@@ -49,8 +49,8 @@ use sirio_ui::{
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
     right_panel::{
-        self, ActivityStatus, ActivitySurface, FilesSnapshot, RightPanel, RightPanelActionEvent,
-        RightPanelEvent,
+        self, ActivityRef, ActivityStatus, ActivitySurface, FilesSnapshot, RightPanel,
+        RightPanelActionEvent, RightPanelEvent,
     },
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
@@ -4323,6 +4323,12 @@ struct PendingPaneClose {
     /// Claimed by the first `render` after this opens; see `focus`'s doc
     /// comment and `PendingTitlePrompt::needs_focus`.
     needs_focus: bool,
+    /// Set when the close was asked from an Activity row of *another*
+    /// worktree, carrying that worktree's label. The switch has already
+    /// happened by the time the dialog is up, so it has to say where the user
+    /// just landed. `None` is the ordinary same-worktree close, whose wording
+    /// is unchanged.
+    from_worktree: Option<String>,
 }
 
 impl SirioWorkspace {
@@ -5883,9 +5889,11 @@ impl SirioWorkspace {
         cx.subscribe(
             right_panel,
             |workspace, _, event: &RightPanelEvent, cx| match event {
-                RightPanelEvent::SelectActivity(index) => workspace.select_activity(*index, cx),
-                RightPanelEvent::CloseActivity(index) => {
-                    workspace.request_close_activity(*index, cx)
+                RightPanelEvent::SelectActivity(reference) => {
+                    workspace.select_activity(reference, cx)
+                }
+                RightPanelEvent::CloseActivity(reference) => {
+                    workspace.request_close_activity(reference, cx)
                 }
                 RightPanelEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
             },
@@ -7293,6 +7301,7 @@ impl SirioWorkspace {
             status,
             focus: cx.focus_handle().tab_stop(true),
             needs_focus: true,
+            from_worktree: None,
         });
         cx.notify();
     }
@@ -7304,15 +7313,49 @@ impl SirioWorkspace {
     /// `sirio_activity::ActivityStatus::requires_close_confirmation` the
     /// pane close does — running, needs-input and error are held for
     /// confirmation, done and idle close immediately — and reuses the
-    /// existing hold-and-banner rather than raising a second prompt.
-    fn request_close_activity(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(index) else {
+    /// existing hold-and-banner rather than raising a second prompt. A row of
+    /// another mounted worktree is brought here first
+    /// ([`Self::select_parked_worktree_tab`]) and its close is then held
+    /// unconditionally: the user was not looking at that surface a moment
+    /// ago, and the switch just happened under their eyes, so the banner is
+    /// the only thing that can still say what "Close Anyway" would close.
+    fn request_close_activity(&mut self, reference: &ActivityRef, cx: &mut Context<Self>) {
+        // A row of another worktree is brought here first: the close then runs
+        // on the live strip, the same path the selected worktree's own rows
+        // take, instead of reaching into a parked layout. The switch is also
+        // why the dialog below is unconditional for these rows -- the user is
+        // closing something they were not looking at a moment ago.
+        let (tab_id, from_worktree) = match reference {
+            ActivityRef::Open(tab_id) => {
+                if !self.tabs.iter().any(|tab| tab.id == *tab_id) {
+                    return;
+                }
+                (*tab_id, None)
+            }
+            ActivityRef::Parked { worktree, index } => {
+                let label = self
+                    .parked_worktree_tabs
+                    .get(worktree)
+                    .map(|parked| self.parked_worktree_label(worktree, parked))
+                    .unwrap_or_else(|| {
+                        Path::new(worktree)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| worktree.clone())
+                    });
+                let Some(tab_id) = self.select_parked_worktree_tab(worktree, *index, cx) else {
+                    return;
+                };
+                (tab_id, Some(label))
+            }
+        };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
-        let tab_id = tab.id;
         let pane_id = tab.focused_pane;
         let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
-        if pane_close_needs_confirmation(status) {
+        if from_worktree.is_some() || pane_close_needs_confirmation(status) {
             self.pending_pane_close = Some(PendingPaneClose {
                 tab_id,
                 pane_id,
@@ -7320,10 +7363,15 @@ impl SirioWorkspace {
                 status,
                 focus: cx.focus_handle().tab_stop(true),
                 needs_focus: true,
+                from_worktree,
             });
             cx.notify();
             return;
         }
+        // `close_tab` takes a position in `self.tabs`, not an id.
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
         self.close_tab(index, None, cx);
     }
 
@@ -7518,15 +7566,20 @@ impl SirioWorkspace {
         Ok(Some((id, title)))
     }
 
+    /// Every surface the user has open, not just the ones in the worktree
+    /// they happen to be looking at. `self.tabs` is the selected worktree's
+    /// strip and nothing else -- a switch replaces it (see `select_worktree`'s
+    /// CENTER-01 comment) -- so the other mounted worktrees' rows come from
+    /// their parked strips, whose terminals are still alive in the cache.
+    ///
+    /// Rows are named by `ActivityRef`, not by their position: the list now
+    /// crosses worktrees, and the caller that acts on a row
+    /// (`select_activity`, `request_close_activity`) used to index
+    /// `self.tabs` with the row number.
     fn activity_surfaces(&self, cx: &App) -> Vec<ActivitySurface> {
-        self.tabs
+        let mut surfaces: Vec<ActivitySurface> = self
+            .tabs
             .iter()
-            .filter(|tab| {
-                paths_name_the_same_document(
-                    &self.tab_worktree_path(tab.id),
-                    &self.working_directory,
-                )
-            })
             .map(|tab| {
                 let icon = tab_icon(
                     tab.kind,
@@ -7534,9 +7587,121 @@ impl SirioWorkspace {
                     self.tab_agent_mark(tab).map(|agent| agent.icon),
                 );
                 let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
-                ActivitySurface::new(icon, tab.title.clone(), self.worktree_label.clone(), status)
+                ActivitySurface::new(
+                    ActivityRef::Open(tab.id),
+                    icon,
+                    tab.title.clone(),
+                    self.worktree_label.clone(),
+                    status,
+                )
             })
-            .collect()
+            .collect();
+        surfaces.extend(self.parked_activity_surfaces());
+        surfaces
+    }
+
+    /// The rows of every mounted worktree that is not the selected one, read
+    /// from its parked strip. Each row's status comes from the pane ids
+    /// parked with that tab, which is why this can show a real status for a
+    /// worktree the user is not looking at: `self.activity` is keyed by pane
+    /// id, not by worktree.
+    ///
+    /// Worktrees are ordered by urgency (`AttentionSort::sorted`, the tray
+    /// roster's rule) and for the same reason: this list has no manual order
+    /// to respect. Within a worktree the strip keeps its own order.
+    fn parked_activity_surfaces(&self) -> Vec<ActivitySurface> {
+        // One worktree per group -- `(label, worst status, rows)` -- because
+        // `sorted` reorders the worktrees as units: the rows of one strip
+        // have to travel together to keep their own order.
+        let mut groups: Vec<(String, ActivityStatus, Vec<ActivitySurface>)> = Vec::new();
+        for (key, parked) in &self.parked_worktree_tabs {
+            if paths_name_the_same_document(Path::new(key), &self.working_directory) {
+                continue;
+            }
+            if !self.terminal_pane_cache.has_in_worktree(key) {
+                continue;
+            }
+            let label = self.parked_worktree_label(key, parked);
+            let mut rows = Vec::new();
+            let mut worst = ActivityStatus::Idle;
+            for (index, tab) in parked.layout.tabs.iter().enumerate() {
+                // Same resolution `parked_sidebar_tabs_for` uses for the
+                // sidebar's own parked rows, so the mark a surface wears
+                // does not change with which list is drawing it.
+                let agent_icon = tab
+                    .agent_id
+                    .as_ref()
+                    .and_then(AgentRef::adapter_id)
+                    .and_then(AgentMark::for_agent_id)
+                    .map(|mark| mark.icon);
+                let status = parked
+                    .terminal_panes_by_tab
+                    .get(index)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|pane_id| {
+                        self.activity
+                            .status(&format!("pane-{pane_id}"))
+                            .map(activity_status_for_agent)
+                    })
+                    .min_by_key(|status| activity_rank(*status))
+                    .unwrap_or(ActivityStatus::Idle);
+                if activity_rank(status) < activity_rank(worst) {
+                    worst = status;
+                }
+                rows.push(ActivitySurface::new(
+                    ActivityRef::Parked {
+                        worktree: key.clone(),
+                        index,
+                    },
+                    // A parked strip keeps no file path, so the icon comes
+                    // from the kind and the agent mark alone.
+                    tab_icon(tab_kind_from_persisted(&tab.kind), None, agent_icon),
+                    tab.title.clone(),
+                    label.clone(),
+                    status,
+                ));
+            }
+            groups.push((label, worst, rows));
+        }
+        sirio_activity::AttentionSort::sorted(&groups, |(_, status, _)| {
+            agent_status_for_activity(*status)
+        })
+        .into_iter()
+        .flat_map(|(_, _, rows)| rows)
+        .collect()
+    }
+
+    /// The `project/branch` label a parked worktree's rows carry.
+    ///
+    /// Built from the catalog and from the branch the strip was parked with,
+    /// deliberately *not* from `worktree_context`: that one reads `.git/HEAD`
+    /// off disk, and this runs for every mounted worktree on every frame.
+    fn parked_worktree_label(&self, worktree_id: &str, parked: &ParkedWorktreeTabs) -> String {
+        let path = Path::new(worktree_id);
+        let catalog_entry = self.project_catalog.projects().iter().find_map(|project| {
+            project
+                .worktrees
+                .iter()
+                .find(|worktree| paths_name_the_same_document(&worktree.path, path))
+                .map(|worktree| (project.name.clone(), worktree.branch.clone()))
+        });
+        let Some((project, catalog_branch)) = catalog_entry else {
+            return path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| worktree_id.to_string());
+        };
+        // The catalog's branch wins when it has one; a checkout the catalog
+        // names but has no branch for still knows the branch its strip was
+        // parked under, which is better than an empty half.
+        let branch = if catalog_branch.is_empty() {
+            parked.layout.branch.clone()
+        } else {
+            catalog_branch
+        };
+        format!("{project}/{branch}")
     }
 
     fn tab_worktree_path(&self, tab_id: usize) -> PathBuf {
@@ -9483,11 +9648,44 @@ impl SirioWorkspace {
         }
     }
 
-    fn select_activity(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.tabs.len() {
-            let tab_id = self.tabs[index].id;
-            self.select_tab(tab_id, None, cx);
+    fn select_activity(&mut self, reference: &ActivityRef, cx: &mut Context<Self>) {
+        match reference {
+            ActivityRef::Open(tab_id) => {
+                if self.tabs.iter().any(|tab| tab.id == *tab_id) {
+                    self.select_tab(*tab_id, None, cx);
+                }
+            }
+            ActivityRef::Parked { worktree, index } => {
+                if let Some(tab_id) = self.select_parked_worktree_tab(worktree, *index, cx) {
+                    self.select_tab(tab_id, None, cx);
+                }
+            }
         }
+    }
+
+    /// Brings a parked worktree back and returns the live tab its parked
+    /// position names, or `None` when the switch failed.
+    ///
+    /// The index counts *every* tab of the strip, where `SelectParkedTab`
+    /// counts only the sidebar-visible ones: the sidebar drew that filtered
+    /// list, the Activity panel draws the whole strip, and each side has to
+    /// count what it drew. `restore_tabs_for_mounted_worktree` rebuilds the
+    /// strip from the parked layout, so the position names the same tab on
+    /// both sides of the switch.
+    fn select_parked_worktree_tab(
+        &mut self,
+        worktree: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        if self
+            .select_worktree(PathBuf::from(worktree), None, cx)
+            .is_err()
+        {
+            self.restore_sidebar_selection(cx);
+            return None;
+        }
+        self.tabs.get(index).map(|tab| tab.id)
     }
 
     fn close_tab(&mut self, index: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -11872,6 +12070,15 @@ impl SirioWorkspace {
             ActivityStatus::Idle | ActivityStatus::Done => {
                 format!("This {subject}'s process will be terminated. Close anyway?")
             }
+        };
+        // A row of another worktree is held unconditionally, so this banner
+        // is also the only confirmation that the workspace moved at all: it
+        // says where the user just landed before naming the close.
+        let message = match &pending.from_worktree {
+            Some(label) => {
+                format!("Sirio switched to {label} to show you this {subject}. {message}")
+            }
+            None => message,
         };
         Some(render_modal(
             ModalSpec {
@@ -17558,6 +17765,7 @@ fn main() {
                             }),
                         );
                         ActivitySurface::new(
+                            ActivityRef::Open(tab.id),
                             icon,
                             tab.title.clone(),
                             activity_label.clone(),
@@ -21184,7 +21392,8 @@ mod tests {
                 workspace.active_tab, 0,
                 "tab 0 is the background tab for this test"
             );
-            workspace.request_close_activity(0, cx);
+            let tab_id = workspace.tabs[0].id;
+            workspace.request_close_activity(&ActivityRef::Open(tab_id), cx);
         });
         cx.run_until_parked();
 
@@ -21512,6 +21721,193 @@ mod tests {
             0,
             "confirming an Activity close closes the whole tab, not just one pane"
         );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every mounted worktree's surfaces stay listed, not only the selected
+    /// one's. `self.tabs` is the selected worktree's strip and nothing else
+    /// (see `select_worktree`'s CENTER-01 comment), so switching to a
+    /// worktree with no layout of its own used to empty the Activity panel
+    /// while the terminal the user had just left was still alive in the pane
+    /// cache with nothing anywhere showing it.
+    #[gpui::test]
+    async fn activity_lists_the_surfaces_of_the_worktrees_left_behind(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("activity-parked");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt0 = worktrees[0].clone();
+        let wt1 = worktrees[1].clone();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt1.clone(), None, cx)
+                .expect("select wt-1");
+        });
+        cx.run_until_parked();
+
+        let rows = workspace.read_with(&cx.cx, |workspace, cx| workspace.activity_surfaces(cx));
+        assert!(
+            !rows.is_empty(),
+            "wt-1 has no tabs of its own, but wt-0's terminal is still mounted \
+             and its surface must still be listed"
+        );
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.reference
+                    == ActivityRef::Parked {
+                        worktree: wt0.to_string_lossy().into_owned(),
+                        index: 0,
+                    }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "wt-0's terminal must be listed by its parked position, got {:?}",
+                    rows.iter().map(|row| &row.reference).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            row.location, "Urgency Project/branch-0",
+            "a row of another worktree names the worktree it comes from, not \
+             the one the user is looking at"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Closing a row of *another* worktree brings that worktree back first and
+    /// then always asks. The held status is `Idle` on purpose: the fixture's
+    /// terminal has no agent identity, `pane_close_needs_confirmation(Idle)` is
+    /// false, and the sibling test below proves a row of the selected worktree
+    /// in that state closes with no prompt at all. So the dialog here can only
+    /// come from where the row lives, and tying the confirmation back to the
+    /// status alone turns this red.
+    #[gpui::test]
+    async fn closing_an_activity_row_of_another_worktree_switches_there_and_asks_first(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("activity-close-parked");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt0 = worktrees[0].clone();
+        let wt1 = worktrees[1].clone();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt1.clone(), None, cx)
+                .expect("select wt-1");
+        });
+        cx.run_until_parked();
+
+        let parked = ActivityRef::Parked {
+            worktree: wt0.to_string_lossy().into_owned(),
+            index: 0,
+        };
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.request_close_activity(&parked, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.working_directory, wt0,
+                "the close of another worktree's row shows that worktree first"
+            );
+            assert!(
+                !workspace.tabs.is_empty(),
+                "the switch brought wt-0's own strip back, so the close runs on \
+                 a live tab instead of reaching into a parked layout"
+            );
+            let pending = workspace
+                .pending_pane_close
+                .as_ref()
+                .expect("the close of another worktree's row is held for confirmation");
+            assert_eq!(
+                pending.status,
+                ActivityStatus::Idle,
+                "the fixture's terminal has no agent, so it reads Idle -- and \
+                 an Idle close of the selected worktree is not confirmed. The \
+                 prompt is up because the row came from somewhere else, not \
+                 because of this status"
+            );
+            assert_eq!(
+                pending.from_worktree.as_deref(),
+                Some("Urgency Project/branch-0"),
+                "the dialog has to say where the user just landed"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of that contract: a row of the *selected* worktree keeps
+    /// the behaviour it had before, idle surfaces included. Without this, "the
+    /// dialog is raised whenever a row is closed" would be indistinguishable
+    /// from "the dialog is raised for rows of other worktrees".
+    #[gpui::test]
+    async fn closing_an_activity_row_of_the_selected_worktree_still_closes_without_asking(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("activity-close-selected");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // No switch: wt-0 is both the selected worktree and the one the row
+        // belongs to, which is the ordinary close the Activity panel already
+        // knew before it crossed worktrees.
+        let (tab_id, tabs_before) =
+            workspace.read_with(&cx.cx, |workspace, _| (workspace.tabs[0].id, workspace.tabs.len()));
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.request_close_activity(&ActivityRef::Open(tab_id), cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                workspace.pending_pane_close.is_none(),
+                "an idle surface of the selected worktree closes on the spot, \
+                 with no prompt -- the behaviour the Activity row always had"
+            );
+            assert_eq!(
+                workspace.tabs.len(),
+                tabs_before - 1,
+                "the tab actually closed"
+            );
+        });
 
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);

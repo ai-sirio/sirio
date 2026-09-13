@@ -72,10 +72,10 @@ pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
 /// User actions originating from an activity row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPanelEvent {
-    /// Select the open tab at this activity index.
-    SelectActivity(usize),
-    /// Close the open tab at this activity index.
-    CloseActivity(usize),
+    /// Select the surface this row names.
+    SelectActivity(ActivityRef),
+    /// Close the surface this row names.
+    CloseActivity(ActivityRef),
     /// Open a file from the Files tree in the host application's tab strip.
     OpenFile(PathBuf),
 }
@@ -92,9 +92,30 @@ pub enum RightPanelActionEvent {
     OpenCommit(String),
 }
 
+/// Which surface an Activity row names.
+///
+/// Position does not do: the list crosses worktrees, so row `n` is not
+/// `tabs[n]`. `Open` names a live tab of the selected worktree by id;
+/// `Parked` names a tab of another mounted worktree, by worktree and by its
+/// position in *that* worktree's parked strip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActivityRef {
+    /// A live tab of the selected worktree, by `OpenTab::id`.
+    Open(usize),
+    /// A tab of another mounted worktree.
+    Parked {
+        /// The worktree, as `path.to_string_lossy()`.
+        worktree: String,
+        /// Position in that worktree's parked strip.
+        index: usize,
+    },
+}
+
 /// A surface shown in the Activity section.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivitySurface {
+    /// Which surface this row names.
+    pub reference: ActivityRef,
     /// The typed surface icon from the shared embedded icon set.
     pub icon: Icon,
     /// Surface title.
@@ -109,12 +130,14 @@ impl ActivitySurface {
     /// Build one activity row.
     #[must_use]
     pub fn new(
+        reference: ActivityRef,
         icon: Icon,
         title: impl Into<String>,
         location: impl Into<String>,
         status: ActivityStatus,
     ) -> Self {
         Self {
+            reference,
             icon,
             title: title.into(),
             location: location.into(),
@@ -1098,9 +1121,20 @@ mod tests {
         let dir = TempDir::new();
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
 
-        let idle = ActivitySurface::new(Icon::SquareTerminal, "one", "", ActivityStatus::Idle);
-        let waiting =
-            ActivitySurface::new(Icon::SquareTerminal, "two", "", ActivityStatus::NeedsInput);
+        let idle = ActivitySurface::new(
+            ActivityRef::Open(0),
+            Icon::SquareTerminal,
+            "one",
+            "",
+            ActivityStatus::Idle,
+        );
+        let waiting = ActivitySurface::new(
+            ActivityRef::Open(1),
+            Icon::SquareTerminal,
+            "two",
+            "",
+            ActivityStatus::NeedsInput,
+        );
 
         panel.update(cx, |panel, cx| {
             panel.set_activity(vec![idle.clone()], cx);
