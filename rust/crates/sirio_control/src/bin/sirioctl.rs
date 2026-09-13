@@ -7,9 +7,9 @@
 //! parity-critical part.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sirio_control::protocol::rows;
 use sirio_control::{
@@ -79,6 +79,7 @@ fn main() {
         "tab" => cmd_tab(socket, &parsed),
         "panel" => cmd_panel(socket, &parsed),
         "surface" => cmd_surface(socket, &parsed),
+        "browser" => cmd_browser(socket, &parsed, &environment),
         _ => {
             eprintln!("sirioctl: unknown command '{subcommand}'");
             usage();
@@ -131,6 +132,16 @@ fn usage() {
          \x20 surface settings open [--section s]\n\
          \x20 surface settings select <section>\n\
          \x20 surface settings read             read the mounted Settings section\n\
+         \x20 browser open <url> [--id-format uuids|both] [--json]\n\
+         \x20 browser navigate <surface> <back|forward|reload>\n\
+         \x20 browser get <surface> <url|text|html> [--selector s] [--json]\n\
+         \x20 browser screenshot <surface> [--path f]\n\
+         \x20 browser snapshot <surface> [--json]\n\
+         \x20 browser act <surface> <click|fill|type|press|scroll> [--ref r|--selector s]\n\
+         \x20   [--value v] [--key k] [--generation g] [--delta-x n] [--delta-y n] [--snapshot-after]\n\
+         \x20 browser wait <surface> (--selector|--text|--url-contains|--load-state|--function) --timeout-ms n\n\
+         \x20 browser eval <surface> <script> [--json]\n\
+         \x20 browser console <surface> [--since ts]\n\
          \x20 panel state <id> [--json]         read terminal state and scrollback\n\
          \x20 panel scrollback <id> [--max-bytes n] [--json]\n\
          \x20 panel create [--worktree w] [--cmd c]\n\
@@ -778,6 +789,909 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// browser.* (#458)
+// ---------------------------------------------------------------------------
+//
+// One CLI verb per documented browser-surface verb, over the `browser.*`
+// control-socket methods the app already dispatches. The running app answers
+// the Rust-era wire: `browser.open` returns a surface id, `browser.get`
+// returns status fields, and page scripts run through `browser.eval`. Three
+// pieces of the documented V1 contract are wider than that wire, and the CLI
+// fills them in itself instead of inventing a second transport:
+//
+//   * `get text|html` and the content conditions of `wait` run page scripts
+//     through `browser.eval`;
+//   * `snapshot` assigns `e1..eN` refs page-side and keeps the live elements
+//     in `window.__sirioRefs`, so `act --ref` has a stable target and a reload
+//     -- which wipes page state -- is exactly what makes a ref `stale_ref`;
+//   * `navigate reload` re-navigates to the surface's current URL, because
+//     the app's Linux path refuses its own `action` parameter.
+//
+// Every request also carries the documented `surface`/`workspace` keys, so an
+// app that implements the full protocol directly takes precedence over the
+// fallbacks wherever it answers.
+
+const BROWSER_POLL: Duration = Duration::from_millis(100);
+const BROWSER_TITLE_WAIT: Duration = Duration::from_secs(5);
+
+/// The worktree browser commands target: `$SIRIO_WORKTREE_ID`, or the
+/// pre-rebrand name for shells started before the rename.
+fn browser_workspace(environment: &BTreeMap<String, String>) -> Option<String> {
+    environment
+        .get("SIRIO_WORKTREE_ID")
+        .or_else(|| environment.get("TILLER_WORKTREE_ID"))
+        .filter(|value| !value.is_empty())
+        .cloned()
+}
+
+/// Params every browser method shares. `surfaceId` rides along with `surface`
+/// because the app's other surface methods spell it that way; a dispatch that
+/// does not know a key ignores it.
+fn browser_params(surface: Option<&str>, workspace: Option<&str>) -> BTreeMap<String, String> {
+    let mut params = BTreeMap::new();
+    if let Some(surface) = surface {
+        params.insert("surface".to_string(), surface.to_string());
+        params.insert("surfaceId".to_string(), surface.to_string());
+    }
+    if let Some(workspace) = workspace {
+        params.insert("workspace".to_string(), workspace.to_string());
+    }
+    params
+}
+
+/// Sends one `browser.*` request. A transport failure keeps the canonical
+/// "Sirio is not running" exit; an app-level refusal is returned so callers can
+/// fall back to the page-script route.
+fn browser_call(
+    socket: &Path,
+    method: &str,
+    params: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, String> {
+    let request = sirio_control::protocol::request::browser(method, params);
+    let response = round_trip_or_die(socket.to_path_buf(), &request);
+    match (response.ok, response.result) {
+        (true, result) => Ok(result.unwrap_or_default()),
+        (false, _) => Err(response.error.unwrap_or_else(|| method.to_string())),
+    }
+}
+
+/// A JS string literal for embedding a caller-supplied value in a page script.
+fn browser_js_literal(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Page results arrive either as the JS value itself or, on engines that
+/// serialize the script result, as a JSON string containing it.
+fn decode_js_string(raw: &str) -> String {
+    if raw.len() >= 2
+        && raw.starts_with('"')
+        && raw.ends_with('"')
+        && let Ok(decoded) = serde_json::from_str::<String>(raw)
+    {
+        return decoded;
+    }
+    raw.to_string()
+}
+
+/// Runs a page script through `browser.eval` and returns its result.
+fn browser_eval(
+    socket: &Path,
+    surface: &str,
+    workspace: Option<&str>,
+    script: &str,
+) -> Result<String, String> {
+    let mut params = browser_params(Some(surface), workspace);
+    params.insert("script".to_string(), script.to_string());
+    let result = browser_call(socket, "browser.eval", params)?;
+    let raw = result
+        .get("value")
+        .or_else(|| result.get("result"))
+        .cloned()
+        .unwrap_or_default();
+    Ok(decode_js_string(&raw))
+}
+
+/// Assigns `e1..eN` refs to the page's interactive/labelled elements and keeps
+/// the live elements in `window.__sirioRefs`. The generation lives in the page
+/// too, so it disappears with the refs on navigation -- which is what makes a
+/// stale ref detectable without any CLI-side state file.
+const BROWSER_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((() => {
+    const generation = String((Number(window.__sirioGeneration) || 0) + 1);
+    const refs = {};
+    const nodes = [];
+    document.querySelectorAll(
+        "a,button,input,select,textarea,[role],[aria-label],h1,h2,h3"
+    ).forEach((el) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+        const ref = "e" + (nodes.length + 1);
+        refs[ref] = el;
+        const node = {
+            ref: ref,
+            role: el.getAttribute("role") || el.tagName.toLowerCase(),
+            name: (el.getAttribute("aria-label") || el.innerText || el.value || "")
+                .trim()
+                .slice(0, 200),
+            box: {
+                x: Math.round(rect.x),
+                y: Math.round(rect.y),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+            },
+        };
+        if (typeof el.value === "string" && el.value !== "") node.value = el.value;
+        nodes.push(node);
+    });
+    window.__sirioRefs = refs;
+    window.__sirioGeneration = generation;
+    return { generation: generation, nodes: nodes };
+})())"#;
+
+/// The JS action one `browser.act` verb performs on `el`, reusing the same
+/// value/key/delta names the socket method documents.
+fn browser_act_js(
+    verb: &str,
+    value: Option<&str>,
+    key: Option<&str>,
+    delta_x: Option<&str>,
+    delta_y: Option<&str>,
+) -> Result<String, String> {
+    let coordinate = |raw: Option<&str>| -> Result<String, String> {
+        match raw {
+            Some(raw) => raw
+                .parse::<f64>()
+                .map(|number| number.to_string())
+                .map_err(|_| format!("--delta must be a number (got '{raw}')")),
+            None => Ok("0".to_string()),
+        }
+    };
+    match verb {
+        "click" => Ok("el.click();".to_string()),
+        "fill" | "type" => Ok(format!(
+            "el.value = {}; \
+             el.dispatchEvent(new Event(\"input\", {{ bubbles: true }})); \
+             el.dispatchEvent(new Event(\"change\", {{ bubbles: true }}));",
+            browser_js_literal(value.unwrap_or_default())
+        )),
+        "press" => {
+            let key = key.ok_or_else(|| "browser.act press requires --key".to_string())?;
+            let key = browser_js_literal(key);
+            Ok(format!(
+                "el.dispatchEvent(new KeyboardEvent(\"keydown\", {{ key: {key}, bubbles: true }})); \
+                 el.dispatchEvent(new KeyboardEvent(\"keyup\", {{ key: {key}, bubbles: true }}));"
+            ))
+        }
+        "scroll" => {
+            let (dx, dy) = (coordinate(delta_x)?, coordinate(delta_y)?);
+            Ok(format!(
+                "el.scrollIntoView({{ block: \"center\" }}); window.scrollBy({dx}, {dy});"
+            ))
+        }
+        other => Err(format!(
+            "unknown browser act verb '{other}' (known verbs: click, fill, type, press, scroll)"
+        )),
+    }
+}
+
+/// Resolves a snapshot ref page-side, refusing it when the page has moved on
+/// (a reload leaves neither `window.__sirioRefs` nor the generation in place).
+fn browser_act_ref_script(
+    verb: &str,
+    reference: &str,
+    generation: &str,
+    value: Option<&str>,
+    key: Option<&str>,
+    delta_x: Option<&str>,
+    delta_y: Option<&str>,
+) -> Result<String, String> {
+    let action = browser_act_js(verb, value, key, delta_x, delta_y)?;
+    Ok(format!(
+        "JSON.stringify((() => {{ \
+         const generation = {generation}; \
+         if (String(window.__sirioGeneration || \"\") !== generation) \
+             return {{ error: \"stale_ref\" }}; \
+         const el = (window.__sirioRefs || {{}})[{reference}]; \
+         if (!el || !el.isConnected) return {{ error: \"stale_ref\" }}; \
+         {action} \
+         return {{ ok: true, generation: generation }}; \
+         }})())",
+        generation = browser_js_literal(generation),
+        reference = browser_js_literal(reference),
+    ))
+}
+
+/// The `surface:N` short handle the skill documents. Derived from the surface
+/// id so repeated calls agree; the CLI never maps it back, every request
+/// forwards the handle verbatim.
+fn short_surface_ref(surface: &str) -> String {
+    let hash = surface.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte as u32)
+    });
+    format!("surface:{}", hash % 1000)
+}
+
+fn print_browser_row(row: &BTreeMap<String, String>, columns: &[&str], as_json: bool) {
+    if as_json {
+        println!("{}", rows::encode(std::slice::from_ref(row)));
+        return;
+    }
+    let line: Vec<String> = columns
+        .iter()
+        .map(|column| row.get(*column).cloned().unwrap_or_default())
+        .collect();
+    println!("{}", line.join("\t"));
+}
+
+fn browser_surface(parsed: &ParsedArgs) -> Result<String, String> {
+    parsed
+        .positional
+        .get(1)
+        .filter(|surface| !surface.is_empty())
+        .cloned()
+        .ok_or_else(|| "Missing browser surface".to_string())
+}
+
+fn cmd_browser(
+    socket: PathBuf,
+    parsed: &ParsedArgs,
+    environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let action = parsed
+        .positional
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| "Missing browser action".to_string())?;
+    let workspace = browser_workspace(environment);
+    match action {
+        "open" => browser_open(&socket, parsed, workspace.as_deref()),
+        "navigate" => browser_navigate(&socket, parsed, workspace.as_deref()),
+        "get" => browser_get(&socket, parsed, workspace.as_deref()),
+        "screenshot" => browser_screenshot(&socket, parsed, workspace.as_deref()),
+        "snapshot" => browser_snapshot_command(&socket, parsed, workspace.as_deref()),
+        "act" => browser_act(&socket, parsed, workspace.as_deref()),
+        "wait" => browser_wait(&socket, parsed, workspace.as_deref()),
+        "eval" => browser_eval_command(&socket, parsed, workspace.as_deref()),
+        "console" => browser_console(&socket, parsed, workspace.as_deref()),
+        "errors" => Err("not_supported: browser.errors is not available in Sirio V1".to_string()),
+        other => Err(format!("unknown browser action '{other}'")),
+    }
+}
+
+/// Polls the page title after `browser.open`, because the app's open answer is
+/// produced before the page has finished loading on this engine.
+fn browser_wait_for_title(
+    socket: &Path,
+    surface: &str,
+    workspace: Option<&str>,
+    deadline: Instant,
+) -> String {
+    loop {
+        if let Ok(title) = browser_eval(socket, surface, workspace, "document.title")
+            && !title.is_empty()
+        {
+            return title;
+        }
+        if Instant::now() >= deadline {
+            return String::new();
+        }
+        std::thread::sleep(BROWSER_POLL);
+    }
+}
+
+fn browser_open(socket: &Path, parsed: &ParsedArgs, workspace: Option<&str>) -> Result<(), String> {
+    let url = parsed
+        .positional
+        .get(1)
+        .filter(|url| !url.is_empty())
+        .cloned()
+        .ok_or_else(|| "Missing open URL".to_string())?;
+    let id_format = match parsed.value("id-format").unwrap_or("uuids") {
+        "" | "uuids" => "uuids",
+        "both" => "both",
+        other => return Err(format!("--id-format must be uuids or both (got '{other}')")),
+    };
+    let mut params = browser_params(None, workspace);
+    params.insert("url".to_string(), url.clone());
+    params.insert("id-format".to_string(), id_format.to_string());
+    if let Some(window) = parsed.value("window") {
+        params.insert("window".to_string(), window.to_string());
+    }
+    let result = browser_call(socket, "browser.open", params)?;
+
+    let surface = result.get("surface").cloned().unwrap_or_default();
+    if surface.is_empty() {
+        return Err("browser.open returned no surface".to_string());
+    }
+    let mut title = result.get("title").cloned().unwrap_or_default();
+    if title.is_empty() {
+        title = browser_wait_for_title(
+            socket,
+            &surface,
+            workspace,
+            Instant::now() + BROWSER_TITLE_WAIT,
+        );
+    }
+    let mut row = BTreeMap::new();
+    row.insert("surface".to_string(), surface.clone());
+    row.insert(
+        "surfaceRef".to_string(),
+        result.get("surfaceRef").cloned().unwrap_or_else(|| {
+            if id_format == "both" {
+                short_surface_ref(&surface)
+            } else {
+                String::new()
+            }
+        }),
+    );
+    row.insert("url".to_string(), result.get("url").cloned().unwrap_or(url));
+    row.insert("title".to_string(), title);
+    print_browser_row(
+        &row,
+        &["surface", "surfaceRef", "url", "title"],
+        parsed.flag("json"),
+    );
+    Ok(())
+}
+
+fn print_browser_navigation(result: &BTreeMap<String, String>) {
+    let mut row = BTreeMap::new();
+    row.insert(
+        "url".to_string(),
+        result
+            .get("url")
+            .or_else(|| result.get("value"))
+            .cloned()
+            .unwrap_or_default(),
+    );
+    row.insert(
+        "title".to_string(),
+        result.get("title").cloned().unwrap_or_default(),
+    );
+    print_browser_row(&row, &["url", "title"], false);
+}
+
+fn browser_navigate(
+    socket: &Path,
+    parsed: &ParsedArgs,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let action = parsed
+        .positional
+        .get(2)
+        .map(String::as_str)
+        .ok_or_else(|| "Missing navigation action (back, forward or reload)".to_string())?;
+    if !matches!(action, "back" | "forward" | "reload") {
+        return Err(format!(
+            "unknown navigation action '{action}' (use back, forward or reload)"
+        ));
+    }
+
+    // The documented wire first: an app that answers it with a URL owns the
+    // navigation.
+    let mut params = browser_params(Some(&surface), workspace);
+    params.insert("action".to_string(), action.to_string());
+    if let Ok(result) = browser_call(socket, "browser.navigate", params)
+        && (result.contains_key("url") || result.contains_key("value"))
+    {
+        print_browser_navigation(&result);
+        return Ok(());
+    }
+
+    match action {
+        "reload" => {
+            // The app's Linux path refuses `action`; reload is a navigation to
+            // the URL the surface already shows.
+            let state = browser_call(
+                socket,
+                "browser.get",
+                browser_params(Some(&surface), workspace),
+            )?;
+            let url = state
+                .get("url")
+                .or_else(|| state.get("value"))
+                .filter(|url| !url.is_empty())
+                .cloned()
+                .ok_or_else(|| "browser.navigate reload: no current url".to_string())?;
+            let mut params = browser_params(Some(&surface), workspace);
+            params.insert("url".to_string(), url);
+            let result = browser_call(socket, "browser.navigate", params)?;
+            print_browser_navigation(&result);
+        }
+        direction => {
+            let state = browser_call(
+                socket,
+                "browser.get",
+                browser_params(Some(&surface), workspace),
+            )?;
+            let flag = if direction == "back" {
+                "canGoBack"
+            } else {
+                "canGoForward"
+            };
+            if state.get(flag).map(String::as_str) == Some("false") {
+                return Err(format!(
+                    "navigation_unavailable: no history to go {direction}"
+                ));
+            }
+            browser_eval(
+                socket,
+                &surface,
+                workspace,
+                &format!("history.{direction}()"),
+            )?;
+            std::thread::sleep(Duration::from_millis(250));
+            let result = browser_call(
+                socket,
+                "browser.get",
+                browser_params(Some(&surface), workspace),
+            )?;
+            print_browser_navigation(&result);
+        }
+    }
+    Ok(())
+}
+
+/// `get text|html` as a page script, for engines that only answer the `url`
+/// field.
+fn browser_content_script(what: &str, selector: &str) -> String {
+    let target = if selector.is_empty() {
+        "document.body".to_string()
+    } else {
+        format!("document.querySelector({})", browser_js_literal(selector))
+    };
+    let property = if what == "text" {
+        "innerText"
+    } else {
+        "outerHTML"
+    };
+    format!(
+        "JSON.stringify((() => {{ const el = {target}; return el ? el.{property} : \"\"; }})())"
+    )
+}
+
+fn browser_get(socket: &Path, parsed: &ParsedArgs, workspace: Option<&str>) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let what = parsed
+        .positional
+        .get(2)
+        .map(String::as_str)
+        .ok_or_else(|| "Missing browser get value (url, text or html)".to_string())?;
+    if !matches!(what, "url" | "text" | "html") {
+        return Err(format!(
+            "unknown browser get value '{what}' (use url, text or html)"
+        ));
+    }
+    let selector = parsed.value("selector");
+    let mut params = browser_params(Some(&surface), workspace);
+    params.insert("what".to_string(), what.to_string());
+    if let Some(selector) = selector {
+        params.insert("selector".to_string(), selector.to_string());
+    }
+    let result = browser_call(socket, "browser.get", params)?;
+    let value = match what {
+        "url" => result
+            .get("value")
+            .or_else(|| result.get("url"))
+            .cloned()
+            .unwrap_or_else(|| {
+                browser_eval(socket, &surface, workspace, "location.href").unwrap_or_default()
+            }),
+        _ => match result.get("value") {
+            Some(value) => value.clone(),
+            None => browser_eval(
+                socket,
+                &surface,
+                workspace,
+                &browser_content_script(what, selector.unwrap_or_default()),
+            )?,
+        },
+    };
+    let mut row = BTreeMap::new();
+    row.insert("value".to_string(), value);
+    print_browser_row(&row, &["value"], parsed.flag("json"));
+    Ok(())
+}
+
+fn browser_screenshot(
+    socket: &Path,
+    parsed: &ParsedArgs,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let mut params = browser_params(Some(&surface), workspace);
+    if let Some(path) = parsed.value("path") {
+        params.insert("path".to_string(), path.to_string());
+    }
+    let result = browser_call(socket, "browser.screenshot", params)?;
+    let mut row = BTreeMap::new();
+    row.insert(
+        "path".to_string(),
+        result.get("path").cloned().unwrap_or_default(),
+    );
+    print_browser_row(&row, &["path"], parsed.flag("json"));
+    Ok(())
+}
+
+/// The `generation` + `nodes` pair a snapshot answers with. An app that
+/// implements it directly wins; otherwise the refs are assigned page-side.
+fn browser_snapshot(
+    socket: &Path,
+    surface: &str,
+    workspace: Option<&str>,
+) -> Result<(String, String), String> {
+    if let Ok(result) = browser_call(
+        socket,
+        "browser.snapshot",
+        browser_params(Some(surface), workspace),
+    ) && let (Some(generation), Some(nodes)) = (result.get("generation"), result.get("nodes"))
+    {
+        return Ok((generation.clone(), nodes.clone()));
+    }
+    let raw = browser_eval(socket, surface, workspace, BROWSER_SNAPSHOT_SCRIPT)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| format!("browser.snapshot failed: {error}"))?;
+    let generation = value
+        .get("generation")
+        .and_then(|value| value.as_str())
+        .unwrap_or("1")
+        .to_string();
+    let nodes = serde_json::to_string(
+        value
+            .get("nodes")
+            .unwrap_or(&serde_json::Value::Array(Vec::new())),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((generation, nodes))
+}
+
+fn print_browser_snapshot(generation: &str, nodes: &str, as_json: bool) {
+    let mut row = BTreeMap::new();
+    row.insert("generation".to_string(), generation.to_string());
+    row.insert("nodes".to_string(), nodes.to_string());
+    if as_json {
+        println!("{}", rows::encode(&[row]));
+    } else {
+        println!("{generation}");
+        println!("{nodes}");
+    }
+}
+
+fn browser_snapshot_command(
+    socket: &Path,
+    parsed: &ParsedArgs,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let (generation, nodes) = browser_snapshot(socket, &surface, workspace)?;
+    print_browser_snapshot(&generation, &nodes, parsed.flag("json"));
+    Ok(())
+}
+
+fn browser_act(socket: &Path, parsed: &ParsedArgs, workspace: Option<&str>) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let verb = parsed
+        .positional
+        .get(2)
+        .map(String::as_str)
+        .ok_or_else(|| {
+            "Missing browser act verb (click, fill, type, press or scroll)".to_string()
+        })?;
+    if !matches!(verb, "click" | "fill" | "type" | "press" | "scroll") {
+        return Err(format!(
+            "unknown browser act verb '{verb}' (known verbs: click, fill, type, press, scroll)"
+        ));
+    }
+    let reference = parsed.value("ref");
+    let selector = parsed.value("selector");
+    let generation = parsed.value("generation");
+    let value = parsed.value("value");
+    let key = parsed.value("key");
+    let snapshot_after = parsed.flag("snapshot-after");
+    let mut row = BTreeMap::new();
+
+    if let Some(reference) = reference {
+        if selector.is_some() {
+            return Err("browser.act takes either --ref or --selector, not both".to_string());
+        }
+        let generation =
+            generation.ok_or_else(|| "browser.act --ref requires --generation".to_string())?;
+
+        // An app that answers `browser.snapshot` with generation+nodes owns
+        // those refs, so it gets the action first. An app whose wire has no
+        // refs (the Rust-era one) refuses a ref act without a selector, and
+        // the CLI then resolves the ref against the snapshot it took itself.
+        let mut params = browser_params(Some(&surface), workspace);
+        params.insert("verb".to_string(), verb.to_string());
+        params.insert("ref".to_string(), reference.to_string());
+        params.insert("generation".to_string(), generation.to_string());
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        if let Some(key) = key {
+            params.insert("key".to_string(), key.to_string());
+        }
+        if let Some(delta_x) = parsed.value("delta-x") {
+            params.insert("deltaX".to_string(), delta_x.to_string());
+        }
+        if let Some(delta_y) = parsed.value("delta-y") {
+            params.insert("deltaY".to_string(), delta_y.to_string());
+        }
+        let mut app_acted = false;
+        match browser_call(socket, "browser.act", params) {
+            Ok(result) => {
+                row.insert("ok".to_string(), "true".to_string());
+                row.insert("generation".to_string(), generation.to_string());
+                if let Some(nodes) = result.get("nodes") {
+                    row.insert("nodes".to_string(), nodes.clone());
+                }
+                app_acted = true;
+            }
+            Err(error) if error.contains("stale_ref") => return Err(error),
+            Err(_) => {}
+        }
+        if !app_acted {
+            let script = browser_act_ref_script(
+                verb,
+                reference,
+                generation,
+                value,
+                key,
+                parsed.value("delta-x"),
+                parsed.value("delta-y"),
+            )?;
+            let raw = browser_eval(socket, &surface, workspace, &script)?;
+            let result: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|error| format!("browser.act failed: {error}"))?;
+            if let Some(error) = result.get("error").and_then(|value| value.as_str()) {
+                return Err(format!("{error}: browser.act {verb} on ref {reference}"));
+            }
+            row.insert("ok".to_string(), "true".to_string());
+            row.insert("generation".to_string(), generation.to_string());
+        }
+    } else {
+        let selector =
+            selector.ok_or_else(|| format!("browser.act {verb} requires --ref or --selector"))?;
+        let mut params = browser_params(Some(&surface), workspace);
+        params.insert("verb".to_string(), verb.to_string());
+        params.insert("selector".to_string(), selector.to_string());
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        if let Some(key) = key {
+            params.insert("key".to_string(), key.to_string());
+        }
+        if let Some(generation) = generation {
+            params.insert("generation".to_string(), generation.to_string());
+        }
+        if let Some(delta_x) = parsed.value("delta-x") {
+            params.insert("deltaX".to_string(), delta_x.to_string());
+        }
+        if let Some(delta_y) = parsed.value("delta-y") {
+            params.insert("deltaY".to_string(), delta_y.to_string());
+        }
+        if snapshot_after {
+            params.insert("snapshotAfter".to_string(), "true".to_string());
+        }
+        let result = browser_call(socket, "browser.act", params)?;
+        row.insert("ok".to_string(), "true".to_string());
+        if let Some(generation) = result.get("generation") {
+            row.insert("generation".to_string(), generation.clone());
+        }
+        if let Some(nodes) = result.get("nodes") {
+            row.insert("nodes".to_string(), nodes.clone());
+        }
+    }
+
+    if snapshot_after {
+        let (generation, nodes) = browser_snapshot(socket, &surface, workspace)?;
+        row.insert("generation".to_string(), generation);
+        row.insert("nodes".to_string(), nodes);
+    }
+    println!("{}", rows::encode(&[row]));
+    Ok(())
+}
+
+/// Whether the page currently satisfies one wait condition.
+fn browser_wait_met(
+    socket: &Path,
+    surface: &str,
+    workspace: Option<&str>,
+    condition: &str,
+    expected: &str,
+) -> Result<bool, String> {
+    match condition {
+        "selector" => Ok(browser_eval(
+            socket,
+            surface,
+            workspace,
+            &format!("!!document.querySelector({})", browser_js_literal(expected)),
+        )? == "true"),
+        "text" => Ok(browser_eval(
+            socket,
+            surface,
+            workspace,
+            &format!(
+                "(document.body ? document.body.innerText : \"\").includes({})",
+                browser_js_literal(expected)
+            ),
+        )? == "true"),
+        "loadState" => Ok(browser_eval(
+            socket,
+            surface,
+            workspace,
+            &format!("document.readyState === {}", browser_js_literal(expected)),
+        )? == "true"),
+        "function" => {
+            Ok(browser_eval(socket, surface, workspace, &format!("!!({expected})"))? == "true")
+        }
+        "urlContains" => {
+            let result = browser_call(
+                socket,
+                "browser.get",
+                browser_params(Some(surface), workspace),
+            )?;
+            Ok(result
+                .get("url")
+                .or_else(|| result.get("value"))
+                .map(|url| url.contains(expected))
+                .unwrap_or(false))
+        }
+        other => Err(format!("unknown wait condition '{other}'")),
+    }
+}
+
+fn browser_wait(socket: &Path, parsed: &ParsedArgs, workspace: Option<&str>) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let timeout_ms = parsed
+        .require("timeout-ms")?
+        .parse::<u64>()
+        .map_err(|_| "--timeout-ms must be a nonnegative integer".to_string())?;
+    let conditions: Vec<(&str, &str)> = [
+        ("selector", parsed.value("selector")),
+        ("text", parsed.value("text")),
+        ("urlContains", parsed.value("url-contains")),
+        ("loadState", parsed.value("load-state")),
+        ("function", parsed.value("function")),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key, value)))
+    .collect();
+    if conditions.len() != 1 {
+        return Err(
+            "pass exactly one wait condition (--selector, --text, --url-contains, --load-state or --function)"
+                .to_string(),
+        );
+    }
+    let (condition, expected) = conditions[0];
+    let started = Instant::now();
+
+    // The documented wire first; an app that understands the condition answers
+    // `ok`. The Rust-era app only waits for load state, so anything else falls
+    // through to polling the page.
+    let mut params = browser_params(Some(&surface), workspace);
+    params.insert(condition.to_string(), expected.to_string());
+    params.insert("timeoutMs".to_string(), timeout_ms.to_string());
+    if let Ok(result) = browser_call(socket, "browser.wait", params)
+        && result.contains_key("ok")
+    {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "ok".to_string(),
+            result
+                .get("ok")
+                .cloned()
+                .unwrap_or_else(|| "true".to_string()),
+        );
+        row.insert(
+            "elapsedMs".to_string(),
+            result
+                .get("elapsedMs")
+                .cloned()
+                .unwrap_or_else(|| started.elapsed().as_millis().to_string()),
+        );
+        println!("{}", rows::encode(&[row]));
+        return Ok(());
+    }
+
+    let deadline = started + Duration::from_millis(timeout_ms);
+    loop {
+        if browser_wait_met(socket, &surface, workspace, condition, expected)? {
+            let mut row = BTreeMap::new();
+            row.insert("ok".to_string(), "true".to_string());
+            row.insert(
+                "elapsedMs".to_string(),
+                started.elapsed().as_millis().to_string(),
+            );
+            println!("{}", rows::encode(&[row]));
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timeout: browser.wait {condition} did not match within {timeout_ms}ms"
+            ));
+        }
+        std::thread::sleep(BROWSER_POLL);
+    }
+}
+
+fn browser_eval_command(
+    socket: &Path,
+    parsed: &ParsedArgs,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let script = parsed
+        .positional
+        .get(2)
+        .filter(|script| !script.is_empty())
+        .cloned()
+        .ok_or_else(|| "Missing browser eval script".to_string())?;
+    let mut params = browser_params(Some(&surface), workspace);
+    params.insert("script".to_string(), script);
+    let result = browser_call(socket, "browser.eval", params)?;
+    let mut row = BTreeMap::new();
+    row.insert(
+        "value".to_string(),
+        result
+            .get("value")
+            .or_else(|| result.get("result"))
+            .cloned()
+            .unwrap_or_default(),
+    );
+    print_browser_row(&row, &["value"], parsed.flag("json"));
+    Ok(())
+}
+
+fn browser_console(
+    socket: &Path,
+    parsed: &ParsedArgs,
+    workspace: Option<&str>,
+) -> Result<(), String> {
+    let surface = browser_surface(parsed)?;
+    let since = parsed
+        .value("since")
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .map_err(|_| "--since must be a number".to_string())
+        })
+        .transpose()?;
+    let mut params = browser_params(Some(&surface), workspace);
+    if let Some(since) = since {
+        params.insert("since".to_string(), since.to_string());
+    }
+    let result = browser_call(socket, "browser.console", params)?;
+    let entries = result
+        .get("entries")
+        .or_else(|| result.get("messages"))
+        .cloned()
+        .unwrap_or_else(|| "[]".to_string());
+    println!("{}", filter_console_entries(&entries, since));
+    Ok(())
+}
+
+/// `--since` filtering for an app that returns the whole buffer.
+fn filter_console_entries(entries: &str, since: Option<f64>) -> String {
+    let Some(since) = since else {
+        return entries.to_string();
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(entries) else {
+        return entries.to_string();
+    };
+    if let Some(items) = value.as_array_mut() {
+        items.retain(|item| {
+            item.get("timestamp")
+                .or_else(|| item.get("time"))
+                .and_then(|value| value.as_f64())
+                .map(|timestamp| timestamp >= since)
+                .unwrap_or(true)
+        });
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| entries.to_string())
+}
+
 fn panel_id(parsed: &ParsedArgs) -> Result<String, String> {
     parsed
         .value("id")
@@ -1050,5 +1964,92 @@ mod tests {
         )
         .expect_err("an empty explicit session is rejected");
         assert!(error.contains("--session"), "got: {error}");
+    }
+
+    /// The short ref the skill documents, stable for the same surface and
+    /// always `surface:N` -- the e2e test takes it as an opaque handle.
+    #[test]
+    fn short_surface_ref_is_stable_and_prefixed() {
+        let first = short_surface_ref("9f1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9");
+        let second = short_surface_ref("9f1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9");
+        assert_eq!(first, second);
+        assert!(first.starts_with("surface:"), "got: {first}");
+        assert_ne!(first, short_surface_ref("another-surface"));
+    }
+
+    /// Engines that serialize the script result wrap it in a JSON string; the
+    /// plain form must survive unchanged.
+    #[test]
+    fn js_results_unwrap_a_json_string() {
+        assert_eq!(
+            decode_js_string("\"Known browser e2e body text\""),
+            "Known browser e2e body text"
+        );
+        assert_eq!(
+            decode_js_string("Known browser e2e body text"),
+            "Known browser e2e body text"
+        );
+        assert_eq!(decode_js_string("a \" quoted"), "a \" quoted");
+    }
+
+    /// A ref act must refuse a page that moved on, and the refusal is the
+    /// documented `stale_ref` the e2e greps for.
+    #[test]
+    fn ref_acts_carry_the_stale_ref_guard() {
+        let script = browser_act_ref_script("click", "e2", "7", None, None, None, None)
+            .expect("click needs no extra argument");
+        assert!(script.contains("stale_ref"), "got: {script}");
+        assert!(script.contains("\"e2\""), "got: {script}");
+        assert!(script.contains("\"7\""), "got: {script}");
+
+        let error = browser_act_ref_script("press", "e1", "1", None, None, None, None)
+            .expect_err("press without --key is rejected");
+        assert!(error.contains("--key"), "got: {error}");
+    }
+
+    /// Caller values are embedded as JSON string literals, never interpolated
+    /// raw into the page script.
+    #[test]
+    fn content_scripts_escape_their_selector() {
+        let script = browser_content_script("text", "a\"] , body");
+        assert!(
+            script.contains("document.querySelector(\"a\\\"] , body\")"),
+            "got: {script}"
+        );
+
+        let act = browser_act_ref_script(
+            "fill",
+            "e1",
+            "1",
+            Some("O'Neil \"quoted\""),
+            None,
+            None,
+            None,
+        )
+        .expect("fill accepts any value");
+        assert!(
+            act.contains("el.value = \"O'Neil \\\"quoted\\\"\""),
+            "got: {act}"
+        );
+    }
+
+    /// The running-pane name wins over the pre-rebrand one.
+    #[test]
+    fn browser_workspace_prefers_the_current_name() {
+        assert_eq!(
+            browser_workspace(&environment(&[
+                ("SIRIO_WORKTREE_ID", "current"),
+                ("TILLER_WORKTREE_ID", "legacy"),
+            ])),
+            Some("current".to_string())
+        );
+        assert_eq!(
+            browser_workspace(&environment(&[("TILLER_WORKTREE_ID", "legacy")])),
+            Some("legacy".to_string())
+        );
+        assert_eq!(
+            browser_workspace(&environment(&[("SIRIO_WORKTREE_ID", "")])),
+            None
+        );
     }
 }
