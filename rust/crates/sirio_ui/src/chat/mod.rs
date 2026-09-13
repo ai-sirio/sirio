@@ -5268,6 +5268,8 @@ impl Chat {
                     title
                 };
                 let mut card = div()
+                    .id(("permission-card", request_id as usize))
+                    .debug_selector(move || format!("permission-card-{request_id}"))
                     .w_full()
                     .rounded(theme.radii.code_block)
                     .bg(theme.surface_raised)
@@ -5330,7 +5332,7 @@ impl Chat {
                         answer_caret_visible,
                     ));
                 } else {
-                    let mut row = div().flex().gap(px(8.0));
+                    let mut row = div().flex().flex_wrap().gap(px(8.0)).gap_y(px(6.0));
                     for option in options {
                         let entity = entity.clone();
                         let option_for_click = option.clone();
@@ -5447,7 +5449,7 @@ impl Chat {
                                 .child("No answer — the turn ended"),
                         );
                     } else {
-                        let mut row = div().flex().gap(px(8.0));
+                        let mut row = div().flex().flex_wrap().gap(px(8.0)).gap_y(px(6.0));
                         for option in &approval.options {
                             let entity = entity.clone();
                             let option_for_click = option.clone();
@@ -13912,6 +13914,71 @@ let answer = 42;
              show right {} vs bar right {}",
             show.right(),
             bar.right(),
+        );
+    }
+
+    /// ACP-supplied option labels can be long ("Yes, and do not ask again
+    /// for this session") and a request can offer many of them: without
+    /// `flex_wrap` the option row grows past the card and the buttons are
+    /// pushed beyond its border.
+    #[gpui::test]
+    async fn long_permission_option_labels_wrap_inside_the_card(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Permission {
+                request_id: 1,
+                title: "Permission requested".into(),
+                prompt: "The agent wants to edit files in the repository.".into(),
+                options: vec![
+                    AnswerOption {
+                        id: "allow-once".into(),
+                        label: "Yes, allow this time only and remember my choice for later".into(),
+                        is_rejection: false,
+                    },
+                    AnswerOption {
+                        id: "allow-always".into(),
+                        label: "Yes, and do not ask again for this session or any future one".into(),
+                        is_rejection: false,
+                    },
+                    AnswerOption {
+                        id: "allow-session".into(),
+                        label: "Yes, and do not ask again for this session regardless of file".into(),
+                        is_rejection: false,
+                    },
+                    AnswerOption {
+                        id: "deny".into(),
+                        label: "No, never allow this tool call to modify anything in this directory"
+                            .into(),
+                        is_rejection: true,
+                    },
+                ],
+                text_input: None,
+                resolved: None,
+                expired: false,
+                dismissed: false,
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("permission-card-1")
+            .expect("the permission card is drawn");
+        let last = cx
+            .debug_bounds("permission-option-deny")
+            .expect("the last option button is drawn");
+        assert!(
+            last.right() <= card.right(),
+            "the last option button overflows the permission card: \
+             option right {} vs card right {}",
+            last.right(),
+            card.right(),
         );
     }
 
