@@ -105,10 +105,62 @@ case "$os" in
     # Download beside the target and move into place, so an interrupted
     # download never leaves a half-written executable named `sirio`.
     tmp="$dir/.sirio.download.$$"
-    trap 'rm -f "$tmp"' EXIT INT TERM
+    work_extract=""
+    cleanup() {
+      rm -f "$tmp"
+      if [ -n "$work_extract" ]; then
+        rm -rf "$work_extract"
+      fi
+    }
+    trap cleanup EXIT INT TERM
     download "Sirio-$version-x86_64.AppImage" "$tmp"
     chmod +x "$tmp"
+
+    # Install the binary before touching launcher metadata. Desktop
+    # integration is best-effort and must never be able to prevent or undo
+    # the binary installation.
     mv -f "$tmp" "$dir/sirio"
+
+    # Desktop integration: the AppImage carries its own .desktop entry and
+    # icon (rendered from Scripts/identity.sh by Scripts/build-appimage.sh).
+    # An AppImage never registers those on its own, so a bare binary install
+    # stays invisible to launchers that enumerate ~/.local/share/applications
+    # (Omarchy's walker/wofi, GNOME, KDE) -- unlike packaged apps. Extract
+    # both into the per-user XDG locations; best-effort, so a runtime that
+    # cannot extract still leaves a working binary behind. It runs in a
+    # subshell whose failure is ignored, so nothing here can abort the
+    # install or trip the EXIT trap into discarding the download.
+    if work_extract=$(mktemp -d 2>/dev/null); then
+      (
+        # The real AppImage runtime takes at most one extraction pattern; a
+        # single `usr/share/*` covers both the .desktop entry and the icon.
+        if (cd "$work_extract" && "$dir/sirio" --appimage-extract 'usr/share/*' >/dev/null 2>&1); then
+          data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+          desktop_src=$(find "$work_extract/squashfs-root/usr/share/applications" -maxdepth 1 -name '*.desktop' 2>/dev/null | head -n 1)
+          if [ -n "$desktop_src" ]; then
+            mkdir -p "$data_home/applications"
+            # Point Exec at the installed file instead of relying on PATH.
+            # Escape \, & and the | delimiter so any install dir yields a
+            # correct Exec line instead of corrupting or failing sed.
+            exec_path=$(printf '%s' "$dir/sirio" | sed 's/[&\\|]/\\&/g')
+            sed "s|^Exec=.*|Exec=$exec_path|" "$desktop_src" > "$data_home/applications/$(basename "$desktop_src")"
+            # A previous install predating desktop integration left this stale
+            # name behind; the identifier-based entry above supersedes it.
+            rm -f "$data_home/applications/sirio.desktop"
+          fi
+          icon_src=$(find "$work_extract/squashfs-root/usr/share/icons" -name '*.png' 2>/dev/null | head -n 1)
+          if [ -n "$icon_src" ]; then
+            mkdir -p "$data_home/icons/hicolor/512x512/apps"
+            cp -f "$icon_src" "$data_home/icons/hicolor/512x512/apps/"
+          fi
+          if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database "$data_home/applications" >/dev/null 2>&1 || true
+          fi
+        fi
+      ) || true
+      rm -rf "$work_extract"
+      work_extract=""
+    fi
 
     echo "Sirio $version installed to $dir/sirio"
     case ":$PATH:" in

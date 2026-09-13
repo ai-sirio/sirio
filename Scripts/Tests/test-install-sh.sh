@@ -33,7 +33,23 @@ if [ "$head_mode" = 1 ]; then
   printf '%s' "$FAKE_EFFECTIVE_URL"
   exit 0
 fi
-printf 'fake-payload' > "$out"
+# A fake AppImage: a shell script answering --appimage-extract the way the
+# runtime does, by materializing squashfs-root under the current directory.
+cat > "$out" <<'PAYLOAD'
+#!/bin/sh
+# Mirrors the real AppImage runtime: --appimage-extract accepts at most one
+# pattern. Two or more is "Unexpected argument count" and exits non-zero.
+if [ "${1:-}" = "--appimage-extract" ]; then
+  if [ "$#" -gt 2 ]; then
+    echo "Unexpected argument count" >&2
+    exit 1
+  fi
+  mkdir -p squashfs-root/usr/share/applications squashfs-root/usr/share/icons/hicolor/512x512/apps
+  printf '[Desktop Entry]\nType=Application\nName=Sirio\nExec=sirio\nIcon=app.sirioai.sirio\n' \
+    > squashfs-root/usr/share/applications/app.sirioai.sirio.desktop
+  printf 'fake-icon' > squashfs-root/usr/share/icons/hicolor/512x512/apps/app.sirioai.sirio.png
+fi
+PAYLOAD
 EOF
 chmod +x "$BIN/curl"
 
@@ -48,8 +64,12 @@ EOF
 chmod +x "$BIN/uname"
 
 run_install() {
+  # HOME alone is not hermetic: install.sh prefers XDG_DATA_HOME for the
+  # .desktop entry and icon, so a host that exports it would be written to.
+  # Pin it (and HOME) inside the sandbox.
   env PATH="$BIN:$PATH" \
       HOME="$WORK/home" \
+      XDG_DATA_HOME="$WORK/home/.local/share" \
       CURL_LOG="$WORK/curl.log" \
       FAKE_OS="$1" FAKE_ARCH="$2" FAKE_EFFECTIVE_URL="$3" \
       SIRIO_INSTALL_DIR="$WORK/home/.local/bin" \
@@ -71,10 +91,20 @@ grep -q "download/v9.9.9/Sirio-9.9.9-x86_64.AppImage" "$WORK/curl.log" \
 # .download temporary is left behind.
 BINARY="$WORK/home/.local/bin/sirio"
 [ -x "$BINARY" ] || fail "expected an executable $BINARY"
-[ "$(cat "$BINARY")" = "fake-payload" ] || fail "the downloaded bytes must be what lands as sirio"
+grep -q "appimage-extract" "$BINARY" || fail "the downloaded bytes must be what lands as sirio"
 if ls "$WORK/home/.local/bin/".sirio.download.* >/dev/null 2>&1; then
   fail "the temporary download file must not survive"
 fi
+
+# Desktop integration: the .desktop entry and icon extracted from the
+# AppImage land in the per-user XDG locations, with Exec pointing at the
+# installed file rather than relying on PATH.
+DESKTOP="$WORK/home/.local/share/applications/app.sirioai.sirio.desktop"
+[ -f "$DESKTOP" ] || fail "expected the .desktop entry at $DESKTOP"
+grep -q "^Exec=$WORK/home/.local/bin/sirio$" "$DESKTOP" \
+  || fail "the .desktop Exec must point at the installed file, got: $(cat "$DESKTOP")"
+ICON="$WORK/home/.local/share/icons/hicolor/512x512/apps/app.sirioai.sirio.png"
+[ -f "$ICON" ] || fail "expected the icon at $ICON"
 
 # 2. A pinned version skips the redirect entirely.
 : > "$WORK/curl.log"
