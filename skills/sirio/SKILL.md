@@ -9,7 +9,7 @@ description: Use when running inside a Sirio pane to create and manage terminal 
 Use `sirioctl` only inside a terminal launched by Sirio. Establish the control connection and obtain machine-stable identity before orchestrating:
 
 ```bash
-[ "$SIRIO_ENV" = "1" ] || exit 1
+[ -n "$SIRIO_PANE_ID" ] || exit 1
 sirioctl ping
 sirioctl identify --json
 ```
