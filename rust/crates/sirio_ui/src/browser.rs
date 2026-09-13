@@ -995,6 +995,27 @@ fn build_production_webview<W: HasWindowHandle>(
         .build_as_child(parent)
 }
 
+/// Brings GTK up on this thread, or says why it could not.
+///
+/// Anything that touches a webkit2gtk type needs GTK initialised first --
+/// wry's [`WebContext::new`] builds an `ApplicationInfo` whose constructor
+/// asserts GTK was initialised on this thread, and that assertion is a
+/// panic. So this runs before the context is built, and a failure travels to
+/// the surface's `startup_failure` instead of reaching that panic.
+///
+/// Idempotent by GTK's own contract: a thread that is already up gets
+/// `Ok(())` back, which is why the build path calls `gtk::init` again.
+#[cfg(target_os = "linux")]
+fn ensure_gtk_initialized() -> Result<(), String> {
+    gtk::init().map_err(|error| format!("GTK init failed: {error}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn ensure_gtk_initialized() -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn build_production_webview_for_platform(
     window: &Window,
@@ -1524,28 +1545,45 @@ impl BrowserSurface {
             field
         });
         let web_events = Rc::new(RefCell::new(Vec::new()));
-        // R6.3: one shared profile in a Sirio-owned directory. Left unset,
-        // WebView2 writes `<exe>.WebView2\EBWebView` beside the binary, which
-        // an installed Sirio under Program Files cannot create.
-        let web_context = WebContext::new(browser_profile_dir());
         #[cfg(not(target_os = "windows"))]
         {
-            let mut web_context = web_context;
-            // #307: a Windows machine without the WebView2 Runtime gets a full
-            // explanation in place of the content, not an engine error it can't
-            // act on. The probe runs before the build: it answers the one
-            // question the build error cannot -- "is the runtime there at all".
-            let (webview, startup_failure) = if webview_runtime_missing() {
-                (None, Some(StartupFailure::RuntimeMissing))
-            } else {
-                match build_production_webview_for_platform(
-                    window,
-                    state.address(),
-                    &web_events,
-                    &mut web_context,
-                ) {
-                    Ok(webview) => (Some(webview), startup_error.map(StartupFailure::Failed)),
-                    Err(error) => (None, Some(StartupFailure::Failed(error))),
+            // GTK must be up before `WebContext::new`: wry builds a webkit2gtk
+            // `ApplicationInfo` there, whose constructor asserts GTK was
+            // initialised on this thread, and that assertion is a panic. It
+            // fired ahead of `build_production_webview_for_platform` -- the
+            // only production `gtk::init` -- so the first `browser.open` took
+            // the whole app down. That call stays where it is: `gtk::init` is
+            // idempotent, so it is a no-op once this one has succeeded.
+            //
+            // The failure is reported, not panicked: with no context built,
+            // `startup_failure` explains the empty surface in place of
+            // content. No context also means no retry, which is the right
+            // answer to a GTK that cannot come up at all.
+            let (webview, startup_failure, web_context) = match ensure_gtk_initialized() {
+                Err(error) => (None, Some(StartupFailure::Failed(error)), None),
+                Ok(()) => {
+                    // R6.3: one shared profile in a Sirio-owned directory.
+                    let mut web_context = WebContext::new(browser_profile_dir());
+                    // #307: a Windows machine without the WebView2 Runtime gets a full
+                    // explanation in place of the content, not an engine error it can't
+                    // act on. The probe runs before the build: it answers the one
+                    // question the build error cannot -- "is the runtime there at all".
+                    let (webview, startup_failure) = if webview_runtime_missing() {
+                        (None, Some(StartupFailure::RuntimeMissing))
+                    } else {
+                        match build_production_webview_for_platform(
+                            window,
+                            state.address(),
+                            &web_events,
+                            &mut web_context,
+                        ) {
+                            Ok(webview) => {
+                                (Some(webview), startup_error.map(StartupFailure::Failed))
+                            }
+                            Err(error) => (None, Some(StartupFailure::Failed(error))),
+                        }
+                    };
+                    (webview, startup_failure, Some(web_context))
                 }
             };
             let webview = Rc::new(RefCell::new(webview));
@@ -1557,7 +1595,7 @@ impl BrowserSurface {
                 address_field,
                 address_focused: false,
                 webview,
-                _web_context: Some(web_context),
+                _web_context: web_context,
                 webview_scale_correction: Rc::new(Cell::new(None)),
                 webview_visible: initial_native_visibility(),
                 overlay_obscured: Rc::new(Cell::new(false)),
@@ -1569,6 +1607,10 @@ impl BrowserSurface {
         }
         #[cfg(target_os = "windows")]
         {
+            // R6.3: one shared profile in a Sirio-owned directory. Left unset,
+            // WebView2 writes `<exe>.WebView2\EBWebView` beside the binary,
+            // which an installed Sirio under Program Files cannot create.
+            let web_context = WebContext::new(browser_profile_dir());
             // #368: never build WebView2 while the App is borrowed. `new`
             // runs inside `cx.new` (itself inside the workspace `update`),
             // and WebView2 init pumps `DispatchMessageW`, which runs any
