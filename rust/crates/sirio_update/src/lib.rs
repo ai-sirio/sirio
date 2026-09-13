@@ -342,11 +342,12 @@ mod tests {
     }
 
     /// A version strictly newer than the compiled one, derived rather than
-    /// spelled out. Every commit in this repo bumps the workspace version
-    /// (see CLAUDE.md), so a literal — the `0.7.0` these tests used to carry
-    /// — stops being newer the day the product reaches it, and then five
-    /// tests fail for a reason that has nothing to do with the updater.
-    /// That is exactly what happened when the workspace passed 0.7.0.
+    /// spelled out. The workspace version still rises — once per release
+    /// cycle rather than once per commit (see CLAUDE.md) — so a literal, the
+    /// `0.7.0` these tests used to carry, goes stale the day the product
+    /// reaches it, and then five tests fail for a reason that has nothing to
+    /// do with the updater. That is exactly what happened when the workspace
+    /// passed 0.7.0.
     fn newer_version() -> String {
         let current = current_version();
         format!("{}.{}.0", current.major, current.minor + 1)
