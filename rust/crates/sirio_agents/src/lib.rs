@@ -698,12 +698,22 @@ mod tests {
     }
 
     #[test]
-    fn oh_my_pi_claims_nothing_until_a_real_omp_is_verified() {
-        // Ship gate, not a note. The retired Swift app launched `omp acp`
-        // (AgentLaunchSpec.swift:73-75), but no omp has been available to
-        // confirm it against, and asserting an unverified capability is the
-        // exact defect this work exists to remove.
-        assert_eq!(OhMyPiAdapter.builtin_acp(), None);
+    fn oh_my_pi_claims_the_acp_subcommand_a_real_omp_answered() {
+        // Ship gate, not a note -- still. It held `None` for as long as no
+        // omp was available to confirm the claim against, which is the whole
+        // point of the design: an unverified capability never ships as
+        // `Some`. omp 18.1.19 then answered the ACP `initialize` handshake,
+        // so the claim moved on evidence rather than on the Swift app's
+        // precedent alone (AgentLaunchSpec.swift:73-75).
+        //
+        // This pins the shape. `tests/acp_conformance.rs`'s
+        // `oh_my_pi_is_only_claimed_once_it_answers` is the half that keeps
+        // it honest: it drives the installed binary and fails if the claim
+        // and the behaviour ever part company again -- in either direction.
+        assert_eq!(
+            OhMyPiAdapter.builtin_acp(),
+            Some(AcpProgram::new("omp", &["acp"]))
+        );
     }
 
     #[test]
