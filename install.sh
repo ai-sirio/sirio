@@ -108,6 +108,38 @@ case "$os" in
     trap 'rm -f "$tmp"' EXIT INT TERM
     download "Sirio-$version-x86_64.AppImage" "$tmp"
     chmod +x "$tmp"
+
+    # Desktop integration: the AppImage carries its own .desktop entry and
+    # icon (rendered from Scripts/identity.sh by Scripts/build-appimage.sh).
+    # An AppImage never registers those on its own, so a bare binary install
+    # stays invisible to launchers that enumerate ~/.local/share/applications
+    # (Omarchy's walker/wofi, GNOME, KDE) -- unlike packaged apps. Extract
+    # both into the per-user XDG locations; best-effort, so a runtime that
+    # cannot extract still leaves a working binary behind.
+    if work_extract=$(mktemp -d 2>/dev/null); then
+      if (cd "$work_extract" && "$tmp" --appimage-extract usr/share/applications usr/share/icons >/dev/null 2>&1); then
+        data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+        desktop_src=$(find "$work_extract/squashfs-root/usr/share/applications" -maxdepth 1 -name '*.desktop' 2>/dev/null | head -n 1)
+        if [ -n "$desktop_src" ]; then
+          mkdir -p "$data_home/applications"
+          # Point Exec at the installed file instead of relying on PATH.
+          sed "s|^Exec=.*|Exec=$dir/sirio|" "$desktop_src" > "$data_home/applications/$(basename "$desktop_src")"
+          # A previous install predating desktop integration left this stale
+          # name behind; the identifier-based entry above supersedes it.
+          rm -f "$data_home/applications/sirio.desktop"
+        fi
+        icon_src=$(find "$work_extract/squashfs-root/usr/share/icons" -name '*.png' 2>/dev/null | head -n 1)
+        if [ -n "$icon_src" ]; then
+          mkdir -p "$data_home/icons/hicolor/512x512/apps"
+          cp -f "$icon_src" "$data_home/icons/hicolor/512x512/apps/"
+        fi
+        if command -v update-desktop-database >/dev/null 2>&1; then
+          update-desktop-database "$data_home/applications" >/dev/null 2>&1 || true
+        fi
+      fi
+      rm -rf "$work_extract"
+    fi
+
     mv -f "$tmp" "$dir/sirio"
 
     echo "Sirio $version installed to $dir/sirio"
