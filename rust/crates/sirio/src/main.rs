@@ -972,6 +972,11 @@ enum ChatControlAction {
         surface_id: String,
     },
 }
+/// Cloning shares every entity handle (`PaneContent`'s `Clone`): a cloned
+/// `OpenTab` is the same terminals and the same chats, not copies of them.
+/// `retain_worktree_chats` relies on that to keep a chat's ACP session alive
+/// across a worktree switch.
+#[derive(Clone)]
 struct OpenTab {
     id: usize,
     /// Stable database identity, independent of the tab's visible position.
@@ -1736,7 +1741,10 @@ impl ControlHandler for AppControlHandler {
         match request.method.as_str() {
             "perf.terminal.write" => {
                 if !sirio_perf::enabled() {
-                    return ControlResponse::failure(&request.id, "performance fixture is disabled");
+                    return ControlResponse::failure(
+                        &request.id,
+                        "performance fixture is disabled",
+                    );
                 }
                 let (Some(id), Some(input)) =
                     (request.params.get("id"), request.params.get("input"))
@@ -2056,7 +2064,9 @@ impl ControlHandler for AppControlHandler {
                 })
             }
             "surface.chat.open" => {
-                if sirio_perf::enabled() && request.params.get("fixture").is_some_and(|v| v == "true") {
+                if sirio_perf::enabled()
+                    && request.params.get("fixture").is_some_and(|v| v == "true")
+                {
                     return self.queue_action(request, move |reply| ControlAction::Chat {
                         action: ChatControlAction::PerfFixture,
                         reply,
@@ -2873,9 +2883,10 @@ fn launch_source_in(launch: &AgentLaunchState, adapter_id: &str) -> sirio_regist
 fn first_resolved_chat_adapter(
     launch: &AgentLaunchState,
 ) -> Option<&'static dyn sirio_agents::AgentAdapter> {
-    AGENT_CATALOG.iter().copied().find(|adapter| {
-        agent_command_for(&launch_source_in(launch, adapter.id())).is_some()
-    })
+    AGENT_CATALOG
+        .iter()
+        .copied()
+        .find(|adapter| agent_command_for(&launch_source_in(launch, adapter.id())).is_some())
 }
 
 /// Sirio's cached copy of the registry document lives beside the agents
@@ -3202,23 +3213,14 @@ fn launch_refusal_reason(source: &sirio_registry::LaunchSource) -> String {
     }
 }
 
-fn panel_state_pairs(
-    snapshot: &PaneStateSnapshot,
-    scrollback: &[u8],
-) -> Vec<(String, String)> {
+fn panel_state_pairs(snapshot: &PaneStateSnapshot, scrollback: &[u8]) -> Vec<(String, String)> {
     let mut pairs = vec![
         (
             "workingDirectory".to_string(),
             display_absolute_path(&snapshot.working_directory),
         ),
-        (
-            "scrollback".to_string(),
-            base64_encode(scrollback),
-        ),
-        (
-            "scrollbackBytes".to_string(),
-            scrollback.len().to_string(),
-        ),
+        ("scrollback".to_string(), base64_encode(scrollback)),
+        ("scrollbackBytes".to_string(), scrollback.len().to_string()),
     ];
     if let Some(status) = snapshot.exit_status {
         let (label, code) = match status {
@@ -4244,6 +4246,16 @@ struct SirioWorkspace {
     /// a mounted worktree uses this snapshot when its DB row is empty or
     /// belongs to another worktree.
     parked_worktree_tabs: BTreeMap<String, ParkedWorktreeTabs>,
+    /// Chat tabs of worktrees the user switched away from, keyed by worktree
+    /// id and then by the tab's stable persistence id. The terminal cache is
+    /// what keeps a terminal alive across a switch; a chat's `Entity<Chat>`
+    /// has no such cache and dropping it ends its ACP session, so a worktree
+    /// switch used to be allowed only while no outgoing tab was live (the
+    /// CENTER-01 gate). Retained here instead, so the reload a switch needs
+    /// can run unconditionally, and re-adopted verbatim -- same entity, same
+    /// session -- when its worktree comes back. Dropped when the worktree is
+    /// evicted or closed.
+    retained_worktree_chats: BTreeMap<String, BTreeMap<String, OpenTab>>,
     /// What each worktree the user switched away from still holds, as the
     /// sidebar lists it under that worktree: its persisted strip, mapped to
     /// parked rows (`SidebarTabRef::Parked`). Filled lazily by
@@ -4937,6 +4949,7 @@ impl SirioWorkspace {
             empty_pane_prompts: BTreeMap::new(),
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
+            retained_worktree_chats: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
             files_snapshot_in_flight: HashSet::new(),
@@ -5928,7 +5941,9 @@ impl SirioWorkspace {
                     account_login::start(&workspace.settings, request, cx);
                 }
                 sirio_ui::settings::SettingsEvent::RefreshUsage => {
-                    workspace.status_bar.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
+                    workspace
+                        .status_bar
+                        .update(cx, |bar, cx| bar.on_refresh_clicked(cx));
                 }
             },
         )
@@ -6128,8 +6143,7 @@ impl SirioWorkspace {
             let tab_id = tab.id;
             tab.panes.for_each(&mut |pane_id, content| {
                 if let TabContent::Terminal { view } = content
-                    && !reused_terminal_panes
-                        .is_some_and(|reused| reused.contains(&pane_id))
+                    && !reused_terminal_panes.is_some_and(|reused| reused.contains(&pane_id))
                 {
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
@@ -6137,11 +6151,7 @@ impl SirioWorkspace {
         }
     }
 
-    fn apply_terminal_font_size_to_tabs(
-        tabs: &[OpenTab],
-        font_size: i32,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_terminal_font_size_to_tabs(tabs: &[OpenTab], font_size: i32, cx: &mut Context<Self>) {
         for tab in tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::Terminal { view } = content {
@@ -6334,8 +6344,8 @@ impl SirioWorkspace {
                 // transition (and no title-owned clear) changes nothing the
                 // workspace draws; the terminal repaints itself through its
                 // own notify.
-                let title_owned_clear = title_owned_before
-                    && !workspace.activity.is_title_owned(&activity_pane_id);
+                let title_owned_clear =
+                    title_owned_before && !workspace.activity.is_title_owned(&activity_pane_id);
                 if transition.is_some()
                     || title_owned_clear
                     || matches!(
@@ -6589,7 +6599,7 @@ impl SirioWorkspace {
         match event {
             SidebarEvent::AddProject(path) => self.add_project(path.clone(), cx),
             SidebarEvent::RemoveProject(id) => self.remove_project(id, cx),
-            SidebarEvent::SelectTab(id) => self.select_tab(*id, None, cx),
+            SidebarEvent::SelectTab(id) => self.activate_tab(*id, None, cx),
             SidebarEvent::SelectParkedTab { path, index } => {
                 // Bring the worktree back first — that restores its strip —
                 // then activate the tab at the clicked position, counted the
@@ -7477,11 +7487,11 @@ impl SirioWorkspace {
     /// `self.tabs` carried a non-idle status to jump to (or the worktree has
     /// no tabs at all), and `Err` when `select_worktree` itself failed.
     ///
-    /// CENTER-01: `select_worktree` now does rehydrate `self.tabs` from
-    /// `path`'s own persisted session when the switch is safe to make (see
-    /// its own doc comment) -- so this jumps into the tab `path`'s database
-    /// row actually names, not whichever worktree happened to be
-    /// materialized in `self.tabs` before the call, the way it used to.
+    /// CENTER-01 used to read the jump's evidence from whichever tabs
+    /// happened to be materialized; the switch now always reloads the target
+    /// worktree's own strip first, so this jumps into the tab `path`'s
+    /// database row (re-mounted from the switch's parked strip, terminals
+    /// re-attached by pane id) actually names.
     fn select_worktree_and_jump(
         &mut self,
         path: PathBuf,
@@ -7536,10 +7546,7 @@ impl SirioWorkspace {
             .unwrap_or_else(|| self.working_directory.clone())
     }
 
-    fn tab_ids_for_worktree(
-        &self,
-        worktree_path: &Path,
-    ) -> impl Iterator<Item = usize> + '_ {
+    fn tab_ids_for_worktree(&self, worktree_path: &Path) -> impl Iterator<Item = usize> + '_ {
         let worktree_path = worktree_path.to_path_buf();
         self.tabs.iter().filter_map(move |tab| {
             paths_name_the_same_document(&self.tab_worktree_path(tab.id), &worktree_path)
@@ -7681,9 +7688,10 @@ impl SirioWorkspace {
     }
 
     fn sync_control_panes(&mut self, cx: &App) {
-        let mut by_directory:
-            BTreeMap<PathBuf, Vec<(PaneInfo, PaneStateSnapshot, Option<ScrollbackSource>)>> =
-            BTreeMap::new();
+        let mut by_directory: BTreeMap<
+            PathBuf,
+            Vec<(PaneInfo, PaneStateSnapshot, Option<ScrollbackSource>)>,
+        > = BTreeMap::new();
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let tab_worktree_path = self.tab_worktree_path(tab.id);
             tab.panes.for_each(&mut |pane_id, content| {
@@ -7831,6 +7839,7 @@ impl SirioWorkspace {
             // PTY instead of leaving a shell behind in the cache.
             self.terminal_pane_cache.remove_worktree(&id);
             self.parked_worktree_tabs.remove(&id);
+            self.retained_worktree_chats.remove(&id);
         }
     }
 
@@ -7898,6 +7907,7 @@ impl SirioWorkspace {
             for tab_id in outgoing_tab_ids {
                 self.track_terminal_panes_in_cache(tab_id);
             }
+            self.retain_worktree_chats(&old_path);
             Some(self.park_current_worktree_tabs(cx))
         } else {
             None
@@ -7907,125 +7917,123 @@ impl SirioWorkspace {
 
         // CENTER-01: `self.tabs` is this window's single, un-scoped-to-worktree
         // tab list (F-CHG-19's "single-open-worktree model", also documented
-        // on `session`'s own module doc). Until now, a switch left it
-        // materialized for whichever worktree happened to already be on
-        // screen -- the stale-centre-pane defect: the sidebar highlight,
-        // status bar and right panel all flip to the new selection, but the
-        // centre pane keeps showing the old one, exactly relabelled by
+        // on `session`'s own module doc). A switch must replace it with the
+        // newly selected worktree's own persisted layout, or the sidebar
+        // highlight, status bar and right panel all flip to the new
+        // selection while the centre viewport keeps rendering the old one
+        // -- the stale-centre-pane defect, exactly relabelled by
         // `sync_control_panes` under the new path on the very next sync.
         //
-        // Reloading is only safe when nothing in the outgoing tabs is live.
-        // Dropping an `OpenTab` drops its `TerminalView`/`Chat` entities, and
-        // `TerminalView::drop` tears its PTY down (`shutdown`) -- the exact
-        // consequence `pane_close_needs_confirmation` already exists to gate
-        // (F-TERM-08's held-close banner) and the same one
-        // `evict_over_capacity_worktrees`'s own `status_of` closure exists to
-        // prevent for the *control-registered* pane list. A worktree switch
-        // must not silently kill live, needs-input, or just-errored work
-        // (its last output may still be the thing the user is about to read)
-        // just because its tabs happen to be the ones on screen, so this
-        // reload reuses that exact predicate rather than a hand-rolled
-        // subset of it. When the gate trips, today's behaviour (stale
-        // content, nothing killed) is left in place rather than risking the
-        // worse failure -- see docs/linux-rewrite/CENTER-PANE-DESYNC.md for
-        // the real fix this stands in for (a genuine multi-worktree mount
-        // model, which is a much larger change touching F-SID-14/
-        // F-CORE-ACT-26/F-CHG-19/F-TERM-11, previously scoped out for the
-        // same reason by the I3-tray-jump wave).
+        // This used to run only while nothing in the outgoing tabs was
+        // live: dropping an `OpenTab` drops its `TerminalView`/`Chat`
+        // entities, and a `TerminalView`'s `Drop` tears its PTY down. The
+        // terminal cache (#348) now owns every outgoing terminal entity,
+        // and `retain_worktree_chats` owns the chat ones, so the reload runs
+        // on *every* switch -- the centre pane always shows the worktree the
+        // user just clicked, and no live work is killed to get there.
+        // `park_current_worktree_tabs` above snapshots the outgoing strip
+        // and `restore_tabs_for_mounted_worktree` re-attaches the cached
+        // terminals, so a switch away and back is lossless for both.
         if !paths_name_the_same_document(&selected_path, &old_path) {
-            let outgoing_is_safe = !self.tabs.iter().any(|tab| {
-                self.tab_status(tab, cx)
-                    .is_some_and(pane_close_needs_confirmation)
-                    // F-TERM-10: catches a live foreground command the
-                    // agent-activity check above cannot see at all (no
-                    // recognized agent, no OSC title, no ACP) -- see
-                    // `tab_has_live_foreground_process`'s own comment.
-                    || self.tab_has_live_foreground_process(tab, cx)
-            });
-            if outgoing_is_safe {
-                // The debounced `schedule_save` below (and every ordinary
-                // mutation's `schedule_save`) always persists under whatever
-                // `self.working_directory` is *at flush time* -- about to
-                // become `selected_path`. Anything from the outgoing
-                // worktree not yet flushed must be saved now, synchronously,
-                // under its own directory, or it is silently lost rather
-                // than merely delayed.
-                if let Some(outgoing_layout) = outgoing_layout {
-                    self.session.save_layout_now(&outgoing_layout);
-                }
-
-                let restored = self
-                    .restore_tabs_for_mounted_worktree(
-                        &selected_path,
-                        self.session.restore_tabs_for(&selected_path),
-                        cx,
-                    );
-                let saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions
-                {
-                    self.session.load_session_refs()
-                } else {
-                    BTreeMap::new()
-                };
-                let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
-                    &restored,
-                    &selected_path,
-                    window,
-                    &mut self.activity,
-                    &saved_session_refs,
-                    Some(&self.terminal_pane_cache),
-                    Some(&self.session),
-                    cx,
-                );
-                let keep_content_ids: HashSet<String> = reused_terminal_panes
-                    .iter()
-                    .map(|pane_id| format!("terminal-{pane_id}"))
-                    .collect();
-                let selected_worktree_id = selected_path.to_string_lossy().into_owned();
-                self.terminal_pane_cache.remove_unkept_in_worktree(
-                    &selected_worktree_id,
-                    &keep_content_ids,
-                );
-                if !self
-                    .terminal_pane_cache
-                    .has_in_worktree(&selected_worktree_id)
-                {
-                    self.parked_worktree_tabs.remove(&selected_worktree_id);
-                }
-                Self::bind_terminal_tabs_with_reused(
-                    &new_tabs,
-                    Some(&reused_terminal_panes),
-                    cx,
-                );
-                Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
-                Self::bind_file_tabs(&new_tabs, cx);
-                for tab in &new_tabs {
-                    tab.panes.for_each(&mut |_, content| {
-                        if let TabContent::Chat(chat) = content {
-                            Self::bind_chat(chat, cx);
-                        }
-                    });
-                }
-                self.tabs = new_tabs;
-                for tab in &self.tabs {
-                    self.tab_worktree_paths
-                        .insert(tab.id, selected_path.clone());
-                }
-                let incoming_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
-                for tab_id in incoming_tab_ids {
-                    self.track_terminal_panes_in_cache_for_worktree(tab_id, &selected_path);
-                }
-                self.next_tab_id = self.tabs.len();
-                self.next_pane_id = next_pane_id(&self.tabs);
-                self.active_tab = active.min(self.tabs.len().saturating_sub(1));
-                // `rebuild_center_split` can reveal a restored Secondary
-                // tab. Point the workspace at the destination before that
-                // side effect so its persisted flag is written to the right
-                // worktree.
-                self.working_directory = selected_path.clone();
-                self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
-                self.rebuild_center_split();
-                restored_secondary_pane_open = Some(self.secondary_pane_open);
+            // The debounced `schedule_save` below (and every ordinary
+            // mutation's `schedule_save`) always persists under whatever
+            // `self.working_directory` is *at flush time* -- about to
+            // become `selected_path`. Anything from the outgoing worktree
+            // not yet flushed must be saved now, synchronously, under its
+            // own directory, or it is silently lost rather than merely
+            // delayed.
+            if let Some(outgoing_layout) = outgoing_layout {
+                self.session.save_layout_now(&outgoing_layout);
             }
+
+            let selected_worktree_id = selected_path.to_string_lossy().into_owned();
+            // The chat entities coming back with this worktree are already
+            // subscribed: `bind_chat` detaches its subscription, so one added
+            // here would double every handler (auto-rename included).
+            let adopted_chat_ids: HashSet<u64> = self
+                .retained_worktree_chats
+                .get(&selected_worktree_id)
+                .map(|retained| {
+                    let mut ids = HashSet::new();
+                    for tab in retained.values() {
+                        tab.panes.for_each(&mut |_, content| {
+                            if let TabContent::Chat(chat) = content {
+                                ids.insert(chat.entity_id().as_u64());
+                            }
+                        });
+                    }
+                    ids
+                })
+                .unwrap_or_default();
+            let restored = self.restore_tabs_for_mounted_worktree(
+                &selected_path,
+                self.session.restore_tabs_for(&selected_path),
+                cx,
+            );
+            let saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions {
+                self.session.load_session_refs()
+            } else {
+                BTreeMap::new()
+            };
+            let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
+                &restored,
+                &selected_path,
+                window,
+                &mut self.activity,
+                &saved_session_refs,
+                Some(&self.terminal_pane_cache),
+                Some(&self.session),
+                self.retained_worktree_chats.get(&selected_worktree_id),
+                cx,
+            );
+            // Whatever this worktree had retained was just re-adopted into
+            // `new_tabs`; a running chat whose tab the database no longer
+            // names is dropped rather than resurrected, so the DB stays the
+            // source of *which* tabs exist.
+            self.retained_worktree_chats.remove(&selected_worktree_id);
+            let keep_content_ids: HashSet<String> = reused_terminal_panes
+                .iter()
+                .map(|pane_id| format!("terminal-{pane_id}"))
+                .collect();
+            self.terminal_pane_cache
+                .remove_unkept_in_worktree(&selected_worktree_id, &keep_content_ids);
+            if !self
+                .terminal_pane_cache
+                .has_in_worktree(&selected_worktree_id)
+            {
+                self.parked_worktree_tabs.remove(&selected_worktree_id);
+            }
+            Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
+            Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
+            Self::bind_file_tabs(&new_tabs, cx);
+            for tab in &new_tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Chat(chat) = content
+                        && !adopted_chat_ids.contains(&chat.entity_id().as_u64())
+                    {
+                        Self::bind_chat(chat, cx);
+                    }
+                });
+            }
+            self.tabs = new_tabs;
+            for tab in &self.tabs {
+                self.tab_worktree_paths
+                    .insert(tab.id, selected_path.clone());
+            }
+            let incoming_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
+            for tab_id in incoming_tab_ids {
+                self.track_terminal_panes_in_cache_for_worktree(tab_id, &selected_path);
+            }
+            self.next_tab_id = self.tabs.len();
+            self.next_pane_id = next_pane_id(&self.tabs);
+            self.active_tab = active.min(self.tabs.len().saturating_sub(1));
+            // `rebuild_center_split` can reveal a restored Secondary tab.
+            // Point the workspace at the destination before that side effect
+            // so its persisted flag is written to the right worktree.
+            self.working_directory = selected_path.clone();
+            self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
+            self.rebuild_center_split();
+            restored_secondary_pane_open = Some(self.secondary_pane_open);
         }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
@@ -8343,6 +8351,7 @@ impl SirioWorkspace {
         let worktree_id = path.to_string_lossy().into_owned();
         self.terminal_pane_cache.remove_worktree(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
+        self.retained_worktree_chats.remove(&worktree_id);
         if was_current {
             for index in (0..self.tabs.len()).rev() {
                 self.close_tab(index, None, cx);
@@ -8410,7 +8419,7 @@ impl SirioWorkspace {
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             Self::bind_terminal_tabs(&tabs, cx);
-        Self::bind_file_tabs(&tabs, cx);
+            Self::bind_file_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
             // tabs need the same binding or a restored session's Edit-tool file
@@ -8989,6 +8998,35 @@ impl SirioWorkspace {
     /// mandatory for the same reason `select_pane` and
     /// `select_worktree` take it that way: some callers legitimately
     /// have no window, and restoring a session should not seize focus.
+    /// Activates a tab on behalf of a user gesture, first selecting the
+    /// worktree that owns it when the gesture named a tab of another one.
+    ///
+    /// [`Self::select_tab`] is deliberately worktree-blind -- callers that
+    /// already know which strip they are acting on (the palette, a tray jump,
+    /// a keyboard cycle) use it directly. A click on a tab is not one of
+    /// those: the user pointed at a tab and the sidebar must follow, or the
+    /// highlight and the visible strip disagree. Switching first is also what
+    /// makes the click safe when the named tab is no longer in `self.tabs`
+    /// (a reload can replace every live id): the worktree selection still
+    /// lands, and the id lookup below simply does nothing.
+    fn activate_tab(&mut self, id: usize, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let owning_worktree = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .map(|tab| self.tab_worktree_path(tab.id));
+        if let Some(path) = owning_worktree
+            && !paths_name_the_same_document(&path, &self.working_directory)
+            && self
+                .select_worktree(path, window.as_deref_mut(), cx)
+                .is_err()
+        {
+            self.restore_sidebar_selection(cx);
+            return;
+        }
+        self.select_tab(id, window, cx);
+    }
+
     fn select_tab(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             self.active_tab = index;
@@ -9148,11 +9186,7 @@ impl SirioWorkspace {
         self.track_terminal_panes_in_cache_for_worktree(tab_id, &worktree_path);
     }
 
-    fn track_terminal_panes_in_cache_for_worktree(
-        &mut self,
-        tab_id: usize,
-        worktree_path: &Path,
-    ) {
+    fn track_terminal_panes_in_cache_for_worktree(&mut self, tab_id: usize, worktree_path: &Path) {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
@@ -9178,15 +9212,46 @@ impl SirioWorkspace {
                 .get_in_worktree(&worktree_id, &content_id)
                 .is_some_and(|pane| pane.controller.entity_id() == view.entity_id());
             if same_view_is_cached {
-                self.terminal_pane_cache.move_within_worktree(
-                    &content_id,
-                    &worktree_id,
-                    placement,
-                );
+                self.terminal_pane_cache
+                    .move_within_worktree(&content_id, &worktree_id, placement);
             } else {
                 self.terminal_pane_cache
                     .insert(worktree_id.clone(), placement, content_id, view);
             }
+        }
+    }
+
+    /// Stashes the outgoing worktree's chat tabs before `select_worktree`
+    /// reloads `self.tabs`.
+    ///
+    /// A chat is the one tab kind the terminal cache cannot keep alive on its
+    /// own: dropping its `OpenTab` drops the `Entity<Chat>` and ends the ACP
+    /// session behind it, which is why a switch used to be gated on nothing
+    /// in the outgoing worktree being live. Retaining the whole `OpenTab`
+    /// here -- entity, pane tree, title and state -- lets the reload run
+    /// unconditionally and lets the chat come back as the same session when
+    /// its worktree is selected again (`restore_tabs_with_terminal_cache`
+    /// adopts it by persistence id). A worktree whose live tabs hold no chat
+    /// drops whatever it had retained: the DB strip is about to be rewritten
+    /// from this same `self.tabs` snapshot, so nothing else can be stale.
+    fn retain_worktree_chats(&mut self, worktree_path: &Path) {
+        let worktree_id = worktree_path.to_string_lossy().into_owned();
+        let mut retained: BTreeMap<String, OpenTab> = BTreeMap::new();
+        for tab in &self.tabs {
+            let mut has_chat = false;
+            tab.panes.for_each(&mut |_, content| {
+                if matches!(content, TabContent::Chat(_)) {
+                    has_chat = true;
+                }
+            });
+            if has_chat {
+                retained.insert(tab.persistence_id.clone(), tab.clone());
+            }
+        }
+        if retained.is_empty() {
+            self.retained_worktree_chats.remove(&worktree_id);
+        } else {
+            self.retained_worktree_chats.insert(worktree_id, retained);
         }
     }
 
@@ -9197,10 +9262,7 @@ impl SirioWorkspace {
             .tabs
             .iter()
             .filter(|tab| {
-                paths_name_the_same_document(
-                    &self.tab_worktree_path(tab.id),
-                    &current_path,
-                )
+                paths_name_the_same_document(&self.tab_worktree_path(tab.id), &current_path)
             })
             .map(|tab| {
                 let mut pane_ids = HashSet::new();
@@ -9255,10 +9317,8 @@ impl SirioWorkspace {
         let assigned_pane_ids = restored_pane_ids(&restored, 0);
 
         for (index, pane_ids) in parked.terminal_panes_by_tab.iter().enumerate() {
-            let live_panes: HashSet<usize> = pane_ids
-                .intersection(&live_pane_ids)
-                .copied()
-                .collect();
+            let live_panes: HashSet<usize> =
+                pane_ids.intersection(&live_pane_ids).copied().collect();
             let Some(tab) = parked.layout.tabs.get(index) else {
                 continue;
             };
@@ -9282,14 +9342,12 @@ impl SirioWorkspace {
         }
 
         for (index, tab) in restored.tabs.iter().enumerate() {
-            let state = restored
-                .tab_states
-                .get(index)
-                .cloned()
-                .unwrap_or_default();
+            let state = restored.tab_states.get(index).cloned().unwrap_or_default();
             let pane_ids = restored_tab_pane_ids(assigned_pane_ids[index], &state);
             if cached_tab_ids.contains(&tab.id)
-                || pane_ids.iter().any(|pane_id| live_pane_ids.contains(pane_id))
+                || pane_ids
+                    .iter()
+                    .any(|pane_id| live_pane_ids.contains(pane_id))
             {
                 continue;
             }
@@ -9412,9 +9470,8 @@ impl SirioWorkspace {
 
     fn rebind_changes_tabs(&mut self, cx: &mut Context<Self>) {
         let working_directory = self.working_directory.clone();
-        let current_tab_ids: HashSet<usize> = self
-            .tab_ids_for_worktree(&working_directory)
-            .collect();
+        let current_tab_ids: HashSet<usize> =
+            self.tab_ids_for_worktree(&working_directory).collect();
         for tab in &mut self.tabs {
             if tab.kind != TabKind::Diff || !current_tab_ids.contains(&tab.id) {
                 continue;
@@ -9501,10 +9558,8 @@ impl SirioWorkspace {
         self.tab_worktree_paths.remove(&tab_id);
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         for pane_id in terminal_pane_ids {
-            self.terminal_pane_cache.remove_in_worktree(
-                &worktree_id,
-                &format!("terminal-{pane_id}"),
-            );
+            self.terminal_pane_cache
+                .remove_in_worktree(&worktree_id, &format!("terminal-{pane_id}"));
         }
         // The model is keyed by pane id and `next_pane_id` is `max + 1` of
         // the tabs that remain, so a closed pane's entry would be inherited
@@ -11196,7 +11251,10 @@ impl SirioWorkspace {
             // the very first click, and the cache's `restore_focus` would
             // never have anything to return for a pane nobody ever moved.
             self.track_terminal_panes_in_cache(tab_id);
-            let worktree_id = self.tab_worktree_path(tab_id).to_string_lossy().into_owned();
+            let worktree_id = self
+                .tab_worktree_path(tab_id)
+                .to_string_lossy()
+                .into_owned();
             self.terminal_pane_cache
                 .focus(&worktree_id, &format!("terminal-{pane_id}"));
             self.mark_activity_dirty();
@@ -11416,10 +11474,8 @@ impl SirioWorkspace {
                 .push(PaneEvent::Close { id: focused_pane });
             if let Some(terminal) = removed.terminal() {
                 terminal.update(cx, |terminal, _| terminal.input([3, 4]));
-                self.terminal_pane_cache.remove_in_worktree(
-                    &worktree_id,
-                    &format!("terminal-{focused_pane}"),
-                );
+                self.terminal_pane_cache
+                    .remove_in_worktree(&worktree_id, &format!("terminal-{focused_pane}"));
             }
             if let TabContent::Browser(surface) = &removed {
                 // F-BRW: a browser leaf closed out of a split leaves the tab
@@ -12211,7 +12267,7 @@ impl SirioWorkspace {
                     if click_count >= 2 {
                         this.begin_tab_rename(id, window, cx);
                     } else {
-                        this.select_tab(id, Some(window), cx);
+                        this.activate_tab(id, Some(window), cx);
                     }
                 });
             })
@@ -13794,44 +13850,40 @@ impl SirioWorkspace {
             .when(self.sidebar_visible, |row| {
                 row.child(
                     shell_chrome::panel("shell-left-panel", &self.left_panel_focus, theme)
-                    .w(px(left_width.unwrap_or(0.0)))
-                    .flex_none()
-                    // Deliberately not `child_view`: the sidebar is an
-                    // ancestor of the running-worktree spinner, so gpui
-                    // marks it dirty on every spinner frame anyway, and a
-                    // cached view re-renders its whole subtree with
-                    // `window.refreshing` set — which would force every
-                    // cached row (`Sidebar::set_cache_rows`) to re-render
-                    // instead of replaying. Mounted plain, the sidebar's
-                    // render is cheap (its rows are fixed-height leaves) and
-                    // only the notified row re-renders.
-                    .child(self.sidebar.clone())
-                    .child(
-                        self.render_panel_resize_handle(
+                        .w(px(left_width.unwrap_or(0.0)))
+                        .flex_none()
+                        // Deliberately not `child_view`: the sidebar is an
+                        // ancestor of the running-worktree spinner, so gpui
+                        // marks it dirty on every spinner frame anyway, and a
+                        // cached view re-renders its whole subtree with
+                        // `window.refreshing` set — which would force every
+                        // cached row (`Sidebar::set_cache_rows`) to re-render
+                        // instead of replaying. Mounted plain, the sidebar's
+                        // render is cheap (its rows are fixed-height leaves) and
+                        // only the notified row re-renders.
+                        .child(self.sidebar.clone())
+                        .child(self.render_panel_resize_handle(
                             panel_layout::PanelSide::Left,
                             entity.clone(),
-                        ),
-                    ),
+                        )),
                 )
             })
             .child(
                 shell_chrome::panel("shell-center-panel", &self.center_panel_focus, theme)
-                .flex_1()
-                .min_w_0()
-                .child(center_column),
+                    .flex_1()
+                    .min_w_0()
+                    .child(center_column),
             )
             .when(self.right_panel_visible, |row| {
                 row.child(
                     shell_chrome::panel("shell-right-panel", &self.right_panel_focus, theme)
-                    .w(px(right_width.unwrap_or(0.0)))
-                    .flex_none()
-                    .child(self.child_view(self.right_panel.clone()))
-                    .child(
-                        self.render_panel_resize_handle(
+                        .w(px(right_width.unwrap_or(0.0)))
+                        .flex_none()
+                        .child(self.child_view(self.right_panel.clone()))
+                        .child(self.render_panel_resize_handle(
                             panel_layout::PanelSide::Right,
                             entity.clone(),
-                        ),
-                    ),
+                        )),
                 )
             })
     }
@@ -15480,13 +15532,12 @@ impl Render for SirioWorkspace {
                     .w_full()
                     .child(self.titlebar.clone()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(self.columns(&theme, cx.entity(), cx, window)),
-            )
+            .child(div().flex_1().min_h_0().w_full().child(self.columns(
+                &theme,
+                cx.entity(),
+                cx,
+                window,
+            )))
             .child(
                 div()
                     .h(px(STATUS_BAR_HEIGHT))
@@ -15732,10 +15783,7 @@ fn resumable_session_refs(
         // on the bare adapter id, so extract it (None for a value that does
         // not resolve to a known adapter — the same skip as before).
         let adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        let legacy_pane_key = format!(
-            "pane-{}",
-            fallback_pane_id_start.saturating_add(tab_index)
-        );
+        let legacy_pane_key = format!("pane-{}", fallback_pane_id_start.saturating_add(tab_index));
         let session_ref = saved_refs
             .get(&pane_key)
             .or_else(|| saved_refs.get(&legacy_pane_key));
@@ -15794,10 +15842,7 @@ fn restored_agent_shell(
     let sirioctl_path = match resolve_sirioctl_for_process() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!(
-                "cannot restore {}: {error}",
-                adapter.display_name()
-            );
+            eprintln!("cannot restore {}: {error}", adapter.display_name());
             return None;
         }
     };
@@ -15839,6 +15884,7 @@ fn restore_tabs(
         window,
         activity,
         saved_session_refs,
+        None,
         None,
         None,
         cx,
@@ -15902,11 +15948,7 @@ fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<u
         .collect()
 }
 
-fn materialize_restored_root(
-    state: &mut SessionTabState,
-    pane_id: usize,
-    fallback_pane_id: usize,
-) {
+fn materialize_restored_root(state: &mut SessionTabState, pane_id: usize, fallback_pane_id: usize) {
     if state.root_id.is_some() {
         return;
     }
@@ -15943,6 +15985,13 @@ fn restore_tabs_with_terminal_cache(
     saved_session_refs: &BTreeMap<String, String>,
     terminal_pane_cache: Option<&TerminalPaneCache<Entity<TerminalView>>>,
     session: Option<&SessionStore>,
+    // Chat tabs of this worktree that stayed alive across a switch, keyed by
+    // persistence id ([`SirioWorkspace::retain_worktree_chats`]). An entry
+    // replaces the tab the database would rebuild: the live `Entity<Chat>`
+    // -- session, transcript, subscriptions and all -- is adopted as-is,
+    // with only its in-list id refreshed, instead of launching a second
+    // one and orphaning the first.
+    retained_chat_tabs: Option<&BTreeMap<String, OpenTab>>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize, HashSet<usize>) {
     // Chat launch sources resolve here from offline facts; the registry
@@ -15988,6 +16037,24 @@ fn restore_tabs_with_terminal_cache(
     let assigned_pane_ids = restored_pane_ids(restored, 0);
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
         let id = tabs.len();
+        if let Some(retained) = retained_chat_tabs.and_then(|retained| retained.get(&tab.id)) {
+            let mut adopted = retained.clone();
+            adopted.id = id;
+            // Its live terminals are already subscribed and already cached;
+            // both marks keep the caller from re-doing either. The tab's own
+            // state (and with it its scrollback) is already current, so none
+            // of the rebuilding below applies to it.
+            adopted.panes.for_each(&mut |leaf_id, content| {
+                if matches!(content, TabContent::Terminal { .. }) {
+                    reused_terminal_panes.insert(leaf_id);
+                }
+            });
+            tabs.push(adopted);
+            if tab.active {
+                active = id;
+            }
+            continue;
+        }
         let mut tab_state = restored
             .tab_states
             .get(tab_index)
@@ -16072,12 +16139,9 @@ fn restore_tabs_with_terminal_cache(
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
-                let view = if let Some(view) = cached_terminal_view(
-                    terminal_pane_cache,
-                    working_directory,
-                    pane_id,
-                    cx,
-                ) {
+                let view = if let Some(view) =
+                    cached_terminal_view(terminal_pane_cache, working_directory, pane_id, cx)
+                {
                     reused_terminal_panes.insert(pane_id);
                     view
                 } else {
@@ -16137,12 +16201,9 @@ fn restore_tabs_with_terminal_cache(
                 TabContent::Chat(chat),
                 &tab_state.pane_events,
                 |new_id| {
-                    if let Some(view) = cached_terminal_view(
-                        terminal_pane_cache,
-                        working_directory,
-                        new_id,
-                        cx,
-                    ) {
+                    if let Some(view) =
+                        cached_terminal_view(terminal_pane_cache, working_directory, new_id, cx)
+                    {
                         reused_terminal_panes.insert(new_id);
                         TabContent::Terminal { view }
                     } else {
@@ -16162,12 +16223,9 @@ fn restore_tabs_with_terminal_cache(
                 },
             ),
             content => replay_pane_events(pane_id, content, &tab_state.pane_events, |new_id| {
-                if let Some(view) = cached_terminal_view(
-                    terminal_pane_cache,
-                    working_directory,
-                    new_id,
-                    cx,
-                ) {
+                if let Some(view) =
+                    cached_terminal_view(terminal_pane_cache, working_directory, new_id, cx)
+                {
                     reused_terminal_panes.insert(new_id);
                     TabContent::Terminal { view }
                 } else {
@@ -17918,17 +17976,40 @@ mod tests {
     #[test]
     fn any_open_overlay_obscures_browsers_a_quiet_frame_obscures_nothing() {
         assert!(
-            !SirioWorkspace::overlay_obscures_browsers(false, false, false, false, false, false, false),
+            !SirioWorkspace::overlay_obscures_browsers(
+                false, false, false, false, false, false, false
+            ),
             "a quiet frame must leave the page mapped"
         );
         for (name, args) in [
-            ("overflow menu", (true, false, false, false, false, false, false)),
-            ("tab context menu", (false, true, false, false, false, false, false)),
-            ("command palette", (false, false, true, false, false, false, false)),
-            ("set-title prompt", (false, false, false, true, false, false, false)),
-            ("pane close confirm", (false, false, false, false, true, false, false)),
-            ("tab rename", (false, false, false, false, false, true, false)),
-            ("+ new-tab menu", (false, false, false, false, false, false, true)),
+            (
+                "overflow menu",
+                (true, false, false, false, false, false, false),
+            ),
+            (
+                "tab context menu",
+                (false, true, false, false, false, false, false),
+            ),
+            (
+                "command palette",
+                (false, false, true, false, false, false, false),
+            ),
+            (
+                "set-title prompt",
+                (false, false, false, true, false, false, false),
+            ),
+            (
+                "pane close confirm",
+                (false, false, false, false, true, false, false),
+            ),
+            (
+                "tab rename",
+                (false, false, false, false, false, true, false),
+            ),
+            (
+                "+ new-tab menu",
+                (false, false, false, false, false, false, true),
+            ),
         ] {
             let (overflow, tab_menu, palette, title, close, rename, new_tab) = args;
             assert!(
@@ -19182,10 +19263,8 @@ mod tests {
     #[gpui::test]
     async fn terminal_pane_does_not_render_a_shell_breadcrumb_overlay(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
-        let working_directory = std::env::temp_dir().join(format!(
-            "sirio-terminal-breadcrumb-{}",
-            std::process::id()
-        ));
+        let working_directory =
+            std::env::temp_dir().join(format!("sirio-terminal-breadcrumb-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create breadcrumb test directory");
         let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
@@ -19559,9 +19638,7 @@ mod tests {
     /// entities, even when the selected worktree's DB layout is empty or
     /// belongs to another worktree. The live cache remains authoritative.
     #[gpui::test]
-    async fn reselecting_a_worktree_reuses_the_mounted_terminal_handle(
-        cx: &mut TestAppContext,
-    ) {
+    async fn reselecting_a_worktree_reuses_the_mounted_terminal_handle(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let (root, worktrees) = urgency_test_root("reselect-terminal");
         let root_for_window = root.clone();
@@ -19595,7 +19672,11 @@ mod tests {
             }
             terminals
         });
-        assert_eq!(original_terminals.len(), 2, "the fixture has two live terminals");
+        assert_eq!(
+            original_terminals.len(),
+            2,
+            "the fixture has two live terminals"
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             cx.run_until_parked();
@@ -19688,7 +19769,11 @@ mod tests {
                 tab_states: Vec::new(),
             });
             assert!(
-                workspace.session.restore_tabs_for(&worktree_a).tabs.is_empty(),
+                workspace
+                    .session
+                    .restore_tabs_for(&worktree_a)
+                    .tabs
+                    .is_empty(),
                 "the test must exercise an empty DB layout for the mounted worktree"
             );
         });
@@ -19720,8 +19805,15 @@ mod tests {
             )
         });
         assert_eq!(tab_titles, ["Terminal", "Second terminal"]);
-        assert_eq!(active_tab, 1, "the live tab order and active tab survive the switch");
-        assert_eq!(restored_terminals.len(), 2, "both cached terminals are restored");
+        assert_eq!(
+            active_tab, 1,
+            "the live tab order and active tab survive the switch"
+        );
+        assert_eq!(
+            restored_terminals.len(),
+            2,
+            "both cached terminals are restored"
+        );
         for ((restored, original), (pid, scrollback)) in restored_terminals
             .iter()
             .zip(&original_terminals)
@@ -19739,12 +19831,18 @@ mod tests {
                 *pid,
                 "reselecting a mounted worktree must not spawn a second shell"
             );
-            assert_eq!(
-                String::from_utf8_lossy(
-                    &restored.read_with(&cx.cx, |terminal, _| terminal.snapshot().scrollback)
-                ),
-                *scrollback,
-                "reselecting a mounted worktree must preserve terminal scrollback"
+            let restored_scrollback = String::from_utf8_lossy(
+                &restored.read_with(&cx.cx, |terminal, _| terminal.snapshot().scrollback),
+            )
+            .into_owned();
+            assert!(
+                restored_scrollback.starts_with(scrollback.as_str()),
+                "reselecting a mounted worktree must not lose terminal \
+                 scrollback: what was on screen before the switch must still \
+                 be there after it. A background tab's PTY may deliver its \
+                 output late and append after the remount -- that is not a \
+                 loss -- but nothing may vanish: before={scrollback:?} \
+                 after={restored_scrollback:?}"
             );
         }
         assert_owned_shells_survived(
@@ -19945,12 +20043,18 @@ mod tests {
                 *pid,
                 "reselecting a mounted worktree must not spawn a second shell"
             );
-            assert_eq!(
-                String::from_utf8_lossy(
-                    &restored.read_with(&cx.cx, |terminal, _| terminal.snapshot().scrollback)
-                ),
-                *scrollback,
-                "reselecting a mounted worktree must preserve terminal scrollback"
+            let restored_scrollback = String::from_utf8_lossy(
+                &restored.read_with(&cx.cx, |terminal, _| terminal.snapshot().scrollback),
+            )
+            .into_owned();
+            assert!(
+                restored_scrollback.starts_with(scrollback.as_str()),
+                "reselecting a mounted worktree must not lose terminal \
+                 scrollback: what was on screen before the switch must still \
+                 be there after it. A background tab's PTY may deliver its \
+                 output late and append after the remount -- that is not a \
+                 loss -- but nothing may vanish: before={scrollback:?} \
+                 after={restored_scrollback:?}"
             );
         }
         assert_owned_shells_survived(
@@ -20309,7 +20413,10 @@ mod tests {
 
     /// The user's own case: switch away from a worktree with open tabs, and
     /// its rows must stay under it — now as parked rows built from the strip
-    /// the switch just saved, no longer as live ones.
+    /// the switch just saved, no longer as live ones. The switch reloads even
+    /// with a live chat on screen: the chat is retained whole
+    /// (`retain_worktree_chats`) and comes back as the same session when the
+    /// worktree is selected again, so reloading costs nothing.
     #[gpui::test]
     async fn switching_away_keeps_the_old_worktrees_tabs_listed_as_parked_rows(
         cx: &mut TestAppContext,
@@ -20361,10 +20468,17 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(
-            cx.debug_bounds(static_pill_close_selector(1, 0)).is_some(),
-            "before the switch the repo's tab is a live pill, closable from its own row"
-        );
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.persistence_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["live-chat"],
+                "before the switch the repo's chat is the one live tab"
+            );
+        });
         assert!(
             cx.debug_bounds(static_pill_selector(2, 0)).is_none(),
             "and the worktree nobody has visited yet lists nothing"
@@ -20391,7 +20505,15 @@ mod tests {
                     .map(|tab| tab.title.as_str())
                     .collect::<Vec<_>>(),
                 vec!["Other A"],
-                "the switch was a safe reload: the repo's tab is no longer live"
+                "the switch always reloads: the repo's tab is no longer live"
+            );
+            assert!(
+                workspace
+                    .retained_worktree_chats
+                    .get(&repo.to_string_lossy().into_owned())
+                    .is_some_and(|retained| retained.contains_key("live-chat")),
+                "the chat tab is retained whole for its worktree, ready to come \
+                 back as the same session"
             );
         });
         // Each worktree carries its own tabs as pills on its own row, so
@@ -20408,14 +20530,6 @@ mod tests {
         let live = cx
             .debug_bounds(static_pill_selector(2, 0))
             .expect("the other worktree's restored tab is a live pill");
-        assert!(
-            cx.debug_bounds(static_pill_close_selector(1, 0)).is_none(),
-            "the repo's tab is parked now: a pill with no live tab behind it cannot be closed"
-        );
-        assert!(
-            cx.debug_bounds(static_pill_close_selector(2, 0)).is_some(),
-            "the restored tab is the live one, so its pill closes"
-        );
         assert!(
             repo_row.top() <= parked.top() && parked.bottom() <= repo_row.bottom(),
             "the parked pill rides on the repo's own row: repo={repo_row:?} parked={parked:?}"
@@ -20480,16 +20594,17 @@ mod tests {
         });
     }
 
-    /// CENTER-01: the safety gate. A live (needs-input) tab in the outgoing
-    /// worktree must survive a switch untouched -- reloading would drop its
-    /// `TerminalView`, and `TerminalView::drop` tears the PTY down. This is
-    /// the same predicate `tray_jump_lands_on_the_target_worktrees_worst_status_tab`
-    /// already exercises incidentally (its own outgoing tab reports `Error`,
-    /// which the gate also protects); this test names the mechanism
-    /// directly, with the plainer `NeedsInput` case, so the gate's own
-    /// contract has one test that is about nothing else.
+    /// A needs-input tab no longer pins its worktree to the screen. It used
+    /// to gate the switch's tab reload outright, because reloading would drop
+    /// the tab's `TerminalView` and `TerminalView::drop` tears the PTY down;
+    /// the terminal cache now owns every outgoing terminal, so the reload is
+    /// unconditional: wt-1 shows its own (empty) strip, and wt-0's
+    /// needs-input terminal survives the switch in the cache to come back
+    /// whole -- same pane, same activity -- when wt-0 is selected again.
     #[gpui::test]
-    async fn switching_away_from_a_needs_input_tab_leaves_it_mounted(cx: &mut TestAppContext) {
+    async fn switching_away_from_a_needs_input_tab_keeps_it_alive_for_the_way_back(
+        cx: &mut TestAppContext,
+    ) {
         cx.set_global(Theme::light());
         let (root, worktrees) = urgency_test_root("center01-gate");
         let root_for_window = root.clone();
@@ -20504,7 +20619,8 @@ mod tests {
                 .expect("workspace root")
         });
 
-        let wt1 = worktrees[1].clone();
+        let (wt0, wt1) = (worktrees[0].clone(), worktrees[1].clone());
+        let wt0_id = wt0.to_string_lossy().into_owned();
 
         workspace.update(&mut cx.cx, |workspace, cx| {
             // wt-0's sole tab (pane 0, the fixture's live `sleep 60` shell)
@@ -20521,18 +20637,43 @@ mod tests {
         workspace.read_with(&cx.cx, |workspace, _| {
             assert_eq!(
                 workspace.working_directory, wt1,
-                "the metadata side of the switch still happens -- only the \
-                 tab reload is gated"
+                "the switch lands on wt-1 -- the reload no longer needs a gate"
             );
+            assert!(
+                workspace.tabs.is_empty(),
+                "wt-1 has no strip of its own, so nothing replaces wt-0's tab \
+                 on screen"
+            );
+            assert!(
+                workspace.terminal_pane_cache.has_in_worktree(&wt0_id),
+                "the needs-input terminal is alive in the cache, not killed \
+                 by the switch"
+            );
+        });
+
+        // And the way back re-mounts it: the same persisted tab, the same
+        // live terminal, still reading as needs-input from the activity the
+        // pane id carried across the switch.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt0.clone(), None, cx)
+                .expect("select wt-0 back");
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx.cx, |workspace, app| {
             assert_eq!(
                 workspace.tabs.len(),
                 1,
-                "the needs-input tab is left mounted rather than dropped"
+                "wt-0's own tab is back once its worktree is selected again"
             );
             assert_eq!(
-                workspace.tabs[0].title, "Terminal",
-                "still wt-0's own tab -- today's stale-but-safe behaviour, \
-                 not wt-1's (empty) persisted layout"
+                workspace.tabs[0].persistence_id, "urgency-terminal",
+                "the same persisted tab, not a fresh default one"
+            );
+            assert_eq!(
+                workspace.tab_status(&workspace.tabs[0], app),
+                Some(ActivityStatus::NeedsInput),
+                "and it still reads as needs-input, not as a fresh idle shell"
             );
         });
 
@@ -22260,9 +22401,8 @@ mod tests {
             "rendering an unchanged terminal must not notify its entity"
         );
 
-        let sole_tab_in_group = terminal.read_with(&cx.cx, |terminal, _| {
-            terminal.sole_tab_in_group()
-        });
+        let sole_tab_in_group =
+            terminal.read_with(&cx.cx, |terminal, _| terminal.sole_tab_in_group());
         terminal.update(&mut cx.cx, |terminal, cx| {
             assert!(terminal.set_sole_tab_in_group(!sole_tab_in_group));
             cx.notify();
@@ -22975,7 +23115,8 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("sidebar-pill-mark-1-0-openai-mark").is_some(),
+            cx.debug_bounds("sidebar-pill-mark-1-0-openai-mark")
+                .is_some(),
             "a process-owned pane's brand reaches its pill"
         );
         workspace.update(&mut cx, |workspace, _| {
@@ -24111,9 +24252,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn restored_legacy_chat_does_not_inherit_sibling_pane_activity(
-        cx: &mut TestAppContext,
-    ) {
+    async fn restored_legacy_chat_does_not_inherit_sibling_pane_activity(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let (workspace, cx) = cx.add_window_view(|_, cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
@@ -24175,8 +24314,7 @@ mod tests {
                 .for_each(&mut |pane_id, _| legacy_pane = Some(pane_id));
             let mut pane_ids = Vec::new();
             for tab in &workspace.tabs {
-                tab.panes
-                    .for_each(&mut |pane_id, _| pane_ids.push(pane_id));
+                tab.panes.for_each(&mut |pane_id, _| pane_ids.push(pane_id));
             }
             let distinct_pane_ids = pane_ids.iter().copied().collect::<HashSet<_>>();
             assert_eq!(
@@ -25539,10 +25677,7 @@ mod tests {
             !prefs.claude_visible,
             "hiding Claude in settings reaches the bar's preferences"
         );
-        assert!(
-            prefs.codex_visible,
-            "the other visible providers stay"
-        );
+        assert!(prefs.codex_visible, "the other visible providers stay");
     }
 
     #[gpui::test]
@@ -25848,17 +25983,11 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert_eq!(hint(WindowCommand::ToggleSidebar), "Ctrl+Shift+D");
             assert_eq!(hint(WindowCommand::ToggleRightPanel), "Ctrl+Shift+R");
-            assert_eq!(
-                hint(WindowCommand::RestoreLaunchSnapshot),
-                "Ctrl+Shift+H"
-            );
+            assert_eq!(hint(WindowCommand::RestoreLaunchSnapshot), "Ctrl+Shift+H");
         } else {
             assert_eq!(hint(WindowCommand::ToggleSidebar), "Ctrl+Shift+S");
             assert_eq!(hint(WindowCommand::ToggleRightPanel), "Ctrl+Shift+I");
-            assert_eq!(
-                hint(WindowCommand::RestoreLaunchSnapshot),
-                "Ctrl+Shift+O"
-            );
+            assert_eq!(hint(WindowCommand::RestoreLaunchSnapshot), "Ctrl+Shift+O");
         }
         // The untouched family members keep their chords on every platform.
         assert_eq!(hint(WindowCommand::ToggleSecondaryPane), "Ctrl+Shift+B");
@@ -27182,7 +27311,11 @@ mod tests {
         );
 
         let adapter = first_resolved_chat_adapter(&launch).expect("a chat agent is available");
-        assert_eq!(adapter.id(), "codex", "catalog order is the fallback preference");
+        assert_eq!(
+            adapter.id(),
+            "codex",
+            "catalog order is the fallback preference"
+        );
     }
 
     fn test_launch_state() -> AgentLaunchState {
@@ -27234,12 +27367,10 @@ mod tests {
             PathBuf::from("/tmp/sirio-control-id-preceding"),
             PathBuf::from("/tmp/sirio-control-id-survivor"),
         ];
-        let worktree = |path: &Path, branch: &str, is_primary: bool| {
-            session::CatalogWorktree {
-                branch: branch.into(),
-                path: path.to_path_buf(),
-                is_primary,
-            }
+        let worktree = |path: &Path, branch: &str, is_primary: bool| session::CatalogWorktree {
+            branch: branch.into(),
+            path: path.to_path_buf(),
+            is_primary,
         };
         let initial = ProjectCatalog::from_projects(vec![session::CatalogProject {
             id: "control-id-project".into(),
@@ -27280,7 +27411,11 @@ mod tests {
             .map(|workspace| workspace.id.clone())
             .collect();
         let unique_ids: HashSet<String> = ids.iter().cloned().collect();
-        assert_eq!(unique_ids.len(), ids.len(), "refresh must not duplicate workspace ids");
+        assert_eq!(
+            unique_ids.len(),
+            ids.len(),
+            "refresh must not duplicate workspace ids"
+        );
         let survivor_after = next
             .workspaces
             .iter()
@@ -27554,9 +27689,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn sidebar_create_worktree_refreshes_catalog_and_control_state(
-        cx: &mut TestAppContext,
-    ) {
+    async fn sidebar_create_worktree_refreshes_catalog_and_control_state(cx: &mut TestAppContext) {
         let repo = committed_test_repo("sidebar-create-state");
         let branch = "sidebar-created";
         let created_path = repo
@@ -27580,19 +27713,23 @@ mod tests {
             )
         });
         workspace.update(cx, |workspace, cx| {
-            assert!(!workspace
-                .project_catalog
-                .projects()[0]
-                .worktrees
-                .iter()
-                .any(|worktree| worktree.path == created_path));
-            assert!(!workspace
-                .control_state
-                .lock()
-                .expect("control state")
-                .workspace_rows()
-                .iter()
-                .any(|row| row.get("path") == Some(&created_path.to_string_lossy().into_owned())));
+            assert!(
+                !workspace.project_catalog.projects()[0]
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == created_path)
+            );
+            assert!(
+                !workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .workspace_rows()
+                    .iter()
+                    .any(
+                        |row| row.get("path") == Some(&created_path.to_string_lossy().into_owned())
+                    )
+            );
 
             workspace.handle_sidebar_event(
                 &SidebarEvent::WorktreeCreated {
@@ -27604,10 +27741,12 @@ mod tests {
         });
 
         workspace.read_with(cx, |workspace, _| {
-            assert!(workspace.project_catalog.projects()[0]
-                .worktrees
-                .iter()
-                .any(|worktree| worktree.path == created_path));
+            assert!(
+                workspace.project_catalog.projects()[0]
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == created_path)
+            );
             let state = workspace.control_state.lock().expect("control state");
             // The two accessors answer in different spellings on purpose.
             // `workspace_rows` is what the control commands serve, and they
@@ -27616,13 +27755,17 @@ mod tests {
             // `no_workspace_command_serves_a_verbatim_path` pins that.
             // `current_workspace` is the stored row, which keeps the path as
             // the app holds it. Each assertion compares against its own.
-            assert!(state
-                .workspace_rows()
-                .iter()
-                .any(|row| row.get("path") == Some(&display_absolute_path(&created_path))));
+            assert!(
+                state
+                    .workspace_rows()
+                    .iter()
+                    .any(|row| row.get("path") == Some(&display_absolute_path(&created_path)))
+            );
             assert_eq!(workspace.working_directory, created_path);
             assert_eq!(
-                state.current_workspace().map(|workspace| workspace.path.clone()),
+                state
+                    .current_workspace()
+                    .map(|workspace| workspace.path.clone()),
                 Some(created_path.to_string_lossy().into_owned())
             );
         });
@@ -27715,12 +27858,46 @@ mod tests {
             );
             drop(state);
 
-            assert_eq!(
+            // The switch the runtime event performs is an unconditional
+            // reload now: repo's live tab leaves the screen -- parked under
+            // repo, its terminal alive in the cache -- and created_path has
+            // no strip of its own, so nothing replaces it.
+            assert!(
+                workspace.tabs.is_empty(),
+                "the switch to the new worktree shows its own (empty) strip, \
+                 not repo's tabs"
+            );
+            assert!(
                 workspace
-                    .tab_ids_for_worktree(&repo)
-                    .collect::<Vec<_>>(),
+                    .parked_worktree_tabs
+                    .contains_key(&repo.to_string_lossy().into_owned()),
+                "repo's tab is parked under its own worktree, not lost"
+            );
+            assert!(
+                workspace
+                    .terminal_pane_cache
+                    .has_in_worktree(&repo.to_string_lossy().into_owned()),
+                "and its terminal stays alive in the cache"
+            );
+            assert!(
+                workspace
+                    .session
+                    .restore_tabs_for(&created_path)
+                    .tabs
+                    .is_empty(),
+                "a runtime switch must not snapshot the old worktree's tabs under the new path"
+            );
+
+            // Selecting repo again re-mounts its own tab under its own
+            // worktree -- the assignment the reload takes away from the
+            // screen is preserved by the parked strip the switch saved.
+            workspace
+                .select_worktree(repo.clone(), None, cx)
+                .expect("select the repo worktree back");
+            assert_eq!(
+                workspace.tab_ids_for_worktree(&repo).collect::<Vec<_>>(),
                 vec![0],
-                "a live tab must remain assigned to the worktree it came from"
+                "the parked tab comes back assigned to the worktree it came from"
             );
             assert_eq!(
                 workspace
@@ -27728,10 +27905,6 @@ mod tests {
                     .collect::<Vec<_>>(),
                 Vec::<usize>::new(),
                 "the newly created worktree must not inherit the selected worktree's tabs"
-            );
-            assert!(
-                workspace.layout(cx).tabs.is_empty(),
-                "a runtime switch must not snapshot the old worktree's tabs under the new path"
             );
         });
 
@@ -27747,9 +27920,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn sidebar_remove_worktree_refreshes_catalog_and_control_state(
-        cx: &mut TestAppContext,
-    ) {
+    async fn sidebar_remove_worktree_refreshes_catalog_and_control_state(cx: &mut TestAppContext) {
         let repo = committed_test_repo("sidebar-remove-state");
         let branch = "sidebar-removed";
         let removed_path = repo
@@ -27806,18 +27977,23 @@ mod tests {
         });
 
         workspace.read_with(cx, |workspace, _| {
-            assert!(!workspace.project_catalog.projects()[0]
-                .worktrees
-                .iter()
-                .any(|worktree| worktree.path == removed_path));
+            assert!(
+                !workspace.project_catalog.projects()[0]
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == removed_path)
+            );
             let state = workspace.control_state.lock().expect("control state");
-            assert!(!state
-                .workspace_rows()
-                .iter()
-                .any(|row| row.get("path") == Some(&removed_path.to_string_lossy().into_owned())));
+            assert!(
+                !state.workspace_rows().iter().any(
+                    |row| row.get("path") == Some(&removed_path.to_string_lossy().into_owned())
+                )
+            );
             assert_eq!(workspace.working_directory, repo);
             assert_eq!(
-                state.current_workspace().map(|workspace| workspace.path.clone()),
+                state
+                    .current_workspace()
+                    .map(|workspace| workspace.path.clone()),
                 Some(repo.to_string_lossy().into_owned())
             );
         });
@@ -27918,18 +28094,17 @@ mod tests {
         let workspace = cx.new(|cx| {
             // One live terminal tab (id 0), owned by the repo's worktree.
             let mut workspace = palette_test_workspace(cx);
-            let project_catalog =
-                ProjectCatalog::from_projects(vec![session::CatalogProject {
-                    id: "focus-regain-project".into(),
-                    name: "Focus Regain Project".into(),
-                    root_path: repo_for_constructor.clone(),
-                    is_git: true,
-                    worktrees: vec![session::CatalogWorktree {
-                        branch: "main".into(),
-                        path: repo_for_constructor.clone(),
-                        is_primary: true,
-                    }],
-                }]);
+            let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "focus-regain-project".into(),
+                name: "Focus Regain Project".into(),
+                root_path: repo_for_constructor.clone(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo_for_constructor.clone(),
+                    is_primary: true,
+                }],
+            }]);
             workspace.working_directory = repo_for_constructor.clone();
             for tab in &workspace.tabs {
                 workspace
@@ -31363,9 +31538,7 @@ mod tests {
     /// the pane preserves the user's restored tab instead of silently
     /// changing the active tab to an unrelated Primary surface.
     #[gpui::test]
-    async fn restoring_an_active_secondary_tab_reopens_the_secondary_pane(
-        cx: &mut TestAppContext,
-    ) {
+    async fn restoring_an_active_secondary_tab_reopens_the_secondary_pane(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
@@ -32187,12 +32360,11 @@ browser  profile  "
     /// #324: the toggle hides the pane and *keeps* its tabs. Conflating it
     /// with the strip's `×`, which closes them, is the mistake this guards.
     #[gpui::test]
-    async fn the_toggle_hides_the_secondary_pane_without_closing_its_tabs(
-        cx: &mut TestAppContext,
-    ) {
+    async fn the_toggle_hides_the_secondary_pane_without_closing_its_tabs(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_, cx| {
-            let mut workspace = palette_test_workspace_with_tab_count_and_translucency(cx, 2, false);
+            let mut workspace =
+                palette_test_workspace_with_tab_count_and_translucency(cx, 2, false);
             workspace.tabs[1].kind = TabKind::Editor;
             workspace.open_secondary_pane();
             // `rebuild_center_split` reads the focused half off `active_tab`.
@@ -33141,11 +33313,10 @@ browser  profile  "
             std::fs::create_dir_all(&other_path).expect("create second fixture worktree");
 
             // Widen the single-worktree fixture to two worktrees under one
-            // project, then rebuild `control_state` with the *other*
-            // worktree already selected -- the workspace is "currently
-            // showing" `other_path` when the jump request arrives, exactly
-            // like a roster click for a worktree that is not the one on
-            // screen.
+            // project, then actually switch to the other one. The workspace
+            // is "currently showing" `other_path` the honest way -- its own
+            // tabs parked by the switch -- exactly like a roster click for a
+            // worktree that is not the one on screen.
             let project = workspace.project_catalog.projects()[0].clone();
             let mut worktrees = project.worktrees.clone();
             worktrees.push(session::CatalogWorktree {
@@ -33160,9 +33331,8 @@ browser  profile  "
                 }]);
             workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
                 &workspace.project_catalog,
-                &other_path,
+                &target_path,
             )));
-            workspace.working_directory = other_path;
 
             // `palette_test_workspace_with_tab_count`'s tabs use
             // `TerminalView::failed`, which reports `ActivityStatus::Error`
@@ -33186,6 +33356,13 @@ browser  profile  "
             workspace
                 .activity
                 .notify("pane-1", AgentStatus::NeedsInput, Instant::now());
+
+            // Now the switch itself: target's tabs leave the screen, parked
+            // with their terminals alive in the cache, pane ids intact.
+            workspace
+                .select_worktree(other_path.clone(), None, cx)
+                .expect("switch to the other worktree");
+            assert!(workspace.tabs.is_empty(), "other has no strip of its own");
 
             let jump = workspace
                 .select_worktree_and_jump(target_path.clone(), None, cx)

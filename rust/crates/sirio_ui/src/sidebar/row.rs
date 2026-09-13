@@ -329,15 +329,12 @@ impl Sidebar {
             .gap(px(4.0))
             .children(row.pills.iter().enumerate().map(|(index, pill)| {
                 let select_entity = entity.clone();
-                let close_entity = entity.clone();
-                let pill_group = format!("sidebar-pill-group-{row_id}-{index}");
                 let tab_id = pill.tab_id;
                 let parked = pill.parked_tab;
                 let path = worktree_path.clone();
                 div()
                     .id(("sidebar-pill", row_id * 32 + index))
                     .debug_selector(move || format!("sidebar-pill-{row_id}-{index}"))
-                    .group(pill_group.clone())
                     .relative()
                     .w(px(Self::PILL_SIZE))
                     .h(px(Self::PILL_SIZE))
@@ -353,7 +350,6 @@ impl Sidebar {
                     .hover(|style| style.bg(theme.element_hover))
                     .child(
                         div()
-                            .group_hover(pill_group.clone(), |style| style.invisible())
                             .debug_selector(move || {
                                 format!(
                                     "sidebar-pill-mark-{row_id}-{index}-{}",
@@ -378,29 +374,6 @@ impl Sidebar {
                                     .bg(crate::right_panel::status_color(status, theme)),
                             )
                         })
-                    })
-                    .when_some(tab_id, |this, tab_id| {
-                        this.child(
-                            div()
-                                .id(("sidebar-pill-close", row_id * 32 + index))
-                                .debug_selector(move || {
-                                    format!("sidebar-pill-close-{row_id}-{index}")
-                                })
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .invisible()
-                                .group_hover(pill_group.clone(), |style| style.visible())
-                                .child(IconElement::new(Icon::Close, IconSize::XSmall))
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    close_entity.update(cx, |_, cx| {
-                                        cx.emit(SidebarEvent::CloseTab(tab_id));
-                                    });
-                                }),
-                        )
                     })
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
@@ -974,10 +947,7 @@ mod tests {
             status: None,
             selected: false,
         }];
-        assert_eq!(
-            Sidebar::sub_line_text(&row),
-            "review the release notes"
-        );
+        assert_eq!(Sidebar::sub_line_text(&row), "review the release notes");
     }
 
     #[gpui::test]
@@ -1002,8 +972,14 @@ mod tests {
         ));
     }
 
+    /// A mouse always hovers the pill before it clicks it, and the old
+    /// design used that hover to swap the mark for a full-size ✕ -- so the
+    /// click that selects was unreachable with a real pointer, and the
+    /// gesture the user meant as "show me this tab" closed it instead. The
+    /// mark is the whole control now, and a hovered click selects like any
+    /// other; closing lives on the tab strip's own ✕.
     #[gpui::test]
-    async fn the_pill_close_reports_close_tab(cx: &mut TestAppContext) {
+    async fn a_hovered_pill_still_selects_its_tab(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1012,17 +988,21 @@ mod tests {
         let sidebar =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
         let events = tests_support::collect_events(&sidebar, &mut cx);
-        let close = cx
-            .debug_bounds("sidebar-pill-close-1-0")
-            .expect("the pill close control is rendered");
-        cx.simulate_mouse_move(close.center(), None, Modifiers::none());
+        let pill = cx
+            .debug_bounds("sidebar-pill-1-0")
+            .expect("the first pill is rendered");
+        cx.simulate_mouse_move(pill.center(), None, Modifiers::none());
         cx.run_until_parked();
-        cx.simulate_click(close.center(), Modifiers::none());
+        assert!(
+            cx.debug_bounds("sidebar-pill-close-1-0").is_none(),
+            "the pill carries no close control, hovered or not"
+        );
+        cx.simulate_click(pill.center(), Modifiers::none());
         cx.run_until_parked();
 
         assert!(matches!(
             events.borrow().last(),
-            Some(SidebarEvent::CloseTab(1))
+            Some(SidebarEvent::SelectTab(1))
         ));
     }
 
