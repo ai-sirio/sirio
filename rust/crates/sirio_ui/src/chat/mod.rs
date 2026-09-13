@@ -7785,6 +7785,14 @@ impl Render for Chat {
                                 .child(
                                     div()
                                         .flex_1()
+                                        // Pi sends the question text itself as the
+                                        // title; without `min_w_0` the row never
+                                        // shrinks below the unwrapped line and Show
+                                        // is pushed past the border (#233 pattern).
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
                                         .text_color(theme.text)
                                         .child(format!("Question waiting · {title}")),
                                 )
@@ -7792,6 +7800,7 @@ impl Render for Chat {
                                     div()
                                         .id("pending-question-show")
                                         .debug_selector(|| "pending-question-show".into())
+                                        .flex_shrink_0()
                                         .px(px(8.0))
                                         .py(px(3.0))
                                         .rounded(theme.radii.control)
@@ -13814,6 +13823,56 @@ let answer = 42;
              badge right {} vs picker right {}",
             badge.right(),
             picker.right(),
+        );
+    }
+
+    /// The pending-question bar's title never shrank below min-content, so
+    /// a long question title (Pi sends the question text itself as the
+    /// title) ran past the bar's border and pushed Show out of the card.
+    /// The title must truncate (`flex_1` + `min_w_0` + `text_ellipsis`,
+    /// with a `flex_shrink_0` Show) instead of overflowing.
+    #[gpui::test]
+    async fn a_long_question_title_does_not_push_show_outside_the_pending_bar(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.entries.push(Entry::Permission {
+                request_id: 1,
+                title: "[Scope punto 1] Clic su una worktree B mentre la worktree A ha \
+                        harness/agenti in esecuzione: oggi il centro NON cambia (gate di \
+                        sicurezza). Cosa vuoi che succeda? Ripeto per sicurezza: cosa vuoi \
+                        che succeda quando clicchi su una worktree diversa?"
+                    .into(),
+                prompt: String::new(),
+                options: Vec::new(),
+                text_input: None,
+                resolved: None,
+                expired: false,
+                dismissed: false,
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let bar = cx
+            .debug_bounds("pending-question-bar")
+            .expect("the pending-question bar is drawn while the question is open");
+        let show = cx
+            .debug_bounds("pending-question-show")
+            .expect("the bar carries its Show control");
+        assert!(
+            show.right() <= bar.right(),
+            "Show overflows the pending-question bar: \
+             show right {} vs bar right {}",
+            show.right(),
+            bar.right(),
         );
     }
 
