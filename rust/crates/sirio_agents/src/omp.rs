@@ -110,14 +110,16 @@ impl super::AgentAdapter for OhMyPiAdapter {
     }
 
     fn builtin_acp(&self) -> Option<crate::AcpProgram> {
-        // The retired Swift app launched `omp acp`
-        // (AgentLaunchSpec.swift:73-75 at 5430d7bf), so this is very
-        // probably `Some(AcpProgram::new("omp", &["acp"]))` — but no omp has
-        // been installed anywhere this could be checked, and shipping an
-        // unverified capability claim is precisely the defect this design
-        // removes. Flip it when `tests/acp_conformance.rs` runs green
-        // against a real omp instead of skipping.
-        None
+        // Flipped on 2026-09-13, on the terms the previous comment set: this
+        // stayed `None` only because no omp had been installed anywhere the
+        // claim could be checked, and `tests/acp_conformance.rs` was skipping
+        // rather than proving it. omp 18.1.19 answers the ACP `initialize`
+        // handshake on stdin with `{"protocolVersion":1,"agentInfo":{"name":
+        // "oh-my-pi",...}}`, so that test now runs for real and holds the
+        // claim to it — the claim is not trusted, it is checked on every
+        // machine that has the binary. The retired Swift app launched the
+        // same subcommand (AgentLaunchSpec.swift:73-75 at 5430d7bf).
+        Some(crate::AcpProgram::new("omp", &["acp"]))
     }
 
     fn summarizer_command(&self, prompt: &str) -> Option<String> {

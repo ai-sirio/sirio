@@ -20725,17 +20725,39 @@ mod tests {
     /// it), so the switch reloaded and dropped it, contradicting CLAUDE.md's
     /// documented "PTYs stay alive across sidebar selection changes"
     /// contract. This deliberately never calls `workspace.activity.notify`
-    /// at all -- unlike the sibling test -- so only
-    /// `tab_has_live_foreground_process`'s direct `/proc` walk over the
-    /// fixture's real `sleep 60` child can save this tab.
+    /// at all, so nothing in the agent-activity model can vouch for the
+    /// pane: if the command survives, it survives on the terminal cache
+    /// alone.
+    ///
+    /// #348 changed *how* it survives, and this test moved with it. The
+    /// switch no longer keeps the outgoing tab in `self.tabs` -- the centre
+    /// pane always reloads from the worktree just clicked -- so the subject
+    /// is no longer the tab list but the process tree under it: the same
+    /// `sleep 60` must still be running once the switch has settled. The
+    /// `/proc` walk is the evidence, not the mechanism; nothing in the
+    /// product consults `tab_has_live_foreground_process`.
     #[cfg(target_os = "linux")]
     #[gpui::test]
     async fn switching_away_from_a_bare_running_command_leaves_it_mounted(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let (root, worktrees) = urgency_test_root("center01-bare-process");
         let root_for_window = root.clone();
-        let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        // Its own shell, not the shared fixture's: this is the one test whose
+        // subject is the *child*. `inspect_process_names` walks the shell's
+        // descendants and skips the shell itself, and a `/bin/sh` that is bash
+        // -- Arch's, and macOS's -- optimizes `sh -c "sleep 60"` into an
+        // `exec`, so the shell process *becomes* `sleep` and has no children
+        // at all. The test then waits ten seconds for a child that can never
+        // appear. The trailing `:` leaves `sleep` no longer last, which is
+        // what makes the shell fork it instead, on every shell rather than
+        // only on the ones that do not take that shortcut.
+        let window = cx.add_window(|_window, cx| {
+            worktree_urgency_test_workspace_with_shell(
+                cx,
+                &root_for_window,
+                pty_fixture_shell("sleep 60; :", &["sleep", "inf"]),
+            )
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -20745,11 +20767,12 @@ mod tests {
                 .expect("workspace root")
         });
 
+        let wt0 = worktrees[0].clone();
         let wt1 = worktrees[1].clone();
 
-        // Poll the real process tree until the fixture's `sh -c "sleep 60"`
-        // has actually forked/exec'd `sleep` -- a real OS fork race the
-        // virtual test clock cannot settle.
+        // Poll the real process tree until the fixture's `sh -c "sleep 60; :"`
+        // has actually forked `sleep` -- a real OS fork race the virtual test
+        // clock cannot settle.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let has_process = workspace.read_with(&cx.cx, |workspace, cx| {
@@ -20785,15 +20808,38 @@ mod tests {
                 "the metadata side of the switch still happens -- only the \
                  tab reload is gated"
             );
-            assert_eq!(
-                workspace.tabs.len(),
-                1,
-                "a tab with a live foreground command -- no agent involved \
-                 at all -- must be left mounted rather than dropped"
+            assert!(
+                workspace.tabs.is_empty(),
+                "the centre pane now always reloads from the newly selected \
+                 worktree's own layout, and wt-1 has none -- see \
+                 `select_worktree`'s comment on #348. This assertion used to \
+                 read `tabs.len() == 1`, from the era when a switch was \
+                 gated on nothing in the outgoing worktree being live; it \
+                 could never run here, because the fixture's shell exec'd \
+                 `sleep` instead of forking it and the poll above timed out \
+                 first. Keeping the tab is no longer how live work survives"
             );
-            assert_eq!(
-                workspace.tabs[0].title, "Terminal",
-                "still wt-0's own tab, not wt-1's (empty) persisted layout"
+        });
+
+        // What "leaves it mounted" means after #348: the outgoing terminal
+        // entity moved into the pane cache instead of being dropped, which is
+        // what keeps its PTY -- and the `sleep 60` under it -- alive across
+        // the switch. `has_in_worktree` is the synchronous evidence for that.
+        //
+        // Walking the process tree again here looks like the more direct
+        // assertion and is not: tearing the pane down does not kill `sleep`
+        // inside this test's window, so a liveness check immediately after
+        // the switch passes either way. Measured -- stubbing
+        // `track_terminal_panes_in_cache_for_worktree` out entirely left the
+        // `sleep` walk still green, while the cache assertion below goes red
+        // at once. A check that cannot fail is not a check.
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                workspace
+                    .terminal_pane_cache
+                    .has_in_worktree(&wt0.to_string_lossy()),
+                "wt-0's terminal must survive the switch in the pane cache -- \
+                 dropping it is what killed the bare `sleep` this test is named for"
             );
         });
 

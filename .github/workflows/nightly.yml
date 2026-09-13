@@ -91,10 +91,39 @@ jobs:
       - name: Stamp the nightly version
         id: stamp
         if: steps.decide.outputs.build == 'true'
+        # `gh api` below needs it: without a token the call fails, the `|| true`
+        # swallows it, LATEST comes back empty and the guard passes every time.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           BASE=$(grep -m1 '^version = ' rust/Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
           if [ -z "$BASE" ]; then
             echo "error: could not read the workspace version from rust/Cargo.toml" >&2
+            exit 1
+          fi
+          # The workspace version names the NEXT release and moves once, in the
+          # commit that opens the cycle. Forget that bump and this is where it
+          # goes wrong, silently: BASE is still the version of a release that
+          # is already out, so `${BASE}-nightly.<stamp>` sorts BELOW it in
+          # semver, the updater skips every nightly until the next cycle, and
+          # nothing says so -- a user just stops getting nightlies. Scripts/ci.sh
+          # checks this too, but build-release.yml runs it with
+          # SIRIO_CI_RELEASE_GATE=1, which is the one case that check skips, so
+          # this step is the nightly's only guard.
+          #
+          # Asked of the releases, not of the git tags: this checkout is
+          # `fetch-depth: 1` and has none, while `gh` is already authenticated
+          # for the step above. `releases/latest` is GitHub's newest
+          # non-prerelease release, which for a repo that publishes one stable
+          # per cycle in order is also the highest -- and unlike `gh release
+          # list --limit N` it cannot stop seeing an older stable because N
+          # nightlies were published since. No release yet means nothing to
+          # sort under, so an empty answer passes.
+          LATEST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          LATEST=${LATEST_TAG#v}
+          if [ -n "$LATEST" ] && [ "$(printf '%s\n' "$LATEST" "$BASE" | sort -V | tail -1)" = "$LATEST" ]; then
+            echo "error: workspace version $BASE is not above the latest stable release $LATEST_TAG" >&2
+            echo "error: the bump that opens the cycle is missing, so $BASE-nightly.<stamp> would sort below $LATEST_TAG and the updater would skip it; open the cycle with: Scripts/set-workspace-version.sh <next version>" >&2
             exit 1
           fi
           STAMP=$(date -u +%Y%m%d%H%M)
