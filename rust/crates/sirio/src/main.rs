@@ -3119,7 +3119,7 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
             return None;
         }
     };
-    let title = output.trim();
+    let title = single_line_title(&output);
     if title.is_empty() {
         None
     } else {
@@ -12939,14 +12939,14 @@ impl SirioWorkspace {
         title: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let title = title.trim();
+        let title = single_line_title(title);
         if title.is_empty() {
             return false;
         }
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return false;
         };
-        tab.title = title.to_owned();
+        tab.title = title;
         // F-CORE-DOM-07: a user-driven rename permanently opts this tab out
         // of automatic renaming, mirroring Swift's `tab.titleIsAutoNamed =
         // false` on manual rename.
@@ -16269,6 +16269,13 @@ fn restore_tabs_with_terminal_cache(
     (tabs, active, reused_terminal_panes)
 }
 
+/// Collapse every run of whitespace (newlines, tabs, spaces) into a single space
+/// and trim the result. Multi-line titles overflow their tab box and corrupt
+/// the tab bar rendering.
+fn single_line_title(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// #125 (spec R6.5): the address a restored Browser tab opens at.
 ///
 /// A session title taken from the user's first prompt.
@@ -16280,7 +16287,7 @@ fn restore_tabs_with_terminal_cache(
 /// existing title alone rather than blanking the tab.
 fn title_from_prompt(prompt: &str) -> Option<String> {
     const MAX: usize = 42;
-    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = single_line_title(prompt);
     if collapsed.is_empty() {
         return None;
     }
@@ -32290,6 +32297,53 @@ browser  profile  "
             None
         );
         assert_eq!(title_from_prompt(""), None);
+    }
+
+    /// The failure this collapse exists for: a summarizer answering on two
+    /// lines put both of them in `tab.title`, and `render_open_tab`'s
+    /// `text_ellipsis` truncates per line -- so the second line escaped the
+    /// tab's box and painted across its neighbour.
+    #[test]
+    fn a_title_is_collapsed_onto_one_line() {
+        assert_eq!(
+            single_line_title("systematic-debugging\nMessaggio ricevuto: `row.rs`"),
+            "systematic-debugging Messaggio ricevuto: `row.rs`"
+        );
+        assert_eq!(single_line_title("a\tb\n\n\nc"), "a b c");
+        assert_eq!(single_line_title("  trimmed  "), "trimmed");
+        // Whitespace alone collapses to nothing, which is what every caller
+        // tests for before it applies a title.
+        assert_eq!(single_line_title(" \n\t "), "");
+    }
+
+    /// A rename carrying a newline must not reach the tab strip intact. The
+    /// draft is not always typed: `LayoutCommand::Rename` arrives over the
+    /// control socket, so `sirioctl` can hand this function any text at all.
+    #[gpui::test]
+    fn a_manual_rename_never_stores_a_multi_line_title(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| palette_test_workspace(cx));
+        let tab_id = workspace.read_with(cx, |workspace, _| workspace.tabs[0].id);
+
+        let applied = workspace.update(cx, |workspace, cx| {
+            workspace.apply_manual_tab_title(tab_id, "first line\nsecond line", cx)
+        });
+        assert!(applied, "a non-empty draft names the tab");
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.tabs[0].title.clone()),
+            "first line second line"
+        );
+
+        // The blank-draft no-op survives the collapse: a draft of nothing but
+        // whitespace still leaves the existing title alone (F-TERM-05).
+        let before = workspace.read_with(cx, |workspace, _| workspace.tabs[0].title.clone());
+        let applied = workspace.update(cx, |workspace, cx| {
+            workspace.apply_manual_tab_title(tab_id, " \n ", cx)
+        });
+        assert!(!applied, "a blank draft is a no-op");
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.tabs[0].title.clone()),
+            before
+        );
     }
 
     /// A single word longer than the cap has no boundary to cut at.
