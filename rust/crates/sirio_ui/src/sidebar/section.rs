@@ -42,7 +42,7 @@ pub(super) fn render_section(
         .border_t_1()
         .border_b_1()
         .border_color(theme.border)
-        .text_size(theme.typography.scaled(12.0))
+        .text_size(theme.typography.scaled(13.5))
         .text_color(theme.text_muted)
         .cursor_pointer()
         // Keep the old project-row selector as a compatibility probe for
