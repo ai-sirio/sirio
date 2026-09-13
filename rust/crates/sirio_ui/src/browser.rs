@@ -858,7 +858,23 @@ fn wait_for_script_result(
     {
         let deadline = Instant::now() + timeout;
         loop {
-            while gtk::events_pending() {
+            // The guard gates the pump, never the receive: `events_pending`
+            // is an assertion first and a queue query second, and it panics
+            // in two different ways -- "GTK has not been initialized" with no
+            // `gtk::init` anywhere, and "GTK may only be used from the main
+            // thread" once some other thread has run it. Either one leaves a
+            // value already sitting in the channel unreachable, which is
+            // exactly what this function exists to hand back. So the guard is
+            // `is_initialized_main_thread`, the same condition
+            // `assert_initialized_main_thread!` checks, rather than the
+            // weaker `is_initialized`, which closes only the first door.
+            //
+            // Nothing about production changes: a live webview is the reason
+            // GTK is up on the main thread, so the guard is true there and the
+            // pump still drives `evaluate_script`'s callback home. Without one
+            // there is no GTK loop to pump, and the caller falls through to
+            // the same 20 ms `try_recv` cadence it would have used with GTK up.
+            while gtk::is_initialized_main_thread() && gtk::events_pending() {
                 gtk::main_iteration_do(false);
             }
             match receiver.try_recv() {
