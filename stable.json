@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.13.3",
-  "notes": "Browser automation reaches the command line, and the app it drives no\nlonger dies the moment a page opens on Linux.\n\n**Drive the browser from the command line**\n\n`sirioctl browser` exists now, with the eight verbs that work: open,\nnavigate, get, snapshot, act, wait, eval and console. Point it at a\npage, read what is on it, click or type into elements by reference.\nEvery one of these was refused as an unknown command until now.\nNavigation means an address only: back, forward and reload are not\nthere yet, and neither is capturing the page as an image, because the\nengine behind this surface offers no way to grab its pixels.\n\n**Opening a page no longer kills the app on Linux**\n\nThe first page open took the whole application down on Linux: the web\ncontext was built before the toolkit it needs had started, so the result\nwas a crash instead of an error, and the control socket answered that\nits worker had stopped because there was no longer a process to answer\nit. Startup now brings that toolkit up first, and one that cannot start\nis reported inside the browser pane instead of ending your session.\n\n**AppImage installs register themselves**\n\nInstalling from the AppImage left no menu entry and no icon, so\nlaunchers that only list installed applications never offered the app.\nThe entry and the icon the image already carries are now written to your\nuser account, pointing at the installed executable. The binary is\nwritten first too: a failure in that desktop integration used to abort\nthe install and delete the download, leaving you with nothing.\n\n**Interface fixes**\n\nTab titles are held to a single line, so a summarizer or a rename that\nanswers on two lines can no longer paint across the neighbouring tab.\nSwitching worktrees reloads the tab strip every time, even while another\nworktree still has work waiting, so the tabs on screen always belong to\nthe worktree you clicked. A tab shows its status with the same bloom as\nits sidebar row, so the two can no longer disagree. The rest of the\nsidebar chrome follows the interface font size from Settings. A long\nquestion title on the pending-question bar is truncated, and its Show\ncontrol stays inside the card. Worktree menus no longer print an\nexplanation beside a greyed-out entry, and the new worktree dialog\ncloses with its own control or confirms with Create, not only from the\nkeyboard.",
+  "version": "0.14.0",
+  "notes": "Oh-My-Pi now works in chat views as well as in a terminal, and long\ntext in the chat no longer pushes a row's controls past the edge of\nits card.\n\n**Oh-My-Pi over the agent protocol**\n\nOh-My-Pi was reachable only through a terminal pane: the app knew of\nno way to talk to it over the agent protocol, so a chat view with it\nwas never offered. Its binary does serve that protocol through its own\nsubcommand, and the app now uses it — a capability confirmed against a\nreal Oh-My-Pi, not assumed from a description of one.\n\n**Long text stays inside its card**\n\nSeveral chat rows handed their width to text that comes from outside\nthe app: a file path, an edit summary, the label that closes a turn,\nthe title of a saved session. One long enough grew the row instead of\nthe row's controls, and everything on the right — line counts, revert\nand confirm buttons, timestamps, the delete control — was drawn past\nthe card's border, unreadable and unclickable. That text is cut to a\nsingle line with an ellipsis now; the controls keep their place.\n\n**Permission buttons wrap**\n\nA permission request can offer several answers with long labels, and\nthey were laid out on one row that ran off the card. The buttons now\nwrap onto as many lines as they need, so every option stays visible\nand clickable.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.13.3/Sirio-0.13.3.dmg",
-      "sha256": "18af09142f7f9902eff6b27f65a8d82aa335a92d79040d1d45b7fa74a557c0bd",
-      "signature": "QxTRyXZXmLhb8KCoEb51ytYNpXSqCPGVYC3FdalPAnmG7gFIqoaol54OPPxbqiRLee5B4bwa5l4kDyNSPsa4AA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.14.0/Sirio-0.14.0.dmg",
+      "sha256": "4662912c9bd481ac78af2e50784bc46edbc1bbbeaadd824efc77e9638c8b6919",
+      "signature": "4o0/WzOMYzsFbBmP9sqy9nJ18vvQZ+9qwbSHcaAg4RhsbNBaIl0D65IuqZE6Nc+iy8icN/E80luiuaIssKpWDA=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.13.3/Sirio-0.13.3-x86_64.AppImage",
-      "sha256": "2ea4ca7cdd5a2195b8fe5a2dff465ca571c6677b2317543b5b2596131c370941",
-      "signature": "uiRuIFO0lUF6OZ9mk6ED79bD/HcwvfNhpWg3LMWipzPSkKRno/HTUb1lUCl2BraTWw0493VEgxmfa3Oz1m9uBw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.14.0/Sirio-0.14.0-x86_64.AppImage",
+      "sha256": "03090b331b19a8810117405745ed22da4deee39089ca21e35b30bfe977b34da5",
+      "signature": "UYxPQw3JAYKAVEiMZmNRLGL3tj8V78aG4ndkB3snzUTU3+GTLQsbDXlLmGL2fH3lIxQ7rhtvMcEu7P/ic4UvBA=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.13.3/SirioSetup-0.13.3.exe",
-      "sha256": "18dd42a8ebc89de337323cfca66a0f33ba90b32ca7bb7921b40f49ba638e5372",
-      "signature": "zzFsjZMq1Ok9t3g1Ofqe6YXLwZuK3Oz4s9bWzAMJltbQS/k7BZzzQAB8t7hkagFMCD1aNzNODFyGrEw7osLKBA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.14.0/SirioSetup-0.14.0.exe",
+      "sha256": "72f272bb30ebec73029323fd04cfa266678f8b12cc4adcc4021a3575a4c54cef",
+      "signature": "Azclwmi7OVKOJJDMqp7Dg8+liwwfd4fCsLCKXeEdJnrzYiiLyKVvUEizdgdKwZFDEOpBLOnUpby0DKJQ0Q07Dw=="
     }
   }
 }
