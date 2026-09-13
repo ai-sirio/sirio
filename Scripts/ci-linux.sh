@@ -65,6 +65,7 @@ export SIRIO_SOCKET="$RUN_DIR/sirio.sock"
 export SIRIO_DB="$RUN_DIR/sirio.sqlite"
 
 APP_PID=""
+BROWSER_APP_PID=""
 PANE_ID=""
 PANE_GROUPS=()
 APP_BIN="$ROOT/rust/target/debug/sirio"
@@ -83,6 +84,29 @@ terminate_tree() {
     kill -"$signal" "$pid" 2>/dev/null || true
 }
 
+# Tear down one app instance started with `setsid`. Both the smoke instance and
+# the browser e2e instance go through here, so an interrupted gate cannot leak
+# either one: the EXIT/INT/TERM trap runs cleanup, and cleanup stops both PIDs.
+stop_app_instance() {
+    local pid=$1
+    # Pane PTYs create their own sessions, so terminate descendants as
+    # well as the app's private process group. Keep the group kill outside
+    # the liveness check: a crashed app may have orphaned children.
+    if kill -0 "$pid" 2>/dev/null; then
+        terminate_tree "$pid" TERM
+    fi
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        terminate_tree "$pid" KILL
+    fi
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
@@ -94,22 +118,10 @@ cleanup() {
         kill -TERM -- "-$pgid" 2>/dev/null || true
     done
     if [[ -n "${APP_PID:-}" ]]; then
-        # Pane PTYs create their own sessions, so terminate descendants as
-        # well as the app's private process group. Keep the group kill outside
-        # the liveness check: a crashed app may have orphaned children.
-        if kill -0 "$APP_PID" 2>/dev/null; then
-            terminate_tree "$APP_PID" TERM
-        fi
-        kill -TERM -- "-$APP_PID" 2>/dev/null || kill -TERM "$APP_PID" 2>/dev/null || true
-        for _ in $(seq 1 30); do
-            kill -0 "$APP_PID" 2>/dev/null || break
-            sleep 0.1
-        done
-        if kill -0 "$APP_PID" 2>/dev/null; then
-            terminate_tree "$APP_PID" KILL
-        fi
-        kill -KILL -- "-$APP_PID" 2>/dev/null || true
-        wait "$APP_PID" 2>/dev/null || true
+        stop_app_instance "$APP_PID"
+    fi
+    if [[ -n "${BROWSER_APP_PID:-}" ]]; then
+        stop_app_instance "$BROWSER_APP_PID"
     fi
     for pgid in "${PANE_GROUPS[@]}"; do
         kill -KILL -- "-$pgid" 2>/dev/null || true
@@ -599,4 +611,123 @@ if ! cmp -s "$ARRIVAL_RUST_FINGERPRINT" "$FINAL_RUST_FINGERPRINT"; then
 fi
 
 echo "PASS: headless smoke test"
+
+# --- Browser surface e2e ---
+#
+# Scripts/e2e-browser.sh drives the whole documented browser surface -- open,
+# navigate, get, snapshot, act, wait, stale-ref rejection -- but no gate ran it,
+# so sirioctl could ship with no `browser` verb at all and the app could panic on
+# the first browser.open without either gate ever noticing. A test nobody runs is
+# documentation, not verification; this stage is where it runs.
+#
+# It cannot ride the headless smoke instance above. The browser needs GPUI's XCB
+# handle, GPUI ignores $DISPLAY whenever WAYLAND_DISPLAY is set, and Xvfb has no
+# DRI3 to present into -- so the only working recipe is the one Scripts/linux-shot.sh
+# documents: a real X display with WAYLAND_DISPLAY unset. That also means this
+# stage is display-gated, not mandatory: where no usable X server exists it SKIPs
+# loudly, naming the reason, rather than turning a headless runner permanently red
+# over a path that runner cannot exercise.
+echo "==> Browser surface e2e"
+
+# Is anything listening on the X socket DISPLAY names? The /tmp/.X11-unix/XN file
+# exists for dead servers too, so its existence alone would launch a doomed app;
+# a connect is the cheapest check that does not need xdpyinfo (absent on this box,
+# and not otherwise required by the gate). A wedged server accepts the connect and
+# then never speaks -- the app's own startup is what exposes that, farther down.
+x_display_listening() {
+    timeout 5 python3 - "$1" >/dev/null 2>&1 <<'PY'
+import socket
+import sys
+
+number = sys.argv[1].rsplit(":", 1)[-1].split(".", 1)[0]
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(2)
+sock.connect(f"/tmp/.X11-unix/X{number}")
+PY
+}
+
+run_browser_e2e_stage() {
+    local stage="browser e2e"
+    local socket="$RUN_DIR/browser.sock"
+    local database="$RUN_DIR/browser.sqlite"
+    local app_log="$LOG_DIR/browser-app.log"
+    local e2e_log="$LOG_DIR/browser-e2e.log"
+
+    if [[ ! -x "$APP_BIN" || ! -x "$CTL_BIN" ]]; then
+        echo "SKIP: $stage — missing app/sirioctl binary ($APP_BIN / $CTL_BIN)"
+        return 0
+    fi
+    # The `browser` verb lands in sirioctl separately from this stage; a binary
+    # built before that lands has nothing for the script to drive. `--help` is
+    # not a real subcommand (the CLI exits 2 after printing usage), so its exit
+    # status is deliberately discarded: what matters is whether the usage the
+    # binary prints advertises the browser verbs.
+    if ! grep -F 'browser open' < <("$CTL_BIN" --help 2>&1) >/dev/null; then
+        echo "SKIP: $stage — the built sirioctl has no \`browser\` command (landing separately; rebuild to exercise)"
+        return 0
+    fi
+    if [[ -z "${DISPLAY:-}" ]]; then
+        echo "SKIP: $stage — DISPLAY is unset; the browser needs GPUI's XCB handle (a Wayland-only session cannot provide it)"
+        return 0
+    fi
+    if ! x_display_listening "$DISPLAY"; then
+        echo "SKIP: $stage — no X server listening on DISPLAY=$DISPLAY"
+        return 0
+    fi
+
+    # Its own socket and database, so it can never reach the headless smoke
+    # instance or an operator's running Sirio even though it shares their display.
+    setsid env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY" GPUI_X11_SCALE_FACTOR=1 \
+        SIRIO_SOCKET="$socket" SIRIO_DB="$database" \
+        "$APP_BIN" >"$app_log" 2>&1 &
+    BROWSER_APP_PID=$!
+
+    local ready=0
+    for _ in $(seq 1 150); do
+        if [[ -S "$socket" ]]; then
+            ready=1
+            break
+        fi
+        if ! kill -0 "$BROWSER_APP_PID" 2>/dev/null; then
+            wait "$BROWSER_APP_PID" 2>/dev/null || true
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "$ready" -ne 1 ]]; then
+        fail_stage "$stage" "$app_log" \
+            "setsid env -u WAYLAND_DISPLAY DISPLAY=$DISPLAY GPUI_X11_SCALE_FACTOR=1 SIRIO_SOCKET=$socket SIRIO_DB=$database $APP_BIN"
+    fi
+
+    # The worktree id must come from *this* instance's catalog: a fresh SIRIO_DB
+    # means `project add` has to run before `current-workspace` can name one, and
+    # an id from the smoke instance above belongs to a different database entirely.
+    local workspace
+    if ! workspace="$(SIRIO_SOCKET="$socket" "$CTL_BIN" project add "$ROOT" >/dev/null 2>&1 &&
+        SIRIO_SOCKET="$socket" "$CTL_BIN" current-workspace)"; then
+        fail_stage "$stage" "$app_log" \
+            "SIRIO_SOCKET=$socket sirioctl project add $ROOT && sirioctl current-workspace"
+    fi
+    local browser_project browser_path worktree_id
+    IFS=$'\t' read -r browser_project _ browser_path worktree_id <<<"$workspace"
+    if [[ -z "$browser_project" || -z "$browser_path" || ! -d "$browser_path" || -z "$worktree_id" ]]; then
+        fail_stage "$stage" "$app_log" "sirioctl current-workspace -> $workspace"
+    fi
+
+    if ! SIRIO_SOCKET="$socket" bash Scripts/e2e-browser.sh "$worktree_id" >"$e2e_log" 2>&1; then
+        {
+            echo
+            echo "--- app output ---"
+            sed -n '1,160p' "$app_log"
+        } >>"$e2e_log"
+        fail_stage "$stage" "$e2e_log" "SIRIO_SOCKET=$socket Scripts/e2e-browser.sh $worktree_id"
+    fi
+
+    stop_app_instance "$BROWSER_APP_PID"
+    BROWSER_APP_PID=""
+    echo "PASS: $stage"
+    tail -5 "$e2e_log" || true
+}
+run_browser_e2e_stage
+
 echo "CI OK"
