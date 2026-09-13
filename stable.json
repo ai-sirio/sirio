@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.11.1",
-  "notes": "0.11.0 shipped the darker Neutral shell but never reached a build: two\ntheme checks still described the palette it replaced. This release is\nthose two checks, brought back in line — the same app, now able to\nrelease.\n\n**Readable text on the status chips**\n\nThe \"not installed\" pill and the terminal-only ACP badge paint their\ntext on a saturated red or amber fill. That text took its colour from\nthe pane, which Neutral's new ladder moved a rung darker in light mode\n— enough to drop the red chip to 3.89:1 and make the label hard to\nread. It now takes the page colour, which is the plane it was always\nmeant to sit against, and clears WCAG AA in both appearances again.\n\n**No visible change otherwise**\n\nThe light coral was retuned in 0.11.0 to stay legible on the new\nsurfaces; the conformance check that pins it still named the old value.\nNothing about the colour moves here — only the check that guards it.",
+  "version": "0.13.3",
+  "notes": "Browser automation reaches the command line, and the app it drives no\nlonger dies the moment a page opens on Linux.\n\n**Drive the browser from the command line**\n\n`sirioctl browser` exists now, with the eight verbs that work: open,\nnavigate, get, snapshot, act, wait, eval and console. Point it at a\npage, read what is on it, click or type into elements by reference.\nEvery one of these was refused as an unknown command until now.\nNavigation means an address only: back, forward and reload are not\nthere yet, and neither is capturing the page as an image, because the\nengine behind this surface offers no way to grab its pixels.\n\n**Opening a page no longer kills the app on Linux**\n\nThe first page open took the whole application down on Linux: the web\ncontext was built before the toolkit it needs had started, so the result\nwas a crash instead of an error, and the control socket answered that\nits worker had stopped because there was no longer a process to answer\nit. Startup now brings that toolkit up first, and one that cannot start\nis reported inside the browser pane instead of ending your session.\n\n**AppImage installs register themselves**\n\nInstalling from the AppImage left no menu entry and no icon, so\nlaunchers that only list installed applications never offered the app.\nThe entry and the icon the image already carries are now written to your\nuser account, pointing at the installed executable. The binary is\nwritten first too: a failure in that desktop integration used to abort\nthe install and delete the download, leaving you with nothing.\n\n**Interface fixes**\n\nTab titles are held to a single line, so a summarizer or a rename that\nanswers on two lines can no longer paint across the neighbouring tab.\nSwitching worktrees reloads the tab strip every time, even while another\nworktree still has work waiting, so the tabs on screen always belong to\nthe worktree you clicked. A tab shows its status with the same bloom as\nits sidebar row, so the two can no longer disagree. The rest of the\nsidebar chrome follows the interface font size from Settings. A long\nquestion title on the pending-question bar is truncated, and its Show\ncontrol stays inside the card. Worktree menus no longer print an\nexplanation beside a greyed-out entry, and the new worktree dialog\ncloses with its own control or confirms with Create, not only from the\nkeyboard.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.11.1/Sirio-0.11.1.dmg",
-      "sha256": "8797b95f85c60676eb3702d5e02a1e010215b77766d4d5b4357442fbe0b4a9d2",
-      "signature": "WilU9V106K0U4oOeW4TIQxhl3LTTxeULNikKJ+WF2hdFBPu0rk7vsboxfgWBwrv+vNa7dwDmy7Rchitmw8wwAQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.13.3/Sirio-0.13.3.dmg",
+      "sha256": "18af09142f7f9902eff6b27f65a8d82aa335a92d79040d1d45b7fa74a557c0bd",
+      "signature": "QxTRyXZXmLhb8KCoEb51ytYNpXSqCPGVYC3FdalPAnmG7gFIqoaol54OPPxbqiRLee5B4bwa5l4kDyNSPsa4AA=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.11.1/Sirio-0.11.1-x86_64.AppImage",
-      "sha256": "1631cc52e3c524dcfdbd97a16f7844e0615c74a99b7d22e7838180796a0940a0",
-      "signature": "hueDYAUCzs9aS9fhbH6lY+slcQ1BVh95cW/rPJIq+awjAOKGWTJyhm6cSYlVd1+ECrltJ24DZ4Nh3nN3Rs0qBw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.13.3/Sirio-0.13.3-x86_64.AppImage",
+      "sha256": "2ea4ca7cdd5a2195b8fe5a2dff465ca571c6677b2317543b5b2596131c370941",
+      "signature": "uiRuIFO0lUF6OZ9mk6ED79bD/HcwvfNhpWg3LMWipzPSkKRno/HTUb1lUCl2BraTWw0493VEgxmfa3Oz1m9uBw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.11.1/SirioSetup-0.11.1.exe",
-      "sha256": "287d99d9f7c20378831e8cedbfe15c363c386193f92dcd3d351f09d01191f040",
-      "signature": "duKRvqAYJNQhawcVvD3BW0AQ0GiA7XMH1Z56LVCk6CxUbl0zqVOav88YCRpCQIy/qCZlDzHWiv655sdiCjEADQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.13.3/SirioSetup-0.13.3.exe",
+      "sha256": "18dd42a8ebc89de337323cfca66a0f33ba90b32ca7bb7921b40f49ba638e5372",
+      "signature": "zzFsjZMq1Ok9t3g1Ofqe6YXLwZuK3Oz4s9bWzAMJltbQS/k7BZzzQAB8t7hkagFMCD1aNzNODFyGrEw7osLKBA=="
     }
   }
 }
