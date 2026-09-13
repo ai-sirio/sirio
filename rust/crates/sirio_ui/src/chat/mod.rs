@@ -2739,6 +2739,19 @@ impl Chat {
             && self.pending_question().is_none()
     }
 
+    /// The share of the context window in use, as the composer shows it.
+    ///
+    /// `None` is deliberately a state of its own: no `usage_update` has
+    /// arrived, or the one that did named no window size, so the honest
+    /// answer is "not reported" — the chip used to fold that into `0%`,
+    /// claiming an empty context nobody measured. Agents that never send a
+    /// usage update (Pi's ACP adapter among them) are exactly the ones that
+    /// read as a fabricated zero.
+    fn context_percent(&self) -> Option<u64> {
+        let usage = self.context_usage.as_ref()?;
+        (usage.size > 0).then(|| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
+    }
+
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
         let mut offset = 0;
         self.entries
@@ -6559,31 +6572,53 @@ impl Chat {
                     }))
                     .when_some(usage, |this, usage| {
                         let percent = if usage.size == 0 {
-                            0
+                            None
                         } else {
-                            ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64
+                            Some(((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
                         };
                         let cost = usage
                             .cost
                             .map(|cost| format!("Cost: {:.2} {}", cost.amount, cost.currency));
-                        this.child(
-                            div()
-                                .id(format!("context-usage-{}-of-{}", usage.used, usage.size))
-                                .debug_selector(move || {
-                                    format!("context-usage-{}-of-{}", usage.used, usage.size)
-                                })
-                                .text_size(typography.footnote)
-                                .text_color(theme.text)
-                                .child(format!("{percent}% of context used")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(typography.caption2)
-                                .text_color(theme.text_faint)
-                                .child(format!("{} / {} tokens", usage.used, usage.size)),
-                        )
-                        .when_some(cost, |this, cost| {
+                        let this = match percent {
+                            Some(percent) => this
+                                .child(
+                                    div()
+                                        .id(format!(
+                                            "context-usage-{}-of-{}",
+                                            usage.used, usage.size
+                                        ))
+                                        .debug_selector(move || {
+                                            format!(
+                                                "context-usage-{}-of-{}",
+                                                usage.used, usage.size
+                                            )
+                                        })
+                                        .text_size(typography.footnote)
+                                        .text_color(theme.text)
+                                        .child(format!("{percent}% of context used")),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(4.0))
+                                        .text_size(typography.caption2)
+                                        .text_color(theme.text_faint)
+                                        .child(format!("{} / {} tokens", usage.used, usage.size)),
+                                ),
+                            // A partial update — the breakdown merged in
+                            // before any used/size pair, or one that named
+                            // no window — must not read as "0 of 0 tokens":
+                            // the breakdown rows below are real, the
+                            // fraction simply is not known.
+                            None => this.child(
+                                div()
+                                    .id("context-usage-unreported")
+                                    .debug_selector(|| "context-usage-unreported".into())
+                                    .text_size(typography.footnote)
+                                    .text_color(theme.text_faint)
+                                    .child("The agent has not reported its context window size."),
+                            ),
+                        };
+                        this.when_some(cost, |this, cost| {
                             this.child(
                                 div()
                                     .mt(px(4.0))
@@ -6644,6 +6679,8 @@ impl Chat {
                     .when(self.context_usage.is_none(), |this| {
                         this.child(
                             div()
+                                .id("context-usage-never-reported")
+                                .debug_selector(|| "context-usage-never-reported".into())
                                 .text_size(typography.footnote)
                                 .text_color(theme.text_faint)
                                 .child("The agent has not reported context usage yet."),
@@ -7073,11 +7110,7 @@ impl Chat {
                     .child("…"),
             );
 
-        let context_percent = context_usage
-            .as_ref()
-            .filter(|usage| usage.size > 0)
-            .map(|usage| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
-            .unwrap_or(0);
+        let context_percent = self.context_percent();
 
         // Three looks, one `AnyElement`: the ready arm is `Stateful` (it
         // carries an id), the other two are plain `Div`s.
@@ -7330,9 +7363,26 @@ impl Chat {
                                 .child(
                                     div()
                                         .id("context-percent")
-                                        .debug_selector(|| "context-percent".into())
-                                        .text_color(theme.text)
-                                        .child(format!("{context_percent}%")),
+                                        // The selector itself carries the
+                                        // distinction, so a drawn test can
+                                        // tell "not reported" from "0% used"
+                                        // without reading pixels.
+                                        .debug_selector(move || {
+                                            if context_percent.is_some() {
+                                                "context-percent".into()
+                                            } else {
+                                                "context-percent-unknown".into()
+                                            }
+                                        })
+                                        .text_color(if context_percent.is_some() {
+                                            theme.text
+                                        } else {
+                                            theme.text_faint
+                                        })
+                                        .child(match context_percent {
+                                            Some(percent) => format!("{percent}%"),
+                                            None => "—".to_string(),
+                                        }),
                                 )
                                 .children(context_popover),
                         )
@@ -16019,6 +16069,99 @@ let answer = 42;
             "25% usage stays on the calm ring"
         );
         assert!(cx.debug_bounds("context-ring-progress").is_some());
+    }
+
+    /// An agent that never reported context usage is not an agent with an
+    /// empty context. The chip used to fold "nothing arrived" into `0%`,
+    /// which is the reading Pi's ACP adapter (and any adapter that sends no
+    /// `usage_update`) always produced; it must say so instead.
+    #[gpui::test]
+    async fn context_chip_says_unknown_rather_than_zero_when_nothing_was_reported(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        assert!(
+            cx.debug_bounds("context-percent-unknown").is_some(),
+            "no reported usage renders the unknown marker"
+        );
+        assert!(
+            cx.debug_bounds("context-percent").is_none(),
+            "an unreported context must not render a percentage"
+        );
+
+        let ring = cx
+            .debug_bounds("context-ring")
+            .expect("context ring is rendered");
+        cx.simulate_click(ring.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("context-popover").is_some());
+        assert!(
+            cx.debug_bounds("context-usage-never-reported").is_some(),
+            "the popover repeats the unknown state"
+        );
+        assert!(
+            cx.debug_bounds("context-usage-0-of-0").is_none(),
+            "the popover must not invent a 0-of-0 window"
+        );
+    }
+
+    /// F-CHAT-18's merge path can produce a `ContextUsage` with token rows
+    /// but no window size (the breakdown arrived, the used/size triple never
+    /// did). The popover must show those real rows without dressing the
+    /// missing fraction up as `0%`.
+    #[gpui::test]
+    async fn partial_context_usage_without_a_window_size_is_not_zero(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.handle_event(
+                AcpEvent::TokenUsageBreakdown {
+                    input_tokens: 40,
+                    output_tokens: 12,
+                    cached_read_tokens: Some(8),
+                },
+                cx,
+            );
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        assert!(
+            cx.debug_bounds("context-percent-unknown").is_some(),
+            "a breakdown without a window renders the unknown marker"
+        );
+
+        let ring = cx
+            .debug_bounds("context-ring")
+            .expect("context ring is rendered");
+        cx.simulate_click(ring.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("context-usage-unreported").is_some());
+        assert!(
+            cx.debug_bounds("context-usage-breakdown").is_some(),
+            "the real token rows still render"
+        );
+        assert!(
+            cx.debug_bounds("context-usage-0-of-0").is_none(),
+            "the popover must not invent a 0-of-0 window"
+        );
     }
 
     /// F-CHAT-36: an agent that exposes no models renders a plain agent
