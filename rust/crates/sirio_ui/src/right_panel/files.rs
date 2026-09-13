@@ -5,6 +5,8 @@
 use super::*;
 use bezel::motion::{Fade, Painter};
 use bezel::ui::popover;
+use bezel::ui::tooltip::Tooltip;
+use bezel::ui::widgets::{ButtonStyle, Buttons as _};
 use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, uniform_list,
 };
@@ -525,8 +527,19 @@ impl RightPanel {
         cx.emit(RightPanelActionEvent::OpenDiff(relative_path));
     }
 
-    fn file_rows(&self) -> Vec<FileRow> {
-        self.flattened_file_rows.clone()
+    /// The rows the tree draws. Both the renderer and the key handler read
+    /// this one list, so an arrow key can never land on a row the frame
+    /// left out: `is_ignored` is set by ancestry, so filtering here takes
+    /// an ignored directory and everything walked beneath it together.
+    fn file_rows(&self, cx: &App) -> Vec<FileRow> {
+        if show_ignored_files(cx) {
+            return self.flattened_file_rows.clone();
+        }
+        self.flattened_file_rows
+            .iter()
+            .filter(|row| !row.node.is_ignored)
+            .cloned()
+            .collect()
     }
 
     fn rebuild_file_rows(&mut self) {
@@ -743,7 +756,7 @@ impl RightPanel {
             self.close_file_context_menu(cx);
             return;
         }
-        let rows = self.file_rows();
+        let rows = self.file_rows(cx);
         if rows.is_empty() {
             return;
         }
@@ -791,7 +804,7 @@ impl RightPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows = self.file_rows();
+        let rows = self.file_rows(cx);
         let row_entity = entity.clone();
         let file_focus = self
             .file_focus
@@ -923,17 +936,66 @@ impl RightPanel {
                 .child(list)
                 .into_any_element()
         };
+        // The toggle belongs to the tree, so it is drawn only when there
+        // is one: not under "Loading files…", and not over the error panel,
+        // where it would cover the Retry that panel exists for.
+        let tree_is_on_screen =
+            self.settled && !(self.file_tree.is_empty() && self.refresh_error.is_some());
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .relative()
             .when(self.is_files_updating(), |this| {
                 this.child(files_refresh_indicator(window, cx))
             })
             .child(body)
+            .when(tree_is_on_screen, |this| {
+                this.child(ignored_files_toggle(entity.clone(), theme, cx))
+            })
             .into_any_element()
     }
+}
+
+/// The git-ignore toggle: bezel's prominent button, pinned to the bottom
+/// right corner of the tree it filters. Prominent rather than ghost because
+/// it is the only thing on screen that explains a missing `target/` — a
+/// quiet control here reads as "the panel lost some files".
+fn ignored_files_toggle(
+    entity: gpui::Entity<RightPanel>,
+    theme: Theme,
+    cx: &mut App,
+) -> AnyElement {
+    let showing = show_ignored_files(cx);
+    let (icon, tooltip) = if showing {
+        (Icon::EyeOff, "Hide ignored files")
+    } else {
+        (Icon::Eye, "Show ignored files")
+    };
+    theme
+        .to_bezel_theme()
+        .button("", ButtonStyle::Prominent, None)
+        // The shipped frame is a label plate (12/6); a lone glyph needs the
+        // same padding on both axes to come out square.
+        .px(theme.spacing.titlebar_control_spacing)
+        .py(theme.spacing.titlebar_control_spacing)
+        .absolute()
+        .bottom(theme.spacing.card_gap)
+        .right(theme.spacing.card_gap)
+        .id("files-toggle-ignored")
+        .debug_selector(|| "files-toggle-ignored".to_owned())
+        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .child(IconElement::new(icon, IconSize::Small).text_color(theme.to_bezel_theme().on_solid))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            let showing = show_ignored_files(cx);
+            set_show_ignored_files(!showing, cx);
+            // The setting is a global; the panel that reads it has to be
+            // told the frame it drew is stale.
+            entity.update(cx, |_, cx| cx.notify());
+        })
+        .into_any_element()
 }
 
 fn files_refresh_indicator(window: &mut Window, cx: &mut App) -> AnyElement {
@@ -2120,6 +2182,117 @@ mod tests {
         );
     }
 
+    /// A node the walk would have produced, for the tests that care about
+    /// the ignore filter rather than about the walk itself.
+    fn walked_node(path: PathBuf, is_dir: bool, is_ignored: bool) -> FileNode {
+        FileNode {
+            name: path
+                .file_name()
+                .expect("a fixture node is named")
+                .to_string_lossy()
+                .to_string(),
+            path,
+            is_dir,
+            git_status: None,
+            is_ignored,
+            expanded: false,
+            read_error: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn row_names(panel: &RightPanel, cx: &App) -> Vec<String> {
+        panel
+            .file_rows(cx)
+            .iter()
+            .map(|row| row.node.name.clone())
+            .collect()
+    }
+
+    /// Hiding ignored paths is a *view* setting, not a walk setting: the
+    /// tree keeps every node it walked, and `file_rows` — the one list both
+    /// the renderer and the key handler read, so neither can disagree with
+    /// the other — drops the ignored rows while the setting is off. A row
+    /// beneath an ignored directory carries the flag by ancestry, so it
+    /// leaves with its parent.
+    #[gpui::test]
+    fn ignored_rows_leave_the_files_list_until_the_setting_shows_them(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let mut panel = RightPanel::new(dir.0.clone());
+        let mut ignored = walked_node(dir.0.join("target"), true, true);
+        ignored.expanded = true;
+        ignored.children = vec![walked_node(dir.0.join("target").join("debug"), true, true)];
+        panel.file_tree = vec![walked_node(dir.0.join("src"), true, false), ignored];
+        panel.rebuild_file_rows();
+
+        assert_eq!(
+            cx.update(|cx| row_names(&panel, cx)),
+            vec!["src".to_owned()],
+            "an ignored path, and everything under it, stays out of the list by default"
+        );
+
+        cx.update(|cx| set_show_ignored_files(true, cx));
+        assert_eq!(
+            cx.update(|cx| row_names(&panel, cx)),
+            vec!["src".to_owned(), "target".to_owned(), "debug".to_owned()],
+            "turning the setting on brings the walked rows back without a re-walk"
+        );
+    }
+
+    /// The toggle is the only way to reach an ignored path, so it has to be
+    /// on screen over the tree and it has to flip the list it names — read
+    /// back from a drawn frame, not from the setting it writes.
+    #[gpui::test]
+    async fn the_files_toggle_shows_and_hides_ignored_rows(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        git(&dir.0, &["init", "-q"]);
+        std::fs::write(dir.0.join(".gitignore"), "target/\n").expect("write .gitignore");
+        std::fs::create_dir_all(dir.0.join("target")).expect("create the ignored directory");
+        std::fs::write(dir.0.join("target").join("app"), b"bin").expect("write an ignored child");
+        std::fs::create_dir_all(dir.0.join("src")).expect("create the tracked directory");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("window");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, cx| {
+                row_names(panel, cx).iter().any(|name| name == "src")
+            })
+        });
+        assert!(
+            panel.read_with(&cx.cx, |panel, cx| {
+                row_names(panel, cx).iter().all(|name| name != "target")
+            }),
+            "the ignored directory is out of the list before the toggle is touched"
+        );
+
+        let toggle = cx
+            .debug_bounds("files-toggle-ignored")
+            .expect("the ignored toggle is drawn over the tree");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.cx.run_until_parked();
+        assert!(
+            panel.read_with(&cx.cx, |panel, cx| {
+                row_names(panel, cx).iter().any(|name| name == "target")
+            }),
+            "one click brings the ignored directory back"
+        );
+
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.cx.run_until_parked();
+        assert!(
+            panel.read_with(&cx.cx, |panel, cx| {
+                row_names(panel, cx).iter().all(|name| name != "target")
+            }),
+            "and a second click hides it again"
+        );
+    }
+
     #[test]
     fn the_files_tree_does_not_read_a_sibling_outside_its_root() {
         let fixture = std::env::temp_dir().join(format!(
@@ -2474,9 +2647,9 @@ mod tests {
             .expect("the rename source directory is drawn");
         cx.simulate_click(source.center(), Modifiers::none());
         pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| {
+            panel.read_with(&cx.cx, |panel, cx| {
                 panel
-                    .file_rows()
+                    .file_rows(cx)
                     .iter()
                     .any(|row| row.node.name == "from" && row.depth == 1)
             })
@@ -2501,9 +2674,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{marker} is drawn"));
             cx.simulate_click(row.center(), Modifiers::none());
             pump_until(&cx.cx, || {
-                panel.read_with(&cx.cx, |panel, _| {
+                panel.read_with(&cx.cx, |panel, cx| {
                     let wanted = panel.repo_root.join(opened);
-                    panel.file_rows().iter().any(|row| row.node.path == wanted)
+                    panel
+                        .file_rows(cx)
+                        .iter()
+                        .any(|row| row.node.path == wanted)
                 })
             });
             cx.cx.run_until_parked();
@@ -2536,9 +2712,9 @@ mod tests {
             .expect("the conflicted directory is drawn");
         cx.simulate_click(conflict.center(), Modifiers::none());
         pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| {
+            panel.read_with(&cx.cx, |panel, cx| {
                 panel
-                    .file_rows()
+                    .file_rows(cx)
                     .iter()
                     .any(|row| row.node.name == "also_mod.txt")
             })

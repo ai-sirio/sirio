@@ -246,6 +246,27 @@ impl PanelView {
     }
 }
 
+/// Whether the Files tree draws git-ignored paths. A global for the same
+/// reason [`PanelViewSetting`] is one: `select_worktree` throws the
+/// `RightPanel` away and builds a fresh one, so a field would forget the
+/// choice on every worktree switch.
+struct ShowIgnoredFilesSetting(bool);
+
+impl gpui::Global for ShowIgnoredFilesSetting {}
+
+/// Whether the Files tree currently draws git-ignored paths. Off until the
+/// Files toggle turns it on: an ignored tree (`target/`, `node_modules/`)
+/// is usually the noisiest part of a checkout, and the walk keeps those
+/// rows either way — this decides only whether they are drawn.
+pub(crate) fn show_ignored_files(cx: &App) -> bool {
+    cx.try_global::<ShowIgnoredFilesSetting>()
+        .is_some_and(|setting| setting.0)
+}
+
+pub(crate) fn set_show_ignored_files(show: bool, cx: &mut App) {
+    cx.set_global(ShowIgnoredFilesSetting(show));
+}
+
 /// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
     repo_root: PathBuf,

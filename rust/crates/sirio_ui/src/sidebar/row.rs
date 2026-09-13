@@ -293,6 +293,8 @@ impl Sidebar {
             Icon::SquarePlus => "square-plus",
             Icon::SquareMinus => "square-minus",
             Icon::Undo => "undo",
+            Icon::Eye => "eye",
+            Icon::EyeOff => "eye-off",
             Icon::GitGraph => "git-graph",
             Icon::FileType(_) => "file-type",
         }

@@ -130,6 +130,10 @@ pub enum Icon {
     SquareMinus,
     /// Undo (`zed/undo.svg`).
     Undo,
+    /// Ignored paths are drawn (`zed/eye.svg`).
+    Eye,
+    /// Ignored paths are hidden (`zed/eye_off.svg`).
+    EyeOff,
     /// A full-colour Material icon for a file type.
     FileType(&'static str),
 }
@@ -200,6 +204,8 @@ impl Icon {
             Icon::SquarePlus => "icons/zed/square_plus.svg",
             Icon::SquareMinus => "icons/zed/square_minus.svg",
             Icon::Undo => "icons/zed/undo.svg",
+            Icon::Eye => "icons/zed/eye.svg",
+            Icon::EyeOff => "icons/zed/eye_off.svg",
             Icon::FileType(name) => match name {
                 "audio" => "icons/file-types/audio.svg",
                 "c" => "icons/file-types/c.svg",
@@ -287,6 +293,8 @@ impl Icon {
             Icon::SquarePlus => include_bytes!("../../../assets/icons/zed/square_plus.svg"),
             Icon::SquareMinus => include_bytes!("../../../assets/icons/zed/square_minus.svg"),
             Icon::Undo => include_bytes!("../../../assets/icons/zed/undo.svg"),
+            Icon::Eye => include_bytes!("../../../assets/icons/zed/eye.svg"),
+            Icon::EyeOff => include_bytes!("../../../assets/icons/zed/eye_off.svg"),
             Icon::FileType(name) => match name {
                 "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
                 "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
