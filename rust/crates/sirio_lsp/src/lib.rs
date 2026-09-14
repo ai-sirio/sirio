@@ -17,11 +17,13 @@ mod framing;
 mod lifecycle;
 mod message;
 mod position;
+mod server;
 
 pub use connection::{Client, Connection};
 pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
 pub use position::LineIndex;
+pub use server::Server;
 
 /// Everything that can go wrong below the UI.
 ///
