@@ -5942,36 +5942,4 @@ mod tests {
         }
     }
 
-    /// The report: opening a very large diff makes the diff's own scroll and
-    /// the whole app lag. The loop's claim is that a frame over an expanded
-    /// diff should cost what the *viewport* costs, not what the *file*
-    /// costs: a 50x larger diff must not make every frame ~50x slower.
-    #[gpui::test]
-    async fn perf_a_large_expanded_diff_costs_a_frame_proportional_to_the_viewport(
-        cx: &mut TestAppContext,
-    ) {
-        let small = measure_big_diff(cx, 300);
-        let large = measure_big_diff(cx, 5_000);
-        for (label, cost) in [("small", &small), ("large", &large)] {
-            eprintln!(
-                "[PERF-diff] {label}: rows={} section_rows={:.2}ms frame={:.2}ms scroll_dispatch={:.2}ms scroll_frame={:.2}ms",
-                cost.rows,
-                cost.section_rows_ms,
-                cost.frame_ms,
-                cost.scroll_dispatch_ms,
-                cost.scroll_frame_ms
-            );
-        }
-        let ratio = large.frame_ms / small.frame_ms.max(0.01);
-        eprintln!("[PERF-diff] frame ratio large/small = {ratio:.1}x");
-        assert!(
-            ratio < 4.0,
-            "a frame over a {}-row diff costs {:.1}ms, {ratio:.1}x the {:.1}ms of a {}-row one: \
-             the whole file is being laid out every frame, not the viewport",
-            large.rows,
-            large.frame_ms,
-            small.frame_ms,
-            small.rows
-        );
-    }
 }

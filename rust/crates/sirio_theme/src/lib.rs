@@ -1702,9 +1702,37 @@ impl Theme {
 /// named like a test.
 #[cfg(target_os = "linux")]
 fn in_test_harness() -> bool {
-    std::thread::current()
-        .name()
-        .is_some_and(|name| name.starts_with("tests::") || name.contains("::tests::"))
+    looks_like_test_harness(
+        std::thread::current().name(),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
+/// Whether this process is a test binary, decided from the two signals a
+/// library can see from inside a dependency. `cfg!(test)` is useless here:
+/// it is set only for the crate being tested, and `sirio_theme` is always
+/// the dependency, never that crate.
+///
+/// The thread name alone was the original check, and it missed: it required
+/// the segment `tests::`, which assumes every test lives in a `mod tests`.
+/// `sirio_ui`'s `changes::perf_baseline` declares its tests directly in the
+/// module, so its threads are named `changes::perf_baseline::<test>` and the
+/// portal query really ran — waking GPUI's single-threaded test scheduler
+/// from zbus's blocking pool and panicking the test as non-deterministic.
+///
+/// The executable path is the signal that does not depend on how a module
+/// spells its tests: cargo and nextest both run test binaries out of
+/// `target/<profile>/deps/`, while every real Sirio build — the dev binary
+/// at `target/<profile>/sirio`, the installed one, the one inside
+/// `Sirio.app` — sits somewhere else.
+fn looks_like_test_harness(thread_name: Option<&str>, current_exe: Option<&std::path::Path>) -> bool {
+    if thread_name.is_some_and(|name| name.starts_with("tests::") || name.contains("::tests::")) {
+        return true;
+    }
+    current_exe.is_some_and(|exe| {
+        exe.parent()
+            .is_some_and(|dir| dir.file_name().is_some_and(|dir| dir == "deps"))
+    })
 }
 
 /// Queries the XDG desktop portal for the preferred color scheme.
@@ -1953,6 +1981,59 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod looks_like_test_harness {
+        use super::*;
+        use std::path::Path;
+
+        /// The name the original guard was written for.
+        #[test]
+        fn a_thread_inside_a_mod_tests_is_a_test() {
+            assert!(super::super::looks_like_test_harness(
+                Some("changes::tests::a_drawn_frame_is_counted"),
+                None
+            ));
+        }
+
+        /// The case that got through and panicked the suite: `perf_baseline`
+        /// declares its tests in the module itself, so no `tests::` segment
+        /// ever appears in the thread name.
+        #[test]
+        fn a_test_declared_outside_a_mod_tests_is_still_a_test() {
+            assert!(
+                super::super::looks_like_test_harness(
+                    Some("changes::perf_baseline::drawn_frames_count_rebuilds_and_payload_copies_separately"),
+                    Some(Path::new("/w/rust/target/debug/deps/sirio_ui-2f1c9a")),
+                ),
+                "a test binary under deps/ is a test harness whatever its threads are named"
+            );
+        }
+
+        /// The dev build: `target/debug/sirio`, not `target/debug/deps/...`.
+        #[test]
+        fn the_dev_binary_is_not_a_test_harness() {
+            assert!(!super::super::looks_like_test_harness(
+                Some("main"),
+                Some(Path::new("/w/rust/target/debug/sirio"))
+            ));
+        }
+
+        /// An installed copy must follow the portal like any real run.
+        #[test]
+        fn an_installed_binary_is_not_a_test_harness() {
+            assert!(!super::super::looks_like_test_harness(
+                Some("main"),
+                Some(Path::new("/usr/bin/sirio"))
+            ));
+        }
+
+        /// Nothing known: assume the real app, so a failure to read either
+        /// signal never silently disables the portal in production.
+        #[test]
+        fn neither_signal_means_not_a_test() {
+            assert!(!super::super::looks_like_test_harness(None, None));
+        }
+    }
 
     /// Installing a theme pushes its appearance into bezel's mirror.
     ///

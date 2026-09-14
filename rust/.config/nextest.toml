@@ -70,14 +70,10 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 3 }
 
-# The two overrides below are declared on `default` and do not inherit, so the
-# PTY group and the perf tests' exclusive scheduling are repeated here. Losing
-# them would turn this gate's wall-clock-sensitive tests into the crowd those
-# overrides exist to prevent.
-[[profile.pr.overrides]]
-filter = 'test(/perf_/)'
-threads-required = 'num-test-threads'
-
+# The override below is declared on `default` and does not inherit, so the PTY
+# group is repeated here. Losing it would turn this gate's PTY tests into the
+# crowd that override exists to prevent. There is no `perf_` override to repeat
+# -- see the note next to its removal on `default`.
 [[profile.pr.overrides]]
 filter = 'test(/real_pty|view_tests::|settle|scrollback/)'
 test-group = 'pty'
@@ -90,16 +86,15 @@ test-group = 'pty'
 # off the critical path without letting them form a crowd.
 pty = { max-threads = 4 }
 
-[[profile.default.overrides]]
-# The four `perf_` tests assert a budget in frames -- a keystroke reaching a
-# repaint inside one 16 ms frame, an idle terminal not burning CPU. Sharing a
-# machine with anything at all is the one condition under which they measure
-# something other than what they claim: `perf_keystroke_echo_latency` fails at
-# 17 ms against a 16 ms budget with three other PTY tests alongside it, and
-# passes with room to spare on its own. Reserving every slot is the honest
-# reading of what they are for.
-filter = 'test(/perf_/)'
-threads-required = 'num-test-threads'
+# There is deliberately no `perf_` override here any more. It used to reserve
+# every test thread for the four tests that asserted a budget in wall-clock
+# terms -- a keystroke reaching a repaint inside one 16 ms frame, an idle
+# terminal not burning CPU, a frame cost proportional to the viewport. Those
+# tests are gone: a gate answer that depends on how busy the machine was is
+# not an answer, and reserving every slot only narrowed the window in which
+# they lied. What still matches `test(/perf_/)` is the `perf_baseline` module,
+# whose tests count rebuilds, payload calls and bytes -- the same number on an
+# idle laptop and a loaded CI runner, so they need no special scheduling.
 
 [[profile.default.overrides]]
 filter = 'test(/real_pty|view_tests::|settle|scrollback/)'

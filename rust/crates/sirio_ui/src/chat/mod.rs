@@ -8689,37 +8689,6 @@ mod tests {
         }
     }
 
-    /// A typical streamed answer is reparsed as deltas arrive. This deliberately
-    /// uses a coarse wall-clock ceiling: it catches an accidental super-linear
-    /// parse/build path without pretending to be a benchmark.
-    #[test]
-    fn a_four_kib_streaming_turn_builds_a_bezel_doc_within_the_frame_budget() {
-        let fragment = "## Result\n\n- [x] parsed\n- [ ] rendered\n\n```rust\nlet answer = 42;\n```\n\n| step | state |\n| --- | --- |\n| parse | done |\n\n";
-        let source = fragment.repeat(35);
-        assert!(
-            (4_096..=5_120).contains(&source.len()),
-            "fixture must stay close to 4 KiB, got {} bytes",
-            source.len()
-        );
-
-        let started = std::time::Instant::now();
-        let document = parse_chat_markdown(&source);
-        let elapsed = started.elapsed();
-        let budget = if cfg!(debug_assertions) {
-            std::time::Duration::from_millis(50)
-        } else {
-            std::time::Duration::from_millis(5)
-        };
-
-        assert!(
-            !document.blocks.is_empty(),
-            "parse/build must produce the bezel document rendered by chat"
-        );
-        assert!(
-            elapsed < budget,
-            "4 KiB markdown parse/build took {elapsed:?}, budget is {budget:?}"
-        );
-    }
 
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
