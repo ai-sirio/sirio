@@ -24,9 +24,9 @@ use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
     InspectorElementId, KeyDownEvent, LayoutId, ListHorizontalSizingBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, ScrollHandle, StyledText,
-    Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window, canvas, div, point,
-    prelude::*, px, quad, size, transparent_black, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollHandle,
+    StyledText, Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window, anchored,
+    canvas, deferred, div, point, prelude::*, px, quad, size, transparent_black, uniform_list,
 };
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::{display_absolute_path, resolve_file_link};
@@ -41,6 +41,7 @@ use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
 };
+use crate::file_context_menu::{self, FileContextAction, FileContextFacts};
 use crate::loading;
 
 /// The rendered-markdown column: the frozen 720px content column (waku
@@ -114,6 +115,15 @@ pub struct FileView {
     /// Scroll state of the two scrolling surfaces, so each can wear bezel's
     /// bar.
     scroll: SurfaceScroll,
+    /// The window-absolute point of the right-click that opened the context
+    /// menu, `None` when it is closed. Window-absolute because
+    /// `anchored().position()` takes a window coordinate as-is (P129).
+    context_menu: Option<Point<Pixels>>,
+    /// Facts only the workspace can answer — whether this file is in a git
+    /// repository, whether that repository has a GitHub remote, whether this
+    /// worktree has an agent chat open. Each costs a subprocess or a walk of
+    /// the open tabs, so they are pushed down rather than asked per click.
+    shell_facts: FileContextFacts,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -206,6 +216,8 @@ impl FileView {
             editor_caret_sig: (0, None),
             editor_caret_visible: false,
             scroll: SurfaceScroll::new(Painter::of(cx)),
+            context_menu: None,
+            shell_facts: FileContextFacts::default(),
         }
     }
 
@@ -251,6 +263,54 @@ impl FileView {
     pub fn clear_notice(&mut self, cx: &mut Context<Self>) {
         self.notice = None;
         cx.notify();
+    }
+
+    /// Called by the workspace when the tab is opened and whenever the facts
+    /// could have changed. See `FileContextFacts` for why these are pushed.
+    pub fn set_shell_facts(&mut self, facts: FileContextFacts, cx: &mut Context<Self>) {
+        if self.shell_facts != facts {
+            self.shell_facts = facts;
+            cx.notify();
+        }
+    }
+
+    /// The shell's facts plus the two this view answers itself.
+    fn menu_facts(&self) -> FileContextFacts {
+        let has_selection = self
+            .editor()
+            .map(|editor| self.current_selection(editor))
+            .is_some_and(|selection| selection.start != selection.end);
+        FileContextFacts {
+            has_selection,
+            is_markdown: self.is_markdown(),
+            ..self.shell_facts
+        }
+    }
+
+    fn open_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor_focus.focus(window, cx);
+        self.context_menu = Some(event.position);
+        cx.notify();
+    }
+
+    fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn handle_context_action(
+        &mut self,
+        _action: FileContextAction,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_context_menu(cx);
     }
 
     /// Re-reads the file and compares it against the last known disk state
@@ -882,11 +942,90 @@ impl Render for FileView {
             ViewState::Ready(editor) => editor.buffer().len(),
             _ => 0,
         });
+        let context_menu = self.context_menu.map(|position| {
+            let entity = cx.entity();
+            let dismiss_entity = entity.clone();
+            let mut menu = div()
+                .id("file-context-menu")
+                .debug_selector(|| "file-context-menu".to_owned())
+                .w(px(240.0))
+                .p(px(6.0))
+                .rounded(theme.radii.user_pill)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
+                .shadow_lg();
+
+            let items = file_context_menu::items(&self.menu_facts());
+            let mut previous_group = None;
+            for (index, item) in items.iter().enumerate() {
+                if previous_group.is_some_and(|group| group != item.group) {
+                    menu = menu.child(div().w_full().h(px(1.0)).my(px(4.0)).bg(theme.border));
+                }
+                previous_group = Some(item.group);
+
+                let action = item.action;
+                let item_entity = entity.clone();
+                let selector = format!("file-context-item-{index}");
+                let debug_selector = selector.clone();
+                let disabled_reason = item.disabled_reason.clone();
+                let is_disabled = disabled_reason.is_some();
+                menu = menu.child(
+                    div()
+                        .id(selector)
+                        .debug_selector(move || debug_selector.clone())
+                        .w_full()
+                        .min_h(px(29.0))
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .rounded(theme.radii.control)
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .text_size(theme.typography.footnote)
+                        .when(is_disabled, |this| {
+                            this.text_color(theme.text_faint).cursor_not_allowed()
+                        })
+                        .when(!is_disabled, |this| {
+                            this.text_color(theme.text)
+                                .hover(|style| style.bg(theme.element_hover))
+                                .on_click(move |_, window, cx| {
+                                    item_entity.update(cx, |view, cx| {
+                                        view.handle_context_action(action, window, cx);
+                                    });
+                                })
+                        })
+                        .child(item.label)
+                        .when_some(disabled_reason, |this, reason| {
+                            this.child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("file-context-item-{index}-reason")
+                                    })
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_faint)
+                                    .child(reason),
+                            )
+                        }),
+                );
+            }
+            let menu = menu.on_mouse_down_out(move |_, _, cx| {
+                dismiss_entity.update(cx, |view, cx| view.dismiss_context_menu(cx));
+            });
+            // `position` is window-absolute already (straight from
+            // `MouseDownEvent::position`). A plain `.absolute().left()/.top()`
+            // resolves against this container's own origin, which is itself
+            // already window-absolute for any view not flush against the
+            // window's top-left corner — double-counting it (P129).
+            deferred(anchored().position(position).snap_to_window().child(menu)).priority(1)
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.surface)
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+            .when_some(context_menu, |this, menu| this.child(menu))
             .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
@@ -2357,6 +2496,104 @@ mod tests {
         }
         let entity =
             cx.update(|window, _| window.root::<FileView>().flatten().expect("file view root"));
+        assert!(
+            entity.read_with(&cx.cx, |view, _| view.editor().is_some()),
+            "the background load must install the editor before the test proceeds"
+        );
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        (cx, entity)
+    }
+
+    struct FileViewOriginFixture {
+        view: gpui::Entity<FileView>,
+    }
+
+    impl Render for FileViewOriginFixture {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .child(
+                    div()
+                        .debug_selector(|| "file-view-origin-spacer".to_owned())
+                        .w(px(280.0))
+                        .h_full(),
+                )
+                .child(div().flex_1().h_full().child(self.view.clone()))
+        }
+    }
+
+    #[gpui::test]
+    async fn the_context_menu_paints_at_the_click_point_behind_a_non_zero_origin(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, _view) = mounted_origin_fixture(cx, file.path().to_path_buf());
+
+        let spacer = cx
+            .debug_bounds("file-view-origin-spacer")
+            .expect("spacer must be drawn");
+        let origin_x = spacer.origin.x + spacer.size.width;
+        assert!(
+            origin_x > px(0.0),
+            "fixture must place the view at a non-zero window origin, got {origin_x:?}"
+        );
+
+        let click = point(origin_x + px(40.0), spacer.origin.y + px(40.0));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+
+        let menu = cx
+            .debug_bounds("file-context-menu")
+            .expect("the context menu must be drawn");
+        // P129 shifted this by the pane's entire 280px origin, so a 1px
+        // tolerance cleanly separates "fixed" from "double-counted".
+        assert!(
+            (menu.origin.x - click.x).abs() < px(1.0) && (menu.origin.y - click.y).abs() < px(1.0),
+            "menu must paint at the click point, not click + view origin (P129): \
+             menu.origin={:?}, click={:?}",
+            menu.origin,
+            click
+        );
+    }
+
+    fn mounted_origin_fixture(
+        cx: &mut gpui::TestAppContext,
+        path: PathBuf,
+    ) -> (VisualTestContext, gpui::Entity<FileView>) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| {
+            let view = cx.new(|cx| FileView::new(path, cx));
+            FileViewOriginFixture { view }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<FileViewOriginFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let entity = fixture.read_with(&cx.cx, |fixture, _| fixture.view.clone());
+        for _ in 0..600 {
+            if entity.read_with(&cx.cx, |view, _| view.editor().is_some()) {
+                break;
+            }
+            cx.cx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
         assert!(
             entity.read_with(&cx.cx, |view, _| view.editor().is_some()),
             "the background load must install the editor before the test proceeds"
