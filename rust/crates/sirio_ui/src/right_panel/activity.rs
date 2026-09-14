@@ -62,6 +62,11 @@ impl RightPanel {
         let status_id = format!("activity-status-{status_name}-{index}");
         let select_entity = entity.clone();
         let close_entity = entity;
+        // `surface` is consumed by the children below, and `on_click` takes an
+        // `Fn`, so the row's identity is cloned out once per listener and again
+        // per click — the same shape `entity` already takes here.
+        let select_reference = surface.reference.clone();
+        let close_reference = surface.reference.clone();
         div()
             .id(format!("activity-{index}"))
             .debug_selector(move || format!("activity-{index}"))
@@ -74,7 +79,7 @@ impl RightPanel {
             .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 select_entity.update(cx, |_, cx| {
-                    cx.emit(RightPanelEvent::SelectActivity(index));
+                    cx.emit(RightPanelEvent::SelectActivity(select_reference.clone()));
                 });
             })
             .child(
@@ -119,7 +124,7 @@ impl RightPanel {
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         close_entity.update(cx, |_, cx| {
-                            cx.emit(RightPanelEvent::CloseActivity(index));
+                            cx.emit(RightPanelEvent::CloseActivity(close_reference.clone()));
                         });
                     })
                     .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text)),
@@ -177,7 +182,9 @@ fn activity_status_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     /// F-CHG-20 (empty half): with no activity rows, the Activity view
     /// states No activity instead of showing nothing.
@@ -212,12 +219,19 @@ mod tests {
                 std::env::temp_dir(),
                 vec![
                     ActivitySurface::new(
+                        ActivityRef::Open(1),
                         Icon::MessageSquare,
                         "Chat",
                         "/repo",
                         ActivityStatus::Running,
                     ),
-                    ActivitySurface::new(Icon::File, "Changes", "/repo", ActivityStatus::Done),
+                    ActivitySurface::new(
+                        ActivityRef::Open(2),
+                        Icon::File,
+                        "Changes",
+                        "/repo",
+                        ActivityStatus::Done,
+                    ),
                 ],
             )
         });
@@ -249,13 +263,21 @@ mod tests {
                 std::env::temp_dir(),
                 vec![
                     ActivitySurface::new(
+                        ActivityRef::Open(1),
                         Icon::MessageSquare,
                         "Waiting agent",
                         "/repo",
                         ActivityStatus::NeedsInput,
                     ),
-                    ActivitySurface::new(Icon::File, "Idle surface", "/repo", ActivityStatus::Idle),
                     ActivitySurface::new(
+                        ActivityRef::Open(2),
+                        Icon::File,
+                        "Idle surface",
+                        "/repo",
+                        ActivityStatus::Idle,
+                    ),
+                    ActivitySurface::new(
+                        ActivityRef::Open(3),
                         Icon::MessageSquare,
                         "Running agent",
                         "/repo",
@@ -287,6 +309,74 @@ mod tests {
         assert!(
             cx.debug_bounds("activity-running-spinner-1").is_none(),
             "Idle does not draw the running spinner"
+        );
+    }
+
+    /// The row carries an identity, not a slot. The list crosses worktrees, so
+    /// the second row's position says nothing about which surface the host must
+    /// act on; a row that emitted its index here would select the selected
+    /// worktree's tab 1, not the parked one the user clicked.
+    #[gpui::test]
+    async fn an_activity_row_emits_the_reference_it_was_given_not_its_position(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(|cx| PanelView::set(PanelView::Activity, cx));
+        let window = cx.add_window(|_window, _cx| {
+            RightPanel::with_activity(
+                std::env::temp_dir(),
+                vec![
+                    ActivitySurface::new(
+                        ActivityRef::Open(42),
+                        Icon::MessageSquare,
+                        "Selected worktree",
+                        "/repo",
+                        ActivityStatus::Running,
+                    ),
+                    ActivitySurface::new(
+                        ActivityRef::Parked {
+                            worktree: "/w/other".into(),
+                            index: 7,
+                        },
+                        Icon::SquareTerminal,
+                        "Other worktree",
+                        "/w/other",
+                        ActivityStatus::Idle,
+                    ),
+                ],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let panel = cx.update(|window, _| {
+            window
+                .root::<RightPanel>()
+                .flatten()
+                .expect("panel root")
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &RightPanelEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let second = cx
+            .debug_bounds("activity-1")
+            .expect("the second activity row is drawn");
+        cx.simulate_click(second.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let expected = vec![RightPanelEvent::SelectActivity(ActivityRef::Parked {
+            worktree: "/w/other".into(),
+            index: 7,
+        })];
+        assert_eq!(
+            *events.borrow(),
+            expected,
+            "the clicked row emits the surface it names, not its position"
         );
     }
 }
