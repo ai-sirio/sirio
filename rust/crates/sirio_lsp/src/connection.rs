@@ -16,9 +16,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::LspError;
 use crate::framing::{read_message, write_message};
 use crate::message::{Incoming, RequestId, ResponseError};
-use crate::LspError;
 
 type Pending = Arc<Mutex<HashMap<String, async_channel::Sender<Result<Value, ResponseError>>>>>;
 
@@ -116,7 +116,8 @@ impl Client {
         method: &'static str,
         params: P,
     ) -> Result<T, LspError> {
-        self.request_with_timeout(method, params, REQUEST_TIMEOUT).await
+        self.request_with_timeout(method, params, REQUEST_TIMEOUT)
+            .await
     }
 
     /// The timeout is a parameter so tests can use milliseconds where the
@@ -158,7 +159,9 @@ impl Client {
 
         match received {
             Ok(Ok(value)) => serde_json::from_value(value).map_err(|error| {
-                LspError::Transport(format!("`{method}` answered with unexpected shape: {error}"))
+                LspError::Transport(format!(
+                    "`{method}` answered with unexpected shape: {error}"
+                ))
             }),
             // A zero code is this crate's own marker for "the connection
             // died underneath you", set by `fail_all_pending`.
@@ -211,15 +214,20 @@ pub(crate) mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    use futures::stream::StreamExt;
     use futures::TryStreamExt;
+    use futures::stream::StreamExt;
 
     /// One direction of an in-memory pipe: bytes written to the returned
     /// writer come out of the returned reader. This is what keeps the whole
     /// protocol suite process-free — and therefore fast and deterministic.
-    fn async_pipe() -> (PipeWriter, impl futures::io::AsyncRead + Unpin + Send + 'static) {
+    fn async_pipe() -> (
+        PipeWriter,
+        impl futures::io::AsyncRead + Unpin + Send + 'static,
+    ) {
         let (sender, receiver) = futures::channel::mpsc::unbounded::<Vec<u8>>();
-        let reader = receiver.map(Ok::<Vec<u8>, std::io::Error>).into_async_read();
+        let reader = receiver
+            .map(Ok::<Vec<u8>, std::io::Error>)
+            .into_async_read();
         (PipeWriter(sender), reader)
     }
 
@@ -233,9 +241,9 @@ pub(crate) mod tests {
         ) -> Poll<std::io::Result<usize>> {
             // Unbounded, so this never returns Pending — which is exactly
             // why no waker bookkeeping is needed here.
-            self.0.unbounded_send(buf.to_vec()).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed")
-            })?;
+            self.0
+                .unbounded_send(buf.to_vec())
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed"))?;
             Poll::Ready(Ok(buf.len()))
         }
 
@@ -282,7 +290,10 @@ pub(crate) mod tests {
                 }
                 for reply in replies {
                     let bytes = serde_json::to_vec(&reply).unwrap();
-                    if crate::framing::write_message(&mut writer, &bytes).await.is_err() {
+                    if crate::framing::write_message(&mut writer, &bytes)
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -308,17 +319,24 @@ pub(crate) mod tests {
             })
             .await;
 
-            let value: serde_json::Value =
-                client.request("textDocument/hover", serde_json::json!({})).await.unwrap();
+            let value: serde_json::Value = client
+                .request("textDocument/hover", serde_json::json!({}))
+                .await
+                .unwrap();
             assert_eq!(value, serde_json::json!({"echo": "textDocument/hover"}));
         });
     }
 
     #[test]
-    fn two_requests_answered_out_of_order_each_get_their_own_response() {
-        // The correlation map earns its keep here: a server is free to
-        // answer the second request first, and a client that assumed FIFO
-        // would hand each caller the other one's answer.
+    fn two_concurrent_requests_each_receive_their_own_id() {
+        // The correlation map earns its keep here: two requests are in
+        // flight at once and each must get the answer bearing its own id.
+        //
+        // Note what this does NOT prove: the scripted peer answers each
+        // request as it arrives, so the replies happen to come back in
+        // order. Proving out-of-order delivery would need a peer that held
+        // the first request and answered the second first. The id check
+        // below still fails any implementation pairing by arrival order.
         futures::executor::block_on(async {
             let (client, _incoming) = with_scripted_server(|request| {
                 let id = request["id"].clone();
@@ -373,8 +391,10 @@ pub(crate) mod tests {
             })
             .await;
 
-            let _: serde_json::Value =
-                client.request("anything", serde_json::json!({})).await.unwrap();
+            let _: serde_json::Value = client
+                .request("anything", serde_json::json!({}))
+                .await
+                .unwrap();
             let notification = incoming.recv().await.unwrap();
             assert!(matches!(
                 notification,
@@ -400,8 +420,10 @@ pub(crate) mod tests {
             })
             .await;
 
-            let _: serde_json::Value =
-                client.request("anything", serde_json::json!({})).await.unwrap();
+            let _: serde_json::Value = client
+                .request("anything", serde_json::json!({}))
+                .await
+                .unwrap();
             let received = incoming.recv().await.unwrap();
             assert!(matches!(
                 received,
@@ -431,7 +453,12 @@ pub(crate) mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error, LspError::Timeout { method: "textDocument/hover" }),
+                matches!(
+                    error,
+                    LspError::Timeout {
+                        method: "textDocument/hover"
+                    }
+                ),
                 "the timeout must name the method that went unanswered, got {error}"
             );
         });
@@ -455,7 +482,10 @@ pub(crate) mod tests {
                     std::time::Duration::from_millis(50),
                 )
                 .await;
-            assert!(client.pending_is_empty(), "the timed-out request must be unregistered");
+            assert!(
+                client.pending_is_empty(),
+                "the timed-out request must be unregistered"
+            );
         });
     }
 

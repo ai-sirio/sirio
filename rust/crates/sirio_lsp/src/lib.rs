@@ -20,6 +20,7 @@ mod position;
 mod server;
 
 pub use connection::{Client, Connection};
+pub use lifecycle::{Capabilities, initialize, shutdown};
 pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
 pub use position::LineIndex;
