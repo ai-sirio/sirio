@@ -147,6 +147,7 @@ jobs:
           bash Scripts/Tests/test-build-appimage.sh
           bash Scripts/Tests/test-release-workflow.sh
           bash Scripts/Tests/test-nightly-workflow.sh
+          bash Scripts/Tests/test-pr-workflow.sh
           bash Scripts/Tests/test-generate-changelog.sh
 
       - name: Install Rust toolchain

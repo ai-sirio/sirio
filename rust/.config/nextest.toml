@@ -45,6 +45,43 @@ retries = 2
 # and still run here.
 default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers)'
 
+[profile.pr]
+# .github/workflows/pr.yml selects this profile, by way of Scripts/ci.sh mapping
+# SIRIO_CI_PR_GATE=1 onto it. Nothing else does.
+#
+# It differs from `default` in exactly one way and from `ci` in exactly one
+# other, and both differences are the point.
+#
+# Like `ci`, it skips the two `sirio_agents` conformance tests, for the same
+# reason spelled out above: they cross-check an adapter's `builtin_acp()` claim
+# against the CLI actually installed on the machine, and a hosted runner has
+# none of them installed. That is not a hypothetical here --
+# `oh_my_pi_is_only_claimed_once_it_answers` is the test that went red on this
+# gate's very first run, on a runner with no `omp`, and it would have gone red
+# on every run after it. A pull request must no more be stopped by which
+# binaries a runner happens to carry than a release must.
+#
+# Unlike `ci`, it retries nothing. Those two retries exist so a *release* does
+# not die of one timing flake on a machine compiling two thousand tests at
+# once. A pull request is the last run where the developer who caused a flake
+# can still see it, so hiding it here would cost exactly what the retries
+# elsewhere are worth.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers)'
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The two overrides below are declared on `default` and do not inherit, so the
+# PTY group and the perf tests' exclusive scheduling are repeated here. Losing
+# them would turn this gate's wall-clock-sensitive tests into the crowd those
+# overrides exist to prevent.
+[[profile.pr.overrides]]
+filter = 'test(/perf_/)'
+threads-required = 'num-test-threads'
+
+[[profile.pr.overrides]]
+filter = 'test(/real_pty|view_tests::|settle|scrollback/)'
+test-group = 'pty'
+
 [test-groups]
 # Tests that spawn a real PTY and wait for its output to settle are asserting
 # on wall-clock behaviour. Run a dozen of them at once and they take the
