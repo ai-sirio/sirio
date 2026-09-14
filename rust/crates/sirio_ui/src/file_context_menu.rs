@@ -179,6 +179,105 @@ fn disabled_reason(action: FileContextAction, facts: &FileContextFacts) -> Optio
     }
 }
 
+/// Drops the indentation every non-blank line shares, so a snippet copied out
+/// of a nested block pastes flush left.
+pub fn trim_common_indent(text: &str) -> String {
+    let indent = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(leading_whitespace)
+        .reduce(common_prefix)
+        .unwrap_or("");
+    if indent.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(line.strip_prefix(indent).unwrap_or_else(|| line.trim_start()));
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Indentation is ASCII whitespace, so byte slicing is character-safe here.
+fn leading_whitespace(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+fn common_prefix<'a>(left: &'a str, right: &'a str) -> &'a str {
+    let shared = left
+        .bytes()
+        .zip(right.bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    &left[..shared]
+}
+
+/// What "Add to Agent Thread" hands over: where the code is, then the code.
+/// The location leads so the agent can act on the file rather than on a
+/// floating quotation.
+pub fn agent_payload(path: &str, lines: (usize, usize), text: &str, language: &str) -> String {
+    let location = if lines.0 == lines.1 {
+        format!("{path}:{}", lines.0)
+    } else {
+        format!("{path}:{}-{}", lines.0, lines.1)
+    };
+    let fence = "`".repeat(longest_backtick_run(text).max(2) + 1);
+    let body = text.trim_end_matches('\n');
+    format!("{location}\n\n{fence}{language}\n{body}\n{fence}\n")
+}
+
+fn longest_backtick_run(text: &str) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    for byte in text.bytes() {
+        if byte == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    longest
+}
+
+/// A GitHub blob URL pinned to a commit, so it keeps resolving after the
+/// branch moves.
+pub fn permalink(
+    owner: &str,
+    project: &str,
+    sha: &str,
+    repo_relative_path: &str,
+    lines: (usize, usize),
+) -> String {
+    let path = repo_relative_path
+        .split('/')
+        .map(escape_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    let anchor = if lines.0 == lines.1 {
+        format!("#L{}", lines.0)
+    } else {
+        format!("#L{}-L{}", lines.0, lines.1)
+    };
+    format!("https://github.com/{owner}/{project}/blob/{sha}/{path}{anchor}")
+}
+
+/// Only the characters that would break the URL itself: a space ends it, a
+/// `#` starts the fragment, a `?` starts the query.
+fn escape_segment(segment: &str) -> String {
+    segment
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23")
+        .replace('?', "%3F")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +408,77 @@ mod tests {
             assert_eq!(item.route, expected, "wrong route for {}", item.label);
         }
     }
+#[test]
+fn trimming_removes_the_indentation_every_line_shares() {
+    let text = "    let a = 1;\n    let b = 2;\n";
+    assert_eq!(trim_common_indent(text), "let a = 1;\nlet b = 2;\n");
 }
 
+#[test]
+fn trimming_keeps_relative_indentation() {
+    let text = "    if x {\n        y();\n    }\n";
+    assert_eq!(trim_common_indent(text), "if x {\n    y();\n}\n");
+}
+
+#[test]
+fn a_line_at_column_zero_means_nothing_is_trimmed() {
+    let text = "fn main() {\n    body();\n}\n";
+    assert_eq!(trim_common_indent(text), text);
+}
+
+#[test]
+fn blank_lines_do_not_defeat_trimming_and_stay_blank() {
+    let text = "    a\n\n    b\n";
+    assert_eq!(trim_common_indent(text), "a\n\nb\n");
+}
+
+#[test]
+fn tabs_are_trimmed_as_the_characters_they_are() {
+    let text = "\t\tone\n\t\ttwo\n";
+    assert_eq!(trim_common_indent(text), "one\ntwo\n");
+}
+
+#[test]
+fn the_agent_gets_a_located_reference_not_orphan_text() {
+    let payload = agent_payload("src/lib.rs", (42, 58), "let a = 1;", "rust");
+    assert_eq!(payload, "src/lib.rs:42-58\n\n```rust\nlet a = 1;\n```\n");
+}
+
+#[test]
+fn a_one_line_reference_names_a_single_line() {
+    let payload = agent_payload("src/lib.rs", (42, 42), "let a = 1;", "rust");
+    assert!(payload.starts_with("src/lib.rs:42\n"), "got {payload:?}");
+}
+
+#[test]
+fn a_selection_containing_a_fence_is_wrapped_in_a_longer_one() {
+    let payload = agent_payload("notes.md", (1, 3), "```\ncode\n```", "markdown");
+    assert!(payload.contains("````markdown\n"), "got {payload:?}");
+    assert!(payload.trim_end().ends_with("````"), "got {payload:?}");
+}
+
+#[test]
+fn a_permalink_points_at_a_commit_and_a_line_range() {
+    assert_eq!(
+        permalink("ai-sirio", "sirio", "abc123", "rust/crates/sirio_ui/src/lib.rs", (10, 12)),
+        "https://github.com/ai-sirio/sirio/blob/abc123/rust/crates/sirio_ui/src/lib.rs#L10-L12"
+    );
+}
+
+#[test]
+fn a_single_line_permalink_has_one_anchor() {
+    assert!(
+        permalink("o", "p", "sha", "a.rs", (7, 7)).ends_with("#L7"),
+        "a one-line selection must not produce a range anchor"
+    );
+}
+
+#[test]
+fn a_path_with_a_space_is_escaped() {
+    assert!(
+        permalink("o", "p", "sha", "my notes/a b.md", (1, 1))
+            .contains("/my%20notes/a%20b.md#L1"),
+        "spaces must be percent-encoded"
+    );
+}
+}
