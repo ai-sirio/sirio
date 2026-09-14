@@ -5961,8 +5961,8 @@ impl SirioWorkspace {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
                     }
                 }
-                FileViewEvent::ViewFileHistory(_) => {
-                    // Task 11.
+                FileViewEvent::ViewFileHistory(path) => {
+                    workspace.show_file_history(path.clone(), cx);
                 }
             },
         )
@@ -6014,6 +6014,28 @@ impl SirioWorkspace {
             });
             chat
         })
+    }
+
+    /// Reveals the History panel for the worktree `path` belongs to. The path
+    /// is resolved repo-relative because `git log -- <path>` answers against
+    /// the repository root, not the process's working directory.
+    ///
+    /// Filtering the panel down to this one file still needs a bridge the
+    /// panel does not expose: `GitHistory` is `pub(crate)` in sirio_ui's
+    /// private `right_panel::history` module, so `show_only_path` is
+    /// unreachable from here. This reveals the worktree's history; the
+    /// one-line filter lands as soon as the panel exposes its history entity.
+    fn show_file_history(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // Outside every known worktree there is no repository whose history
+        // could be shown.
+        let Some(root) = self.worktree_root_for(&path) else {
+            return;
+        };
+        // Repo-relative form, ready for the day the panel accepts a path filter.
+        let _relative = path.strip_prefix(&root).ok();
+        self.right_panel_visible = true;
+        sirio_ui::right_panel::PanelView::set(sirio_ui::right_panel::PanelView::History, cx);
+        cx.notify();
     }
 
     /// The GitHub blob URL for `path`, pinned to the worktree's current HEAD.
@@ -31940,6 +31962,41 @@ mod tests {
         assert!(
             !facts.in_git_repo && !facts.has_github_remote,
             "a file under no known worktree is in no repository: {facts:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn viewing_a_file_s_history_reveals_the_history_panel(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("file-history-reveal");
+        let file = repo.join("README.md");
+        let workspace = cx.new(|cx| {
+            let mut workspace = worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            );
+            workspace.right_panel_visible = false;
+            workspace
+        });
+        cx.run_until_parked();
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_file_history(file.clone(), cx);
+        });
+        let visible =
+            workspace.read_with(cx, |workspace, _| workspace.right_panel_visible);
+        assert!(
+            visible,
+            "viewing a file's history must reveal the right panel"
+        );
+        let view = cx.update(|cx| right_panel::PanelView::get(cx));
+        assert_eq!(
+            view,
+            right_panel::PanelView::History,
+            "viewing a file's history must switch the right panel to History"
         );
     }
 
