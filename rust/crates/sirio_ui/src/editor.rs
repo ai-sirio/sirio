@@ -242,6 +242,27 @@ impl Selection {
     }
 }
 
+/// The 1-based, inclusive line numbers `selection` covers in `buffer`.
+///
+/// A selection that ends exactly on a newline stops at the line that newline
+/// closes: selecting a whole line reports one line, not two.
+pub fn line_range_for(buffer: &str, selection: Selection) -> (usize, usize) {
+    let start_line = newline_count(&buffer[..selection.start]) + 1;
+    if selection.is_collapsed() {
+        return (start_line, start_line);
+    }
+    let head = &buffer[..selection.end];
+    let mut end_line = newline_count(head) + 1;
+    if head.ends_with('\n') {
+        end_line -= 1;
+    }
+    (start_line, end_line.max(start_line))
+}
+
+fn newline_count(text: &str) -> usize {
+    text.bytes().filter(|byte| *byte == b'\n').count()
+}
+
 /// Why the editor is not showing editable content. Distinct from
 /// [`Conflict`], which is about the file *changing* while open.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1931,5 +1952,48 @@ mod tests {
         // Component-wise (not byte-wise, which would split on the
         // platform's separator): the joined suffix is the relative input.
         assert!(Path::new(&absolutized).ends_with(relative));
+    }
+
+    /// Tests for `line_range_for`, kept in a module named after the function
+    /// under test so its name is part of each test's path — libtest filters
+    /// on the path, and `cargo test -p sirio_ui line_range_for` selects
+    /// exactly these five.
+    mod line_range_for {
+        use super::*;
+
+        #[test]
+        fn a_caret_in_an_empty_buffer_is_on_line_one() {
+            assert_eq!(line_range_for("", Selection::point(0)), (1, 1));
+        }
+
+        #[test]
+        fn a_selection_inside_one_line_spans_that_line_only() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            let selection = Selection::new(buffer, 6, 10).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (2, 2));
+        }
+
+        #[test]
+        fn a_selection_crossing_a_newline_spans_both_lines() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            let selection = Selection::new(buffer, 2, 8).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (1, 2));
+        }
+
+        #[test]
+        fn a_selection_ending_on_a_newline_does_not_claim_the_next_line() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            // "alpha\n" — the trailing newline must not drag line 2 in.
+            let selection = Selection::new(buffer, 0, 6).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (1, 1));
+        }
+
+        #[test]
+        fn multibyte_text_before_the_selection_does_not_shift_the_count() {
+            let buffer = "però\nsecond\n";
+            let start = buffer.find("second").expect("present");
+            let selection = Selection::new(buffer, start, start + 6).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (2, 2));
+        }
     }
 }
