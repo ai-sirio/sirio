@@ -43,7 +43,8 @@ use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
-    editor::fs_actions::open_command as platform_open_command,
+    editor::fs_actions::{open_command as platform_open_command, reveal_command},
+    file_context_menu::FileContextFacts,
     file_view::{FileView, FileViewEvent},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
@@ -5923,9 +5924,93 @@ impl SirioWorkspace {
             file_view,
             |workspace, _, event: &FileViewEvent, cx| match event {
                 FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                FileViewEvent::RevealInFileManager(path) => {
+                    if let Some(mut command) = reveal_command(path) {
+                        command
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        let _ = command.spawn();
+                    }
+                }
+                FileViewEvent::OpenInTerminal(path) => {
+                    let directory = path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| path.clone());
+                    workspace.open_terminal_in(directory, cx);
+                }
+                FileViewEvent::SendSelectionToAgent { .. }
+                | FileViewEvent::CopyPermalink { .. }
+                | FileViewEvent::ViewFileHistory(_) => {
+                    // Tasks 9, 10 and 11.
+                }
             },
         )
         .detach();
+    }
+
+    /// The context-menu facts only this workspace can answer. `in_git_repo`
+    /// is decided from the worktree rows already held, not from a
+    /// subprocess; only the GitHub check shells out, and only once per
+    /// worktree rather than once per right-click.
+    fn file_context_facts(&self, path: &Path) -> FileContextFacts {
+        let worktree = self.worktree_root_for(path);
+        let has_github_remote = worktree
+            .as_deref()
+            .is_some_and(|repo| sirio_git::github_owner(repo).is_some());
+        FileContextFacts {
+            in_git_repo: worktree.is_some(),
+            has_github_remote,
+            has_agent_chat: self.active_chat_for(path).is_some(),
+            // Answered by the view itself; see `FileView::menu_facts`.
+            has_selection: false,
+            is_markdown: false,
+        }
+    }
+
+    /// The ACP chat of the worktree this file belongs to, if one is open.
+    /// Terminal panes are deliberately not candidates: pasting into a busy
+    /// agent's PTY is interference Sirio avoids everywhere else.
+    fn active_chat_for(&self, path: &Path) -> Option<Entity<Chat>> {
+        let worktree = self.worktree_root_for(path)?;
+        self.tabs.iter().find_map(|tab| {
+            if tab.kind != TabKind::AgentChat {
+                return None;
+            }
+            let owned = self
+                .tab_worktree_paths
+                .get(&tab.id)
+                .is_some_and(|owner| paths_name_the_same_document(owner, &worktree));
+            if !owned {
+                return None;
+            }
+            let mut chat = None;
+            tab.panes.for_each(&mut |_, content| {
+                if chat.is_none()
+                    && let TabContent::Chat(entity) = content
+                {
+                    chat = Some(entity.clone());
+                }
+            });
+            chat
+        })
+    }
+
+    /// The root of the worktree `path` lives under, longest match first so a
+    /// nested worktree wins over the parent it sits inside. The rows live in
+    /// `ControlState::workspaces` (`Vec<ControlWorkspace>`), whose `path` is
+    /// a `String`, not a `PathBuf`; `workspace_rows()` is the control
+    /// socket's wire encoding, not the live rows.
+    fn worktree_root_for(&self, path: &Path) -> Option<PathBuf> {
+        self.control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .workspaces
+            .iter()
+            .map(|workspace| PathBuf::from(&workspace.path))
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())
     }
 
     /// Chat-local edit summaries emit only an intent to open a file; the
@@ -10149,6 +10234,28 @@ impl SirioWorkspace {
         self.add_terminal_tab_with_shell_and_agent(title, shell, agent_icon, None, cx);
     }
 
+    /// A plain terminal tab rooted at `directory` — the file menu's "Open in
+    /// Terminal" lands on the file's own folder, not the worktree root. A
+    /// plain shell, never an agent command: this is navigation, not a launch.
+    fn open_terminal_in(&mut self, directory: PathBuf, cx: &mut Context<Self>) {
+        let title = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terminal".to_owned());
+        let terminal = cx.new(|cx| match TerminalView::with_shell(&directory, TerminalShell::System, cx) {
+            Ok(view) => view,
+            // A PTY can fail to fork for ordinary reasons: the pane shows the
+            // failure and a retry button instead of aborting the app.
+            Err(error) => TerminalView::failed(
+                &directory,
+                TerminalShell::System,
+                format!("{error:#}"),
+                cx,
+            ),
+        });
+        self.insert_terminal_tab(title, terminal, None, cx);
+    }
+
     /// Like `add_terminal_tab_with_shell`, but also threads the agent id
     /// through to `insert_terminal_tab` so the very first `schedule_save`
     /// snapshot already carries it. F-AGENT-OPENCODE-01: setting
@@ -10287,8 +10394,10 @@ impl SirioWorkspace {
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
+        let facts = self.file_context_facts(&path);
         let view = cx.new(|cx| FileView::new(path, cx));
         Self::subscribe_file_view(&view, cx);
+        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
@@ -31770,6 +31879,22 @@ mod tests {
         cx.run_until_parked();
         drop(workspace);
         let _ = std::fs::remove_dir_all(&scratch_root);
+    }
+
+    #[gpui::test]
+    fn a_file_outside_every_worktree_offers_neither_git_entry(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let repo = test_repo("file-facts-no-worktrees");
+            worktree_state_test_workspace(cx, &repo, vec![])
+        });
+        cx.run_until_parked();
+        let outside = std::path::Path::new("/tmp/not-a-worktree/loose.rs");
+        let facts =
+            workspace.read_with(cx, |workspace, _| workspace.file_context_facts(outside));
+        assert!(
+            !facts.in_git_repo && !facts.has_github_remote,
+            "a file under no known worktree is in no repository: {facts:?}"
+        );
     }
 
     #[gpui::test]
