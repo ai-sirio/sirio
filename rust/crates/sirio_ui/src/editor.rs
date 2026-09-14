@@ -133,6 +133,36 @@ pub enum Language {
 }
 
 impl Language {
+    /// Every variant, in declaration order. Kept exhaustive by hand because
+    /// the compiler does not check array literals the way it checks a
+    /// `match`: a new variant must be added here too.
+    pub const ALL: [Language; 24] = [
+        Language::PlainText,
+        Language::Markdown,
+        Language::Rust,
+        Language::Python,
+        Language::JavaScript,
+        Language::TypeScript,
+        Language::Shell,
+        Language::Json,
+        Language::Yaml,
+        Language::Toml,
+        Language::C,
+        Language::Cpp,
+        Language::Go,
+        Language::Swift,
+        Language::Kotlin,
+        Language::Java,
+        Language::Ruby,
+        Language::Php,
+        Language::Html,
+        Language::Css,
+        Language::Sql,
+        Language::Xml,
+        Language::Lua,
+        Language::Zig,
+    ];
+
     /// Resolves a path's language from its extension, case-insensitively,
     /// falling back to plain text for unknown or absent extensions.
     pub fn from_path(path: &Path) -> Language {
@@ -196,6 +226,38 @@ impl Language {
             Language::Xml => "XML",
             Language::Lua => "Lua",
             Language::Zig => "Zig",
+        }
+    }
+
+    /// The conventional Markdown fence info-string for this language:
+    /// lowercase ASCII, `""` for plain text. [`Language::name`] is for the
+    /// status line and is wrong here ("C++", "JSON" are not valid tags).
+    pub fn fence_tag(&self) -> &'static str {
+        match self {
+            Language::PlainText => "",
+            Language::Markdown => "markdown",
+            Language::Rust => "rust",
+            Language::Python => "python",
+            Language::JavaScript => "javascript",
+            Language::TypeScript => "typescript",
+            Language::Shell => "bash",
+            Language::Json => "json",
+            Language::Yaml => "yaml",
+            Language::Toml => "toml",
+            Language::C => "c",
+            Language::Cpp => "cpp",
+            Language::Go => "go",
+            Language::Swift => "swift",
+            Language::Kotlin => "kotlin",
+            Language::Java => "java",
+            Language::Ruby => "ruby",
+            Language::Php => "php",
+            Language::Html => "html",
+            Language::Css => "css",
+            Language::Sql => "sql",
+            Language::Xml => "xml",
+            Language::Lua => "lua",
+            Language::Zig => "zig",
         }
     }
 
@@ -1994,6 +2056,42 @@ mod tests {
             let start = buffer.find("second").expect("present");
             let selection = Selection::new(buffer, start, start + 6).expect("valid range");
             assert_eq!(line_range_for(buffer, selection), (2, 2));
+        }
+    }
+
+    /// Tests for `fence_tag`, kept in a module named after the method under
+    /// test so its name is part of each test's path — libtest filters on the
+    /// path, and `cargo test -p sirio_ui fence_tag` selects exactly these
+    /// four. A flat test name would select none and report a false green.
+    mod fence_tag {
+        use super::*;
+
+        #[test]
+        fn the_readable_cpp_name_is_not_its_markdown_tag() {
+            assert_eq!(Language::Cpp.name(), "C++");
+            assert_eq!(Language::Cpp.fence_tag(), "cpp");
+        }
+
+        #[test]
+        fn plain_text_has_no_fence_tag_at_all() {
+            assert_eq!(Language::PlainText.fence_tag(), "");
+        }
+
+        #[test]
+        fn the_shell_tag_is_the_conventional_bash() {
+            assert_eq!(Language::Shell.fence_tag(), "bash");
+        }
+
+        #[test]
+        fn every_tag_is_either_empty_or_lowercase_ascii() {
+            for language in Language::ALL {
+                let tag = language.fence_tag();
+                assert!(
+                    tag.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                    "{language:?} has a non-conventional fence tag: {tag:?}"
+                );
+            }
         }
     }
 }
