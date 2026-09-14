@@ -13,9 +13,11 @@
 //! `sirio_activity` stays window-free.
 
 mod framing;
+mod message;
 mod position;
 
 pub use lsp_types;
+pub use message::{Incoming, RequestId, ResponseError};
 pub use position::LineIndex;
 
 /// Everything that can go wrong below the UI.
