@@ -5940,10 +5940,24 @@ impl SirioWorkspace {
                         .unwrap_or_else(|| path.clone());
                     workspace.open_terminal_in(directory, cx);
                 }
-                FileViewEvent::SendSelectionToAgent { .. }
-                | FileViewEvent::CopyPermalink { .. }
-                | FileViewEvent::ViewFileHistory(_) => {
-                    // Tasks 9, 10 and 11.
+                FileViewEvent::SendSelectionToAgent {
+                    path,
+                    lines,
+                    text,
+                    language,
+                } => {
+                    if let Some(chat) = workspace.active_chat_for(path) {
+                        let label = workspace
+                            .repo_relative(path)
+                            .unwrap_or_else(|| path.display().to_string());
+                        let payload = sirio_ui::file_context_menu::agent_payload(
+                            &label, *lines, text, language,
+                        );
+                        chat.update(cx, |chat, cx| chat.control_append(&payload, cx));
+                    }
+                }
+                FileViewEvent::CopyPermalink { .. } | FileViewEvent::ViewFileHistory(_) => {
+                    // Tasks 10 and 11.
                 }
             },
         )
@@ -5995,6 +6009,13 @@ impl SirioWorkspace {
             });
             chat
         })
+    }
+
+    /// `path` relative to its worktree root, for a reference an agent can act
+    /// on. `None` when the file is under no known worktree.
+    fn repo_relative(&self, path: &Path) -> Option<String> {
+        let root = self.worktree_root_for(path)?;
+        Some(path.strip_prefix(&root).ok()?.display().to_string())
     }
 
     /// The root of the worktree `path` lives under, longest match first so a
