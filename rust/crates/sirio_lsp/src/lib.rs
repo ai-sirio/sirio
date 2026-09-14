@@ -14,6 +14,7 @@
 
 mod connection;
 mod framing;
+mod lifecycle;
 mod message;
 mod position;
 
