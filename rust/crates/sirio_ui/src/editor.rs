@@ -133,6 +133,36 @@ pub enum Language {
 }
 
 impl Language {
+    /// Every variant, in declaration order. Kept exhaustive by hand because
+    /// the compiler does not check array literals the way it checks a
+    /// `match`: a new variant must be added here too.
+    pub const ALL: [Language; 24] = [
+        Language::PlainText,
+        Language::Markdown,
+        Language::Rust,
+        Language::Python,
+        Language::JavaScript,
+        Language::TypeScript,
+        Language::Shell,
+        Language::Json,
+        Language::Yaml,
+        Language::Toml,
+        Language::C,
+        Language::Cpp,
+        Language::Go,
+        Language::Swift,
+        Language::Kotlin,
+        Language::Java,
+        Language::Ruby,
+        Language::Php,
+        Language::Html,
+        Language::Css,
+        Language::Sql,
+        Language::Xml,
+        Language::Lua,
+        Language::Zig,
+    ];
+
     /// Resolves a path's language from its extension, case-insensitively,
     /// falling back to plain text for unknown or absent extensions.
     pub fn from_path(path: &Path) -> Language {
@@ -199,6 +229,38 @@ impl Language {
         }
     }
 
+    /// The conventional Markdown fence info-string for this language:
+    /// lowercase ASCII, `""` for plain text. [`Language::name`] is for the
+    /// status line and is wrong here ("C++", "JSON" are not valid tags).
+    pub fn fence_tag(&self) -> &'static str {
+        match self {
+            Language::PlainText => "",
+            Language::Markdown => "markdown",
+            Language::Rust => "rust",
+            Language::Python => "python",
+            Language::JavaScript => "javascript",
+            Language::TypeScript => "typescript",
+            Language::Shell => "bash",
+            Language::Json => "json",
+            Language::Yaml => "yaml",
+            Language::Toml => "toml",
+            Language::C => "c",
+            Language::Cpp => "cpp",
+            Language::Go => "go",
+            Language::Swift => "swift",
+            Language::Kotlin => "kotlin",
+            Language::Java => "java",
+            Language::Ruby => "ruby",
+            Language::Php => "php",
+            Language::Html => "html",
+            Language::Css => "css",
+            Language::Sql => "sql",
+            Language::Xml => "xml",
+            Language::Lua => "lua",
+            Language::Zig => "zig",
+        }
+    }
+
     pub fn is_plain_text(&self) -> bool {
         matches!(self, Language::PlainText)
     }
@@ -240,6 +302,27 @@ impl Selection {
     pub fn text<'a>(&self, buffer: &'a str) -> &'a str {
         &buffer[self.start..self.end]
     }
+}
+
+/// The 1-based, inclusive line numbers `selection` covers in `buffer`.
+///
+/// A selection that ends exactly on a newline stops at the line that newline
+/// closes: selecting a whole line reports one line, not two.
+pub fn line_range_for(buffer: &str, selection: Selection) -> (usize, usize) {
+    let start_line = newline_count(&buffer[..selection.start]) + 1;
+    if selection.is_collapsed() {
+        return (start_line, start_line);
+    }
+    let head = &buffer[..selection.end];
+    let mut end_line = newline_count(head) + 1;
+    if head.ends_with('\n') {
+        end_line -= 1;
+    }
+    (start_line, end_line.max(start_line))
+}
+
+fn newline_count(text: &str) -> usize {
+    text.bytes().filter(|byte| *byte == b'\n').count()
 }
 
 /// Why the editor is not showing editable content. Distinct from
@@ -1931,5 +2014,84 @@ mod tests {
         // Component-wise (not byte-wise, which would split on the
         // platform's separator): the joined suffix is the relative input.
         assert!(Path::new(&absolutized).ends_with(relative));
+    }
+
+    /// Tests for `line_range_for`, kept in a module named after the function
+    /// under test so its name is part of each test's path — libtest filters
+    /// on the path, and `cargo test -p sirio_ui line_range_for` selects
+    /// exactly these five.
+    mod line_range_for {
+        use super::*;
+
+        #[test]
+        fn a_caret_in_an_empty_buffer_is_on_line_one() {
+            assert_eq!(line_range_for("", Selection::point(0)), (1, 1));
+        }
+
+        #[test]
+        fn a_selection_inside_one_line_spans_that_line_only() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            let selection = Selection::new(buffer, 6, 10).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (2, 2));
+        }
+
+        #[test]
+        fn a_selection_crossing_a_newline_spans_both_lines() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            let selection = Selection::new(buffer, 2, 8).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (1, 2));
+        }
+
+        #[test]
+        fn a_selection_ending_on_a_newline_does_not_claim_the_next_line() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            // "alpha\n" — the trailing newline must not drag line 2 in.
+            let selection = Selection::new(buffer, 0, 6).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (1, 1));
+        }
+
+        #[test]
+        fn multibyte_text_before_the_selection_does_not_shift_the_count() {
+            let buffer = "però\nsecond\n";
+            let start = buffer.find("second").expect("present");
+            let selection = Selection::new(buffer, start, start + 6).expect("valid range");
+            assert_eq!(line_range_for(buffer, selection), (2, 2));
+        }
+    }
+
+    /// Tests for `fence_tag`, kept in a module named after the method under
+    /// test so its name is part of each test's path — libtest filters on the
+    /// path, and `cargo test -p sirio_ui fence_tag` selects exactly these
+    /// four. A flat test name would select none and report a false green.
+    mod fence_tag {
+        use super::*;
+
+        #[test]
+        fn the_readable_cpp_name_is_not_its_markdown_tag() {
+            assert_eq!(Language::Cpp.name(), "C++");
+            assert_eq!(Language::Cpp.fence_tag(), "cpp");
+        }
+
+        #[test]
+        fn plain_text_has_no_fence_tag_at_all() {
+            assert_eq!(Language::PlainText.fence_tag(), "");
+        }
+
+        #[test]
+        fn the_shell_tag_is_the_conventional_bash() {
+            assert_eq!(Language::Shell.fence_tag(), "bash");
+        }
+
+        #[test]
+        fn every_tag_is_either_empty_or_lowercase_ascii() {
+            for language in Language::ALL {
+                let tag = language.fence_tag();
+                assert!(
+                    tag.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                    "{language:?} has a non-conventional fence tag: {tag:?}"
+                );
+            }
+        }
     }
 }

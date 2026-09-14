@@ -66,7 +66,7 @@ pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
 pub use graph::{GraphRow, LayoutChunk, LayoutCursor, extend_layout, layout};
 pub use ignored::{IgnoredPaths, ignored_paths, parse_ignored};
 pub use log::{CommitRecord, GitLog, LogFilter, looks_like_hash, parse_log};
-pub use remote::{GitRemote, github_owner, project_name};
+pub use remote::{GitRemote, github_owner, head_sha, origin_url, project_name};
 pub use side_by_side::{
     DiffSideBySideLine, DiffSideBySideRow, GitDiffSideBySide, GitDiffSideBySideLine,
     GitDiffSideBySideRow, side_by_side_rows,
