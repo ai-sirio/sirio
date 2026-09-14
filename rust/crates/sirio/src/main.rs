@@ -5956,8 +5956,13 @@ impl SirioWorkspace {
                         chat.update(cx, |chat, cx| chat.control_append(&payload, cx));
                     }
                 }
-                FileViewEvent::CopyPermalink { .. } | FileViewEvent::ViewFileHistory(_) => {
-                    // Tasks 10 and 11.
+                FileViewEvent::CopyPermalink { path, lines } => {
+                    if let Some(url) = workspace.permalink_for(path, *lines) {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+                    }
+                }
+                FileViewEvent::ViewFileHistory(_) => {
+                    // Task 11.
                 }
             },
         )
@@ -6009,6 +6014,26 @@ impl SirioWorkspace {
             });
             chat
         })
+    }
+
+    /// The GitHub blob URL for `path`, pinned to the worktree's current HEAD.
+    /// `None` when the file is under no worktree, the remote is not GitHub,
+    /// or HEAD is unborn — each of which the menu already reports as a
+    /// disabled reason, so silence here is the honest answer.
+    fn permalink_for(&self, path: &Path, lines: (usize, usize)) -> Option<String> {
+        let root = self.worktree_root_for(path)?;
+        let repo = root.as_path();
+        let owner = sirio_git::github_owner(repo)?;
+        let project = sirio_git::project_name(&sirio_git::origin_url(repo)?);
+        let sha = sirio_git::head_sha(repo)?;
+        let relative = path
+            .strip_prefix(repo)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        Some(sirio_ui::file_context_menu::permalink(
+            &owner, &project, &sha, &relative, lines,
+        ))
     }
 
     /// `path` relative to its worktree root, for a reference an agent can act
