@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.14.0",
-  "notes": "Oh-My-Pi now works in chat views as well as in a terminal, and long\ntext in the chat no longer pushes a row's controls past the edge of\nits card.\n\n**Oh-My-Pi over the agent protocol**\n\nOh-My-Pi was reachable only through a terminal pane: the app knew of\nno way to talk to it over the agent protocol, so a chat view with it\nwas never offered. Its binary does serve that protocol through its own\nsubcommand, and the app now uses it — a capability confirmed against a\nreal Oh-My-Pi, not assumed from a description of one.\n\n**Long text stays inside its card**\n\nSeveral chat rows handed their width to text that comes from outside\nthe app: a file path, an edit summary, the label that closes a turn,\nthe title of a saved session. One long enough grew the row instead of\nthe row's controls, and everything on the right — line counts, revert\nand confirm buttons, timestamps, the delete control — was drawn past\nthe card's border, unreadable and unclickable. That text is cut to a\nsingle line with an ellipsis now; the controls keep their place.\n\n**Permission buttons wrap**\n\nA permission request can offer several answers with long labels, and\nthey were laid out on one row that ran off the card. The buttons now\nwrap onto as many lines as they need, so every option stays visible\nand clickable.",
+  "version": "0.15.0",
+  "notes": "The Activity panel now shows everything you have running rather than\nonly the worktree you are looking at, an agent that dies mid-turn says\nwhy, and a chat no longer claims its context is empty when nothing ever\nmeasured it.\n\n**Every running worktree in one list**\n\nThe Activity section listed only the surfaces of the worktree currently\nselected, so everything running elsewhere vanished from the panel the\nmoment you looked at something else. It now lists every mounted\nworktree's surfaces, each row carrying its own project and branch, with\nthe worktrees that want attention first. Selecting a row belonging to\nanother worktree switches there and opens it. Closing one switches there\nfirst and then always asks before closing — the thing being closed is\nsomething you were not looking at a second earlier, and the dialog is\nthe only place that can still say what it is.\n\n**An agent that dies says why**\n\nWhen a chat agent went away in the middle of a turn, the only thing\nshown was that the connection had closed: the same message whether the\nagent had crashed, exited cleanly, or been terminated by Sirio itself.\nThe error now names the cause — the exit code the process reported or\nthe signal that killed it, the agent's own last words from its error\noutput, and, when Sirio's inactivity watchdog was what ended it, that it\nwas the watchdog and after how long.\n\n**Waiting on a permission no longer stalls the session, or kills the agent**\n\nA permission request left open froze the rest of that chat: no further\noutput arrived while the card waited for an answer, and a second request\nfrom the agent could not be answered at all. Worse, that wait counted as\nsilence from the agent, so an agent that had done nothing but ask a\nquestion was killed ten minutes later. Time spent waiting for you is no\nlonger counted against the agent, the session keeps streaming while a\ncard is open, and a card that expires is answered as a refusal rather\nthan as a protocol failure.\n\n**Context reads as unknown instead of zero**\n\nAgents that never report how much of their context window is in use —\nPi among them, whose adapter does not send that figure at all — showed\n`Context 0%`, stating as measurement something nobody had measured. The\nchip now shows a dash, and the details say the agent has not reported a\ncontext window size instead of printing `0 / 0 tokens`. Agents that do\nreport their usage are unchanged.\n\n**Quieter thinking and loading indicators**\n\nThe orbs drawn while an agent is thinking, and while a view is still\nloading, are painted in a neutral gray.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.14.0/Sirio-0.14.0.dmg",
-      "sha256": "4662912c9bd481ac78af2e50784bc46edbc1bbbeaadd824efc77e9638c8b6919",
-      "signature": "4o0/WzOMYzsFbBmP9sqy9nJ18vvQZ+9qwbSHcaAg4RhsbNBaIl0D65IuqZE6Nc+iy8icN/E80luiuaIssKpWDA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.15.0/Sirio-0.15.0.dmg",
+      "sha256": "44413e1d02a834477d42d1a23259f6415bfefd906a6e17b4390f7699309f3f50",
+      "signature": "aJRilcBwooc68CE8ukvTeDOFbAjkjxfuXoTLyszbmGiMPi18hzwKv4nkxTRa+iAG9Ipie+jrY/OMa3Hw3KLUBg=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.14.0/Sirio-0.14.0-x86_64.AppImage",
-      "sha256": "03090b331b19a8810117405745ed22da4deee39089ca21e35b30bfe977b34da5",
-      "signature": "UYxPQw3JAYKAVEiMZmNRLGL3tj8V78aG4ndkB3snzUTU3+GTLQsbDXlLmGL2fH3lIxQ7rhtvMcEu7P/ic4UvBA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.15.0/Sirio-0.15.0-x86_64.AppImage",
+      "sha256": "e00739dd87db92c7c81b8166155acdbb8cf9611d10279c430f553d9cdd90b6c7",
+      "signature": "jgbPGq3B+H1e0lv/DlsKYfPO9E6rfULdZkmdyE1LDSFuI4xONkpyr6a2Nn1XPum271oILEsaPrJtjB77Lu0eAQ=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.14.0/SirioSetup-0.14.0.exe",
-      "sha256": "72f272bb30ebec73029323fd04cfa266678f8b12cc4adcc4021a3575a4c54cef",
-      "signature": "Azclwmi7OVKOJJDMqp7Dg8+liwwfd4fCsLCKXeEdJnrzYiiLyKVvUEizdgdKwZFDEOpBLOnUpby0DKJQ0Q07Dw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.15.0/SirioSetup-0.15.0.exe",
+      "sha256": "a83141fbb880c3230893cfe07f5260f1588e356a4fc69e4fecf997d073650d43",
+      "signature": "JshmlegFLXOBAgh/wG2Kp9z6ZpsJPk5fG8jnzB5+Nfg52MvL8JajprfSMIPFCmLh2IJNeBWXc1yK8zEQzXD+CA=="
     }
   }
 }
