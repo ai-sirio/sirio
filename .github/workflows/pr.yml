@@ -1,0 +1,123 @@
+name: PR gate
+
+# The verification gate every change passes before it reaches `main`.
+#
+# Until this file existed, nothing in .github/workflows ran on a pull request:
+# build-release.yml only ever fires from release.yml (a `v*.*.*` tag) or
+# nightly.yml (a schedule), so the only checks a PR ever showed were CodeQL's
+# default setup. Those compile nothing and run no tests, and a PR wearing four
+# green ticks looked verified while `Scripts/ci.sh` -- the gate CLAUDE.md says
+# must print `CI OK` before a PR is opened -- had never been near it. That was
+# discipline, not a gate, and it failed the way discipline does: #475 reached
+# review with its tests written but never executed, and #474 with a Cargo.toml
+# that walked the workspace version backwards from 0.14.1 to 0.14.0.
+#
+# Linux, not macOS, deliberately. macOS is the release platform and gates every
+# release (docs/superpowers/specs/2026-08-29-macos-release-platform-design.md),
+# and build-release.yml still runs this same script there for both channels.
+# What a PR needs is the fastest honest answer to "does this compile and do the
+# tests pass", on the cheapest runner that can give it. The macOS-specific code
+# paths -- the libproc walk in sirio_activity, getpeereid in sirio_control, the
+# NSStatusItem tray in sirio -- are `cfg`-gated and do not compile here, so a
+# green run here is not a claim about them; the release gate is still where
+# they are proven.
+on:
+  pull_request:
+    branches: [main]
+  # `main` too, and not as a formality: a push can reach it without a pull
+  # request (the ruleset has bypass holders), and a merge commit compiles
+  # neither of its parents. The branch itself has to be checked, or the first
+  # thing a contributor learns about a broken `main` is their own red PR.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded run on the same ref is answering a question nobody is asking
+# any more. Cancelling is safe here in a way it is not for nightly.yml, which
+# queues instead: that one publishes, this one only reports.
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Scripts/ci.sh
+    runs-on: ubuntu-latest
+    # The workspace is ~400 crates including GPUI, and a cold cache compiles
+    # every one of them twice (lib and test targets) before the first test
+    # runs. Generous on purpose: a gate that times out mid-compile teaches the
+    # same lesson as a gate that is always red.
+    timeout-minutes: 90
+    steps:
+      # fetch-depth: 0 because Scripts/ci.sh runs check-cycle-version.sh first,
+      # and that compares the workspace version against the last released tag.
+      # A shallow clone carries no tags, so the check would pass by knowing
+      # nothing -- the exact failure it exists to catch.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # GPUI links against the system GTK/WebKit stack on Linux; without these
+      # the failure arrives as a pkg-config error from a transitive -sys crate
+      # (gdk-sys, then javascriptcore-rs-sys) that names neither GPUI nor this
+      # repo. Established by building the workspace on a bare container, not
+      # copied from another project's list.
+      - name: Install GPUI's system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libxkbcommon-x11-dev \
+            libfontconfig-dev \
+            libasound2-dev \
+            libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Exactly 0.15.2, and the pin is upstream's, not a preference: a *newer*
+      # Zig fails too, so the upgrade reflex makes it worse (#63). Scripts/ci.sh
+      # preflights the version and fails with that message, but arriving there
+      # having installed the right one is cheaper than reading it.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally,
+      # so a runner without sccache fails before compiling a single crate, in a
+      # way that looks nothing like its cause.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      # Scripts/ci.sh runs the tests through nextest, not `cargo test`: cargo
+      # runs the 45 test binaries strictly one after another, so the two slow
+      # ones dominate the wall clock while the other 43 wait at idle cores.
+      # The prebuilt binary rather than `cargo install`, which would compile it
+      # here and cost more than it saves.
+      - name: Install cargo-nextest
+        run: |
+          curl -LsSf https://get.nexte.st/latest/linux \
+            | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # SIRIO_CI_RELEASE_GATE is deliberately NOT set. That variable selects the
+      # `ci` nextest profile, whose two retries exist so a release does not die
+      # of one timing flake on a machine compiling two thousand tests at once.
+      # A pull request is where a developer has to *see* that flake, so this
+      # runs the default profile: no retries, no skips, the complete failure
+      # set rather than the first one.
+      - name: Run the gate
+        run: Scripts/ci.sh
