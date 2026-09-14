@@ -105,6 +105,15 @@ pub fn project_name(url: &str) -> String {
     GitRemote::project_name(url)
 }
 
+/// The full commit id HEAD resolves to, or `None` when HEAD is unborn (a
+/// repository created with `git init` and nothing committed).
+pub fn head_sha(repo: &Path) -> Option<String> {
+    let output = git::run_accepting(&["rev-parse", "--verify", "--quiet", "HEAD"], repo, &[0, 1])
+        .ok()?;
+    let sha = output.stdout_string().trim().to_owned();
+    (!sha.is_empty()).then_some(sha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +147,39 @@ mod tests {
     fn a_repository_without_an_origin_reports_none() {
         let dir = init_repo("no-origin");
         assert_eq!(GitRemote::origin_url(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_head_sha_is_a_full_commit_id() {
+        let dir = init_repo("head-sha");
+        std::fs::write(dir.join("README.md"), "hi\n").expect("write file");
+        for args in [
+            vec!["add", "README.md"],
+            vec![
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        ] {
+            let out = Command::new("git").args(args).current_dir(&dir).output().expect("git");
+            assert!(out.status.success(), "git failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        let sha = head_sha(&dir).expect("HEAD resolves");
+        assert_eq!(sha.len(), 40);
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "not hex: {sha}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_has_no_head() {
+        let dir = init_repo("no-head");
+        assert_eq!(head_sha(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
