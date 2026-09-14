@@ -12,10 +12,12 @@
 //! layer drivable from a plain `block_on` in tests, the same reason
 //! `sirio_activity` stays window-free.
 
+mod connection;
 mod framing;
 mod message;
 mod position;
 
+pub use connection::{Client, Connection};
 pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
 pub use position::LineIndex;
