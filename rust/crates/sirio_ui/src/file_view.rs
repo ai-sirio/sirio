@@ -306,11 +306,57 @@ impl FileView {
 
     fn handle_context_action(
         &mut self,
-        _action: FileContextAction,
-        _window: &mut Window,
+        action: FileContextAction,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.dismiss_context_menu(cx);
+        match action {
+            FileContextAction::Copy => self.copy_selection(false, cx),
+            FileContextAction::CopyAndTrim => self.copy_selection(true, cx),
+            FileContextAction::Cut => {
+                self.copy_selection(false, cx);
+                self.replace_selection("");
+                cx.notify();
+            }
+            FileContextAction::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.replace_selection(&text);
+                    cx.notify();
+                }
+            }
+            FileContextAction::OpenMarkdownPreview => {
+                self.set_markdown_mode(MarkdownMode::Preview, cx);
+            }
+            FileContextAction::SendToAgent
+            | FileContextAction::RevealInFileManager
+            | FileContextAction::OpenInTerminal
+            | FileContextAction::CopyPermalink
+            | FileContextAction::ViewFileHistory => {
+                // App route — task 7 emits these.
+                let _ = window;
+            }
+        }
+    }
+
+    /// The selected text, or `None` when the selection is collapsed.
+    fn selected_text(&self) -> Option<String> {
+        let editor = self.editor()?;
+        let selection = self.current_selection(editor);
+        (selection.start != selection.end)
+            .then(|| editor.buffer()[selection.start..selection.end].to_owned())
+    }
+
+    fn copy_selection(&mut self, trim: bool, cx: &mut Context<Self>) {
+        let Some(text) = self.selected_text() else {
+            return;
+        };
+        let text = if trim {
+            file_context_menu::trim_common_indent(&text)
+        } else {
+            text
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
     }
 
     /// Re-reads the file and compares it against the last known disk state
@@ -2604,6 +2650,41 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         (cx, entity)
+    }
+
+    #[gpui::test]
+    async fn copy_and_trim_pastes_flush_left(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension(
+            "rs",
+            "fn outer() {\n        let a = 1;\n        let b = 2;\n}\n",
+        );
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        // Select the two indented lines, not the braces around them.
+        let buffer = view.read_with(&cx.cx, |view, _| {
+            view.editor().expect("editor").buffer().to_string()
+        });
+        let start = buffer.find("        let a").expect("first indented line");
+        let end = buffer.find("\n}").expect("closing brace");
+        view.update(&mut cx.cx, |view, cx| {
+            view.source_selection = Some(Selection { start, end });
+            cx.notify();
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.handle_context_action(FileContextAction::CopyAndTrim, window, cx);
+            });
+        });
+
+        let copied = cx
+            .update(|_, cx| cx.read_from_clipboard())
+            .and_then(|item| item.text())
+            .expect("Copy and Trim must write the clipboard");
+        assert_eq!(
+            copied, "let a = 1;\nlet b = 2;",
+            "the indentation every line shares must be dropped"
+        );
     }
 
     #[gpui::test]
