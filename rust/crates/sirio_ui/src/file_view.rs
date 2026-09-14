@@ -157,6 +157,19 @@ impl SurfaceScroll {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileViewEvent {
     OpenFile(PathBuf),
+    SendSelectionToAgent {
+        path: PathBuf,
+        lines: (usize, usize),
+        text: String,
+        language: &'static str,
+    },
+    RevealInFileManager(PathBuf),
+    OpenInTerminal(PathBuf),
+    CopyPermalink {
+        path: PathBuf,
+        lines: (usize, usize),
+    },
+    ViewFileHistory(PathBuf),
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -307,7 +320,7 @@ impl FileView {
     fn handle_context_action(
         &mut self,
         action: FileContextAction,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.dismiss_context_menu(cx);
@@ -328,13 +341,27 @@ impl FileView {
             FileContextAction::OpenMarkdownPreview => {
                 self.set_markdown_mode(MarkdownMode::Preview, cx);
             }
-            FileContextAction::SendToAgent
-            | FileContextAction::RevealInFileManager
-            | FileContextAction::OpenInTerminal
-            | FileContextAction::CopyPermalink
-            | FileContextAction::ViewFileHistory => {
-                // App route — task 7 emits these.
-                let _ = window;
+            FileContextAction::SendToAgent => {
+                if let Some(event) = self.selection_event(cx) {
+                    cx.emit(event);
+                }
+            }
+            FileContextAction::RevealInFileManager => {
+                cx.emit(FileViewEvent::RevealInFileManager(self.path.clone()));
+            }
+            FileContextAction::OpenInTerminal => {
+                cx.emit(FileViewEvent::OpenInTerminal(self.path.clone()));
+            }
+            FileContextAction::CopyPermalink => {
+                if let Some(lines) = self.selection_lines() {
+                    cx.emit(FileViewEvent::CopyPermalink {
+                        path: self.path.clone(),
+                        lines,
+                    });
+                }
+            }
+            FileContextAction::ViewFileHistory => {
+                cx.emit(FileViewEvent::ViewFileHistory(self.path.clone()));
             }
         }
     }
@@ -357,6 +384,27 @@ impl FileView {
             text
         };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
+    /// The 1-based, inclusive line range the caret or selection covers.
+    fn selection_lines(&self) -> Option<(usize, usize)> {
+        let editor = self.editor()?;
+        Some(crate::editor::line_range_for(
+            editor.buffer(),
+            self.current_selection(editor),
+        ))
+    }
+
+    /// The payload "Add to Agent Thread" carries: where the code is, the code
+    /// itself already trimmed flush left, and the fence tag to wrap it in.
+    fn selection_event(&self, _cx: &mut Context<Self>) -> Option<FileViewEvent> {
+        let text = file_context_menu::trim_common_indent(&self.selected_text()?);
+        Some(FileViewEvent::SendSelectionToAgent {
+            path: self.path.clone(),
+            lines: self.selection_lines()?,
+            text,
+            language: self.editor()?.language().fence_tag(),
+        })
     }
 
     /// Re-reads the file and compares it against the last known disk state
@@ -2684,6 +2732,57 @@ mod tests {
         assert_eq!(
             copied, "let a = 1;\nlet b = 2;",
             "the indentation every line shares must be dropped"
+        );
+    }
+
+    #[gpui::test]
+    async fn reveal_and_send_leave_as_events_carrying_the_located_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let path = file.path().to_path_buf();
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        // Select the whole second line.
+        let buffer = view.read_with(&cx.cx, |view, _| {
+            view.editor().expect("editor").buffer().to_string()
+        });
+        let start = buffer.find("fn b").expect("second line");
+        let end = start + "fn b() {}".len();
+        view.update(&mut cx.cx, |view, cx| {
+            view.source_selection = Some(Selection { start, end });
+            cx.notify();
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.handle_context_action(FileContextAction::SendToAgent, window, cx);
+                view.handle_context_action(FileContextAction::RevealInFileManager, window, cx);
+            });
+        });
+
+        let seen = events.borrow().clone();
+        assert_eq!(
+            seen,
+            vec![
+                FileViewEvent::SendSelectionToAgent {
+                    path: path.clone(),
+                    lines: (2, 2),
+                    text: "fn b() {}".to_owned(),
+                    language: "rust",
+                },
+                FileViewEvent::RevealInFileManager(path),
+            ],
+            "both App-route entries must leave as typed events"
         );
     }
 
