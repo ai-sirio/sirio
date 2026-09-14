@@ -383,6 +383,18 @@ impl GitHistory {
         self.set_filter(filter, cx);
     }
 
+    /// Filters the panel to one path driven from outside it — the editor's
+    /// "View File History" has a path in hand, not a typed draft. Writes the
+    /// draft too, so the toolbar names what is being filtered.
+    pub fn show_only_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.path_draft = path.display().to_string();
+        let filter = LogFilter {
+            paths: vec![path],
+            ..self.filter.clone()
+        };
+        self.set_filter(filter, cx);
+    }
+
     /// IntelliSort: `--topo-order` keeps a merged branch's commits
     /// contiguous instead of interleaving them by date.
     pub(crate) fn toggle_topo_order(&mut self, cx: &mut Context<Self>) {
@@ -2064,6 +2076,27 @@ mod tests {
         });
         history.read_with(cx, |history, _| {
             assert_eq!(history.commits[0].subject, "second");
+        });
+    }
+
+    /// A caller outside the panel has a path in hand, not a draft to type:
+    /// `show_only_path` must write both the query and the toolbar's field, so
+    /// the panel shows what it is filtered to.
+    #[gpui::test]
+    fn show_only_path_filters_to_that_path_and_fills_the_draft(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+
+        history.update(cx, |history, cx| {
+            history.show_only_path(PathBuf::from("src/main.rs"), cx);
+        });
+
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.filter.paths, vec![PathBuf::from("src/main.rs")]);
+            assert_eq!(history.path_draft, "src/main.rs");
         });
     }
 
