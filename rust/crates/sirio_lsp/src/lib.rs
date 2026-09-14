@@ -12,6 +12,7 @@
 //! layer drivable from a plain `block_on` in tests, the same reason
 //! `sirio_activity` stays window-free.
 
+mod framing;
 mod position;
 
 pub use lsp_types;
