@@ -2826,6 +2826,24 @@ impl Chat {
         cx.notify();
     }
 
+    /// Adds text to the end of the visible composer's draft, keeping
+    /// mentions, attachments and everything already typed — the route a code
+    /// snippet takes, where [`Self::control_compose`] would discard a
+    /// half-written prompt. The two are separated by a blank line unless the
+    /// draft already ends in one.
+    pub fn control_append(&mut self, text: &str, cx: &mut Context<Self>) {
+        let draft = self.draft_text();
+        let combined = if draft.is_empty() || draft.ends_with("\n\n") {
+            format!("{draft}{text}")
+        } else if draft.ends_with('\n') {
+            format!("{draft}\n{text}")
+        } else {
+            format!("{draft}\n\n{text}")
+        };
+        self.set_composer_text(combined, cx);
+        cx.notify();
+    }
+
     /// Sends exactly as the rendered Send control does, after replacing the
     /// visible composer with the socket request's text.
     pub fn control_send(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -10453,6 +10471,29 @@ let answer = 42;
         assert!(
             cx.debug_bounds("composer-input").is_some(),
             "the edited composer remains mounted in the rendered chat"
+        );
+    }
+
+    /// Appending is not composing: a snippet must land beside the draft the
+    /// user was already writing rather than replace it.
+    #[gpui::test]
+    async fn appending_a_snippet_keeps_the_half_written_draft(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+
+        chat.update(&mut cx.cx, |chat, cx| {
+            chat.control_compose("please review ", cx);
+            chat.control_append("src/main.rs:2", cx);
+        });
+
+        let draft = chat.read_with(&cx.cx, |chat, _| chat.draft_text());
+        assert!(
+            draft.starts_with("please review "),
+            "the half-written draft survives the append: {draft:?}"
+        );
+        assert!(
+            draft.contains("src/main.rs:2"),
+            "the appended snippet landed in the composer: {draft:?}"
         );
     }
 
