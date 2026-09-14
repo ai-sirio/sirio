@@ -66,6 +66,18 @@ grep -q "nextest" "$PR_CODE" || fail "pr.yml must install cargo-nextest"
 grep -q "libgtk-3-dev" "$PR_CODE" || fail "pr.yml must install GPUI's GTK dependencies"
 grep -q "libwebkit2gtk-4.1-dev" "$PR_CODE" || fail "pr.yml must install GPUI's WebKit dependencies"
 
+# sirio_theme asks fontdb for the generic monospace and sans families and then
+# asserts the answer is an installed face. A bare runner has neither, so fontdb
+# returns its own defaults -- FreeMono, FreeSans -- and the assertion is right
+# to fail: the app really would resolve to a family that is not there. The
+# fonts are installed rather than the test exempted, and this keeps it that way.
+grep -q "fonts-freefont-ttf" "$PR_CODE" || fail "pr.yml must install the fonts sirio_theme resolves to"
+
+# The `pr` nextest profile: the release profile's skip list for the agent-CLI
+# conformance tests, without its retries. Selected by Scripts/ci.sh from this
+# variable and nothing else.
+grep -q "SIRIO_CI_PR_GATE" "$PR_CODE" || fail "pr.yml must select the pr nextest profile"
+
 # SIRIO_CI_RELEASE_GATE selects the `ci` nextest profile: two retries and the
 # skip list for the agent-CLI conformance tests. Those exist so a *release*
 # does not die of one timing flake. A pull request is where a developer has to

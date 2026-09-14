@@ -79,6 +79,23 @@ jobs:
             libasound2-dev \
             libssl-dev
 
+      # A bare runner ships almost no fonts, and `sirio_theme` asks fontdb for
+      # the system's generic monospace and sans families and then asserts the
+      # answer is an installed face. With nothing installed fontdb returns its
+      # own built-in defaults -- FreeMono and FreeSans -- which are not there,
+      # and `{code,ui}_family_resolution_falls_back_to_a_family_that_exists`
+      # fails. That assertion is right, not flaky: the app really would resolve
+      # to a family the machine does not have. So install the fonts it names
+      # rather than exempt the test. fonts-freefont-ttf is the package that
+      # provides exactly those two; dejavu is the family fontconfig prefers
+      # once any real font set exists, and keeps the resolution realistic.
+      - name: Install the fonts sirio_theme resolves to
+        run: |
+          sudo apt-get install -y -q --no-install-recommends \
+            fonts-freefont-ttf \
+            fonts-dejavu-core
+          fc-cache -f
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -113,11 +130,15 @@ jobs:
         with:
           workspaces: rust
 
-      # SIRIO_CI_RELEASE_GATE is deliberately NOT set. That variable selects the
-      # `ci` nextest profile, whose two retries exist so a release does not die
-      # of one timing flake on a machine compiling two thousand tests at once.
-      # A pull request is where a developer has to *see* that flake, so this
-      # runs the default profile: no retries, no skips, the complete failure
-      # set rather than the first one.
+      # SIRIO_CI_PR_GATE selects the `pr` nextest profile (rust/.config/
+      # nextest.toml). It takes the release profile's skip list -- the two
+      # conformance tests that probe the agent CLIs installed on the machine,
+      # which a hosted runner does not have -- and deliberately not its two
+      # retries: a release must not die of one timing flake, but a pull request
+      # is the last run where the developer who caused a flake can still see it.
+      #
+      # SIRIO_CI_RELEASE_GATE stays unset here; that one is build-release.yml's.
       - name: Run the gate
+        env:
+          SIRIO_CI_PR_GATE: '1'
         run: Scripts/ci.sh

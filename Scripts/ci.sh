@@ -51,7 +51,18 @@ cd rust
 # profile -- retries, and the skip list for the two tests that probe the agent
 # CLIs installed on the machine -- which lives in .config/nextest.toml, next to
 # the reasoning, rather than as argv here.
+#
+# SIRIO_CI_PR_GATE=1 is set by .github/workflows/pr.yml and by nothing else. It
+# selects `pr`, which takes that same skip list -- a hosted runner has no agent
+# CLIs installed either, and a pull request must no more be stopped by which
+# binaries a runner happens to carry than a release must -- and deliberately
+# does NOT take the retries: a flake has to be visible to the developer who
+# caused it, and a pull request is the last run where that is still true.
 PROFILE=default
+if [[ "${SIRIO_CI_PR_GATE:-}" == "1" ]]; then
+    PROFILE=pr
+    export CARGO_INCREMENTAL=0
+fi
 if [[ "${SIRIO_CI_RELEASE_GATE:-}" == "1" ]]; then
     PROFILE=ci
     # .cargo/config.toml keeps incremental compilation on because sccache
