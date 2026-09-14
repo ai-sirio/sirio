@@ -255,7 +255,85 @@ fn agent_death_is_transport_error() {
         message.contains("fixture last words before dying"),
         "death report dropped the agent's stderr: {message}"
     );
+    // "Incoming transport closed" names a symptom, not a cause. How the
+    // process ended is the one fact that separates a crash from a clean exit
+    // from a signal, and the OS already has it.
+    assert!(
+        message.contains("exited with code 17"),
+        "death report dropped the agent's exit status: {message}"
+    );
     let _ = client.shutdown();
+}
+
+#[test]
+fn death_report_waits_for_the_agents_last_stderr_line() {
+    let (mut client, events) = launch_fixture("death_noisy_stderr");
+    client
+        .prompt("die after a burst of stderr")
+        .expect("prompt accepted");
+    let message = loop {
+        match next_event(&events) {
+            AcpEvent::TransportError(message) => break message,
+            AcpEvent::Timeout {
+                operation,
+                duration,
+            } => panic!("unexpected {operation:?} timeout after {duration:?}"),
+            other => panic!("unexpected death event: {other:?}"),
+        }
+    };
+    // The report is built on the connection thread the instant stdout hits
+    // EOF; the stderr drain runs on its own thread and may still be behind.
+    // Reading the tail without waiting for that thread keeps the noise and
+    // loses the line that actually says what happened.
+    assert!(
+        message.contains("fixture died right after this line"),
+        "death report was built before the stderr drain caught up: {message}"
+    );
+    let _ = client.shutdown();
+}
+
+#[test]
+fn an_open_permission_does_not_freeze_the_session() {
+    // The ACP connection dispatches every handler on one task, so a handler
+    // that waits for the user stops the whole session: no `session/update` is
+    // processed, the transcript freezes, and any second request the agent
+    // makes can never be answered. The fixture keeps streaming while its
+    // permission is unanswered, so a chunk arriving before the answer is the
+    // proof the loop stayed free.
+    let (mut client, events) = launch_fixture("permission_stream");
+    client
+        .prompt("ask, then keep working")
+        .expect("prompt accepted");
+
+    let request_id = loop {
+        match next_event(&events) {
+            AcpEvent::PermissionRequest { request_id, .. } => break request_id,
+            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            _ => {}
+        }
+    };
+
+    let streamed_while_open = matches!(
+        next_event(&events),
+        AcpEvent::AgentMessageChunk(ref text) if text.starts_with("tick")
+    );
+    assert!(
+        streamed_while_open,
+        "the session stopped streaming while a permission card was open"
+    );
+
+    client
+        .respond_permission(request_id, "allow")
+        .expect("permission answer should be sent");
+    let mut turn_ended = false;
+    while !turn_ended {
+        match next_event(&events) {
+            AcpEvent::TurnEnded { .. } => turn_ended = true,
+            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            _ => {}
+        }
+    }
+    client.shutdown().expect("fixture should shut down cleanly");
 }
 
 #[test]

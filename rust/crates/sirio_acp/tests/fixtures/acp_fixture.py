@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import threading
 import time
 
 
@@ -304,6 +305,53 @@ def question_death_prompt(request):
     os._exit(17)
 
 
+def permission_stream_prompt(request):
+    """Ask for a permission and keep streaming while it stays unanswered.
+
+    A client that waits for the answer inside its protocol event loop cannot
+    process these notifications until the card is closed, so the chunks below
+    are the observable for "the session kept running".
+    """
+    answered = threading.Event()
+
+    def wait_for_answer():
+        line = sys.stdin.readline()
+        if line and json.loads(line).get("id") == 9001:
+            answered.set()
+
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 9001,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId": "tool-stream",
+                    "title": "keep streaming",
+                    "status": "pending",
+                },
+                "options": [
+                    {"optionId": "allow", "name": "Allow once", "kind": "allow_once"}
+                ],
+            },
+        }
+    )
+    threading.Thread(target=wait_for_answer, daemon=True).start()
+    for tick in range(40):
+        if answered.is_set():
+            break
+        notification(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "tick%d" % tick},
+            }
+        )
+        time.sleep(0.05)
+    answered.wait(timeout=5)
+    response(request["id"], {"stopReason": "end_turn"})
+
+
 def queue_prompt(request, number):
     notification(
         {
@@ -476,8 +524,22 @@ def main():
                 sys.stderr.write("fixture last words before dying\n")
                 sys.stderr.flush()
                 os._exit(17)
+            if MODE == "death_noisy_stderr":
+                # The drain thread and the connection thread race here: the
+                # report is built the instant stdout hits EOF, while these
+                # lines may still be sitting in the stderr pipe. The last one
+                # is the marker precisely because it is the one a lagging
+                # drain has not reached yet.
+                for index in range(200):
+                    sys.stderr.write("fixture stderr line %d\n" % index)
+                sys.stderr.write("fixture died right after this line\n")
+                sys.stderr.flush()
+                os._exit(23)
             if MODE == "cancel":
                 cancel_prompt(request)
+                return
+            if MODE == "permission_stream":
+                permission_stream_prompt(request)
                 return
             if MODE == "cancel_permission":
                 cancel_permission_prompt(request)

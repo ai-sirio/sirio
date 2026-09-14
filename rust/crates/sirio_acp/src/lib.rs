@@ -24,7 +24,8 @@ use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -598,7 +599,13 @@ impl AcpClient {
         cwd: impl AsRef<Path>,
         startup_timeout: Duration,
     ) -> Result<(Self, EventStream)> {
-        Self::launch_with_timeouts(command, cwd, startup_timeout, PROMPT_TIMEOUT)
+        Self::launch_with_timeouts(
+            command,
+            cwd,
+            startup_timeout,
+            PROMPT_TIMEOUT,
+            PERMISSION_TIMEOUT,
+        )
     }
 
     fn launch_with_timeouts(
@@ -606,6 +613,7 @@ impl AcpClient {
         cwd: impl AsRef<Path>,
         startup_timeout: Duration,
         prompt_timeout: Duration,
+        permission_timeout: Duration,
     ) -> Result<(Self, EventStream)> {
         let cwd = cwd.as_ref().to_path_buf();
         let (command_tx, command_rx) = async_channel::unbounded();
@@ -632,6 +640,7 @@ impl AcpClient {
                     worker_mode_catalog,
                     worker_mcp_warnings,
                     prompt_timeout,
+                    permission_timeout,
                 );
             })?;
 
@@ -925,6 +934,7 @@ fn run_connection(
     mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
     mcp_warnings: Arc<Mutex<Vec<String>>>,
     prompt_timeout: Duration,
+    permission_timeout: Duration,
 ) {
     let started = Arc::new(AtomicBool::new(false));
     let clean_shutdown = Arc::new(AtomicBool::new(false));
@@ -943,6 +953,19 @@ fn run_connection(
     // Its last words are the only evidence of why it went away.
     let stderr_tail: StderrTail = Arc::new(Mutex::new(VecDeque::new()));
     let drain_tail = Arc::clone(&stderr_tail);
+    // Raised by the drain thread when the agent's stderr reaches EOF. A death
+    // report built before that point reads a tail the drain has not finished
+    // filling — the agent's last line is precisely the one still in the pipe.
+    let stderr_drained = Arc::new(AtomicBool::new(false));
+    let drain_done = Arc::clone(&stderr_drained);
+    // How many permission cards are open. Time spent waiting on a human is
+    // the client's silence, not the agent's, and the idle watchdog must not
+    // count it (see the prompt-timeout thread below).
+    let open_permissions = Arc::new(AtomicUsize::new(0));
+    // What the OS said about the agent's exit, once anything has observed it.
+    // `terminate_and_reap` takes the child out of the handle, so whoever
+    // reaps has to record the status for the report built afterwards.
+    let exit_status: ExitStatusSlot = Arc::new(Mutex::new(None));
     let activity: ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
     let attempted_program = command.program.clone();
     let command = command_for_process(command);
@@ -969,12 +992,17 @@ fn run_connection(
     let _watchdog = thread::Builder::new()
         .name("sirio-acp-permission-watchdog".into())
         .spawn(move || {
-            // The permission handler blocks the connection's single dispatch
-            // task while it waits for a choice, so a transport that dies with
-            // a permission pending would otherwise hang until PERMISSION_TIMEOUT
-            // — the read loop can never notice the EOF. Watch the child
-            // process instead: on exit, withdraw every pending permission so
-            // the handler unblocks and the connection observes the death.
+            // A permission whose agent died is unanswerable: nothing will ever
+            // read the response, and the task waiting on the user's choice
+            // would otherwise sit there for the whole PERMISSION_TIMEOUT with
+            // the card still offering buttons. Watch the child process: on
+            // exit, withdraw every pending permission so those tasks finish
+            // and the card stops pretending it can still be answered.
+            //
+            // The wait itself no longer runs on the connection's dispatch
+            // task — it is spawned (see the permission handler) precisely so
+            // an open card cannot stall the session — but this sweep is still
+            // what turns a dead agent into a closed card.
             //
             // Withdrawing *once* is not enough, and that was a real bug. A
             // request the agent wrote just before dying is still sitting in the
@@ -1033,6 +1061,7 @@ fn run_connection(
         .name("sirio-acp-stderr".into())
         .spawn(move || {
             block_on(drain_stderr(stderr, mcp_warnings, drain_tail));
+            drain_done.store(true, Ordering::Release);
         });
 
     let connection_event_tx = event_tx.clone();
@@ -1044,6 +1073,9 @@ fn run_connection(
     let shutdown_ack_for_connection = Arc::clone(&shutdown_ack);
     let child_for_connection = Arc::clone(&child);
     let stderr_tail_for_connection = Arc::clone(&stderr_tail);
+    let stderr_drained_for_connection = Arc::clone(&stderr_drained);
+    let open_permissions_for_connection = Arc::clone(&open_permissions);
+    let exit_status_for_connection = Arc::clone(&exit_status);
     let activity_for_connection = Arc::clone(&activity);
     let connection_result = block_on(async move {
         let notification_activity = Arc::clone(&activity_for_connection);
@@ -1053,6 +1085,7 @@ fn run_connection(
         let connection_events = connection_event_tx.clone();
         let permission_waiters = Arc::clone(&pending_permissions);
         let connection_waiters = Arc::clone(&pending_permissions);
+        let open_permissions_for_permission = Arc::clone(&open_permissions_for_connection);
         let permission_counter = Arc::clone(&permission_counter);
         let prompt_counter = Arc::clone(&prompt_counter);
         let active_prompt = Arc::clone(&active_prompt);
@@ -1109,7 +1142,7 @@ fn run_connection(
             .on_receive_request(
                 async move |request: RequestPermissionRequest,
                             responder,
-                            _connection: ConnectionTo<Agent>| {
+                            connection: ConnectionTo<Agent>| {
                     touch_activity(&permission_activity);
                     let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
                     let (choice_tx, choice_rx) = async_channel::bounded(1);
@@ -1138,37 +1171,61 @@ fn run_connection(
                             question,
                         })
                         .await;
-                    let choice = choice_rx.recv();
-                    let timeout = async_io::Timer::after(PERMISSION_TIMEOUT);
-                    futures::pin_mut!(choice, timeout);
-                    let choice = match futures::future::select(choice, timeout).await {
-                        futures::future::Either::Left((choice, _)) => {
-                            choice.unwrap_or(PermissionChoice::Cancelled)
-                        }
-                        futures::future::Either::Right((_, _)) => {
-                            if let Ok(mut waiters) = permission_waiters.lock() {
-                                waiters.remove(&request_id);
+                    // Everything past this point waits on a human, and the ACP
+                    // connection dispatches every handler on one task: waiting
+                    // here stops the whole session -- no `session/update` is
+                    // processed while the card is open, and a second request
+                    // from the agent can never be answered. The SDK's own
+                    // remedy is `ConnectionTo::spawn`, so the wait runs there
+                    // and the event loop returns immediately.
+                    let waiters = Arc::clone(&permission_waiters);
+                    let open = Arc::clone(&open_permissions_for_permission);
+                    let answered_activity = Arc::clone(&permission_activity);
+                    let expiry_reason = Arc::clone(&permission_timeout_reason);
+                    open.fetch_add(1, Ordering::AcqRel);
+                    connection.spawn(async move {
+                        let choice = choice_rx.recv();
+                        let timeout = async_io::Timer::after(permission_timeout);
+                        futures::pin_mut!(choice, timeout);
+                        let choice = match futures::future::select(choice, timeout).await {
+                            futures::future::Either::Left((choice, _)) => {
+                                choice.unwrap_or(PermissionChoice::Cancelled)
                             }
-                            let timeout = AcpError::Timeout {
-                                operation: TimeoutOperation::Permission,
-                                duration: PERMISSION_TIMEOUT,
-                            };
-                            record_timeout(&permission_timeout_reason, timeout.clone());
-                            return Err(agent_client_protocol::Error::internal_error());
+                            futures::future::Either::Right((_, _)) => {
+                                // A deadline the user missed is a refusal, not
+                                // a protocol fault: answering `internal_error`
+                                // hands the agent a failed request it never got
+                                // wrong, and agents differ wildly in how well
+                                // they take that. The reason is still recorded
+                                // so the death report can name it.
+                                record_timeout(
+                                    &expiry_reason,
+                                    AcpError::Timeout {
+                                        operation: TimeoutOperation::Permission,
+                                        duration: permission_timeout,
+                                    },
+                                );
+                                PermissionChoice::Cancelled
+                            }
+                        };
+                        if let Ok(mut waiters) = waiters.lock() {
+                            waiters.remove(&request_id);
                         }
-                    };
-                    if let Ok(mut waiters) = permission_waiters.lock() {
-                        waiters.remove(&request_id);
-                    }
-                    let outcome = match choice {
-                        PermissionChoice::Selected(option_id) => {
-                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                                option_id,
-                            ))
-                        }
-                        PermissionChoice::Cancelled => RequestPermissionOutcome::Cancelled,
-                    };
-                    responder.respond(RequestPermissionResponse::new(outcome))
+                        open.fetch_sub(1, Ordering::AcqRel);
+                        // The card closing is fresh evidence about the agent:
+                        // the idle window starts from the answer, not from the
+                        // question.
+                        touch_activity(&answered_activity);
+                        let outcome = match choice {
+                            PermissionChoice::Selected(option_id) => {
+                                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                                    option_id,
+                                ))
+                            }
+                            PermissionChoice::Cancelled => RequestPermissionOutcome::Cancelled,
+                        };
+                        responder.respond(RequestPermissionResponse::new(outcome))
+                    })
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -1252,6 +1309,11 @@ fn run_connection(
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
                             let prompt_stderr_tail = Arc::clone(&stderr_tail_for_connection);
+                            let prompt_stderr_drained =
+                                Arc::clone(&stderr_drained_for_connection);
+                            let prompt_death_reason = Arc::clone(&prompt_timeout_reason);
+                            let prompt_child = Arc::clone(&child_for_prompt);
+                            let prompt_exit_status = Arc::clone(&exit_status_for_connection);
                             // Dropped when the result arrives (or the connection dies
                             // with the request pending) so the timeout thread below
                             // wakes immediately instead of sleeping the full window.
@@ -1298,10 +1360,26 @@ fn run_connection(
                                                 .await;
                                         }
                                         Err(error) => {
+                                            // `Incoming transport closed` names
+                                            // a symptom. Everything Sirio knows
+                                            // about the cause has to ride along
+                                            // here: this turn error is the only
+                                            // message the user ever sees, since
+                                            // the UI drops the client on it and
+                                            // that marks the shutdown clean,
+                                            // suppressing the connection-level
+                                            // `Timeout` event entirely.
+                                            let cause = timeout_cause(&prompt_death_reason);
+                                            let exit = child_exit_report(
+                                                &prompt_child,
+                                                &prompt_exit_status,
+                                            )
+                                            .await;
+                                            wait_for_stderr_drain(&prompt_stderr_drained).await;
                                             let report = stderr_tail_report(&prompt_stderr_tail);
                                             let _ = event_tx
                                                 .send(AcpEvent::TransportError(format!(
-                                                    "prompt failed: {error}{report}"
+                                                    "prompt failed: {error}{cause}{exit}{report}"
                                                 )))
                                                 .await;
                                         }
@@ -1312,6 +1390,9 @@ fn run_connection(
                             let timeout_reason = Arc::clone(&prompt_timeout_reason);
                             let child = Arc::clone(&child_for_prompt);
                             let prompt_activity = Arc::clone(&activity_for_connection);
+                            let prompt_open_permissions =
+                                Arc::clone(&open_permissions_for_connection);
+                            let watchdog_exit_status = Arc::clone(&exit_status_for_connection);
                             touch_activity(&prompt_activity);
                             let _ = thread::Builder::new()
                                 .name("sirio-acp-prompt-timeout".into())
@@ -1321,6 +1402,14 @@ fn run_connection(
                                     // pushed it back to. Only silence for a
                                     // whole window reaches the kill below.
                                     loop {
+                                        // An unanswered card is the client's
+                                        // silence, not the agent's: the agent
+                                        // asked and is doing exactly what it
+                                        // should, which is nothing. Killing it
+                                        // for that reaped healthy sessions.
+                                        if prompt_open_permissions.load(Ordering::Acquire) > 0 {
+                                            touch_activity(&prompt_activity);
+                                        }
                                         let remaining = prompt_timeout
                                             .saturating_sub(idle_for(&prompt_activity));
                                         if remaining.is_zero() {
@@ -1346,7 +1435,10 @@ fn run_connection(
                                             duration: prompt_timeout,
                                         };
                                         record_timeout(&timeout_reason, timeout);
-                                        terminate_and_reap_blocking(&child);
+                                        record_exit_status(
+                                            &watchdog_exit_status,
+                                            terminate_and_reap_blocking(&child),
+                                        );
                                     }
                                 });
                         }
@@ -1474,7 +1566,7 @@ fn run_connection(
     });
 
     connection_finished.store(true, Ordering::Release);
-    terminate_and_reap_blocking(&child);
+    record_exit_status(&exit_status, terminate_and_reap_blocking(&child));
     if let Ok(mut ack) = shutdown_ack.lock()
         && let Some(ack) = ack.take()
     {
@@ -1517,13 +1609,15 @@ fn run_connection(
                 duration,
             });
         } else {
+            block_on(wait_for_stderr_drain(&stderr_drained));
             let report = stderr_tail_report(&stderr_tail);
+            let exit = block_on(child_exit_report(&child, &exit_status));
             let detail = match connection_result {
                 Err(error) => format!(": {error}"),
                 Ok(()) => String::new(),
             };
             let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
-                "ACP transport closed unexpectedly{detail}{report}"
+                "ACP transport closed unexpectedly{detail}{exit}{report}"
             )));
         }
     }
@@ -1594,6 +1688,21 @@ fn push_stderr_tail(tail: &StderrTail, line: String) {
     }
 }
 
+/// How long a death report waits for the stderr drain thread to reach EOF
+/// before giving up on the agent's last words. The two pipes close together
+/// when the process dies, but they are read by different threads: without
+/// this the report is routinely built from a tail the drain has not finished
+/// filling, and the missing line is always the final one — the only line that
+/// says anything about why the agent went away.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(200);
+
+async fn wait_for_stderr_drain(drained: &Arc<AtomicBool>) {
+    let deadline = std::time::Instant::now() + STDERR_DRAIN_GRACE;
+    while !drained.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        async_io::Timer::after(Duration::from_millis(5)).await;
+    }
+}
+
 fn stderr_tail_report(tail: &StderrTail) -> String {
     let lines = tail
         .lock()
@@ -1648,9 +1757,9 @@ fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
     }
 }
 
-async fn terminate_and_reap(child: &ChildHandle) {
+async fn terminate_and_reap(child: &ChildHandle) -> Option<ExitStatus> {
     let Some(mut child) = child.lock().ok().and_then(|mut child| child.take()) else {
-        return;
+        return None;
     };
     #[cfg(unix)]
     if let Ok(pid) = i32::try_from(child.id()) {
@@ -1664,11 +1773,97 @@ async fn terminate_and_reap(child: &ChildHandle) {
     let wait = child.status();
     let timeout = async_io::Timer::after(CHILD_REAP_TIMEOUT);
     futures::pin_mut!(wait, timeout);
-    let _ = futures::future::select(wait, timeout).await;
+    match futures::future::select(wait, timeout).await {
+        futures::future::Either::Left((status, _)) => status.ok(),
+        futures::future::Either::Right((_, _)) => None,
+    }
 }
 
-fn terminate_and_reap_blocking(child: &ChildHandle) {
-    block_on(terminate_and_reap(child));
+fn terminate_and_reap_blocking(child: &ChildHandle) -> Option<ExitStatus> {
+    block_on(terminate_and_reap(child))
+}
+
+/// What the OS said about the agent's exit, recorded by whoever reaped it.
+/// [`terminate_and_reap`] takes the child out of its handle, so a report
+/// built afterwards has nothing left to ask.
+type ExitStatusSlot = Arc<Mutex<Option<ExitStatus>>>;
+
+fn record_exit_status(slot: &ExitStatusSlot, status: Option<ExitStatus>) {
+    if let Some(status) = status
+        && let Ok(mut slot) = slot.lock()
+    {
+        slot.get_or_insert(status);
+    }
+}
+
+/// How long a death report waits for the kernel to make the agent's exit
+/// status readable. Stdout reaching EOF means the process is on its way out,
+/// but the two events are not the same instant.
+const CHILD_EXIT_PROBE: Duration = Duration::from_millis(200);
+
+/// How the agent process ended, phrased for the error the user reads. An
+/// empty string when nothing has observed the exit yet — a still-running
+/// agent that merely closed its stdout is a real case, and guessing a cause
+/// there would be worse than saying nothing.
+async fn child_exit_report(child: &ChildHandle, recorded: &ExitStatusSlot) -> String {
+    let deadline = std::time::Instant::now() + CHILD_EXIT_PROBE;
+    loop {
+        if let Some(status) = recorded.lock().ok().and_then(|slot| *slot) {
+            return format!(" ({})", describe_exit(status));
+        }
+        if let Some(status) = try_child_status(child) {
+            record_exit_status(recorded, Some(status));
+            return format!(" ({})", describe_exit(status));
+        }
+        if std::time::Instant::now() >= deadline {
+            return String::new();
+        }
+        async_io::Timer::after(Duration::from_millis(5)).await;
+    }
+}
+
+/// Non-blocking so the child lock is never held across an await — a
+/// `MutexGuard` alive over one would make the connection's futures `!Send`.
+fn try_child_status(child: &ChildHandle) -> Option<ExitStatus> {
+    let mut guard = child.lock().ok()?;
+    let child = guard.as_mut()?;
+    child.try_status().ok().flatten()
+}
+
+fn describe_exit(status: ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("agent killed by signal {signal}");
+        }
+    }
+    match status.code() {
+        Some(code) => format!("agent exited with code {code}"),
+        None => "agent exited without reporting a status".to_string(),
+    }
+}
+
+/// The deadline Sirio itself enforced, when one fired. Without this the turn
+/// error blames the transport for a kill Sirio decided on.
+fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
+    match reason.lock().ok().and_then(|reason| reason.clone()) {
+        Some(AcpError::Timeout {
+            operation: TimeoutOperation::Prompt,
+            duration,
+        }) => format!(
+            "\nSirio reaped the agent after {}s without a single update from it (prompt watchdog)",
+            duration.as_secs()
+        ),
+        Some(AcpError::Timeout {
+            operation,
+            duration,
+        }) => format!(
+            "\nSirio's {operation:?} wait expired after {}s",
+            duration.as_secs()
+        ),
+        _ => String::new(),
+    }
 }
 
 fn detach_worker(worker: JoinHandle<()>) {
@@ -3139,6 +3334,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
             ".",
             FIXTURE_STARTUP_TIMEOUT,
             Duration::from_secs(2),
+            PERMISSION_TIMEOUT,
         )
         .expect("fixture agent should create a session");
 
@@ -3177,6 +3373,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
             ".",
             FIXTURE_STARTUP_TIMEOUT,
             Duration::from_millis(300),
+            PERMISSION_TIMEOUT,
         )
         .expect("fixture agent should create a session");
 
@@ -3196,6 +3393,115 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         assert!(
             elapsed < Duration::from_secs(5),
             "the reap took {elapsed:?}, far past the 300ms window"
+        );
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reaped_turn_names_the_watchdog_in_its_own_error() {
+        // The connection-level `Timeout` event is emitted only when the
+        // worker's own tail runs with `clean_shutdown` unset -- and in the app
+        // it never is, because the UI drops its `AcpClient` the moment the
+        // turn error lands, which sends `Command::Shutdown` and marks the
+        // shutdown clean. The turn's own error is therefore the only message
+        // the user ever reads, so it has to carry the cause.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) sleep 30 ;;"#,
+        );
+        let (mut client, events) = AcpClient::launch_with_timeouts(
+            command,
+            ".",
+            FIXTURE_STARTUP_TIMEOUT,
+            Duration::from_millis(300),
+            PERMISSION_TIMEOUT,
+        )
+        .expect("fixture agent should create a session");
+
+        client.prompt("say nothing").expect("prompt accepted");
+        let seen = drain_until_turn_end(&events, Duration::from_secs(5));
+
+        let message = seen
+            .iter()
+            .find_map(|event| match event {
+                AcpEvent::TransportError(message) => Some(message.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the reaped turn reported no error at all: {seen:?}"));
+        assert!(
+            message.contains("prompt watchdog"),
+            "the reaped turn blamed the transport instead of the watchdog: {message}"
+        );
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_permission_card_is_not_agent_silence() {
+        // Time spent waiting on a human is the client's silence, not the
+        // agent's. Counting it against the idle window SIGKILLs a perfectly
+        // healthy agent whose only mistake was asking a question.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"test","toolCall":{"toolCallId":"t","title":"ask","status":"pending"},"options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"}]}}'; sleep 30 ;;"#,
+        );
+        let (mut client, events) = AcpClient::launch_with_timeouts(
+            command,
+            ".",
+            FIXTURE_STARTUP_TIMEOUT,
+            Duration::from_millis(300),
+            PERMISSION_TIMEOUT,
+        )
+        .expect("fixture agent should create a session");
+
+        client.prompt("ask me something").expect("prompt accepted");
+        // Five windows of an unanswered card. Every one of them used to be
+        // counted as agent silence.
+        let seen = drain_until_turn_end(&events, Duration::from_millis(1500));
+
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, AcpEvent::PermissionRequest { .. })),
+            "the fixture's permission request never surfaced: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                AcpEvent::Timeout { .. } | AcpEvent::TransportError(_)
+            )),
+            "an agent waiting on an unanswered card was reaped: {seen:?}"
+        );
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_expired_permission_is_answered_as_cancelled() {
+        // A deadline the user missed is a refusal, not a protocol fault.
+        // Answering `internal_error` leaves the agent holding a failed
+        // request it never made a mistake on, and agents differ wildly in how
+        // gracefully they take that.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"test","toolCall":{"toolCallId":"t","title":"ask","status":"pending"},"options":[{"optionId":"allow","name":"Allow once","kind":"allow_once"}]}}'; while IFS= read -r answer; do case "$answer" in *cancelled*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}'; break ;; esac; done ;;"#,
+        );
+        let (mut client, events) = AcpClient::launch_with_timeouts(
+            command,
+            ".",
+            FIXTURE_STARTUP_TIMEOUT,
+            Duration::from_secs(10),
+            Duration::from_millis(200),
+        )
+        .expect("fixture agent should create a session");
+
+        client.prompt("ask me something").expect("prompt accepted");
+        let seen = drain_until_turn_end(&events, Duration::from_secs(5));
+
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, AcpEvent::TurnEnded { .. })),
+            "the agent never saw a cancelled outcome for the expired card: {seen:?}"
         );
 
         let _ = client.shutdown();
