@@ -117,6 +117,110 @@ fn files_watch_path_is_relevant(
         || (second.as_os_str() == "refs" && components.next().is_some())
 }
 
+/// How many distinct files a references search will read for previews.
+/// A reference list is a handful of files in the ordinary case and every
+/// file in the repository in the pathological one ("references to `new`");
+/// this is where that stops being the UI's problem.
+const PREVIEW_FILE_BUDGET: usize = 100;
+
+/// The identifier around `offset`, or empty when there is none.
+///
+/// The server's answer does not carry the symbol's name, so the panel's
+/// heading comes from the buffer. Empty is a real answer — the heading then
+/// says "12 references" rather than inventing a name.
+fn symbol_at(text: &str, offset: usize) -> String {
+    fn part_of_word(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    if text.is_empty() {
+        return String::new();
+    }
+    // An offset at the very end of the buffer still belongs to the word
+    // ending there, so start the scan from the byte before it.
+    let mut start = offset.min(text.len());
+    while start > 0 {
+        let previous = text[..start]
+            .chars()
+            .next_back()
+            .expect("a non-empty prefix has a last character");
+        if !part_of_word(previous) {
+            break;
+        }
+        start -= previous.len_utf8();
+    }
+    let mut end = offset.min(text.len());
+    while end < text.len() {
+        let next = text[end..]
+            .chars()
+            .next()
+            .expect("a non-empty suffix has a first character");
+        if !part_of_word(next) {
+            break;
+        }
+        end += next.len_utf8();
+    }
+    text[start..end].to_owned()
+}
+
+/// Turns the server's targets into the panel's rows, reading each distinct
+/// file at most once for its preview.
+///
+/// `read` is a parameter rather than a call to `std::fs` so the budget and
+/// the ordering are testable without writing files anywhere. `budget`
+/// bounds the *reads*, never the rows: a reference beyond it is still
+/// listed, as a coordinate without a preview.
+///
+/// Rows come out ordered by (display, line), which is what makes one header
+/// per file correct downstream.
+fn reference_rows_with<F>(
+    targets: Vec<sirio_lsp::Target>,
+    worktree_root: &Path,
+    budget: usize,
+    mut read: F,
+) -> Vec<sirio_ui::right_panel::ReferenceRow>
+where
+    F: FnMut(&Path) -> Option<Vec<String>>,
+{
+    use std::collections::HashMap;
+
+    let mut rows: Vec<sirio_ui::right_panel::ReferenceRow> = targets
+        .into_iter()
+        .map(|target| sirio_ui::right_panel::ReferenceRow {
+            display: target
+                .path
+                .strip_prefix(worktree_root)
+                .unwrap_or(&target.path)
+                .display()
+                .to_string(),
+            path: target.path,
+            line: target.line as usize,
+            preview: String::new(),
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        left.display
+            .cmp(&right.display)
+            .then(left.line.cmp(&right.line))
+    });
+
+    let mut cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for row in &mut rows {
+        if !cache.contains_key(&row.path) {
+            if cache.len() >= budget {
+                continue;
+            }
+            // An unreadable file caches as an empty Vec, so it is read
+            // once and counted once rather than retried per row.
+            cache.insert(row.path.clone(), read(&row.path).unwrap_or_default());
+        }
+        if let Some(line) = cache.get(&row.path).and_then(|lines| lines.get(row.line)) {
+            row.preview = line.trim().to_owned();
+        }
+    }
+    rows
+}
+
 mod account_login;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
@@ -5933,6 +6037,9 @@ impl SirioWorkspace {
                     workspace.add_conflict_terminal_tab(path.clone(), cx)
                 }
                 RightPanelActionEvent::OpenCommit(sha) => workspace.add_commit_tab(sha.clone(), cx),
+                RightPanelActionEvent::OpenAtLine { path, line } => {
+                    workspace.open_at_line(path.clone(), *line, cx)
+                }
             },
         )
         .detach();
@@ -5993,6 +6100,9 @@ impl SirioWorkspace {
                 FileViewEvent::GoToDefinition { path, offset } => {
                     workspace.go_to_definition(path.clone(), *offset, view.clone(), cx);
                 }
+                FileViewEvent::FindReferences { path, offset } => {
+                    workspace.find_references(path.clone(), *offset, view.clone(), cx);
+                }
             },
         )
         .detach();
@@ -6014,6 +6124,9 @@ impl SirioWorkspace {
             definition_available: worktree
                 .as_deref()
                 .is_some_and(|root| self.lsp.definition_available(path, root)),
+            references_available: worktree
+                .as_deref()
+                .is_some_and(|root| self.lsp.references_available(path, root)),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -10715,6 +10828,86 @@ impl SirioWorkspace {
                     None => view.update(cx, |view, cx| view.set_notice("No definition found", cx)),
                 },
                 Err(error) => view.update(cx, |view, cx| view.set_notice(error.to_string(), cx)),
+            });
+        })
+        .detach();
+    }
+
+    /// Everywhere the symbol under the caret is used, shown in the right
+    /// panel. The panel opens **before** the answer: against a server that
+    /// is still indexing, waiting for the reply would make the menu entry
+    /// look like it did nothing at all.
+    fn find_references(
+        &mut self,
+        path: PathBuf,
+        offset: usize,
+        view: Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        use sirio_ui::right_panel::{PanelView, ReferencesState};
+
+        let Some(worktree_root) = self.worktree_root_for(&path) else {
+            return;
+        };
+        let Some(entry) = self.lsp.entry_for(&path) else {
+            return;
+        };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
+        if !server.capabilities().references {
+            return;
+        }
+        let client = server.client().clone();
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let symbol = symbol_at(&text, offset);
+        let position = sirio_lsp::LineIndex::new(&text).position(offset);
+
+        self.right_panel_visible = true;
+        PanelView::set(PanelView::References, cx);
+        let searching = ReferencesState::Searching {
+            symbol: symbol.clone(),
+        };
+        self.right_panel
+            .update(cx, |panel, cx| panel.set_references(searching, cx));
+        cx.notify();
+
+        let source = path.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::references(&client, &source, position).await })
+                .await;
+            let state = match found {
+                Ok(targets) => {
+                    let rows = cx
+                        .background_executor()
+                        .spawn(async move {
+                            reference_rows_with(
+                                targets,
+                                &worktree_root,
+                                PREVIEW_FILE_BUDGET,
+                                |path| {
+                                    std::fs::read_to_string(path).ok().map(|text| {
+                                        text.lines().map(str::to_owned).collect::<Vec<_>>()
+                                    })
+                                },
+                            )
+                        })
+                        .await;
+                    ReferencesState::Found { symbol, rows }
+                }
+                Err(error) => ReferencesState::Failed(error.to_string()),
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                workspace
+                    .right_panel
+                    .update(cx, |panel, cx| panel.set_references(state, cx));
             });
         })
         .detach();
@@ -18683,6 +18876,95 @@ mod tests {
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
     use sirio_ui::sidebar::parked_tab_row_id;
+
+    #[test]
+    fn the_identifier_under_the_caret_names_the_search() {
+        // The LSP answer does not carry the symbol's name, so the heading
+        // has to come from the buffer. Scanning must stop at the edges of
+        // the identifier and at the edges of the buffer.
+        let text = "let spawn_router = 1;\n";
+        assert_eq!(symbol_at(text, 6), "spawn_router", "inside the word");
+        assert_eq!(symbol_at(text, 4), "spawn_router", "at its first byte");
+        assert_eq!(symbol_at(text, 16), "spawn_router", "at its last byte");
+        assert_eq!(symbol_at(text, 3), "let", "the previous word");
+        assert_eq!(symbol_at("", 0), "", "an empty buffer names nothing");
+        assert_eq!(symbol_at("  ", 1), "", "whitespace names nothing");
+        assert_eq!(symbol_at("x", 1), "x", "an offset at the very end");
+    }
+
+    #[test]
+    fn a_non_ascii_identifier_is_not_cut_in_half() {
+        // Slicing a multi-byte character mid-way panics. A scan that walks
+        // bytes without checking character boundaries finds this the hard
+        // way, in front of a user.
+        let text = "let caffè = 1;";
+        assert_eq!(symbol_at(text, 5), "caffè");
+    }
+
+    #[test]
+    fn rows_carry_previews_and_are_ordered_by_file_then_line() {
+        // Grouping downstream assumes this order; producing it here is what
+        // makes one header per file correct.
+        let targets = vec![
+            sirio_lsp::Target { path: "/repo/b.rs".into(), line: 1, character: 0 },
+            sirio_lsp::Target { path: "/repo/a.rs".into(), line: 4, character: 0 },
+            sirio_lsp::Target { path: "/repo/a.rs".into(), line: 0, character: 0 },
+        ];
+        let rows = reference_rows_with(targets, std::path::Path::new("/repo"), 10, |path| {
+            (path == std::path::Path::new("/repo/a.rs")).then(|| {
+                vec!["  fn a() {}".to_owned(), "x".to_owned(), "y".to_owned(),
+                     "z".to_owned(), "  a();".to_owned()]
+            })
+        });
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].display, "a.rs");
+        assert_eq!(rows[0].line, 0);
+        assert_eq!(rows[0].preview, "fn a() {}", "the preview is trimmed");
+        assert_eq!(rows[1].display, "a.rs");
+        assert_eq!(rows[1].line, 4);
+        assert_eq!(rows[2].display, "b.rs");
+        assert_eq!(rows[2].preview, "", "a file that could not be read still gets a row");
+    }
+
+    #[test]
+    fn the_preview_budget_bounds_the_reads_without_dropping_rows() {
+        // A symbol used in a thousand files must not read a thousand files
+        // on the way to the panel — and must still show a thousand rows.
+        let targets = (0..5)
+            .map(|index| sirio_lsp::Target {
+                path: std::path::PathBuf::from(format!("/repo/f{index}.rs")),
+                line: 0,
+                character: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut read_count = 0;
+        let rows = reference_rows_with(targets, std::path::Path::new("/repo"), 2, |_| {
+            read_count += 1;
+            Some(vec!["source".to_owned()])
+        });
+
+        assert_eq!(rows.len(), 5, "every reference is listed");
+        assert_eq!(read_count, 2, "only the budget's worth of files are read");
+        assert_eq!(rows[0].preview, "source");
+        assert_eq!(rows[4].preview, "", "beyond the budget, a row is a coordinate");
+    }
+
+    #[test]
+    fn a_line_past_the_end_of_a_file_still_produces_a_row() {
+        // The file moved while the server was thinking. Losing the row
+        // would be worse than showing it without a preview.
+        let targets = vec![sirio_lsp::Target {
+            path: "/repo/a.rs".into(),
+            line: 900,
+            character: 0,
+        }];
+        let rows = reference_rows_with(targets, std::path::Path::new("/repo"), 10, |_| {
+            Some(vec!["one line".to_owned()])
+        });
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, "");
+    }
 
     #[gpui::test]
     async fn quitting_takes_every_language_server_out_of_the_registry(cx: &mut TestAppContext) {
