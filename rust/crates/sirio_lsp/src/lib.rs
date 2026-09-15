@@ -21,6 +21,7 @@ mod message;
 mod position;
 mod roots;
 mod server;
+mod uri;
 
 pub use config::{ConfigError, LanguageEntry, LanguageTable};
 pub use loader::{ConfigLoader, Reload, config_path};
@@ -31,6 +32,7 @@ pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
 pub use position::LineIndex;
 pub use server::Server;
+pub use uri::{path_for_uri, uri_for_path};
 
 /// Everything that can go wrong below the UI.
 ///

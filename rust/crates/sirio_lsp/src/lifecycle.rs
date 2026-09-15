@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use lsp_types::{
-    ClientCapabilities, InitializeParams, InitializeResult, OneOf, ServerCapabilities, Uri,
+    ClientCapabilities, InitializeParams, InitializeResult, OneOf, ServerCapabilities,
 };
 
 use crate::connection::Client;
@@ -59,9 +59,7 @@ impl From<&ServerCapabilities> for Capabilities {
 
 /// Runs `initialize` then `initialized`, returning what the server offers.
 pub async fn initialize(client: &Client, root: &Path) -> Result<Capabilities, LspError> {
-    let root_uri: Uri = format!("file://{}", root.display())
-        .parse()
-        .map_err(|_| LspError::Launch(format!("root is not an absolute path: {}", root.display())))?;
+    let root_uri = crate::uri::uri_for_path(root)?;
 
     #[allow(deprecated)] // `root_uri` is deprecated in the spec but still
     // what several servers actually read; sending both is the pragmatic
