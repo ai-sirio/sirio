@@ -128,6 +128,17 @@ pub struct FileView {
     /// terms. Replaced wholesale on every publish — an empty list is how a
     /// server says the errors are gone, so it must clear, not be ignored.
     diagnostics: Vec<FileDiagnostic>,
+    /// The offset the pointer is resting on, the frame point it rests at,
+    /// and the timer that will turn that rest into a question. Replacing
+    /// the `Task` cancels it, which is the whole of dwell cancellation.
+    hover_offset: Option<usize>,
+    hover_point: Point<Pixels>,
+    hover_task: Option<Task<()>>,
+    /// Monotonic, bumped on every dwell. A reply carrying an older number
+    /// is an answer about a place the pointer has left, and is dropped.
+    /// Without this the card appears where the cursor no longer is.
+    hover_seq: u64,
+    hover_card: Option<String>,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -174,6 +185,7 @@ pub enum FileViewEvent {
         lines: (usize, usize),
     },
     ViewFileHistory(PathBuf),
+    Hover { path: PathBuf, offset: usize, seq: u64 },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -205,6 +217,8 @@ pub struct FileDiagnostic {
 pub fn init(cx: &mut App) {
     ::editor::init(cx);
 }
+
+const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl FileView {
     /// Starts loading `path` without doing filesystem work during render.
@@ -258,6 +272,11 @@ impl FileView {
             context_menu: None,
             shell_facts: FileContextFacts::default(),
             diagnostics: Vec::new(),
+            hover_offset: None,
+            hover_point: point(px(0.), px(0.)),
+            hover_task: None,
+            hover_seq: 0,
+            hover_card: None,
         }
     }
 
@@ -323,6 +342,55 @@ impl FileView {
         &self.diagnostics
     }
 
+    /// Called from every pointer move over the source surface, which is to
+    /// say very often. **An unchanged offset returns immediately**, without
+    /// notifying — this is a hot path and a `notify` here would redraw the
+    /// file on every pixel of travel.
+    pub fn hover_moved(&mut self, offset: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.hover_offset == Some(offset) {
+            return;
+        }
+        self.hover_offset = Some(offset);
+        self.hover_point = at;
+        if self.hover_card.take().is_some() {
+            cx.notify();
+        }
+        self.hover_seq = self.hover_seq.wrapping_add(1);
+        let seq = self.hover_seq;
+        let path = self.path.clone();
+        self.hover_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_DELAY).await;
+            let _ = this.update(cx, |_view, cx| {
+                cx.emit(FileViewEvent::Hover { path, offset, seq });
+            });
+        }));
+    }
+
+    /// Accepts an answer only if it is about where the pointer is now.
+    pub fn set_hover(&mut self, seq: u64, text: Option<String>, cx: &mut Context<Self>) {
+        if seq != self.hover_seq {
+            return;
+        }
+        self.hover_card = text;
+        cx.notify();
+    }
+
+    pub fn hover_sequence(&self) -> u64 {
+        self.hover_seq
+    }
+
+    pub fn hover_card(&self) -> Option<&str> {
+        self.hover_card.as_deref()
+    }
+
+    fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_offset = None;
+        self.hover_task = None;
+        if self.hover_card.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The shell's facts plus the two this view answers itself.
     fn menu_facts(&self) -> FileContextFacts {
         let has_selection = self
@@ -342,6 +410,7 @@ impl FileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_hover(cx);
         self.editor_focus.focus(window, cx);
         self.context_menu = Some(event.position);
         cx.notify();
@@ -618,6 +687,7 @@ impl FileView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_hover(cx);
         if event.keystroke.modifiers.control && event.keystroke.key == "a" {
             self.select_all();
             cx.notify();
@@ -1149,6 +1219,13 @@ impl Render for FileView {
             // window's top-left corner — double-counting it (P129).
             deferred(anchored().position(position).snap_to_window().child(menu)).priority(1)
         });
+        let hover_card = self.hover_card.clone().map(|text| {
+            let at = self.hover_point + point(px(12.), px(18.));
+            deferred(
+                anchored().position(at).snap_to_window().child(hover_card(&text, theme)),
+            )
+            .priority(1)
+        });
         div()
             .size_full()
             .flex()
@@ -1156,6 +1233,7 @@ impl Render for FileView {
             .bg(theme.surface)
             .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
             .when_some(context_menu, |this, menu| this.child(menu))
+            .when_some(hover_card, |this, card| this.child(card))
             .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
@@ -1996,6 +2074,24 @@ impl Element for EditableLine {
         let line_start = self.line_start;
         let line_len = self.line_len;
         let view = self.view.clone();
+        let hitbox_for_hover = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && !event.dragging()
+                && hitbox_for_hover.is_hovered(window)
+            {
+                let local = match layout.index_for_position(event.position) {
+                    Ok(index) | Err(index) => index.min(line_len),
+                };
+                let at = event.position;
+                view.update(cx, |view, cx| view.hover_moved(line_start + local, at, cx));
+            }
+        });
+
+        let layout = self.text.layout().clone();
+        let line_start = self.line_start;
+        let line_len = self.line_len;
+        let view = self.view.clone();
         let links = self.links.clone();
         let pressed_for_up = self.pressed.clone();
         let hitbox_for_up = hitbox.clone();
@@ -2054,6 +2150,29 @@ impl MarkdownFormatOp {
     fn apply(self, file_view: &gpui::Entity<FileView>, cx: &mut App) {
         file_view.update(cx, |view, cx| view.apply_markdown_format(self, cx));
     }
+}
+
+/// The hover popover. Plain text in the code font: the server answers in
+/// Markdown, and rendering it properly would put a parser in the paint
+/// path for the sake of a few bold words. The signature — the part that
+/// matters — reads correctly either way.
+fn hover_card(text: &str, theme: Theme) -> AnyElement {
+    div()
+        .id("file-view-hover")
+        .debug_selector(|| "file-view-hover".into())
+        .max_w(px(520.0))
+        .max_h(px(240.0))
+        .overflow_hidden()
+        .p(px(8.0))
+        .bg(theme.surface_raised)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radii.control)
+        .font_family(theme.typography.code_family)
+        .text_size(theme.typography.code_size)
+        .text_color(theme.text)
+        .child(text.to_owned())
+        .into_any_element()
 }
 
 fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
@@ -2592,6 +2711,118 @@ mod tests {
     // and each mode renders the content that belongs to it — rendered
     // Markdown in Preview, the numbered source in Code. The typography
     // inside either mode is appearance and is not asserted.
+
+    #[gpui::test]
+    async fn a_resting_pointer_asks_for_a_hover_only_after_the_delay(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                if let FileViewEvent::Hover { offset, .. } = event {
+                    captured.borrow_mut().push(*offset);
+                }
+            })
+            .detach();
+        });
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.hover_moved(3, point(px(10.), px(10.)), cx)
+        });
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.cx.run_until_parked();
+        assert!(
+            events.borrow().is_empty(),
+            "100ms is not a dwell — asking this early makes every pass of the mouse a request"
+        );
+
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[3],
+            "exactly one request, for the resting offset"
+        );
+    }
+
+    #[gpui::test]
+    async fn moving_on_before_the_delay_asks_only_about_where_it_stopped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                if let FileViewEvent::Hover { offset, .. } = event {
+                    captured.borrow_mut().push(*offset);
+                }
+            })
+            .detach();
+        });
+
+        for offset in [1usize, 2, 3, 4] {
+            view.update(&mut cx.cx, |view, cx| {
+                view.hover_moved(offset, point(px(10.), px(10.)), cx)
+            });
+            cx.cx.executor().advance_clock(std::time::Duration::from_millis(50));
+        }
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[4],
+            "replacing the timer Task cancels it, so only the last rest asks"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_reply_for_a_place_the_pointer_has_left_is_discarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        // Two dwells: the first reply arrives after the second has started.
+        view.update(&mut cx.cx, |view, cx| {
+            view.hover_moved(3, point(px(10.), px(10.)), cx)
+        });
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+        let stale = view.read_with(&cx.cx, |view, _| view.hover_sequence());
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.hover_moved(9, point(px(20.), px(10.)), cx)
+        });
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_hover(stale, Some("stale answer".to_owned()), cx)
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)),
+            None,
+            "an answer for a place the pointer has left must not appear where it now is"
+        );
+
+        let current = view.read_with(&cx.cx, |view, _| view.hover_sequence());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_hover(current, Some("fresh answer".to_owned()), cx)
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
+                .as_deref(),
+            Some("fresh answer")
+        );
+    }
 
     /// Mounts a `FileView` in a drawn window and pumps until its background
     /// load has actually installed the editor — the same hardened pump the
