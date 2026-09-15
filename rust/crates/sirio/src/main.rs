@@ -117,6 +117,110 @@ fn files_watch_path_is_relevant(
         || (second.as_os_str() == "refs" && components.next().is_some())
 }
 
+/// How many distinct files a references search will read for previews.
+/// A reference list is a handful of files in the ordinary case and every
+/// file in the repository in the pathological one ("references to `new`");
+/// this is where that stops being the UI's problem.
+const PREVIEW_FILE_BUDGET: usize = 100;
+
+/// The identifier around `offset`, or empty when there is none.
+///
+/// The server's answer does not carry the symbol's name, so the panel's
+/// heading comes from the buffer. Empty is a real answer — the heading then
+/// says "12 references" rather than inventing a name.
+fn symbol_at(text: &str, offset: usize) -> String {
+    fn part_of_word(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    if text.is_empty() {
+        return String::new();
+    }
+    // An offset at the very end of the buffer still belongs to the word
+    // ending there, so start the scan from the byte before it.
+    let mut start = offset.min(text.len());
+    while start > 0 {
+        let previous = text[..start]
+            .chars()
+            .next_back()
+            .expect("a non-empty prefix has a last character");
+        if !part_of_word(previous) {
+            break;
+        }
+        start -= previous.len_utf8();
+    }
+    let mut end = offset.min(text.len());
+    while end < text.len() {
+        let next = text[end..]
+            .chars()
+            .next()
+            .expect("a non-empty suffix has a first character");
+        if !part_of_word(next) {
+            break;
+        }
+        end += next.len_utf8();
+    }
+    text[start..end].to_owned()
+}
+
+/// Turns the server's targets into the panel's rows, reading each distinct
+/// file at most once for its preview.
+///
+/// `read` is a parameter rather than a call to `std::fs` so the budget and
+/// the ordering are testable without writing files anywhere. `budget`
+/// bounds the *reads*, never the rows: a reference beyond it is still
+/// listed, as a coordinate without a preview.
+///
+/// Rows come out ordered by (display, line), which is what makes one header
+/// per file correct downstream.
+fn reference_rows_with<F>(
+    targets: Vec<sirio_lsp::Target>,
+    worktree_root: &Path,
+    budget: usize,
+    mut read: F,
+) -> Vec<sirio_ui::right_panel::ReferenceRow>
+where
+    F: FnMut(&Path) -> Option<Vec<String>>,
+{
+    use std::collections::HashMap;
+
+    let mut rows: Vec<sirio_ui::right_panel::ReferenceRow> = targets
+        .into_iter()
+        .map(|target| sirio_ui::right_panel::ReferenceRow {
+            display: target
+                .path
+                .strip_prefix(worktree_root)
+                .unwrap_or(&target.path)
+                .display()
+                .to_string(),
+            path: target.path,
+            line: target.line as usize,
+            preview: String::new(),
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        left.display
+            .cmp(&right.display)
+            .then(left.line.cmp(&right.line))
+    });
+
+    let mut cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for row in &mut rows {
+        if !cache.contains_key(&row.path) {
+            if cache.len() >= budget {
+                continue;
+            }
+            // An unreadable file caches as an empty Vec, so it is read
+            // once and counted once rather than retried per row.
+            cache.insert(row.path.clone(), read(&row.path).unwrap_or_default());
+        }
+        if let Some(line) = cache.get(&row.path).and_then(|lines| lines.get(row.line)) {
+            row.preview = line.trim().to_owned();
+        }
+    }
+    rows
+}
+
 mod account_login;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
@@ -3979,6 +4083,10 @@ struct SirioWorkspace {
     status_bar: Entity<StatusBar>,
     settings: Entity<Settings>,
     right_panel: Entity<RightPanel>,
+    /// The Go to Symbol overlay. Held always, rendered only while open —
+    /// it owns its query, selection and focus; this crate owns the fetch
+    /// and the jump.
+    outline: Entity<sirio_ui::outline::Outline>,
     sidebar_visible: bool,
     right_panel_visible: bool,
     /// Preferred width, not the drawn width: `panel_layout::resolve_panel_widths`
@@ -4794,7 +4902,16 @@ impl SirioWorkspace {
         })
         .detach();
 
+        let outline = cx.new(sirio_ui::outline::Outline::new);
         Self::subscribe_right_panel(&right_panel, cx);
+        cx.subscribe(
+            &outline,
+            |workspace, _, event: &sirio_ui::outline::OutlineEvent, cx| {
+                let sirio_ui::outline::OutlineEvent::Jump { path, line } = event;
+                workspace.open_at_line(path.clone(), *line, cx);
+            },
+        )
+        .detach();
         Self::bind_terminal_tabs(&tabs, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         // `bind_file_tabs` needs `&mut self`, which does not exist yet, so
@@ -4879,6 +4996,7 @@ impl SirioWorkspace {
             status_bar,
             settings,
             right_panel,
+            outline,
             sidebar_visible: true,
             right_panel_visible: true,
             sidebar_width,
@@ -5933,6 +6051,9 @@ impl SirioWorkspace {
                     workspace.add_conflict_terminal_tab(path.clone(), cx)
                 }
                 RightPanelActionEvent::OpenCommit(sha) => workspace.add_commit_tab(sha.clone(), cx),
+                RightPanelActionEvent::OpenAtLine { path, line } => {
+                    workspace.open_at_line(path.clone(), *line, cx)
+                }
             },
         )
         .detach();
@@ -5993,6 +6114,9 @@ impl SirioWorkspace {
                 FileViewEvent::GoToDefinition { path, offset } => {
                     workspace.go_to_definition(path.clone(), *offset, view.clone(), cx);
                 }
+                FileViewEvent::FindReferences { path, offset } => {
+                    workspace.find_references(path.clone(), *offset, view.clone(), cx);
+                }
             },
         )
         .detach();
@@ -6011,7 +6135,12 @@ impl SirioWorkspace {
             in_git_repo: worktree.is_some(),
             has_github_remote,
             has_agent_chat: self.active_chat_for(path).is_some(),
-            definition_available: self.lsp.definition_available(path),
+            definition_available: worktree
+                .as_deref()
+                .is_some_and(|root| self.lsp.definition_available(path, root)),
+            references_available: worktree
+                .as_deref()
+                .is_some_and(|root| self.lsp.references_available(path, root)),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -10374,17 +10503,20 @@ impl SirioWorkspace {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Terminal".to_owned());
-        let terminal = cx.new(|cx| match TerminalView::with_shell(&directory, TerminalShell::System, cx) {
-            Ok(view) => view,
-            // A PTY can fail to fork for ordinary reasons: the pane shows the
-            // failure and a retry button instead of aborting the app.
-            Err(error) => TerminalView::failed(
-                &directory,
-                TerminalShell::System,
-                format!("{error:#}"),
-                cx,
-            ),
-        });
+        let terminal =
+            cx.new(
+                |cx| match TerminalView::with_shell(&directory, TerminalShell::System, cx) {
+                    Ok(view) => view,
+                    // A PTY can fail to fork for ordinary reasons: the pane shows the
+                    // failure and a retry button instead of aborting the app.
+                    Err(error) => TerminalView::failed(
+                        &directory,
+                        TerminalShell::System,
+                        format!("{error:#}"),
+                        cx,
+                    ),
+                },
+            );
         self.insert_terminal_tab(title, terminal, None, cx);
     }
 
@@ -10508,7 +10640,9 @@ impl SirioWorkspace {
             view.update(cx, |view, cx| view.set_notice(message, cx));
         }
         let Some(entry) = entry else { return };
-        let Some(worktree_root) = self.worktree_root_for(path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(path) else {
+            return;
+        };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
         if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
             self.open_document_on_server(path, view, cx);
@@ -10534,7 +10668,11 @@ impl SirioWorkspace {
                     let router = Self::spawn_router(&server, cx);
                     workspace.lsp.insert(
                         key.clone(),
-                        crate::lsp::ServerHandle { server, read_loop: task, router },
+                        crate::lsp::ServerHandle {
+                            server,
+                            read_loop: task,
+                            router,
+                        },
                     );
                     // The server exists only now, so the facts that depend
                     // on it — whether "Go to Definition" is offered — were
@@ -10595,7 +10733,9 @@ impl SirioWorkspace {
     /// by path rather than remembered per server, because the same file can
     /// be open in more than one tab.
     fn apply_diagnostics(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
-        let Some((path, raw)) = sirio_lsp::parse_publish(params) else { return };
+        let Some((path, raw)) = sirio_lsp::parse_publish(params) else {
+            return;
+        };
         for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
             if !paths_name_the_same_document(&open_path, &path) {
                 continue;
@@ -10620,10 +10760,16 @@ impl SirioWorkspace {
         view: &Entity<FileView>,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.lsp.entry_for(path) else { return };
-        let Some(worktree_root) = self.worktree_root_for(path) else { return };
+        let Some(entry) = self.lsp.entry_for(path) else {
+            return;
+        };
+        let Some(worktree_root) = self.worktree_root_for(path) else {
+            return;
+        };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
-        let Some(server) = self.lsp.server_for(&key) else { return };
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
         let client = server.client().clone();
         let version = self.lsp.versions_mut().opened(path);
         let text = view
@@ -10648,10 +10794,16 @@ impl SirioWorkspace {
         view: Entity<FileView>,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.lsp.entry_for(&path) else { return };
-        let Some(worktree_root) = self.worktree_root_for(&path) else { return };
+        let Some(entry) = self.lsp.entry_for(&path) else {
+            return;
+        };
+        let Some(worktree_root) = self.worktree_root_for(&path) else {
+            return;
+        };
         let key = self.lsp.key_for(&path, &worktree_root, &entry);
-        let Some(server) = self.lsp.server_for(&key) else { return };
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
         // A server that does not offer hover is not asked. The negotiated
         // capability decides, never an assumption about what a server does.
         if !server.capabilities().hover {
@@ -10683,10 +10835,16 @@ impl SirioWorkspace {
         view: Entity<FileView>,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.lsp.entry_for(&path) else { return };
-        let Some(worktree_root) = self.worktree_root_for(&path) else { return };
+        let Some(entry) = self.lsp.entry_for(&path) else {
+            return;
+        };
+        let Some(worktree_root) = self.worktree_root_for(&path) else {
+            return;
+        };
         let key = self.lsp.key_for(&path, &worktree_root, &entry);
-        let Some(server) = self.lsp.server_for(&key) else { return };
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
         if !server.capabilities().definition {
             return;
         }
@@ -10718,6 +10876,146 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// Everywhere the symbol under the caret is used, shown in the right
+    /// panel. The panel opens **before** the answer: against a server that
+    /// is still indexing, waiting for the reply would make the menu entry
+    /// look like it did nothing at all.
+    fn find_references(
+        &mut self,
+        path: PathBuf,
+        offset: usize,
+        view: Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        use sirio_ui::right_panel::{PanelView, ReferencesState};
+
+        let Some(worktree_root) = self.worktree_root_for(&path) else {
+            return;
+        };
+        let Some(entry) = self.lsp.entry_for(&path) else {
+            return;
+        };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
+        if !server.capabilities().references {
+            return;
+        }
+        let client = server.client().clone();
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let symbol = symbol_at(&text, offset);
+        let position = sirio_lsp::LineIndex::new(&text).position(offset);
+
+        self.right_panel_visible = true;
+        PanelView::set(PanelView::References, cx);
+        let searching = ReferencesState::Searching {
+            symbol: symbol.clone(),
+        };
+        self.right_panel
+            .update(cx, |panel, cx| panel.set_references(searching, cx));
+        cx.notify();
+
+        let source = path.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::references(&client, &source, position).await })
+                .await;
+            let state = match found {
+                Ok(targets) => {
+                    let rows = cx
+                        .background_executor()
+                        .spawn(async move {
+                            reference_rows_with(
+                                targets,
+                                &worktree_root,
+                                PREVIEW_FILE_BUDGET,
+                                |path| {
+                                    std::fs::read_to_string(path).ok().map(|text| {
+                                        text.lines().map(str::to_owned).collect::<Vec<_>>()
+                                    })
+                                },
+                            )
+                        })
+                        .await;
+                    ReferencesState::Found { symbol, rows }
+                }
+                Err(error) => ReferencesState::Failed(error.to_string()),
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                workspace
+                    .right_panel
+                    .update(cx, |panel, cx| panel.set_references(state, cx));
+            });
+        })
+        .detach();
+    }
+
+    /// The active file's symbols, in an overlay that jumps and disappears.
+    ///
+    /// The overlay opens **before** the request: against a server that is
+    /// still indexing, opening on the answer would leave the command
+    /// looking inert for several seconds.
+    ///
+    /// A tab split into two panes has no single "the file"; this takes the
+    /// first file view in pane order, the same walk `handle_save_file`
+    /// does.
+    fn go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.tabs.get(self.active_tab).and_then(|tab| {
+            let mut found = None;
+            tab.panes.for_each(&mut |_, content| {
+                if found.is_none()
+                    && let TabContent::File { view } = content
+                {
+                    found = Some(view.clone());
+                }
+            });
+            found
+        }) else {
+            return;
+        };
+        let path = view.read(cx).path().to_path_buf();
+        let Some(worktree_root) = self.worktree_root_for(&path) else {
+            return;
+        };
+        let Some(entry) = self.lsp.entry_for(&path) else {
+            return;
+        };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
+        if !server.capabilities().document_symbols {
+            return;
+        }
+        let client = server.client().clone();
+
+        self.outline
+            .update(cx, |outline, cx| outline.begin(path.clone(), window, cx));
+
+        let source = path.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::document_symbols(&client, &source).await })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.outline.update(cx, |outline, cx| match found {
+                    Ok(symbols) => {
+                        outline.set_symbols(&path, crate::lsp::view_symbols(&symbols), cx)
+                    }
+                    Err(error) => outline.fail(&path, error.to_string(), cx),
+                });
+            });
+        })
+        .detach();
+    }
+
     /// Opens a file (or selects the tab already showing it) and reveals a
     /// line, whether or not the content has loaded yet.
     fn open_at_line(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
@@ -10732,10 +11030,16 @@ impl SirioWorkspace {
     /// Tells the server a file is closed and forgets its version, so a
     /// reopen starts over at 1.
     fn close_document_on_server(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let Some(entry) = self.lsp.entry_for(path) else { return };
-        let Some(worktree_root) = self.worktree_root_for(path) else { return };
+        let Some(entry) = self.lsp.entry_for(path) else {
+            return;
+        };
+        let Some(worktree_root) = self.worktree_root_for(path) else {
+            return;
+        };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
-        let Some(server) = self.lsp.server_for(&key) else { return };
+        let Some(server) = self.lsp.server_for(&key) else {
+            return;
+        };
         let client = server.client().clone();
         self.lsp.versions_mut().closed(path);
         let path = path.to_path_buf();
@@ -15124,7 +15428,7 @@ impl SirioWorkspace {
         }
     }
 
-    fn palette_context(&self) -> PaletteContext {
+    fn palette_context(&self, cx: &App) -> PaletteContext {
         let sidebar_target = self.project_catalog.projects().iter().find_map(|project| {
             project
                 .worktrees
@@ -15155,7 +15459,35 @@ impl SirioWorkspace {
             active_tab_kind: self.tabs.get(self.active_tab).map(|tab| tab.kind),
             has_retained_chat: !self.retained_chats.is_empty(),
             sidebar_target,
+            symbols_available: self.active_file_offers_symbols(cx),
         }
+    }
+
+    /// Whether the active tab is a file whose own server offers document
+    /// symbols.
+    ///
+    /// `&self` plus `&App`, never `&mut self`: this is computed during a
+    /// render, and needing `&mut` for it is exactly what made the context
+    /// menu's facts settle for a containment match before Task 4.
+    fn active_file_offers_symbols(&self, cx: &App) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return false;
+        };
+        let mut path = None;
+        tab.panes.for_each(&mut |_, content| {
+            if path.is_none()
+                && let TabContent::File { view } = content
+            {
+                path = Some(view.read(cx).path().to_path_buf());
+            }
+        });
+        let Some(path) = path else { return false };
+        let Some(root) = self.worktree_root_for(&path) else {
+            return false;
+        };
+        self.lsp
+            .capability_for(&path, &root)
+            .is_some_and(|offered| offered.document_symbols)
     }
 
     fn focused_terminal(&self, window: &Window, cx: &App) -> bool {
@@ -15338,7 +15670,7 @@ impl SirioWorkspace {
             self.close_command_palette(window, cx);
             return;
         }
-        let context = self.palette_context();
+        let context = self.palette_context(cx);
         let entries = palette_entries(&context);
         let filtered = filter_palette_entries(&entries, &self.palette_query);
         match key {
@@ -15465,6 +15797,10 @@ impl SirioWorkspace {
                 }
             }
             PaletteCommand::Sidebar(action) => self.dispatch_sidebar_palette_action(action, cx),
+            PaletteCommand::GoToSymbol => {
+                self.close_command_palette(window, cx);
+                self.go_to_symbol(window, cx);
+            }
         }
         self.close_command_palette(window, cx);
     }
@@ -15474,7 +15810,7 @@ impl SirioWorkspace {
         action: SidebarPaletteAction,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.palette_context().sidebar_target else {
+        let Some(target) = self.palette_context(cx).sidebar_target else {
             return;
         };
         match action {
@@ -15540,8 +15876,8 @@ impl SirioWorkspace {
         )
     }
 
-    fn render_command_palette(&self, theme: Theme, entity: Entity<Self>) -> AnyElement {
-        let context = self.palette_context();
+    fn render_command_palette(&self, theme: Theme, entity: Entity<Self>, cx: &App) -> AnyElement {
+        let context = self.palette_context(cx);
         let entries = palette_entries(&context);
         let filtered = filter_palette_entries(&entries, &self.palette_query);
         let selected = self.palette_selected.min(filtered.len().saturating_sub(1));
@@ -16136,7 +16472,10 @@ impl Render for SirioWorkspace {
                         .child(self.child_view(self.status_bar.clone())),
                 )
                 .when(self.palette_open, |this| {
-                    this.child(self.render_command_palette(theme, cx.entity()))
+                    this.child(self.render_command_palette(theme, cx.entity(), cx))
+                })
+                .when(self.outline.read(cx).is_open(), |this| {
+                    this.child(self.outline.clone())
                 })
                 .children(self.render_global_overlays(theme, cx.entity()));
         }
@@ -16251,7 +16590,10 @@ impl Render for SirioWorkspace {
                     .child(self.status_bar.clone()),
             )
             .when(self.palette_open, |this| {
-                this.child(self.render_command_palette(theme, cx.entity()))
+                this.child(self.render_command_palette(theme, cx.entity(), cx))
+            })
+            .when(self.outline.read(cx).is_open(), |this| {
+                this.child(self.outline.clone())
             })
             .children(self.render_global_overlays(theme, cx.entity()))
     }
@@ -18682,6 +19024,118 @@ mod tests {
     // one by its pill, so this import lives here rather than at the top.
     use sirio_ui::sidebar::parked_tab_row_id;
 
+    #[test]
+    fn the_identifier_under_the_caret_names_the_search() {
+        // The LSP answer does not carry the symbol's name, so the heading
+        // has to come from the buffer. Scanning must stop at the edges of
+        // the identifier and at the edges of the buffer.
+        let text = "let spawn_router = 1;\n";
+        assert_eq!(symbol_at(text, 6), "spawn_router", "inside the word");
+        assert_eq!(symbol_at(text, 4), "spawn_router", "at its first byte");
+        assert_eq!(symbol_at(text, 16), "spawn_router", "at its last byte");
+        assert_eq!(symbol_at(text, 3), "let", "the previous word");
+        assert_eq!(symbol_at("", 0), "", "an empty buffer names nothing");
+        assert_eq!(symbol_at("  ", 1), "", "whitespace names nothing");
+        assert_eq!(symbol_at("x", 1), "x", "an offset at the very end");
+    }
+
+    #[test]
+    fn a_non_ascii_identifier_is_not_cut_in_half() {
+        // Slicing a multi-byte character mid-way panics. A scan that walks
+        // bytes without checking character boundaries finds this the hard
+        // way, in front of a user.
+        let text = "let caffè = 1;";
+        assert_eq!(symbol_at(text, 5), "caffè");
+    }
+
+    #[test]
+    fn rows_carry_previews_and_are_ordered_by_file_then_line() {
+        // Grouping downstream assumes this order; producing it here is what
+        // makes one header per file correct.
+        let targets = vec![
+            sirio_lsp::Target {
+                path: "/repo/b.rs".into(),
+                line: 1,
+                character: 0,
+            },
+            sirio_lsp::Target {
+                path: "/repo/a.rs".into(),
+                line: 4,
+                character: 0,
+            },
+            sirio_lsp::Target {
+                path: "/repo/a.rs".into(),
+                line: 0,
+                character: 0,
+            },
+        ];
+        let rows = reference_rows_with(targets, std::path::Path::new("/repo"), 10, |path| {
+            (path == std::path::Path::new("/repo/a.rs")).then(|| {
+                vec![
+                    "  fn a() {}".to_owned(),
+                    "x".to_owned(),
+                    "y".to_owned(),
+                    "z".to_owned(),
+                    "  a();".to_owned(),
+                ]
+            })
+        });
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].display, "a.rs");
+        assert_eq!(rows[0].line, 0);
+        assert_eq!(rows[0].preview, "fn a() {}", "the preview is trimmed");
+        assert_eq!(rows[1].display, "a.rs");
+        assert_eq!(rows[1].line, 4);
+        assert_eq!(rows[2].display, "b.rs");
+        assert_eq!(
+            rows[2].preview, "",
+            "a file that could not be read still gets a row"
+        );
+    }
+
+    #[test]
+    fn the_preview_budget_bounds_the_reads_without_dropping_rows() {
+        // A symbol used in a thousand files must not read a thousand files
+        // on the way to the panel — and must still show a thousand rows.
+        let targets = (0..5)
+            .map(|index| sirio_lsp::Target {
+                path: std::path::PathBuf::from(format!("/repo/f{index}.rs")),
+                line: 0,
+                character: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut read_count = 0;
+        let rows = reference_rows_with(targets, std::path::Path::new("/repo"), 2, |_| {
+            read_count += 1;
+            Some(vec!["source".to_owned()])
+        });
+
+        assert_eq!(rows.len(), 5, "every reference is listed");
+        assert_eq!(read_count, 2, "only the budget's worth of files are read");
+        assert_eq!(rows[0].preview, "source");
+        assert_eq!(
+            rows[4].preview, "",
+            "beyond the budget, a row is a coordinate"
+        );
+    }
+
+    #[test]
+    fn a_line_past_the_end_of_a_file_still_produces_a_row() {
+        // The file moved while the server was thinking. Losing the row
+        // would be worse than showing it without a preview.
+        let targets = vec![sirio_lsp::Target {
+            path: "/repo/a.rs".into(),
+            line: 900,
+            character: 0,
+        }];
+        let rows = reference_rows_with(targets, std::path::Path::new("/repo"), 10, |_| {
+            Some(vec!["one line".to_owned()])
+        });
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, "");
+    }
+
     #[gpui::test]
     async fn quitting_takes_every_language_server_out_of_the_registry(cx: &mut TestAppContext) {
         // The registry must be emptied on quit, or a server that ignores
@@ -18690,7 +19144,10 @@ mod tests {
         let mut supervisor = crate::lsp::LspSupervisor::new(sirio_lsp::ConfigLoader::new(
             std::env::temp_dir().join("sirio-quit-test-absent/languages.toml"),
         ));
-        assert!(supervisor.take_all().is_empty(), "an empty registry hands back nothing");
+        assert!(
+            supervisor.take_all().is_empty(),
+            "an empty registry hands back nothing"
+        );
         let _ = cx;
     }
 
@@ -22587,8 +23044,9 @@ mod tests {
         // No switch: wt-0 is both the selected worktree and the one the row
         // belongs to, which is the ordinary close the Activity panel already
         // knew before it crossed worktrees.
-        let (tab_id, tabs_before) =
-            workspace.read_with(&cx.cx, |workspace, _| (workspace.tabs[0].id, workspace.tabs.len()));
+        let (tab_id, tabs_before) = workspace.read_with(&cx.cx, |workspace, _| {
+            (workspace.tabs[0].id, workspace.tabs.len())
+        });
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.request_close_activity(&ActivityRef::Open(tab_id), cx);
         });
@@ -32478,8 +32936,7 @@ mod tests {
         });
         cx.run_until_parked();
         let outside = std::path::Path::new("/tmp/not-a-worktree/loose.rs");
-        let facts =
-            workspace.read_with(cx, |workspace, _| workspace.file_context_facts(outside));
+        let facts = workspace.read_with(cx, |workspace, _| workspace.file_context_facts(outside));
         assert!(
             !facts.in_git_repo && !facts.has_github_remote,
             "a file under no known worktree is in no repository: {facts:?}"
@@ -32507,8 +32964,7 @@ mod tests {
         workspace.update(cx, |workspace, cx| {
             workspace.show_file_history(file.clone(), cx);
         });
-        let visible =
-            workspace.read_with(cx, |workspace, _| workspace.right_panel_visible);
+        let visible = workspace.read_with(cx, |workspace, _| workspace.right_panel_visible);
         assert!(
             visible,
             "viewing a file's history must reveal the right panel"

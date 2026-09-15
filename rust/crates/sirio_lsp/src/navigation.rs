@@ -62,6 +62,31 @@ pub async fn definition(
     Ok(targets(&answer))
 }
 
+/// Everywhere the symbol at a position is used, the declaration included.
+/// Empty is a real answer: a symbol used nowhere is not a failure.
+///
+/// `includeDeclaration` is deliberately `true`. A list that omits the
+/// declaration omits the one place a reader most often wants to get back to,
+/// and a server asked the other way says so by returning fewer entries —
+/// never by returning an error.
+pub async fn references(
+    client: &Client,
+    path: &Path,
+    position: Position,
+) -> Result<Vec<Target>, LspError> {
+    let answer: Value = client
+        .request(
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": uri_for_path(path)? },
+                "position": position,
+                "context": { "includeDeclaration": true },
+            }),
+        )
+        .await?;
+    Ok(targets(&answer))
+}
+
 /// Flattens the three shapes `Hover.contents` may take and strips Markdown
 /// code fences. The card paints plain text in the code font, so a fence is
 /// three characters of noise occupying a line of a small popover.
@@ -206,5 +231,58 @@ mod tests {
         }]);
         assert_eq!(targets(&answer).len(), 1);
         assert_eq!(targets(&answer)[0].line, 2);
+    }
+
+    #[test]
+    fn a_references_request_asks_for_the_declaration_too() {
+        // The context object is the whole risk here. A server that is not
+        // asked for the declaration answers a shorter list and no error, so
+        // asserting only the parsed answer would pass against a bug.
+        futures::executor::block_on(async {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = seen.clone();
+            let (client, _incoming) =
+                crate::connection::tests::with_scripted_server(move |request| {
+                    captured.lock().unwrap().push(request.clone());
+                    vec![serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": [{
+                            "uri": "file:///tmp/a.rs",
+                            "range": { "start": {"line": 3, "character": 1},
+                                       "end":   {"line": 3, "character": 6} }
+                        }]
+                    })]
+                })
+                .await;
+
+            let found = references(
+                &client,
+                std::path::Path::new("/tmp/a.rs"),
+                Position { line: 0, character: 0 },
+            )
+            .await
+            .expect("the server answered");
+
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].line, 3);
+            assert_eq!(found[0].path, std::path::PathBuf::from("/tmp/a.rs"));
+
+            let sent = seen.lock().unwrap().clone();
+            assert_eq!(sent.len(), 1, "exactly one request went out");
+            assert_eq!(sent[0]["method"], serde_json::json!("textDocument/references"));
+            assert_eq!(
+                sent[0]["params"]["context"]["includeDeclaration"],
+                serde_json::json!(true),
+                "without this the declaration is missing from the list"
+            );
+        });
+    }
+
+    #[test]
+    fn no_references_is_an_empty_list_rather_than_an_error() {
+        // A symbol used nowhere is an ordinary answer.
+        assert!(targets(&serde_json::json!(null)).is_empty());
+        assert!(targets(&serde_json::json!([])).is_empty());
     }
 }

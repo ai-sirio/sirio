@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sirio_lsp::{ConfigLoader, LanguageEntry, Reload, Server};
+use sirio_lsp::{Capabilities, ConfigLoader, LanguageEntry, LanguageTable, Reload, Server};
 
 /// One running server: the connection, plus the gpui task driving its read
 /// loop. Dropping the task stops the loop, so the handle owning both is what
@@ -42,7 +42,10 @@ pub fn answer_for(
                 .get("items")
                 .and_then(serde_json::Value::as_array)
                 .map_or(0, Vec::len);
-            Ok(serde_json::Value::Array(vec![serde_json::Value::Null; items]))
+            Ok(serde_json::Value::Array(vec![
+                serde_json::Value::Null;
+                items
+            ]))
         }
         // We declare no dynamic registration, so these should not arrive —
         // but a server that sends one anyway must not be left waiting.
@@ -53,6 +56,23 @@ pub fn answer_for(
         // server carry on instead of blocking on us.
         other => Err((-32601, format!("{other} is not implemented by Sirio"))),
     }
+}
+
+/// Which `(project root, language)` a file resolves to, given a table.
+///
+/// Separated from the registry on purpose: this is the decision that used
+/// to be approximated by a containment match, and as a free function over
+/// a plain table it is testable with no server running anywhere.
+pub fn key_for_file(
+    table: &LanguageTable,
+    file: &Path,
+    worktree_root: &Path,
+) -> Option<(PathBuf, String)> {
+    let entry = table.for_path(file)?;
+    Some((
+        sirio_lsp::project_root(file, worktree_root, &entry.roots),
+        entry.name.clone(),
+    ))
 }
 
 /// Converts the protocol's positions into the line-and-byte terms the view
@@ -84,6 +104,37 @@ pub fn view_diagnostics(
                 },
                 message: finding.message.clone(),
             }
+        })
+        .collect()
+}
+
+/// Converts the protocol's symbol kinds into the ones the overlay draws.
+///
+/// The mirror of [`view_diagnostics`], and for the same reason: a
+/// `sirio_lsp::SymbolKind` is the protocol's table, a
+/// `sirio_ui::outline::OutlineKind` is a case a view can paint, and the app
+/// is the only place that knows both.
+pub fn view_symbols(raw: &[sirio_lsp::Symbol]) -> Vec<sirio_ui::outline::OutlineSymbol> {
+    use sirio_ui::outline::{OutlineKind, OutlineSymbol};
+
+    raw.iter()
+        .map(|symbol| OutlineSymbol {
+            name: symbol.name.clone(),
+            detail: symbol.detail.clone(),
+            kind: match symbol.kind {
+                sirio_lsp::SymbolKind::Function => OutlineKind::Function,
+                sirio_lsp::SymbolKind::Method => OutlineKind::Method,
+                sirio_lsp::SymbolKind::Struct => OutlineKind::Struct,
+                sirio_lsp::SymbolKind::Enum => OutlineKind::Enum,
+                sirio_lsp::SymbolKind::Interface => OutlineKind::Interface,
+                sirio_lsp::SymbolKind::Field => OutlineKind::Field,
+                sirio_lsp::SymbolKind::Constant => OutlineKind::Constant,
+                sirio_lsp::SymbolKind::Variable => OutlineKind::Variable,
+                sirio_lsp::SymbolKind::Module => OutlineKind::Module,
+                sirio_lsp::SymbolKind::Other => OutlineKind::Other,
+            },
+            line: symbol.line as usize,
+            depth: symbol.depth,
         })
         .collect()
 }
@@ -166,14 +217,34 @@ impl LspSupervisor {
         self.servers.get(key).map(|handle| &handle.server)
     }
 
-    /// Whether a running server that offers definitions covers `path`.
-    /// Read-only on purpose: the menu facts are computed from `&self`, and
-    /// the key-building entry lookup needs `&mut` for its table reload —
-    /// so this matches by containment instead of recomputing the key.
-    pub fn definition_available(&self, path: &Path) -> bool {
-        self.servers.iter().any(|((root, _), handle)| {
-            path.starts_with(root) && handle.server.capabilities().definition
-        })
+    /// The table as already loaded, with no refresh. The refresh in
+    /// [`Self::entry_for`] is a freshness step that belongs to opening a
+    /// file; it is also the only reason that method needs `&mut self`, and
+    /// the only reason the capability questions below used to be answered
+    /// by a containment match rather than an exact lookup.
+    pub fn table(&self) -> &LanguageTable {
+        self.loader.table()
+    }
+
+    /// The negotiated capabilities of the server this file would actually
+    /// use. `None` when no entry claims the extension, or when no server is
+    /// running for that exact (project root, language) pair — so a Python
+    /// file inside a Rust project answers `None`, which is the whole point.
+    pub fn capability_for(&self, file: &Path, worktree_root: &Path) -> Option<Capabilities> {
+        let key = key_for_file(self.table(), file, worktree_root)?;
+        self.servers
+            .get(&key)
+            .map(|handle| handle.server.capabilities())
+    }
+
+    pub fn definition_available(&self, file: &Path, worktree_root: &Path) -> bool {
+        self.capability_for(file, worktree_root)
+            .is_some_and(|offered| offered.definition)
+    }
+
+    pub fn references_available(&self, file: &Path, worktree_root: &Path) -> bool {
+        self.capability_for(file, worktree_root)
+            .is_some_and(|offered| offered.references)
     }
 
     /// Empties the registry, handing every server back for shutdown. Used by
@@ -193,6 +264,12 @@ mod tests {
         sirio_lsp::ConfigLoader::new(
             std::env::temp_dir().join("sirio-lsp-supervisor-absent/languages.toml"),
         )
+    }
+
+    impl LspSupervisor {
+        fn table_for_test(&self) -> &sirio_lsp::LanguageTable {
+            self.table()
+        }
     }
 
     #[test]
@@ -261,8 +338,8 @@ mod tests {
 
     #[test]
     fn a_registration_request_is_accepted() {
-        let answer = answer_for("client/registerCapability", &serde_json::json!({}))
-            .expect("answered");
+        let answer =
+            answer_for("client/registerCapability", &serde_json::json!({})).expect("answered");
         assert_eq!(answer, serde_json::Value::Null);
     }
 
@@ -270,8 +347,8 @@ mod tests {
     fn an_unknown_request_is_refused_with_method_not_found() {
         // Refusing is an answer. Silence is what stalls a server, and a
         // stalled server produces no error anywhere.
-        let (code, message) = answer_for("window/showMessageRequest", &serde_json::json!({}))
-            .expect_err("refused");
+        let (code, message) =
+            answer_for("window/showMessageRequest", &serde_json::json!({})).expect_err("refused");
         assert_eq!(code, -32601);
         assert!(message.contains("window/showMessageRequest"));
     }
@@ -283,8 +360,14 @@ mod tests {
         // the wrong text and is invisible on ASCII fixtures.
         let text = "let a = 1;\nlet \u{1f980} = 2;\n";
         let raw = vec![sirio_lsp::RawDiagnostic {
-            start: sirio_lsp::lsp_types::Position { line: 1, character: 4 },
-            end: sirio_lsp::lsp_types::Position { line: 1, character: 6 },
+            start: sirio_lsp::lsp_types::Position {
+                line: 1,
+                character: 4,
+            },
+            end: sirio_lsp::lsp_types::Position {
+                line: 1,
+                character: 6,
+            },
             severity: sirio_lsp::Severity::Warning,
             message: "unused variable".to_owned(),
         }];
@@ -293,7 +376,10 @@ mod tests {
         assert_eq!(converted[0].line, 1);
         assert_eq!(converted[0].message, "unused variable");
         let crab = &text[converted[0].range.clone()];
-        assert_eq!(crab, "\u{1f980}", "the range must cover the emoji, not half of it");
+        assert_eq!(
+            crab, "\u{1f980}",
+            "the range must cover the emoji, not half of it"
+        );
     }
 
     #[test]
@@ -302,8 +388,14 @@ mod tests {
         // range outliving its text is normal. Panicking on it is not.
         let text = "one line\n";
         let raw = vec![sirio_lsp::RawDiagnostic {
-            start: sirio_lsp::lsp_types::Position { line: 40, character: 0 },
-            end: sirio_lsp::lsp_types::Position { line: 40, character: 5 },
+            start: sirio_lsp::lsp_types::Position {
+                line: 40,
+                character: 0,
+            },
+            end: sirio_lsp::lsp_types::Position {
+                line: 40,
+                character: 5,
+            },
             severity: sirio_lsp::Severity::Error,
             message: "stale".to_owned(),
         }];
@@ -312,5 +404,87 @@ mod tests {
         assert!(converted[0].range.start <= text.len());
         assert!(converted[0].range.end <= text.len());
         assert!(converted[0].range.start <= converted[0].range.end);
+    }
+
+    #[test]
+    fn a_python_file_under_a_rust_root_resolves_to_a_different_key() {
+        // The regression this closes: the old containment match asked only
+        // whether a running server's root was a prefix of the path, so
+        // rust-analyzer's root made every file under it look served —
+        // including files it cannot say anything about.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let table = supervisor.table_for_test();
+        let root = std::path::Path::new("/repo");
+
+        let rust = key_for_file(table, std::path::Path::new("/repo/src/main.rs"), root)
+            .expect("a .rs file resolves");
+        let python = key_for_file(table, std::path::Path::new("/repo/tool.py"), root)
+            .expect("a .py file resolves");
+
+        assert_ne!(
+            rust, python,
+            "a Rust server's key must not be the key a Python file resolves to"
+        );
+        assert_eq!(rust.1, "rust");
+        assert_eq!(python.1, "python");
+    }
+
+    #[test]
+    fn a_file_no_entry_claims_resolves_to_no_key_at_all() {
+        // No key means no server, which means the menu entry is disabled
+        // with a reason rather than enabled and inert.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let table = supervisor.table_for_test();
+        assert!(
+            key_for_file(
+                table,
+                std::path::Path::new("/repo/NOTES.txt"),
+                std::path::Path::new("/repo")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn symbols_arrive_in_the_view_s_own_vocabulary() {
+        // The protocol's kind is a number in a table; the view's is a case
+        // it can draw. Converting here is what keeps sirio_ui free of
+        // lsp-types — the same reason view_diagnostics exists above.
+        let raw = vec![
+            sirio_lsp::Symbol {
+                name: "LspSupervisor".to_owned(),
+                detail: Some("struct".to_owned()),
+                kind: sirio_lsp::SymbolKind::Struct,
+                line: 10,
+                depth: 0,
+            },
+            sirio_lsp::Symbol {
+                name: "servers".to_owned(),
+                detail: None,
+                kind: sirio_lsp::SymbolKind::Field,
+                line: 12,
+                depth: 1,
+            },
+        ];
+        let converted = view_symbols(&raw);
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].name, "LspSupervisor");
+        assert_eq!(converted[0].kind, sirio_ui::outline::OutlineKind::Struct);
+        assert_eq!(converted[0].detail.as_deref(), Some("struct"));
+        assert_eq!(converted[0].line, 10);
+        assert_eq!(converted[1].depth, 1, "the indent survives the crossing");
+        assert_eq!(converted[1].kind, sirio_ui::outline::OutlineKind::Field);
+    }
+
+    #[test]
+    fn capabilities_are_absent_while_no_server_runs() {
+        // Nothing is running in a fresh supervisor, so every question about
+        // a capability answers "no" — never "maybe".
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/main.rs");
+        let root = std::path::Path::new("/repo");
+        assert!(supervisor.capability_for(file, root).is_none());
+        assert!(!supervisor.definition_available(file, root));
+        assert!(!supervisor.references_available(file, root));
     }
 }
