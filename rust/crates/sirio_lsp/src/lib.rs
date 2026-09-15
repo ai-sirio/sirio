@@ -18,9 +18,11 @@ mod framing;
 mod lifecycle;
 mod message;
 mod position;
+mod roots;
 mod server;
 
 pub use config::{ConfigError, LanguageEntry, LanguageTable};
+pub use roots::project_root;
 pub use connection::{Client, Connection};
 pub use lifecycle::{Capabilities, initialize, shutdown};
 pub use lsp_types;
