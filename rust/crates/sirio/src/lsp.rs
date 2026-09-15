@@ -475,4 +475,16 @@ mod tests {
         assert_eq!(converted[1].depth, 1, "the indent survives the crossing");
         assert_eq!(converted[1].kind, sirio_ui::outline::OutlineKind::Field);
     }
+
+    #[test]
+    fn capabilities_are_absent_while_no_server_runs() {
+        // Nothing is running in a fresh supervisor, so every question about
+        // a capability answers "no" — never "maybe".
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/main.rs");
+        let root = std::path::Path::new("/repo");
+        assert!(supervisor.capability_for(file, root).is_none());
+        assert!(!supervisor.definition_available(file, root));
+        assert!(!supervisor.references_available(file, root));
+    }
 }
