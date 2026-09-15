@@ -6011,7 +6011,9 @@ impl SirioWorkspace {
             in_git_repo: worktree.is_some(),
             has_github_remote,
             has_agent_chat: self.active_chat_for(path).is_some(),
-            definition_available: self.lsp.definition_available(path),
+            definition_available: worktree
+                .as_deref()
+                .is_some_and(|root| self.lsp.definition_available(path, root)),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,

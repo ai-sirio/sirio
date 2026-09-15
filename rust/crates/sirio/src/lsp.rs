@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sirio_lsp::{ConfigLoader, LanguageEntry, Reload, Server};
+use sirio_lsp::{Capabilities, ConfigLoader, LanguageEntry, LanguageTable, Reload, Server};
 
 /// One running server: the connection, plus the gpui task driving its read
 /// loop. Dropping the task stops the loop, so the handle owning both is what
@@ -53,6 +53,23 @@ pub fn answer_for(
         // server carry on instead of blocking on us.
         other => Err((-32601, format!("{other} is not implemented by Sirio"))),
     }
+}
+
+/// Which `(project root, language)` a file resolves to, given a table.
+///
+/// Separated from the registry on purpose: this is the decision that used
+/// to be approximated by a containment match, and as a free function over
+/// a plain table it is testable with no server running anywhere.
+pub fn key_for_file(
+    table: &LanguageTable,
+    file: &Path,
+    worktree_root: &Path,
+) -> Option<(PathBuf, String)> {
+    let entry = table.for_path(file)?;
+    Some((
+        sirio_lsp::project_root(file, worktree_root, &entry.roots),
+        entry.name.clone(),
+    ))
 }
 
 /// Converts the protocol's positions into the line-and-byte terms the view
@@ -166,14 +183,34 @@ impl LspSupervisor {
         self.servers.get(key).map(|handle| &handle.server)
     }
 
-    /// Whether a running server that offers definitions covers `path`.
-    /// Read-only on purpose: the menu facts are computed from `&self`, and
-    /// the key-building entry lookup needs `&mut` for its table reload —
-    /// so this matches by containment instead of recomputing the key.
-    pub fn definition_available(&self, path: &Path) -> bool {
-        self.servers.iter().any(|((root, _), handle)| {
-            path.starts_with(root) && handle.server.capabilities().definition
-        })
+    /// The table as already loaded, with no refresh. The refresh in
+    /// [`Self::entry_for`] is a freshness step that belongs to opening a
+    /// file; it is also the only reason that method needs `&mut self`, and
+    /// the only reason the capability questions below used to be answered
+    /// by a containment match rather than an exact lookup.
+    pub fn table(&self) -> &LanguageTable {
+        self.loader.table()
+    }
+
+    /// The negotiated capabilities of the server this file would actually
+    /// use. `None` when no entry claims the extension, or when no server is
+    /// running for that exact (project root, language) pair — so a Python
+    /// file inside a Rust project answers `None`, which is the whole point.
+    pub fn capability_for(&self, file: &Path, worktree_root: &Path) -> Option<Capabilities> {
+        let key = key_for_file(self.table(), file, worktree_root)?;
+        self.servers
+            .get(&key)
+            .map(|handle| handle.server.capabilities())
+    }
+
+    pub fn definition_available(&self, file: &Path, worktree_root: &Path) -> bool {
+        self.capability_for(file, worktree_root)
+            .is_some_and(|offered| offered.definition)
+    }
+
+    pub fn references_available(&self, file: &Path, worktree_root: &Path) -> bool {
+        self.capability_for(file, worktree_root)
+            .is_some_and(|offered| offered.references)
     }
 
     /// Empties the registry, handing every server back for shutdown. Used by
@@ -193,6 +230,12 @@ mod tests {
         sirio_lsp::ConfigLoader::new(
             std::env::temp_dir().join("sirio-lsp-supervisor-absent/languages.toml"),
         )
+    }
+
+    impl LspSupervisor {
+        fn table_for_test(&self) -> &sirio_lsp::LanguageTable {
+            self.table()
+        }
     }
 
     #[test]
@@ -312,5 +355,56 @@ mod tests {
         assert!(converted[0].range.start <= text.len());
         assert!(converted[0].range.end <= text.len());
         assert!(converted[0].range.start <= converted[0].range.end);
+    }
+
+    #[test]
+    fn a_python_file_under_a_rust_root_resolves_to_a_different_key() {
+        // The regression this closes: the old containment match asked only
+        // whether a running server's root was a prefix of the path, so
+        // rust-analyzer's root made every file under it look served —
+        // including files it cannot say anything about.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let table = supervisor.table_for_test();
+        let root = std::path::Path::new("/repo");
+
+        let rust = key_for_file(table, std::path::Path::new("/repo/src/main.rs"), root)
+            .expect("a .rs file resolves");
+        let python = key_for_file(table, std::path::Path::new("/repo/tool.py"), root)
+            .expect("a .py file resolves");
+
+        assert_ne!(
+            rust, python,
+            "a Rust server's key must not be the key a Python file resolves to"
+        );
+        assert_eq!(rust.1, "rust");
+        assert_eq!(python.1, "python");
+    }
+
+    #[test]
+    fn a_file_no_entry_claims_resolves_to_no_key_at_all() {
+        // No key means no server, which means the menu entry is disabled
+        // with a reason rather than enabled and inert.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let table = supervisor.table_for_test();
+        assert!(
+            key_for_file(
+                table,
+                std::path::Path::new("/repo/NOTES.txt"),
+                std::path::Path::new("/repo")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn capabilities_are_absent_while_no_server_runs() {
+        // Nothing is running in a fresh supervisor, so every question about
+        // a capability answers "no" — never "maybe".
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/main.rs");
+        let root = std::path::Path::new("/repo");
+        assert!(supervisor.capability_for(file, root).is_none());
+        assert!(!supervisor.definition_available(file, root));
+        assert!(!supervisor.references_available(file, root));
     }
 }
