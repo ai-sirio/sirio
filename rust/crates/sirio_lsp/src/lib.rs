@@ -12,6 +12,7 @@
 //! layer drivable from a plain `block_on` in tests, the same reason
 //! `sirio_activity` stays window-free.
 
+mod config;
 mod connection;
 mod framing;
 mod lifecycle;
@@ -19,6 +20,7 @@ mod message;
 mod position;
 mod server;
 
+pub use config::{ConfigError, LanguageEntry, LanguageTable};
 pub use connection::{Client, Connection};
 pub use lifecycle::{Capabilities, initialize, shutdown};
 pub use lsp_types;

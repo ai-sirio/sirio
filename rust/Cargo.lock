@@ -7292,6 +7292,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sirio_perf",
+ "toml 0.8.23",
 ]
 
 [[package]]
