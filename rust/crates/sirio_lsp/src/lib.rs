@@ -24,6 +24,7 @@ mod navigation;
 mod position;
 mod roots;
 mod server;
+mod symbols;
 mod uri;
 
 pub use config::{ConfigError, LanguageEntry, LanguageTable};
@@ -38,6 +39,7 @@ pub use message::{Incoming, RequestId, ResponseError};
 pub use navigation::{Target, definition, hover, references};
 pub use position::LineIndex;
 pub use server::Server;
+pub use symbols::{Symbol, SymbolKind, document_symbols, parse_symbols};
 pub use uri::{path_for_uri, uri_for_path};
 
 /// Everything that can go wrong below the UI.
