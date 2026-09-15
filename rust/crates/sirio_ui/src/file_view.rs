@@ -124,6 +124,26 @@ pub struct FileView {
     /// worktree has an agent chat open. Each costs a subprocess or a walk of
     /// the open tabs, so they are pushed down rather than asked per click.
     shell_facts: FileContextFacts,
+    /// Findings published by the language server for this file, in buffer
+    /// terms. Replaced wholesale on every publish — an empty list is how a
+    /// server says the errors are gone, so it must clear, not be ignored.
+    diagnostics: Vec<FileDiagnostic>,
+    /// The offset the pointer is resting on, the frame point it rests at,
+    /// and the timer that will turn that rest into a question. Replacing
+    /// the `Task` cancels it, which is the whole of dwell cancellation.
+    hover_offset: Option<usize>,
+    hover_point: Point<Pixels>,
+    hover_task: Option<Task<()>>,
+    /// Monotonic, bumped on every dwell. A reply carrying an older number
+    /// is an answer about a place the pointer has left, and is dropped.
+    /// Without this the card appears where the cursor no longer is.
+    hover_seq: u64,
+    hover_card: Option<String>,
+    /// A line to scroll to as soon as there is something to scroll. Held
+    /// rather than applied because a tab opened by "go to definition" is
+    /// still loading its content: revealing immediately addresses lines
+    /// that do not exist yet, and does nothing at all.
+    pending_reveal: Option<usize>,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -170,15 +190,41 @@ pub enum FileViewEvent {
         lines: (usize, usize),
     },
     ViewFileHistory(PathBuf),
+    Hover { path: PathBuf, offset: usize, seq: u64 },
+    GoToDefinition { path: PathBuf, offset: usize },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
+
+/// How bad a diagnostic is, in the only terms the view needs. Ordered
+/// worst-first so `min()` over a line picks the mark to paint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+/// One finding, already in this view's own terms: a line index and a byte
+/// range into the buffer. The conversion from the protocol's UTF-16
+/// positions happens in the app, which owns the buffer — this crate never
+/// learns what a UTF-16 code unit is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDiagnostic {
+    pub line: usize,
+    pub range: std::ops::Range<usize>,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+}
 
 /// Installs bezel-editor's key bindings for the application. The app crate
 /// calls through this module so the dependency remains owned by `sirio_ui`.
 pub fn init(cx: &mut App) {
     ::editor::init(cx);
 }
+
+const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl FileView {
     /// Starts loading `path` without doing filesystem work during render.
@@ -192,6 +238,7 @@ impl FileView {
                 view.markdown_mode = Self::initial_markdown_mode(&editor);
                 view.state = ViewState::Ready(editor);
                 view.load_task = None;
+                view.apply_pending_reveal(cx);
                 cx.notify();
             });
         });
@@ -231,6 +278,13 @@ impl FileView {
             scroll: SurfaceScroll::new(Painter::of(cx)),
             context_menu: None,
             shell_facts: FileContextFacts::default(),
+            diagnostics: Vec::new(),
+            hover_offset: None,
+            hover_point: point(px(0.), px(0.)),
+            hover_task: None,
+            hover_seq: 0,
+            hover_card: None,
+            pending_reveal: None,
         }
     }
 
@@ -287,6 +341,129 @@ impl FileView {
         }
     }
 
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<FileDiagnostic>, cx: &mut Context<Self>) {
+        self.diagnostics = diagnostics;
+        cx.notify();
+    }
+
+    pub fn diagnostics(&self) -> &[FileDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Called from every pointer move over the source surface, which is to
+    /// say very often. **An unchanged offset returns immediately**, without
+    /// notifying — this is a hot path and a `notify` here would redraw the
+    /// file on every pixel of travel.
+    pub fn hover_moved(&mut self, offset: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.hover_offset == Some(offset) {
+            return;
+        }
+        self.hover_offset = Some(offset);
+        self.hover_point = at;
+        let had_card = self.hover_card.take().is_some();
+        // The diagnostic half of the card is already here, so it shows
+        // immediately — no round trip, and a server with no hoverProvider
+        // still shows its errors. The reply joins it later in `set_hover`.
+        let local = self
+            .diagnostics_at(offset)
+            .iter()
+            .map(|found| found.message.clone())
+            .collect::<Vec<_>>();
+        self.hover_card = (!local.is_empty()).then(|| local.join("\n"));
+        if had_card || self.hover_card.is_some() {
+            cx.notify();
+        }
+        self.hover_seq = self.hover_seq.wrapping_add(1);
+        let seq = self.hover_seq;
+        let path = self.path.clone();
+        self.hover_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_DELAY).await;
+            let _ = this.update(cx, |_view, cx| {
+                cx.emit(FileViewEvent::Hover { path, offset, seq });
+            });
+        }));
+    }
+
+    /// Accepts an answer only if it is about where the pointer is now.
+    /// The server's text joins the diagnostics already on the card, under
+    /// them — it never replaces them.
+    pub fn set_hover(&mut self, seq: u64, text: Option<String>, cx: &mut Context<Self>) {
+        if seq != self.hover_seq {
+            return;
+        }
+        let local = self.hover_offset.map(|offset| {
+            self.diagnostics_at(offset)
+                .iter()
+                .map(|found| found.message.clone())
+                .collect::<Vec<_>>()
+        }).unwrap_or_default();
+        let mut parts = local;
+        parts.extend(text);
+        self.hover_card = (!parts.is_empty()).then(|| parts.join("\n"));
+        cx.notify();
+    }
+
+    pub fn hover_sequence(&self) -> u64 {
+        self.hover_seq
+    }
+
+    pub fn hover_card(&self) -> Option<&str> {
+        self.hover_card.as_deref()
+    }
+
+    pub fn reveal_at(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.pending_reveal = Some(line);
+        self.apply_pending_reveal(cx);
+    }
+
+    fn apply_pending_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.pending_reveal else { return };
+        // No editor yet means no lines yet: keep holding.
+        if self.editor().is_none() {
+            return;
+        }
+        self.pending_reveal = None;
+        self.scroll
+            .source
+            .scroll_to_item(line, gpui::ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    pub fn request_definition(&mut self, offset: usize, cx: &mut Context<Self>) {
+        cx.emit(FileViewEvent::GoToDefinition {
+            path: self.path.clone(),
+            offset,
+        });
+    }
+
+    /// The mark a line earns: the worst severity among its diagnostics.
+    pub fn mark_for_line(&self, line: usize) -> Option<DiagnosticSeverity> {
+        self.diagnostics
+            .iter()
+            .filter(|found| found.line == line)
+            .map(|found| found.severity)
+            .min()
+    }
+
+    /// Every message covering a byte offset, worst first.
+    fn diagnostics_at(&self, offset: usize) -> Vec<&FileDiagnostic> {
+        let mut found: Vec<_> = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.range.contains(&offset) || d.range.start == offset)
+            .collect();
+        found.sort_by_key(|d| d.severity);
+        found
+    }
+
+    fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_offset = None;
+        self.hover_task = None;
+        if self.hover_card.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The shell's facts plus the two this view answers itself.
     fn menu_facts(&self) -> FileContextFacts {
         let has_selection = self
@@ -306,6 +483,7 @@ impl FileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_hover(cx);
         self.editor_focus.focus(window, cx);
         self.context_menu = Some(event.position);
         cx.notify();
@@ -362,6 +540,12 @@ impl FileView {
             }
             FileContextAction::ViewFileHistory => {
                 cx.emit(FileViewEvent::ViewFileHistory(self.path.clone()));
+            }
+            FileContextAction::GoToDefinition => {
+                cx.emit(FileViewEvent::GoToDefinition {
+                    path: self.path.clone(),
+                    offset: self.caret,
+                });
             }
         }
     }
@@ -582,6 +766,7 @@ impl FileView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_hover(cx);
         if event.keystroke.modifiers.control && event.keystroke.key == "a" {
             self.select_all();
             cx.notify();
@@ -1113,6 +1298,13 @@ impl Render for FileView {
             // window's top-left corner — double-counting it (P129).
             deferred(anchored().position(position).snap_to_window().child(menu)).priority(1)
         });
+        let hover_card = self.hover_card.clone().map(|text| {
+            let at = self.hover_point + point(px(12.), px(18.));
+            deferred(
+                anchored().position(at).snap_to_window().child(hover_card(&text, theme)),
+            )
+            .priority(1)
+        });
         div()
             .size_full()
             .flex()
@@ -1120,6 +1312,7 @@ impl Render for FileView {
             .bg(theme.surface)
             .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
             .when_some(context_menu, |this, menu| this.child(menu))
+            .when_some(hover_card, |this, card| this.child(card))
             .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
@@ -1456,6 +1649,7 @@ fn render_content(
         range
             .filter_map(|index| line_ranges.get(index).map(|range| (index, *range)))
             .map(|(index, (start, end))| {
+                let mark = row_entity.read(cx).mark_for_line(index);
                 render_source_line(
                     index,
                     buffer.get(start..end).unwrap_or_default().to_owned(),
@@ -1468,6 +1662,7 @@ fn render_content(
                     caret_visible,
                     caret_offset,
                     &syntax_palette,
+                    mark,
                 )
             })
             .collect()
@@ -1601,6 +1796,7 @@ fn render_source_line(
     caret_visible: bool,
     caret_offset: usize,
     syntax_palette: &bezel::theme::SyntaxPalette,
+    mark: Option<DiagnosticSeverity>,
 ) -> gpui::Stateful<gpui::Div> {
     let caret = if caret_visible && caret_offset >= start && caret_offset <= end {
         Some((caret_offset - start).min(line.len()))
@@ -1624,8 +1820,33 @@ fn render_source_line(
             div()
                 .w(px(52.0))
                 .flex_none()
-                .text_color(theme.text_faint)
-                .child(format!("{:>5} ", index + 1)),
+                .flex()
+                .flex_row()
+                .child(
+                    div()
+                        .w(px(10.0))
+                        .flex_none()
+                        .when_some(mark, |element, severity| {
+                            element
+                                .debug_selector({
+                                    let selector = format!("file-line-mark-{index}");
+                                    move || selector.clone()
+                                })
+                                .text_color(match severity {
+                                    DiagnosticSeverity::Error => theme.danger,
+                                    DiagnosticSeverity::Warning => theme.warning,
+                                    _ => theme.text_faint,
+                                })
+                                .child("●")
+                        }),
+                )
+                .child(
+                    div()
+                        .w(px(42.0))
+                        .flex_none()
+                        .text_color(theme.text_faint)
+                        .child(format!("{:>5} ", index + 1)),
+                ),
         )
         .child(EditableLine::new(
             ("file-line-text", index),
@@ -1960,6 +2181,24 @@ impl Element for EditableLine {
         let line_start = self.line_start;
         let line_len = self.line_len;
         let view = self.view.clone();
+        let hitbox_for_hover = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && !event.dragging()
+                && hitbox_for_hover.is_hovered(window)
+            {
+                let local = match layout.index_for_position(event.position) {
+                    Ok(index) | Err(index) => index.min(line_len),
+                };
+                let at = event.position;
+                view.update(cx, |view, cx| view.hover_moved(line_start + local, at, cx));
+            }
+        });
+
+        let layout = self.text.layout().clone();
+        let line_start = self.line_start;
+        let line_len = self.line_len;
+        let view = self.view.clone();
         let links = self.links.clone();
         let pressed_for_up = self.pressed.clone();
         let hitbox_for_up = hitbox.clone();
@@ -1982,6 +2221,10 @@ impl Element for EditableLine {
                         {
                             let target = target.clone();
                             view.update(cx, |view, cx| view.open_markdown_link(&target, cx));
+                        } else {
+                            // Not a link — in a code file the same gesture
+                            // means "where is this defined?".
+                            view.update(cx, |view, cx| view.request_definition(up_global, cx));
                         }
                     }
                 }
@@ -2018,6 +2261,29 @@ impl MarkdownFormatOp {
     fn apply(self, file_view: &gpui::Entity<FileView>, cx: &mut App) {
         file_view.update(cx, |view, cx| view.apply_markdown_format(self, cx));
     }
+}
+
+/// The hover popover. Plain text in the code font: the server answers in
+/// Markdown, and rendering it properly would put a parser in the paint
+/// path for the sake of a few bold words. The signature — the part that
+/// matters — reads correctly either way.
+fn hover_card(text: &str, theme: Theme) -> AnyElement {
+    div()
+        .id("file-view-hover")
+        .debug_selector(|| "file-view-hover".into())
+        .max_w(px(520.0))
+        .max_h(px(240.0))
+        .overflow_hidden()
+        .p(px(8.0))
+        .bg(theme.surface_raised)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radii.control)
+        .font_family(theme.typography.code_family)
+        .text_size(theme.typography.code_size)
+        .text_color(theme.text)
+        .child(text.to_owned())
+        .into_any_element()
 }
 
 fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
@@ -2556,6 +2822,309 @@ mod tests {
     // and each mode renders the content that belongs to it — rendered
     // Markdown in Preview, the numbered source in Code. The typography
     // inside either mode is appearance and is not asserted.
+
+    #[gpui::test]
+    async fn a_resting_pointer_asks_for_a_hover_only_after_the_delay(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                if let FileViewEvent::Hover { offset, .. } = event {
+                    captured.borrow_mut().push(*offset);
+                }
+            })
+            .detach();
+        });
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.hover_moved(3, point(px(10.), px(10.)), cx)
+        });
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.cx.run_until_parked();
+        assert!(
+            events.borrow().is_empty(),
+            "100ms is not a dwell — asking this early makes every pass of the mouse a request"
+        );
+
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[3],
+            "exactly one request, for the resting offset"
+        );
+    }
+
+    #[gpui::test]
+    async fn moving_on_before_the_delay_asks_only_about_where_it_stopped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                if let FileViewEvent::Hover { offset, .. } = event {
+                    captured.borrow_mut().push(*offset);
+                }
+            })
+            .detach();
+        });
+
+        for offset in [1usize, 2, 3, 4] {
+            view.update(&mut cx.cx, |view, cx| {
+                view.hover_moved(offset, point(px(10.), px(10.)), cx)
+            });
+            cx.cx.executor().advance_clock(std::time::Duration::from_millis(50));
+        }
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[4],
+            "replacing the timer Task cancels it, so only the last rest asks"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_reply_for_a_place_the_pointer_has_left_is_discarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        // Two dwells: the first reply arrives after the second has started.
+        view.update(&mut cx.cx, |view, cx| {
+            view.hover_moved(3, point(px(10.), px(10.)), cx)
+        });
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+        let stale = view.read_with(&cx.cx, |view, _| view.hover_sequence());
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.hover_moved(9, point(px(20.), px(10.)), cx)
+        });
+        cx.cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        cx.cx.run_until_parked();
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_hover(stale, Some("stale answer".to_owned()), cx)
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)),
+            None,
+            "an answer for a place the pointer has left must not appear where it now is"
+        );
+
+        let current = view.read_with(&cx.cx, |view, _| view.hover_sequence());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_hover(current, Some("fresh answer".to_owned()), cx)
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
+                .as_deref(),
+            Some("fresh answer")
+        );
+    }
+
+    #[gpui::test]
+    async fn revealing_a_line_scrolls_it_into_view(cx: &mut gpui::TestAppContext) {
+        let body = (0..400).map(|n| format!("line {n}\n")).collect::<String>();
+        let file = TempFile::with_extension("rs", &body);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_none(),
+            "line 350 starts off screen, or the test proves nothing"
+        );
+        view.update(&mut cx.cx, |view, cx| view.reveal_at(350, cx));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_some(),
+            "reveal scrolls the line into view"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_reveal_asked_before_the_file_loaded_still_happens(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // This is the whole trap. A tab opened by "go to definition" loads
+        // its content asynchronously, so revealing immediately after the tab
+        // appears addresses lines that do not exist yet. Held, then applied.
+        let body = (0..400).map(|n| format!("line {n}\n")).collect::<String>();
+        let file = TempFile::with_extension("rs", &body);
+
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| {
+            let mut view = FileView::new(file.path().to_path_buf(), cx);
+            // Before any load has completed.
+            view.reveal_at(350, cx);
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        for _ in 0..600 {
+            let ready = cx.update(|window, app| {
+                window
+                    .root::<FileView>()
+                    .flatten()
+                    .is_some_and(|view| view.read(app).editor().is_some())
+            });
+            if ready {
+                break;
+            }
+            cx.cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_some(),
+            "the reveal was held until the content existed, not dropped"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_modifier_click_asks_for_the_definition(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "fn main() { helper(); }\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                if let FileViewEvent::GoToDefinition { offset, .. } = event {
+                    captured.borrow_mut().push(*offset);
+                }
+            })
+            .detach();
+        });
+
+        view.update(&mut cx.cx, |view, cx| view.request_definition(12, cx));
+        cx.cx.run_until_parked();
+        assert_eq!(&*events.borrow(), &[12]);
+    }
+
+    #[gpui::test]
+    async fn a_diagnostic_marks_its_line_without_moving_the_numbers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {\n    let x = 1;\n}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let before = cx
+            .debug_bounds("file-source-line-1")
+            .expect("line 1 is drawn");
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 1,
+                    range: 16..17,
+                    severity: DiagnosticSeverity::Warning,
+                    message: "unused variable `x`".to_owned(),
+                }],
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("file-line-mark-1").is_some(),
+            "the marked line carries a mark"
+        );
+        let after = cx
+            .debug_bounds("file-source-line-1")
+            .expect("line 1 is still drawn");
+        assert_eq!(
+            before.origin.x, after.origin.x,
+            "the mark lives in its own column: a file with an error must not \
+             shift every line number sideways"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_worst_severity_wins_the_mark(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "a\nb\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![
+                    FileDiagnostic { line: 0, range: 0..1,
+                        severity: DiagnosticSeverity::Hint, message: "hint".into() },
+                    FileDiagnostic { line: 0, range: 0..1,
+                        severity: DiagnosticSeverity::Error, message: "error".into() },
+                ],
+                cx,
+            )
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.mark_for_line(0)),
+            Some(DiagnosticSeverity::Error)
+        );
+    }
+
+    #[gpui::test]
+    async fn resting_on_a_diagnostic_shows_its_message_with_no_server_reply(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The diagnostic half of the card is built locally, so it appears
+        // immediately — and a server with no hoverProvider still shows its
+        // errors.
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic { line: 0, range: 4..5,
+                    severity: DiagnosticSeverity::Error, message: "boom".into() }],
+                cx,
+            );
+            view.hover_moved(4, point(px(10.), px(10.)), cx);
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)).as_deref(),
+            Some("boom"),
+            "no round trip is involved: the message is already in the view"
+        );
+    }
+
+    #[gpui::test]
+    async fn an_empty_publish_clears_the_marks(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "a\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic { line: 0, range: 0..1,
+                    severity: DiagnosticSeverity::Error, message: "boom".into() }],
+                cx,
+            );
+            view.set_diagnostics(Vec::new(), cx);
+        });
+        assert_eq!(view.read_with(&cx.cx, |view, _| view.mark_for_line(0)), None);
+    }
 
     /// Mounts a `FileView` in a drawn window and pumps until its background
     /// load has actually installed the editor — the same hardened pump the

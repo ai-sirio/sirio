@@ -5945,7 +5945,7 @@ impl SirioWorkspace {
     fn subscribe_file_view(file_view: &Entity<FileView>, cx: &mut Context<Self>) {
         cx.subscribe(
             file_view,
-            |workspace, _, event: &FileViewEvent, cx| match event {
+            |workspace, view, event: &FileViewEvent, cx| match event {
                 FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
                 FileViewEvent::RevealInFileManager(path) => {
                     if let Some(mut command) = reveal_command(path) {
@@ -5987,6 +5987,12 @@ impl SirioWorkspace {
                 FileViewEvent::ViewFileHistory(path) => {
                     workspace.show_file_history(path.clone(), cx);
                 }
+                FileViewEvent::Hover { path, offset, seq } => {
+                    workspace.request_hover(path.clone(), *offset, *seq, view.clone(), cx);
+                }
+                FileViewEvent::GoToDefinition { path, offset } => {
+                    workspace.go_to_definition(path.clone(), *offset, view.clone(), cx);
+                }
             },
         )
         .detach();
@@ -6005,6 +6011,7 @@ impl SirioWorkspace {
             in_git_repo: worktree.is_some(),
             has_github_remote,
             has_agent_chat: self.active_chat_for(path).is_some(),
+            definition_available: self.lsp.definition_available(path),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -9951,6 +9958,17 @@ impl SirioWorkspace {
             browser.update(cx, |surface, _| surface.close_native());
         }
         let worktree_path = self.tab_worktree_path(tab_id);
+        // The server still thinks every open document is open until it is
+        // told otherwise; say so before the tab — and its view — is gone.
+        let mut closed_files = Vec::new();
+        self.tabs[index].panes.for_each(&mut |_, content| {
+            if let TabContent::File { view } = content {
+                closed_files.push(view.read(cx).path().to_path_buf());
+            }
+        });
+        for path in closed_files {
+            self.close_document_on_server(&path, cx);
+        }
         self.tabs.remove(index);
         self.tab_worktree_paths.remove(&tab_id);
         let worktree_id = worktree_path.to_string_lossy().into_owned();
@@ -10493,6 +10511,7 @@ impl SirioWorkspace {
         let Some(worktree_root) = self.worktree_root_for(path) else { return };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
         if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
+            self.open_document_on_server(path, view, cx);
             return;
         }
 
@@ -10500,6 +10519,7 @@ impl SirioWorkspace {
         let args = entry.args.clone();
         let root = key.0.clone();
         let view = view.clone();
+        let path_for_facts = path.to_path_buf();
         cx.spawn(async move |this, cx| {
             let launched = cx
                 .background_executor()
@@ -10511,9 +10531,17 @@ impl SirioWorkspace {
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
                     let task = cx.background_executor().spawn(read_loop);
-                    workspace
-                        .lsp
-                        .insert(key, crate::lsp::ServerHandle { server, read_loop: task });
+                    let router = Self::spawn_router(&server, cx);
+                    workspace.lsp.insert(
+                        key.clone(),
+                        crate::lsp::ServerHandle { server, read_loop: task, router },
+                    );
+                    // The server exists only now, so the facts that depend
+                    // on it — whether "Go to Definition" is offered — were
+                    // false when the tab opened. Push them again.
+                    let facts = workspace.file_context_facts(&path_for_facts);
+                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                    workspace.open_document_on_server(&path_for_facts, &view, cx);
                 }
                 Err(error) => {
                     workspace.lsp.mark_dead(key);
@@ -10525,6 +10553,197 @@ impl SirioWorkspace {
             });
         })
         .detach();
+    }
+
+    /// One task per server, on the **foreground** executor because it
+    /// updates entities. Holds its own clone of the `Client` — `Client` is
+    /// `Clone` — so answering never has to reach back into the supervisor
+    /// and take a second lease on the workspace.
+    fn spawn_router(server: &sirio_lsp::Server, cx: &mut Context<Self>) -> Task<()> {
+        let incoming = server.incoming().clone();
+        let client = server.client().clone();
+        cx.spawn(async move |this, cx| {
+            while let Ok(message) = incoming.recv().await {
+                match message {
+                    sirio_lsp::Incoming::ServerRequest { id, method, params } => {
+                        match crate::lsp::answer_for(&method, &params) {
+                            Ok(result) => {
+                                let _ = client.respond(id, result).await;
+                            }
+                            Err((code, message)) => {
+                                let _ = client.respond_error(id, code, &message).await;
+                            }
+                        }
+                    }
+                    sirio_lsp::Incoming::Notification { method, params }
+                        if method == "textDocument/publishDiagnostics" =>
+                    {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.apply_diagnostics(&params, cx);
+                        });
+                    }
+                    // `$/progress`, `window/logMessage` and the rest. Read
+                    // and dropped on purpose: draining is the point, and the
+                    // name here must stay content-free.
+                    _ => sirio_perf::event("lsp.message.dropped", 0),
+                }
+            }
+        })
+    }
+
+    /// Routes one publish to every view showing that file. Views are found
+    /// by path rather than remembered per server, because the same file can
+    /// be open in more than one tab.
+    fn apply_diagnostics(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some((path, raw)) = sirio_lsp::parse_publish(params) else { return };
+        for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
+            if !paths_name_the_same_document(&open_path, &path) {
+                continue;
+            }
+            let text = view
+                .read(cx)
+                .editor()
+                .map(|editor| editor.buffer().to_owned())
+                .unwrap_or_default();
+            let converted = crate::lsp::view_diagnostics(&text, &raw);
+            view.update(cx, |view, cx| view.set_diagnostics(converted, cx));
+        }
+    }
+
+    /// Tells the server about a file, from either of the two orders in
+    /// which they can meet: the server finished launching for a file that
+    /// was already open, or a file opened onto a server already running.
+    /// Both happen, because the launch is asynchronous.
+    fn open_document_on_server(
+        &mut self,
+        path: &Path,
+        view: &Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.lsp.entry_for(path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(path) else { return };
+        let key = self.lsp.key_for(path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else { return };
+        let client = server.client().clone();
+        let version = self.lsp.versions_mut().opened(path);
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let path = path.to_path_buf();
+        let language = entry.name.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = sirio_lsp::did_open(&client, &path, &language, version, &text).await;
+            })
+            .detach();
+    }
+
+    fn request_hover(
+        &mut self,
+        path: PathBuf,
+        offset: usize,
+        seq: u64,
+        view: Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.lsp.entry_for(&path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(&path) else { return };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else { return };
+        // A server that does not offer hover is not asked. The negotiated
+        // capability decides, never an assumption about what a server does.
+        if !server.capabilities().hover {
+            return;
+        }
+        let client = server.client().clone();
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let position = sirio_lsp::LineIndex::new(&text).position(offset);
+        cx.spawn(async move |_this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::hover(&client, &path, position).await })
+                .await;
+            if let Ok(text) = answer {
+                let _ = view.update(cx, |view, cx| view.set_hover(seq, text, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn go_to_definition(
+        &mut self,
+        path: PathBuf,
+        offset: usize,
+        view: Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.lsp.entry_for(&path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(&path) else { return };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else { return };
+        if !server.capabilities().definition {
+            return;
+        }
+        let client = server.client().clone();
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let position = sirio_lsp::LineIndex::new(&text).position(offset);
+        let source = path.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::definition(&client, &source, position).await })
+                .await;
+            let _ = this.update(cx, |workspace, cx| match found {
+                Ok(targets) => match targets.first() {
+                    Some(target) => {
+                        workspace.open_at_line(target.path.clone(), target.line as usize, cx)
+                    }
+                    // An honest answer, not silence: the user pressed
+                    // something and deserves to know it was heard.
+                    None => view.update(cx, |view, cx| view.set_notice("No definition found", cx)),
+                },
+                Err(error) => view.update(cx, |view, cx| view.set_notice(error.to_string(), cx)),
+            });
+        })
+        .detach();
+    }
+
+    /// Opens a file (or selects the tab already showing it) and reveals a
+    /// line, whether or not the content has loaded yet.
+    fn open_at_line(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
+        self.add_file_tab(path.clone(), cx);
+        for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
+            if paths_name_the_same_document(&open_path, &path) {
+                view.update(cx, |view, cx| view.reveal_at(line, cx));
+            }
+        }
+    }
+
+    /// Tells the server a file is closed and forgets its version, so a
+    /// reopen starts over at 1.
+    fn close_document_on_server(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(entry) = self.lsp.entry_for(path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(path) else { return };
+        let key = self.lsp.key_for(path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else { return };
+        let client = server.client().clone();
+        self.lsp.versions_mut().closed(path);
+        let path = path.to_path_buf();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = sirio_lsp::did_close(&client, &path).await;
+            })
+            .detach();
     }
 
     fn add_file_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
