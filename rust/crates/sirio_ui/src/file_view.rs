@@ -352,7 +352,17 @@ impl FileView {
         }
         self.hover_offset = Some(offset);
         self.hover_point = at;
-        if self.hover_card.take().is_some() {
+        let had_card = self.hover_card.take().is_some();
+        // The diagnostic half of the card is already here, so it shows
+        // immediately — no round trip, and a server with no hoverProvider
+        // still shows its errors. The reply joins it later in `set_hover`.
+        let local = self
+            .diagnostics_at(offset)
+            .iter()
+            .map(|found| found.message.clone())
+            .collect::<Vec<_>>();
+        self.hover_card = (!local.is_empty()).then(|| local.join("\n"));
+        if had_card || self.hover_card.is_some() {
             cx.notify();
         }
         self.hover_seq = self.hover_seq.wrapping_add(1);
@@ -367,11 +377,21 @@ impl FileView {
     }
 
     /// Accepts an answer only if it is about where the pointer is now.
+    /// The server's text joins the diagnostics already on the card, under
+    /// them — it never replaces them.
     pub fn set_hover(&mut self, seq: u64, text: Option<String>, cx: &mut Context<Self>) {
         if seq != self.hover_seq {
             return;
         }
-        self.hover_card = text;
+        let local = self.hover_offset.map(|offset| {
+            self.diagnostics_at(offset)
+                .iter()
+                .map(|found| found.message.clone())
+                .collect::<Vec<_>>()
+        }).unwrap_or_default();
+        let mut parts = local;
+        parts.extend(text);
+        self.hover_card = (!parts.is_empty()).then(|| parts.join("\n"));
         cx.notify();
     }
 
@@ -381,6 +401,26 @@ impl FileView {
 
     pub fn hover_card(&self) -> Option<&str> {
         self.hover_card.as_deref()
+    }
+
+    /// The mark a line earns: the worst severity among its diagnostics.
+    pub fn mark_for_line(&self, line: usize) -> Option<DiagnosticSeverity> {
+        self.diagnostics
+            .iter()
+            .filter(|found| found.line == line)
+            .map(|found| found.severity)
+            .min()
+    }
+
+    /// Every message covering a byte offset, worst first.
+    fn diagnostics_at(&self, offset: usize) -> Vec<&FileDiagnostic> {
+        let mut found: Vec<_> = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.range.contains(&offset) || d.range.start == offset)
+            .collect();
+        found.sort_by_key(|d| d.severity);
+        found
     }
 
     fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
@@ -1570,6 +1610,7 @@ fn render_content(
         range
             .filter_map(|index| line_ranges.get(index).map(|range| (index, *range)))
             .map(|(index, (start, end))| {
+                let mark = row_entity.read(cx).mark_for_line(index);
                 render_source_line(
                     index,
                     buffer.get(start..end).unwrap_or_default().to_owned(),
@@ -1582,6 +1623,7 @@ fn render_content(
                     caret_visible,
                     caret_offset,
                     &syntax_palette,
+                    mark,
                 )
             })
             .collect()
@@ -1715,6 +1757,7 @@ fn render_source_line(
     caret_visible: bool,
     caret_offset: usize,
     syntax_palette: &bezel::theme::SyntaxPalette,
+    mark: Option<DiagnosticSeverity>,
 ) -> gpui::Stateful<gpui::Div> {
     let caret = if caret_visible && caret_offset >= start && caret_offset <= end {
         Some((caret_offset - start).min(line.len()))
@@ -1738,8 +1781,33 @@ fn render_source_line(
             div()
                 .w(px(52.0))
                 .flex_none()
-                .text_color(theme.text_faint)
-                .child(format!("{:>5} ", index + 1)),
+                .flex()
+                .flex_row()
+                .child(
+                    div()
+                        .w(px(10.0))
+                        .flex_none()
+                        .when_some(mark, |element, severity| {
+                            element
+                                .debug_selector({
+                                    let selector = format!("file-line-mark-{index}");
+                                    move || selector.clone()
+                                })
+                                .text_color(match severity {
+                                    DiagnosticSeverity::Error => theme.danger,
+                                    DiagnosticSeverity::Warning => theme.warning,
+                                    _ => theme.text_faint,
+                                })
+                                .child("●")
+                        }),
+                )
+                .child(
+                    div()
+                        .w(px(42.0))
+                        .flex_none()
+                        .text_color(theme.text_faint)
+                        .child(format!("{:>5} ", index + 1)),
+                ),
         )
         .child(EditableLine::new(
             ("file-line-text", index),
@@ -2822,6 +2890,107 @@ mod tests {
                 .as_deref(),
             Some("fresh answer")
         );
+    }
+
+    #[gpui::test]
+    async fn a_diagnostic_marks_its_line_without_moving_the_numbers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "fn main() {\n    let x = 1;\n}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let before = cx
+            .debug_bounds("file-source-line-1")
+            .expect("line 1 is drawn");
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 1,
+                    range: 16..17,
+                    severity: DiagnosticSeverity::Warning,
+                    message: "unused variable `x`".to_owned(),
+                }],
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("file-line-mark-1").is_some(),
+            "the marked line carries a mark"
+        );
+        let after = cx
+            .debug_bounds("file-source-line-1")
+            .expect("line 1 is still drawn");
+        assert_eq!(
+            before.origin.x, after.origin.x,
+            "the mark lives in its own column: a file with an error must not \
+             shift every line number sideways"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_worst_severity_wins_the_mark(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "a\nb\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![
+                    FileDiagnostic { line: 0, range: 0..1,
+                        severity: DiagnosticSeverity::Hint, message: "hint".into() },
+                    FileDiagnostic { line: 0, range: 0..1,
+                        severity: DiagnosticSeverity::Error, message: "error".into() },
+                ],
+                cx,
+            )
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.mark_for_line(0)),
+            Some(DiagnosticSeverity::Error)
+        );
+    }
+
+    #[gpui::test]
+    async fn resting_on_a_diagnostic_shows_its_message_with_no_server_reply(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The diagnostic half of the card is built locally, so it appears
+        // immediately — and a server with no hoverProvider still shows its
+        // errors.
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic { line: 0, range: 4..5,
+                    severity: DiagnosticSeverity::Error, message: "boom".into() }],
+                cx,
+            );
+            view.hover_moved(4, point(px(10.), px(10.)), cx);
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)).as_deref(),
+            Some("boom"),
+            "no round trip is involved: the message is already in the view"
+        );
+    }
+
+    #[gpui::test]
+    async fn an_empty_publish_clears_the_marks(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "a\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic { line: 0, range: 0..1,
+                    severity: DiagnosticSeverity::Error, message: "boom".into() }],
+                cx,
+            );
+            view.set_diagnostics(Vec::new(), cx);
+        });
+        assert_eq!(view.read_with(&cx.cx, |view, _| view.mark_for_line(0)), None);
     }
 
     /// Mounts a `FileView` in a drawn window and pumps until its background
