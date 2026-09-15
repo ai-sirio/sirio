@@ -5990,6 +5990,9 @@ impl SirioWorkspace {
                 FileViewEvent::Hover { path, offset, seq } => {
                     workspace.request_hover(path.clone(), *offset, *seq, view.clone(), cx);
                 }
+                FileViewEvent::GoToDefinition { path, offset } => {
+                    workspace.go_to_definition(path.clone(), *offset, view.clone(), cx);
+                }
             },
         )
         .detach();
@@ -6008,6 +6011,7 @@ impl SirioWorkspace {
             in_git_repo: worktree.is_some(),
             has_github_remote,
             has_agent_chat: self.active_chat_for(path).is_some(),
+            definition_available: self.lsp.definition_available(path),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -10670,6 +10674,59 @@ impl SirioWorkspace {
             }
         })
         .detach();
+    }
+
+    fn go_to_definition(
+        &mut self,
+        path: PathBuf,
+        offset: usize,
+        view: Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.lsp.entry_for(&path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(&path) else { return };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else { return };
+        if !server.capabilities().definition {
+            return;
+        }
+        let client = server.client().clone();
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let position = sirio_lsp::LineIndex::new(&text).position(offset);
+        let source = path.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::definition(&client, &source, position).await })
+                .await;
+            let _ = this.update(cx, |workspace, cx| match found {
+                Ok(targets) => match targets.first() {
+                    Some(target) => {
+                        workspace.open_at_line(target.path.clone(), target.line as usize, cx)
+                    }
+                    // An honest answer, not silence: the user pressed
+                    // something and deserves to know it was heard.
+                    None => view.update(cx, |view, cx| view.set_notice("No definition found", cx)),
+                },
+                Err(error) => view.update(cx, |view, cx| view.set_notice(error.to_string(), cx)),
+            });
+        })
+        .detach();
+    }
+
+    /// Opens a file (or selects the tab already showing it) and reveals a
+    /// line, whether or not the content has loaded yet.
+    fn open_at_line(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
+        self.add_file_tab(path.clone(), cx);
+        for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
+            if paths_name_the_same_document(&open_path, &path) {
+                view.update(cx, |view, cx| view.reveal_at(line, cx));
+            }
+        }
     }
 
     /// Tells the server a file is closed and forgets its version, so a

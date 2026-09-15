@@ -166,6 +166,16 @@ impl LspSupervisor {
         self.servers.get(key).map(|handle| &handle.server)
     }
 
+    /// Whether a running server that offers definitions covers `path`.
+    /// Read-only on purpose: the menu facts are computed from `&self`, and
+    /// the key-building entry lookup needs `&mut` for its table reload —
+    /// so this matches by containment instead of recomputing the key.
+    pub fn definition_available(&self, path: &Path) -> bool {
+        self.servers.iter().any(|((root, _), handle)| {
+            path.starts_with(root) && handle.server.capabilities().definition
+        })
+    }
+
     /// Empties the registry, handing every server back for shutdown. Used by
     /// `cx.on_app_quit`: the caller stops each one, and the kill after the
     /// grace period is the contract, not a fallback.

@@ -11,6 +11,7 @@ const NO_SELECTION: &str = "Select some text first";
 const NO_AGENT_CHAT: &str = "No agent chat open in this worktree";
 const NO_GITHUB_REMOTE: &str = "This repository has no GitHub remote";
 const NOT_IN_GIT: &str = "This file is not in a git repository";
+const NO_DEFINITION: &str = "No language server offers definitions here";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileContextAction {
@@ -24,6 +25,7 @@ pub enum FileContextAction {
     OpenMarkdownPreview,
     CopyPermalink,
     ViewFileHistory,
+    GoToDefinition,
 }
 
 /// `View` is served by `FileView` itself; `App` leaves as a `FileViewEvent`
@@ -55,9 +57,10 @@ pub struct FileContextFacts {
     pub in_git_repo: bool,
     pub has_github_remote: bool,
     pub has_agent_chat: bool,
+    pub definition_available: bool,
 }
 
-const ITEMS: [FileContextItem; 10] = [
+const ITEMS: [FileContextItem; 11] = [
     FileContextItem {
         label: "Add to Agent Thread",
         action: FileContextAction::SendToAgent,
@@ -128,6 +131,13 @@ const ITEMS: [FileContextItem; 10] = [
         disabled_reason: None,
         group: 3,
     },
+    FileContextItem {
+        label: "Go to Definition",
+        action: FileContextAction::GoToDefinition,
+        route: FileContextRoute::App,
+        disabled_reason: None,
+        group: 3,
+    },
 ];
 
 /// The entries to draw for `facts`, in order. An entry that is meaningless
@@ -171,6 +181,9 @@ fn disabled_reason(action: FileContextAction, facts: &FileContextFacts) -> Optio
         }
         FileContextAction::ViewFileHistory => {
             (!facts.in_git_repo).then(|| NOT_IN_GIT.to_owned())
+        }
+        FileContextAction::GoToDefinition => {
+            (!facts.definition_available).then(|| NO_DEFINITION.to_owned())
         }
         FileContextAction::Paste
         | FileContextAction::RevealInFileManager
@@ -289,6 +302,7 @@ mod tests {
             in_git_repo: true,
             has_github_remote: true,
             has_agent_chat: true,
+            definition_available: true,
         }
     }
 
@@ -308,6 +322,7 @@ mod tests {
                 "Open Markdown Preview",
                 "Copy Permalink to Line",
                 "View File History",
+                "Go to Definition",
             ]
         );
         assert!(items(&all_true()).iter().all(|item| item.disabled_reason.is_none()));

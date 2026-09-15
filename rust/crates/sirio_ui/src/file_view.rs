@@ -139,6 +139,11 @@ pub struct FileView {
     /// Without this the card appears where the cursor no longer is.
     hover_seq: u64,
     hover_card: Option<String>,
+    /// A line to scroll to as soon as there is something to scroll. Held
+    /// rather than applied because a tab opened by "go to definition" is
+    /// still loading its content: revealing immediately addresses lines
+    /// that do not exist yet, and does nothing at all.
+    pending_reveal: Option<usize>,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -186,6 +191,7 @@ pub enum FileViewEvent {
     },
     ViewFileHistory(PathBuf),
     Hover { path: PathBuf, offset: usize, seq: u64 },
+    GoToDefinition { path: PathBuf, offset: usize },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -232,6 +238,7 @@ impl FileView {
                 view.markdown_mode = Self::initial_markdown_mode(&editor);
                 view.state = ViewState::Ready(editor);
                 view.load_task = None;
+                view.apply_pending_reveal(cx);
                 cx.notify();
             });
         });
@@ -277,6 +284,7 @@ impl FileView {
             hover_task: None,
             hover_seq: 0,
             hover_card: None,
+            pending_reveal: None,
         }
     }
 
@@ -403,6 +411,31 @@ impl FileView {
         self.hover_card.as_deref()
     }
 
+    pub fn reveal_at(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.pending_reveal = Some(line);
+        self.apply_pending_reveal(cx);
+    }
+
+    fn apply_pending_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.pending_reveal else { return };
+        // No editor yet means no lines yet: keep holding.
+        if self.editor().is_none() {
+            return;
+        }
+        self.pending_reveal = None;
+        self.scroll
+            .source
+            .scroll_to_item(line, gpui::ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    pub fn request_definition(&mut self, offset: usize, cx: &mut Context<Self>) {
+        cx.emit(FileViewEvent::GoToDefinition {
+            path: self.path.clone(),
+            offset,
+        });
+    }
+
     /// The mark a line earns: the worst severity among its diagnostics.
     pub fn mark_for_line(&self, line: usize) -> Option<DiagnosticSeverity> {
         self.diagnostics
@@ -507,6 +540,12 @@ impl FileView {
             }
             FileContextAction::ViewFileHistory => {
                 cx.emit(FileViewEvent::ViewFileHistory(self.path.clone()));
+            }
+            FileContextAction::GoToDefinition => {
+                cx.emit(FileViewEvent::GoToDefinition {
+                    path: self.path.clone(),
+                    offset: self.caret,
+                });
             }
         }
     }
@@ -2182,6 +2221,10 @@ impl Element for EditableLine {
                         {
                             let target = target.clone();
                             view.update(cx, |view, cx| view.open_markdown_link(&target, cx));
+                        } else {
+                            // Not a link — in a code file the same gesture
+                            // means "where is this defined?".
+                            view.update(cx, |view, cx| view.request_definition(up_global, cx));
                         }
                     }
                 }
@@ -2890,6 +2933,96 @@ mod tests {
                 .as_deref(),
             Some("fresh answer")
         );
+    }
+
+    #[gpui::test]
+    async fn revealing_a_line_scrolls_it_into_view(cx: &mut gpui::TestAppContext) {
+        let body = (0..400).map(|n| format!("line {n}\n")).collect::<String>();
+        let file = TempFile::with_extension("rs", &body);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_none(),
+            "line 350 starts off screen, or the test proves nothing"
+        );
+        view.update(&mut cx.cx, |view, cx| view.reveal_at(350, cx));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_some(),
+            "reveal scrolls the line into view"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_reveal_asked_before_the_file_loaded_still_happens(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // This is the whole trap. A tab opened by "go to definition" loads
+        // its content asynchronously, so revealing immediately after the tab
+        // appears addresses lines that do not exist yet. Held, then applied.
+        let body = (0..400).map(|n| format!("line {n}\n")).collect::<String>();
+        let file = TempFile::with_extension("rs", &body);
+
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| {
+            let mut view = FileView::new(file.path().to_path_buf(), cx);
+            // Before any load has completed.
+            view.reveal_at(350, cx);
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        for _ in 0..600 {
+            let ready = cx.update(|window, app| {
+                window
+                    .root::<FileView>()
+                    .flatten()
+                    .is_some_and(|view| view.read(app).editor().is_some())
+            });
+            if ready {
+                break;
+            }
+            cx.cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_some(),
+            "the reveal was held until the content existed, not dropped"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_modifier_click_asks_for_the_definition(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "fn main() { helper(); }\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                if let FileViewEvent::GoToDefinition { offset, .. } = event {
+                    captured.borrow_mut().push(*offset);
+                }
+            })
+            .detach();
+        });
+
+        view.update(&mut cx.cx, |view, cx| view.request_definition(12, cx));
+        cx.cx.run_until_parked();
+        assert_eq!(&*events.borrow(), &[12]);
     }
 
     #[gpui::test]
