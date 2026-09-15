@@ -14,10 +14,12 @@
 
 mod config;
 mod connection;
+mod diagnostics;
 mod framing;
 mod lifecycle;
 mod loader;
 mod message;
+mod navigation;
 mod position;
 mod roots;
 mod server;
@@ -27,9 +29,11 @@ pub use config::{ConfigError, LanguageEntry, LanguageTable};
 pub use loader::{ConfigLoader, Reload, config_path};
 pub use roots::project_root;
 pub use connection::{Client, Connection};
+pub use diagnostics::{RawDiagnostic, Severity, parse_publish};
 pub use lifecycle::{Capabilities, initialize, shutdown};
 pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
+pub use navigation::{Target, definition, hover};
 pub use position::LineIndex;
 pub use server::Server;
 pub use uri::{path_for_uri, uri_for_path};
