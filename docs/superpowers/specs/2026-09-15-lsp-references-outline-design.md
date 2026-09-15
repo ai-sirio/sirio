@@ -336,7 +336,8 @@ sirio_ui/src/
   grouping function; and the regression for the closed defect:
   `capability_for` answering `None` for a Python file under a Rust root.
 - **`sirio_ui`** — on the `mounted_file_view` bench: the menu entry
-  disabled *with its reason*; the filter narrowing; the arrows wrapping;
+  disabled *with its reason*; the filter narrowing; the arrows clamping
+  at both ends rather than wrapping, as §4 requires;
   Enter emitting **exactly one** `Jump`; an answer for a different path
   discarded; one header per file in the list; the overlay's three empty
   states and the panel's *Searching…* distinguished from its "No
