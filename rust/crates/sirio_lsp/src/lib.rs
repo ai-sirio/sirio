@@ -54,6 +54,11 @@ pub enum LspError {
     Transport(String),
     /// The server answered with a JSON-RPC error object.
     Server { code: i64, message: String },
+    /// The server accepted the request and then declined to answer it
+    /// because its own index was too stale — JSON-RPC `-32801`,
+    /// `ContentModified`. Not a fault: it is what a server says while it is
+    /// still reading the project, and it must not be shown as a break.
+    NotReady,
     /// The server accepted the request and never answered it.
     Timeout { method: &'static str },
 }
@@ -65,6 +70,9 @@ impl std::fmt::Display for LspError {
             Self::Transport(detail) => write!(f, "language server transport failed: {detail}"),
             Self::Server { code, message } => {
                 write!(f, "language server returned error {code}: {message}")
+            }
+            Self::NotReady => {
+                write!(f, "the language server is still indexing this project")
             }
             Self::Timeout { method } => write!(f, "language server did not answer `{method}`"),
         }

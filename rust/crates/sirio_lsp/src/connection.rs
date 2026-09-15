@@ -166,6 +166,9 @@ impl Client {
             // A zero code is this crate's own marker for "the connection
             // died underneath you", set by `fail_all_pending`.
             Ok(Err(ResponseError { code: 0, message })) => Err(LspError::Transport(message)),
+            // -32801 ContentModified: the server is still indexing. This arm
+            // must precede the general one below, or it never matches.
+            Ok(Err(ResponseError { code: -32801, .. })) => Err(LspError::NotReady),
             Ok(Err(ResponseError { code, message })) => Err(LspError::Server { code, message }),
             Err(_) => Err(LspError::Transport(format!(
                 "`{method}` was abandoned: the connection closed"
@@ -393,6 +396,61 @@ pub(crate) mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(error, LspError::Server { code: -32601, .. }));
+        });
+    }
+
+    #[test]
+    fn a_content_modified_answer_is_a_wait_rather_than_a_fault() {
+        // -32801 is what rust-analyzer answers for minutes after it
+        // starts. Reported as a generic server error it reads like a
+        // break; it is the ordinary state of a server still indexing.
+        futures::executor::block_on(async {
+            let (client, _incoming) = with_scripted_server(|request| {
+                vec![serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": { "code": -32801, "message": "content modified" }
+                })]
+            })
+            .await;
+
+            let error = client
+                .request::<_, serde_json::Value>(
+                    "textDocument/references",
+                    serde_json::json!({}),
+                )
+                .await
+                .expect_err("the server declined to answer");
+
+            assert!(
+                matches!(error, LspError::NotReady),
+                "expected NotReady, got {error:?}"
+            );
+            assert!(
+                error.to_string().contains("indexing"),
+                "the message must read as a wait: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn another_server_error_is_still_a_server_error() {
+        // The specific arm must not swallow the general one.
+        futures::executor::block_on(async {
+            let (client, _incoming) = with_scripted_server(|request| {
+                vec![serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": { "code": -32602, "message": "invalid params" }
+                })]
+            })
+            .await;
+
+            let error = client
+                .request::<_, serde_json::Value>("textDocument/hover", serde_json::json!({}))
+                .await
+                .expect_err("the server refused");
+            assert!(matches!(error, LspError::Server { code: -32602, .. }));
         });
     }
 
