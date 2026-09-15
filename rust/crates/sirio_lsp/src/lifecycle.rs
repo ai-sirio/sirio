@@ -16,7 +16,9 @@
 use std::path::Path;
 
 use lsp_types::{
-    ClientCapabilities, InitializeParams, InitializeResult, OneOf, ServerCapabilities, Uri,
+    ClientCapabilities, GotoCapability, HoverClientCapabilities, InitializeParams,
+    InitializeResult, MarkupKind, OneOf, PublishDiagnosticsClientCapabilities, ServerCapabilities,
+    TextDocumentSyncClientCapabilities,
 };
 
 use crate::connection::Client;
@@ -57,11 +59,45 @@ impl From<&ServerCapabilities> for Capabilities {
     }
 }
 
+/// What we tell the server we can do. Two rules govern this value.
+///
+/// **Declare only what we can use.** `workspace.configuration` and
+/// `window.workDoneProgress` are absent deliberately: declaring them
+/// invites requests whose only honest answer from us is `null`.
+///
+/// **`linkSupport: false` is a decision, not a default.** With it off the
+/// server must answer `Location` rather than `LocationLink`, which halves
+/// the shapes `navigation::definition` has to understand.
+fn client_capabilities() -> ClientCapabilities {
+    ClientCapabilities {
+        text_document: Some(lsp_types::TextDocumentClientCapabilities {
+            hover: Some(HoverClientCapabilities {
+                dynamic_registration: Some(false),
+                content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+            }),
+            definition: Some(GotoCapability {
+                dynamic_registration: Some(false),
+                link_support: Some(false),
+            }),
+            publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
+                related_information: Some(false),
+                ..Default::default()
+            }),
+            synchronization: Some(TextDocumentSyncClientCapabilities {
+                dynamic_registration: Some(false),
+                will_save: Some(false),
+                will_save_wait_until: Some(false),
+                did_save: Some(true),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Runs `initialize` then `initialized`, returning what the server offers.
 pub async fn initialize(client: &Client, root: &Path) -> Result<Capabilities, LspError> {
-    let root_uri: Uri = format!("file://{}", root.display())
-        .parse()
-        .map_err(|_| LspError::Launch(format!("root is not an absolute path: {}", root.display())))?;
+    let root_uri = crate::uri::uri_for_path(root)?;
 
     #[allow(deprecated)] // `root_uri` is deprecated in the spec but still
     // what several servers actually read; sending both is the pragmatic
@@ -69,7 +105,7 @@ pub async fn initialize(client: &Client, root: &Path) -> Result<Capabilities, Ls
     let params = InitializeParams {
         process_id: Some(std::process::id()),
         root_uri: Some(root_uri.clone()),
-        capabilities: ClientCapabilities::default(),
+        capabilities: client_capabilities(),
         workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
             uri: root_uri,
             name: root
@@ -172,5 +208,35 @@ mod tests {
             assert!(!capabilities.references, "a false provider is not an offer");
             assert!(!capabilities.document_symbols, "an absent provider is not an offer");
         });
+    }
+
+    #[test]
+    fn initialize_declares_only_the_capabilities_we_can_serve() {
+        let capabilities = client_capabilities();
+        let json = serde_json::to_value(&capabilities).expect("capabilities serialise");
+
+        let text_document = &json["textDocument"];
+        assert!(text_document["hover"]["contentFormat"].is_array());
+        assert_eq!(
+            text_document["definition"]["linkSupport"],
+            serde_json::json!(false),
+            "linkSupport off keeps the answer a Location, halving what navigation parses"
+        );
+        assert_eq!(
+            text_document["synchronization"]["didSave"],
+            serde_json::json!(true)
+        );
+        assert!(text_document["publishDiagnostics"].is_object());
+
+        // Declaring these invites requests we could only answer with null.
+        // Their absence is the decision, so it is what the test pins.
+        assert!(
+            json["workspace"].get("configuration").is_none(),
+            "workspace.configuration must stay undeclared"
+        );
+        assert!(
+            json["window"].get("workDoneProgress").is_none(),
+            "window.workDoneProgress must stay undeclared"
+        );
     }
 }

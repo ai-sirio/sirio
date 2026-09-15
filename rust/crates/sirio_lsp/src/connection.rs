@@ -193,6 +193,26 @@ impl Client {
         .await
     }
 
+    /// Refuses a request the server made of us, in the protocol's own terms.
+    ///
+    /// This is the other half of [`Client::respond`] and it is not optional
+    /// either. A server that asked for something we do not implement is
+    /// still waiting; `-32601` unblocks it in one message, where silence
+    /// stalls it forever with nothing in any log.
+    pub async fn respond_error(
+        &self,
+        id: RequestId,
+        code: i64,
+        message: &str,
+    ) -> Result<(), LspError> {
+        self.send(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": code, "message": message },
+        }))
+        .await
+    }
+
     /// Test seam: proves a giving-up request unregistered itself.
     #[cfg(test)]
     pub(crate) fn pending_is_empty(&self) -> bool {
@@ -500,6 +520,44 @@ pub(crate) mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(error, LspError::Transport(_)));
+        });
+    }
+
+    #[test]
+    fn an_unimplemented_request_is_refused_in_the_protocols_own_terms() {
+        futures::executor::block_on(async {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = seen.clone();
+            let (client, _incoming) = with_scripted_server(move |request| {
+                captured.lock().unwrap().push(request.clone());
+                // Keep the peer loop alive: an empty reply list ends it.
+                vec![serde_json::json!({"jsonrpc": "2.0", "id": 9999, "result": null})]
+            })
+            .await;
+
+            client
+                .respond_error(serde_json::json!(7), -32601, "not implemented")
+                .await
+                .expect("the refusal reaches the server");
+
+            // The peer only observes what the client wrote, so give the
+            // write a turn to land before reading it back.
+            for _ in 0..50 {
+                if !seen.lock().unwrap().is_empty() {
+                    break;
+                }
+                futures_timer::Delay::new(std::time::Duration::from_millis(10)).await;
+            }
+
+            let sent = seen.lock().unwrap();
+            let refusal = sent.first().expect("the server saw the refusal");
+            assert_eq!(refusal["id"], serde_json::json!(7));
+            assert_eq!(refusal["error"]["code"], serde_json::json!(-32601));
+            assert_eq!(refusal["error"]["message"], serde_json::json!("not implemented"));
+            assert!(
+                refusal.get("result").is_none(),
+                "a JSON-RPC answer carries a result or an error, never both"
+            );
         });
     }
 }
