@@ -35,7 +35,7 @@ pub use document::{DocumentVersions, did_change, did_close, did_open, did_save};
 pub use lifecycle::{Capabilities, initialize, shutdown};
 pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
-pub use navigation::{Target, definition, hover};
+pub use navigation::{Target, definition, hover, references};
 pub use position::LineIndex;
 pub use server::Server;
 pub use uri::{path_for_uri, uri_for_path};
