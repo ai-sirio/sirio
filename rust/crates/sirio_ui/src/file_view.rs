@@ -192,6 +192,7 @@ pub enum FileViewEvent {
     ViewFileHistory(PathBuf),
     Hover { path: PathBuf, offset: usize, seq: u64 },
     GoToDefinition { path: PathBuf, offset: usize },
+    FindReferences { path: PathBuf, offset: usize },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -543,6 +544,12 @@ impl FileView {
             }
             FileContextAction::GoToDefinition => {
                 cx.emit(FileViewEvent::GoToDefinition {
+                    path: self.path.clone(),
+                    offset: self.caret,
+                });
+            }
+            FileContextAction::FindReferences => {
+                cx.emit(FileViewEvent::FindReferences {
                     path: self.path.clone(),
                     offset: self.caret,
                 });

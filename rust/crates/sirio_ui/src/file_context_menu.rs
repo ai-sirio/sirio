@@ -12,6 +12,7 @@ const NO_AGENT_CHAT: &str = "No agent chat open in this worktree";
 const NO_GITHUB_REMOTE: &str = "This repository has no GitHub remote";
 const NOT_IN_GIT: &str = "This file is not in a git repository";
 const NO_DEFINITION: &str = "No language server offers definitions here";
+const NO_REFERENCES: &str = "No language server offers references here";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileContextAction {
@@ -26,6 +27,7 @@ pub enum FileContextAction {
     CopyPermalink,
     ViewFileHistory,
     GoToDefinition,
+    FindReferences,
 }
 
 /// `View` is served by `FileView` itself; `App` leaves as a `FileViewEvent`
@@ -58,9 +60,10 @@ pub struct FileContextFacts {
     pub has_github_remote: bool,
     pub has_agent_chat: bool,
     pub definition_available: bool,
+    pub references_available: bool,
 }
 
-const ITEMS: [FileContextItem; 11] = [
+const ITEMS: [FileContextItem; 12] = [
     FileContextItem {
         label: "Add to Agent Thread",
         action: FileContextAction::SendToAgent,
@@ -138,6 +141,13 @@ const ITEMS: [FileContextItem; 11] = [
         disabled_reason: None,
         group: 3,
     },
+    FileContextItem {
+        label: "Find References",
+        action: FileContextAction::FindReferences,
+        route: FileContextRoute::App,
+        disabled_reason: None,
+        group: 3,
+    },
 ];
 
 /// The entries to draw for `facts`, in order. An entry that is meaningless
@@ -184,6 +194,9 @@ fn disabled_reason(action: FileContextAction, facts: &FileContextFacts) -> Optio
         }
         FileContextAction::GoToDefinition => {
             (!facts.definition_available).then(|| NO_DEFINITION.to_owned())
+        }
+        FileContextAction::FindReferences => {
+            (!facts.references_available).then(|| NO_REFERENCES.to_owned())
         }
         FileContextAction::Paste
         | FileContextAction::RevealInFileManager
@@ -303,6 +316,7 @@ mod tests {
             has_github_remote: true,
             has_agent_chat: true,
             definition_available: true,
+            references_available: true,
         }
     }
 
@@ -323,6 +337,7 @@ mod tests {
                 "Copy Permalink to Line",
                 "View File History",
                 "Go to Definition",
+                "Find References",
             ]
         );
         assert!(items(&all_true()).iter().all(|item| item.disabled_reason.is_none()));
@@ -423,6 +438,53 @@ mod tests {
             assert_eq!(item.route, expected, "wrong route for {}", item.label);
         }
     }
+#[test]
+fn find_references_is_offered_and_explains_itself_when_it_cannot_run() {
+// Present-with-a-reason, never absent and never silently inert:
+// the reader must learn that no server here answers this.
+let facts = FileContextFacts {
+references_available: false,
+..FileContextFacts::default()
+};
+let entry = items(&facts)
+.into_iter()
+.find(|item| item.action == FileContextAction::FindReferences)
+.expect("the entry is present even when it cannot run");
+assert_eq!(entry.label, "Find References");
+assert_eq!(entry.route, FileContextRoute::App);
+assert_eq!(entry.disabled_reason.as_deref(), Some(NO_REFERENCES));
+}
+
+#[test]
+fn find_references_is_enabled_once_a_server_offers_it() {
+let facts = FileContextFacts {
+references_available: true,
+..FileContextFacts::default()
+};
+let entry = items(&facts)
+.into_iter()
+.find(|item| item.action == FileContextAction::FindReferences)
+.expect("the entry is present");
+assert_eq!(entry.disabled_reason, None);
+}
+
+#[test]
+fn find_references_sits_beside_go_to_definition() {
+// Same group means no separator between them: they are two halves
+// of one question about the symbol under the pointer.
+let facts = FileContextFacts::default();
+let entries = items(&facts);
+let definition = entries
+.iter()
+.find(|item| item.action == FileContextAction::GoToDefinition)
+.expect("go to definition");
+let references = entries
+.iter()
+.find(|item| item.action == FileContextAction::FindReferences)
+.expect("find references");
+assert_eq!(definition.group, references.group);
+}
+
 #[test]
 fn trimming_removes_the_indentation_every_line_shares() {
     let text = "    let a = 1;\n    let b = 2;\n";
