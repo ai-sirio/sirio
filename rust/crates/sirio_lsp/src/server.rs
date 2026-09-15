@@ -152,6 +152,15 @@ mod tests {
     ///
     /// `dd` is what makes it exact — `read` would stop at a newline inside
     /// the payload, which is the very thing the header exists to prevent.
+    ///
+    /// The carriage return is stripped after the read rather than matched in
+    /// the `case` pattern. An earlier version matched `'' | $'\r'`, which is
+    /// **bash's ANSI-C quoting and not POSIX**: on dash — Ubuntu's `/bin/sh`,
+    /// and therefore the CI runner's — that pattern is the literal text `$\r`,
+    /// the blank-line arm never fires, the body is never read, and the
+    /// handshake dies on its 30-second timeout. It passed on every developer
+    /// machine whose `/bin/sh` is bash, which is the worst way for a test to
+    /// be wrong.
     #[cfg(unix)]
     fn fixture_server() -> (&'static str, Vec<String>) {
         (
@@ -159,10 +168,11 @@ mod tests {
             vec![
                 "-c".to_string(),
                 r#"
-while IFS= read -r header; do
+while IFS= read -r line; do
+  header=$(printf '%s' "$line" | tr -d '\r')
   case "$header" in
     Content-Length:*) len=$(printf '%s' "$header" | tr -dc '0-9') ;;
-    '' | $'\r') 
+    '')
       body=$(dd bs=1 count="$len" 2>/dev/null)
       id=$(printf '%s' "$body" | sed -E 's/.*"id":([0-9]+).*/\1/')
       payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"capabilities":{"hoverProvider":true}}}'
