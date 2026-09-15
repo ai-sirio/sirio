@@ -22,6 +22,7 @@ pub(crate) enum PaletteCommand {
     Tab(TabCommand),
     NewTab(NewTabAction),
     Sidebar(SidebarPaletteAction),
+    GoToSymbol,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +67,9 @@ pub(crate) struct PaletteContext {
     pub active_tab_kind: Option<TabKind>,
     pub has_retained_chat: bool,
     pub sidebar_target: Option<SidebarPaletteTarget>,
+    /// Whether the active tab is a file whose server offers document
+    /// symbols. Answered by the workspace, which owns the supervisor.
+    pub symbols_available: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +82,7 @@ pub(crate) enum PaletteDisabledReason {
     NoSelectedWorktree,
     AlreadyPrimary,
     NotPrimary,
+    NoSymbolProvider,
 }
 
 impl PaletteDisabledReason {
@@ -94,6 +99,7 @@ impl PaletteDisabledReason {
             Self::NoSelectedWorktree => "No selected worktree",
             Self::AlreadyPrimary => "Already the primary worktree",
             Self::NotPrimary => "Worktree is not primary",
+            Self::NoSymbolProvider => "No language server for this file",
         }
     }
 }
@@ -259,6 +265,16 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             Some(window_shortcut_hint(WindowCommand::FocusAddressBar)),
             context,
         ),
+        if context.symbols_available {
+            PaletteEntry::enabled(PaletteCommand::GoToSymbol, "Go to Symbol in File", None)
+        } else {
+            PaletteEntry::disabled(
+                PaletteCommand::GoToSymbol,
+                "Go to Symbol in File",
+                None,
+                PaletteDisabledReason::NoSymbolProvider,
+            )
+        },
         PaletteEntry::enabled(
             PaletteCommand::Tab(TabCommand::FocusPane(SplitDirection::Horizontal, false)),
             "Focus Pane Left",
@@ -508,6 +524,7 @@ mod tests {
         PaletteContext {
             active_tab_kind: Some(TabKind::Terminal),
             has_retained_chat: true,
+            symbols_available: false,
             sidebar_target: Some(SidebarPaletteTarget {
                 project_id: "sirio".into(),
                 project_path: PathBuf::from("/tmp/sirio"),
@@ -734,5 +751,50 @@ mod tests {
                 Some("Ctrl+Shift+O")
             );
         }
+    }
+
+    #[test]
+    fn go_to_symbol_explains_itself_when_no_server_offers_symbols() {
+        // Present with a reason, never absent and never enabled-and-inert:
+        // the same contract the file context menu follows.
+        let mut context = context();
+        context.symbols_available = false;
+        let entry = entries(&context)
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::GoToSymbol)
+            .expect("the entry is listed even when it cannot run");
+        assert_eq!(entry.label, "Go to Symbol in File");
+        assert_eq!(
+            entry.disabled_reason,
+            Some(PaletteDisabledReason::NoSymbolProvider)
+        );
+        assert_eq!(
+            PaletteDisabledReason::NoSymbolProvider.label(),
+            "No language server for this file"
+        );
+    }
+
+    #[test]
+    fn go_to_symbol_is_enabled_once_a_server_offers_symbols() {
+        let mut context = context();
+        context.symbols_available = true;
+        let entry = entries(&context)
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::GoToSymbol)
+            .expect("the entry is listed");
+        assert!(entry.is_enabled());
+    }
+
+    #[test]
+    fn go_to_symbol_carries_no_shortcut() {
+        // ctrl-shift-o is already the palette's History row, and on Windows
+        // that chord never reaches the window at all (main.rs:299).
+        let mut context = context();
+        context.symbols_available = true;
+        let entry = entries(&context)
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::GoToSymbol)
+            .expect("the entry is listed");
+        assert_eq!(entry.shortcut, None);
     }
 }

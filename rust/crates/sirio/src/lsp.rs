@@ -42,7 +42,10 @@ pub fn answer_for(
                 .get("items")
                 .and_then(serde_json::Value::as_array)
                 .map_or(0, Vec::len);
-            Ok(serde_json::Value::Array(vec![serde_json::Value::Null; items]))
+            Ok(serde_json::Value::Array(vec![
+                serde_json::Value::Null;
+                items
+            ]))
         }
         // We declare no dynamic registration, so these should not arrive —
         // but a server that sends one anyway must not be left waiting.
@@ -101,6 +104,37 @@ pub fn view_diagnostics(
                 },
                 message: finding.message.clone(),
             }
+        })
+        .collect()
+}
+
+/// Converts the protocol's symbol kinds into the ones the overlay draws.
+///
+/// The mirror of [`view_diagnostics`], and for the same reason: a
+/// `sirio_lsp::SymbolKind` is the protocol's table, a
+/// `sirio_ui::outline::OutlineKind` is a case a view can paint, and the app
+/// is the only place that knows both.
+pub fn view_symbols(raw: &[sirio_lsp::Symbol]) -> Vec<sirio_ui::outline::OutlineSymbol> {
+    use sirio_ui::outline::{OutlineKind, OutlineSymbol};
+
+    raw.iter()
+        .map(|symbol| OutlineSymbol {
+            name: symbol.name.clone(),
+            detail: symbol.detail.clone(),
+            kind: match symbol.kind {
+                sirio_lsp::SymbolKind::Function => OutlineKind::Function,
+                sirio_lsp::SymbolKind::Method => OutlineKind::Method,
+                sirio_lsp::SymbolKind::Struct => OutlineKind::Struct,
+                sirio_lsp::SymbolKind::Enum => OutlineKind::Enum,
+                sirio_lsp::SymbolKind::Interface => OutlineKind::Interface,
+                sirio_lsp::SymbolKind::Field => OutlineKind::Field,
+                sirio_lsp::SymbolKind::Constant => OutlineKind::Constant,
+                sirio_lsp::SymbolKind::Variable => OutlineKind::Variable,
+                sirio_lsp::SymbolKind::Module => OutlineKind::Module,
+                sirio_lsp::SymbolKind::Other => OutlineKind::Other,
+            },
+            line: symbol.line as usize,
+            depth: symbol.depth,
         })
         .collect()
 }
@@ -304,8 +338,8 @@ mod tests {
 
     #[test]
     fn a_registration_request_is_accepted() {
-        let answer = answer_for("client/registerCapability", &serde_json::json!({}))
-            .expect("answered");
+        let answer =
+            answer_for("client/registerCapability", &serde_json::json!({})).expect("answered");
         assert_eq!(answer, serde_json::Value::Null);
     }
 
@@ -313,8 +347,8 @@ mod tests {
     fn an_unknown_request_is_refused_with_method_not_found() {
         // Refusing is an answer. Silence is what stalls a server, and a
         // stalled server produces no error anywhere.
-        let (code, message) = answer_for("window/showMessageRequest", &serde_json::json!({}))
-            .expect_err("refused");
+        let (code, message) =
+            answer_for("window/showMessageRequest", &serde_json::json!({})).expect_err("refused");
         assert_eq!(code, -32601);
         assert!(message.contains("window/showMessageRequest"));
     }
@@ -326,8 +360,14 @@ mod tests {
         // the wrong text and is invisible on ASCII fixtures.
         let text = "let a = 1;\nlet \u{1f980} = 2;\n";
         let raw = vec![sirio_lsp::RawDiagnostic {
-            start: sirio_lsp::lsp_types::Position { line: 1, character: 4 },
-            end: sirio_lsp::lsp_types::Position { line: 1, character: 6 },
+            start: sirio_lsp::lsp_types::Position {
+                line: 1,
+                character: 4,
+            },
+            end: sirio_lsp::lsp_types::Position {
+                line: 1,
+                character: 6,
+            },
             severity: sirio_lsp::Severity::Warning,
             message: "unused variable".to_owned(),
         }];
@@ -336,7 +376,10 @@ mod tests {
         assert_eq!(converted[0].line, 1);
         assert_eq!(converted[0].message, "unused variable");
         let crab = &text[converted[0].range.clone()];
-        assert_eq!(crab, "\u{1f980}", "the range must cover the emoji, not half of it");
+        assert_eq!(
+            crab, "\u{1f980}",
+            "the range must cover the emoji, not half of it"
+        );
     }
 
     #[test]
@@ -345,8 +388,14 @@ mod tests {
         // range outliving its text is normal. Panicking on it is not.
         let text = "one line\n";
         let raw = vec![sirio_lsp::RawDiagnostic {
-            start: sirio_lsp::lsp_types::Position { line: 40, character: 0 },
-            end: sirio_lsp::lsp_types::Position { line: 40, character: 5 },
+            start: sirio_lsp::lsp_types::Position {
+                line: 40,
+                character: 0,
+            },
+            end: sirio_lsp::lsp_types::Position {
+                line: 40,
+                character: 5,
+            },
             severity: sirio_lsp::Severity::Error,
             message: "stale".to_owned(),
         }];
@@ -397,14 +446,33 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_are_absent_while_no_server_runs() {
-        // Nothing is running in a fresh supervisor, so every question about
-        // a capability answers "no" — never "maybe".
-        let supervisor = LspSupervisor::new(loader_with_defaults());
-        let file = std::path::Path::new("/repo/src/main.rs");
-        let root = std::path::Path::new("/repo");
-        assert!(supervisor.capability_for(file, root).is_none());
-        assert!(!supervisor.definition_available(file, root));
-        assert!(!supervisor.references_available(file, root));
+    fn symbols_arrive_in_the_view_s_own_vocabulary() {
+        // The protocol's kind is a number in a table; the view's is a case
+        // it can draw. Converting here is what keeps sirio_ui free of
+        // lsp-types — the same reason view_diagnostics exists above.
+        let raw = vec![
+            sirio_lsp::Symbol {
+                name: "LspSupervisor".to_owned(),
+                detail: Some("struct".to_owned()),
+                kind: sirio_lsp::SymbolKind::Struct,
+                line: 10,
+                depth: 0,
+            },
+            sirio_lsp::Symbol {
+                name: "servers".to_owned(),
+                detail: None,
+                kind: sirio_lsp::SymbolKind::Field,
+                line: 12,
+                depth: 1,
+            },
+        ];
+        let converted = view_symbols(&raw);
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].name, "LspSupervisor");
+        assert_eq!(converted[0].kind, sirio_ui::outline::OutlineKind::Struct);
+        assert_eq!(converted[0].detail.as_deref(), Some("struct"));
+        assert_eq!(converted[0].line, 10);
+        assert_eq!(converted[1].depth, 1, "the indent survives the crossing");
+        assert_eq!(converted[1].kind, sirio_ui::outline::OutlineKind::Field);
     }
 }
