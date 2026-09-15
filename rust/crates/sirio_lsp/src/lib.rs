@@ -14,6 +14,7 @@
 
 mod config;
 mod connection;
+mod document;
 mod framing;
 mod lifecycle;
 mod loader;
@@ -27,6 +28,7 @@ pub use config::{ConfigError, LanguageEntry, LanguageTable};
 pub use loader::{ConfigLoader, Reload, config_path};
 pub use roots::project_root;
 pub use connection::{Client, Connection};
+pub use document::{DocumentVersions, did_change, did_close, did_open, did_save};
 pub use lifecycle::{Capabilities, initialize, shutdown};
 pub use lsp_types;
 pub use message::{Incoming, RequestId, ResponseError};
