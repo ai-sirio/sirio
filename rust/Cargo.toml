@@ -13,6 +13,7 @@ members = [
     "crates/sirio_ui",
     "crates/sirio_terminal",
     "crates/sirio_acp",
+    "crates/sirio_lsp",
     "crates/sirio_project",
     "crates/sirio_git",
     "crates/sirio_persistence",

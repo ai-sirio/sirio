@@ -1,0 +1,19 @@
+[package]
+name = "sirio_lsp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sirio_perf = { path = "../sirio_perf" }
+# The ~200 protocol structs, serde-derived. Pinned exactly: a minor bump
+# here is a wire-format change, not a dependency chore.
+lsp-types = "=0.97.0"
+serde = { workspace = true }
+serde_json = "1"
+# The same async set sirio_acp uses. No tokio: see the plan's global
+# constraints and sirio_theme::looks_like_test_harness for why.
+futures = "0.3"
+futures-timer = "3"
+async-channel = "2"
+async-process = "2"

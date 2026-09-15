@@ -27,11 +27,21 @@ __pycache__/
 *.pyc
 
 # Local tool/IDE/planning artifacts — not shared repo content. docs/ stays
-# local except the release notes: release.yml refuses a tag whose
-# docs/release-notes/<version>.md is missing, so that one directory is repo
-# content (a parent excluded with `/docs/` could not be re-included).
+# local except two directories the repo itself depends on. Both need the
+# `/docs/*` + `!` shape, because a parent excluded with `/docs/` could not
+# be re-included:
+#   - release-notes: release.yml refuses a tag whose
+#     docs/release-notes/<version>.md is missing.
+#   - superpowers/specs: shipped rustdoc links into them by URL (sirio_apply
+#     alone carries nine), so an untracked spec is a 404 in published
+#     documentation — and the auto-update spec those nine cite was lost
+#     exactly this way. Implementation *plans* stay local on purpose: they
+#     are execution scaffolding and go stale the moment the work lands.
 /.codegraph/
 /docs/*
 !/docs/release-notes/
+!/docs/superpowers/
+/docs/superpowers/*
+!/docs/superpowers/specs/
 /output/
 /plans/
