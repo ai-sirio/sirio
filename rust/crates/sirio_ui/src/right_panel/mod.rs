@@ -12,6 +12,7 @@ mod activity;
 mod files;
 mod history;
 mod history_toolbar;
+mod references;
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*, px,
@@ -23,6 +24,9 @@ use std::time::{Duration, SystemTime};
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use history::{GitHistory, GitHistoryEvent};
+
+pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
+use references::{ReferencesEvent, ReferencesList};
 
 // ROW_HEIGHT stays reachable at the module root for the conformance
 // suite (`crate::right_panel::ROW_HEIGHT`) even though the file-tree
@@ -90,6 +94,9 @@ pub enum RightPanelActionEvent {
     /// Open one commit's diff in a host tab, by full object name. The History
     /// view raises this; the host owns the tab it lands in.
     OpenCommit(String),
+    /// Open a file at a line — a references result. The panel names the
+    /// place; the app owns the tab.
+    OpenAtLine { path: PathBuf, line: usize },
 }
 
 /// Which surface an Activity row names.
@@ -154,6 +161,7 @@ pub enum PanelView {
     Activity,
     Diff,
     History,
+    References,
 }
 
 /// A settled Files tree, handed to the host on the way out of a worktree so
@@ -231,11 +239,12 @@ impl gpui::Global for PanelViewSetting {}
 
 impl PanelView {
     /// Rail order, left to right.
-    const ORDER: [PanelView; 4] = [
+    const ORDER: [PanelView; 5] = [
         PanelView::Files,
         PanelView::Activity,
         PanelView::Diff,
         PanelView::History,
+        PanelView::References,
     ];
 
     fn icon(self) -> Icon {
@@ -244,6 +253,7 @@ impl PanelView {
             PanelView::Activity => Icon::Thread,
             PanelView::Diff => Icon::Diff,
             PanelView::History => Icon::GitGraph,
+            PanelView::References => Icon::MagnifyingGlass,
         }
     }
 
@@ -253,6 +263,7 @@ impl PanelView {
             PanelView::Activity => "right-panel-tab-activity",
             PanelView::Diff => "right-panel-tab-diff",
             PanelView::History => "right-panel-tab-history",
+            PanelView::References => "right-panel-tab-references",
         }
     }
 
@@ -341,6 +352,10 @@ pub struct RightPanel {
     /// checkout changes. A user who never opens History never runs `git log`.
     history: Option<gpui::Entity<GitHistory>>,
     history_subscription: Option<gpui::Subscription>,
+    /// Built when References is first shown, dropped when the checkout
+    /// changes. A user who never asks for references never pays for it.
+    references: Option<gpui::Entity<ReferencesList>>,
+    references_subscription: Option<gpui::Subscription>,
     /// The resolved right-panel width, pushed in by the host every render.
     /// The History toolbar shapes itself from it; see [`GitHistory::panel_width`].
     panel_width: f32,
@@ -381,6 +396,8 @@ impl RightPanel {
             changes_subscriptions: Vec::new(),
             history: None,
             history_subscription: None,
+            references: None,
+            references_subscription: None,
             panel_width: 405.0,
             is_stale: false,
             updating: false,
@@ -505,6 +522,8 @@ impl RightPanel {
         self.changes_subscriptions.clear();
         self.history = None;
         self.history_subscription = None;
+        self.references = None;
+        self.references_subscription = None;
         self.is_stale = false;
         self.updating = false;
         self.refresh_started = false;
@@ -557,6 +576,8 @@ impl RightPanel {
         self.changes_subscriptions.clear();
         self.history = None;
         self.history_subscription = None;
+        self.references = None;
+        self.references_subscription = None;
         self.updating = false;
         self.refresh_started = false;
         self.refresh_task = None;
@@ -769,6 +790,46 @@ impl RightPanel {
             .flex_col()
             .child(history)
     }
+
+    fn ensure_references(&mut self, cx: &mut Context<Self>) -> gpui::Entity<ReferencesList> {
+        if let Some(list) = self.references.clone() {
+            return list;
+        }
+        let list = cx.new(|_| ReferencesList::new());
+        self.references_subscription = Some(cx.subscribe(
+            &list,
+            |_, _, event: &ReferencesEvent, cx| match event {
+                ReferencesEvent::Open { path, line } => {
+                    cx.emit(RightPanelActionEvent::OpenAtLine {
+                        path: path.clone(),
+                        line: *line,
+                    })
+                }
+            },
+        ));
+        self.references = Some(list.clone());
+        list
+    }
+
+    fn render_references(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let list = self.ensure_references(cx);
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .child(list)
+    }
+
+    /// The host's way in. Building the list if it does not exist yet is
+    /// deliberate: the answer can arrive before the user has ever looked at
+    /// this surface, and dropping it then would lose the search they asked
+    /// for.
+    pub fn set_references(&mut self, state: ReferencesState, cx: &mut Context<Self>) {
+        let list = self.ensure_references(cx);
+        list.update(cx, |list, cx| list.set_state(state, cx));
+        cx.notify();
+    }
 }
 
 impl EventEmitter<RightPanelEvent> for RightPanel {}
@@ -828,6 +889,7 @@ impl Render for RightPanel {
                         .into_any_element(),
                     PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
                     PanelView::History => self.render_history(theme, cx).into_any_element(),
+                    PanelView::References => self.render_references(theme, cx).into_any_element(),
                 }
             })
             .when(self.worktree_selected, |this| {

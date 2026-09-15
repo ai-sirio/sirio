@@ -116,6 +116,8 @@ pub enum Icon {
     Diff,
     /// The History view in the right panel's rail (`zed/git_graph.svg`).
     GitGraph,
+    /// The References view in the right panel's rail (`zed/magnifying_glass.svg`).
+    MagnifyingGlass,
     /// Unified Changes view (`zed/diff_unified.svg`).
     DiffUnified,
     /// Split Changes view (`zed/diff_split.svg`).
@@ -193,6 +195,7 @@ impl Icon {
             Icon::Thread => "icons/zed/thread.svg",
             Icon::Diff => "icons/zed/diff.svg",
             Icon::GitGraph => "icons/zed/git_graph.svg",
+            Icon::MagnifyingGlass => "icons/zed/magnifying_glass.svg",
             Icon::DiffUnified => "icons/zed/diff_unified.svg",
             Icon::DiffSplit => "icons/zed/diff_split.svg",
             Icon::ExpandVertical => "icons/zed/expand_vertical.svg",
@@ -280,6 +283,7 @@ impl Icon {
             Icon::Thread => include_bytes!("../../../assets/icons/zed/thread.svg"),
             Icon::Diff => include_bytes!("../../../assets/icons/zed/diff.svg"),
             Icon::GitGraph => include_bytes!("../../../assets/icons/zed/git_graph.svg"),
+            Icon::MagnifyingGlass => include_bytes!("../../../assets/icons/zed/magnifying_glass.svg"),
             Icon::DiffUnified => include_bytes!("../../../assets/icons/zed/diff_unified.svg"),
             Icon::DiffSplit => include_bytes!("../../../assets/icons/zed/diff_split.svg"),
             Icon::ExpandVertical => include_bytes!("../../../assets/icons/zed/expand_vertical.svg"),
@@ -649,7 +653,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 33] = [
+pub const ALL_ICONS: [Icon; 34] = [
     Icon::FolderFill,
     Icon::GitBranch,
     Icon::MessageSquare,
@@ -676,6 +680,7 @@ pub const ALL_ICONS: [Icon; 33] = [
     Icon::PanelRight,
     Icon::Archive,
     Icon::Lock,
+    Icon::MagnifyingGlass,
     Icon::DiffUnified,
     Icon::DiffSplit,
     Icon::ExpandVertical,
@@ -751,6 +756,7 @@ mod tests {
             (Icon::PanelRight, "icons/zed/threads_sidebar_right_open.svg"),
             (Icon::Archive, "icons/zed/archive.svg"),
             (Icon::Lock, "icons/zed/lock.svg"),
+            (Icon::MagnifyingGlass, "icons/zed/magnifying_glass.svg"),
             (Icon::DiffUnified, "icons/zed/diff_unified.svg"),
             (Icon::DiffSplit, "icons/zed/diff_split.svg"),
             (Icon::ExpandVertical, "icons/zed/expand_vertical.svg"),

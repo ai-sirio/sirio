@@ -294,6 +294,7 @@ impl Sidebar {
             Icon::SquareMinus => "square-minus",
             Icon::Undo => "undo",
             Icon::GitGraph => "git-graph",
+            Icon::MagnifyingGlass => "magnifying-glass",
             Icon::FileType(_) => "file-type",
         }
     }
