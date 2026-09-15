@@ -17,3 +17,7 @@ futures = "0.3"
 futures-timer = "3"
 async-channel = "2"
 async-process = "2"
+# Reading the language table into a struct. The repo's other TOML crate,
+# `toml_edit`, exists to rewrite Codex's config without disturbing its
+# formatting — a different job with a much more awkward read API.
+toml = "=0.8.23"

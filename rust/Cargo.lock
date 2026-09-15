@@ -7207,6 +7207,7 @@ dependencies = [
  "sirio_apply",
  "sirio_control",
  "sirio_git",
+ "sirio_lsp",
  "sirio_perf",
  "sirio_persistence",
  "sirio_project",
@@ -7292,6 +7293,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sirio_perf",
+ "toml 0.8.23",
 ]
 
 [[package]]
