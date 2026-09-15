@@ -453,6 +453,19 @@ mod tests {
         assert_eq!(narrowed[0].name, "spawn_router");
         assert_eq!(narrowed[1].name, "Spawner");
 
+        // Mid-string: 'awn' sits at offset 2, so a prefix matcher
+        // would miss it entirely.
+        let mid = filter_symbols(&symbols, "awn");
+        assert_eq!(mid.len(), 2);
+        assert_eq!(mid[0].name, "spawn_router");
+        assert_eq!(mid[1].name, "Spawner");
+
+        // Surrounding whitespace is trimmed before matching.
+        let padded = filter_symbols(&symbols, "  SPA  ");
+        assert_eq!(padded.len(), 2);
+        assert_eq!(padded[0].name, "spawn_router");
+        assert_eq!(padded[1].name, "Spawner");
+
         assert!(filter_symbols(&symbols, "zzz").is_empty());
     }
 
@@ -511,6 +524,14 @@ mod tests {
             });
         });
 
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(
+            outline.read_with(&cx.cx, |o, _| o.selected_index()),
+            0,
+            "a single up from the first row clamps, not wraps to the last"
+        );
+
         cx.simulate_keystrokes("up up");
         cx.run_until_parked();
         assert_eq!(outline.read_with(&cx.cx, |o, _| o.selected_index()), 0);
@@ -521,6 +542,14 @@ mod tests {
             outline.read_with(&cx.cx, |o, _| o.selected_index()),
             1,
             "the last row, not back to the first"
+        );
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            outline.read_with(&cx.cx, |o, _| o.selected_index()),
+            1,
+            "a single down from the last row clamps, not wraps to the first"
         );
     }
 
