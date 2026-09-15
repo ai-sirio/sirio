@@ -5945,7 +5945,7 @@ impl SirioWorkspace {
     fn subscribe_file_view(file_view: &Entity<FileView>, cx: &mut Context<Self>) {
         cx.subscribe(
             file_view,
-            |workspace, _, event: &FileViewEvent, cx| match event {
+            |workspace, view, event: &FileViewEvent, cx| match event {
                 FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
                 FileViewEvent::RevealInFileManager(path) => {
                     if let Some(mut command) = reveal_command(path) {
@@ -5986,6 +5986,9 @@ impl SirioWorkspace {
                 }
                 FileViewEvent::ViewFileHistory(path) => {
                     workspace.show_file_history(path.clone(), cx);
+                }
+                FileViewEvent::Hover { path, offset, seq } => {
+                    workspace.request_hover(path.clone(), *offset, *seq, view.clone(), cx);
                 }
             },
         )
@@ -10631,6 +10634,42 @@ impl SirioWorkspace {
                 let _ = sirio_lsp::did_open(&client, &path, &language, version, &text).await;
             })
             .detach();
+    }
+
+    fn request_hover(
+        &mut self,
+        path: PathBuf,
+        offset: usize,
+        seq: u64,
+        view: Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.lsp.entry_for(&path) else { return };
+        let Some(worktree_root) = self.worktree_root_for(&path) else { return };
+        let key = self.lsp.key_for(&path, &worktree_root, &entry);
+        let Some(server) = self.lsp.server_for(&key) else { return };
+        // A server that does not offer hover is not asked. The negotiated
+        // capability decides, never an assumption about what a server does.
+        if !server.capabilities().hover {
+            return;
+        }
+        let client = server.client().clone();
+        let text = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+            .unwrap_or_default();
+        let position = sirio_lsp::LineIndex::new(&text).position(offset);
+        cx.spawn(async move |_this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { sirio_lsp::hover(&client, &path, position).await })
+                .await;
+            if let Ok(text) = answer {
+                let _ = view.update(cx, |view, cx| view.set_hover(seq, text, cx));
+            }
+        })
+        .detach();
     }
 
     /// Tells the server a file is closed and forgets its version, so a
