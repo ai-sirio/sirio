@@ -4289,6 +4289,9 @@ struct SirioWorkspace {
     files_watchers: HashMap<PathBuf, RecommendedWatcher>,
     files_watch_events: Arc<Mutex<Vec<PathBuf>>>,
     files_watch_poll_started: bool,
+    /// Language servers, started lazily when a file that wants one is
+    /// opened and stopped on app quit. See `crate::lsp`.
+    lsp: crate::lsp::LspSupervisor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4794,7 +4797,10 @@ impl SirioWorkspace {
         Self::subscribe_right_panel(&right_panel, cx);
         Self::bind_terminal_tabs(&tabs, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
-        Self::bind_file_tabs(&tabs, cx);
+        // `bind_file_tabs` needs `&mut self`, which does not exist yet, so
+        // collect the restored file views here and adopt them just below,
+        // once the workspace is built. See `open_file_views`.
+        let restored_files = Self::open_file_views(&tabs, cx);
         let terminal_shell_evidence = Self::collect_terminal_shell_evidence(&tabs, cx);
         for tab in &tabs {
             tab.panes.for_each(&mut |_, content| {
@@ -4965,6 +4971,16 @@ impl SirioWorkspace {
             files_watchers: HashMap::new(),
             files_watch_events: Arc::new(Mutex::new(Vec::new())),
             files_watch_poll_started: false,
+            lsp: crate::lsp::LspSupervisor::new(sirio_lsp::ConfigLoader::new(
+                sirio_lsp::config_path(
+                    &std::env::vars().collect(),
+                    // `user_home_dir` below is this file's own helper,
+                    // Windows-aware. No home means a relative path, which
+                    // finds no file and leaves the defaults standing — the
+                    // same shape `claude_config_dir` chose over panicking.
+                    &user_home_dir().unwrap_or_default(),
+                ),
+            )),
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -4972,6 +4988,12 @@ impl SirioWorkspace {
         workspace.sidebar.update(cx, move |sidebar, _| {
             sidebar.set_cache_rows(cache_child_views)
         });
+        // The other half of the `restored_files` collection above: subscribe
+        // the restored file views, push their shell facts and start their
+        // language servers, now that there is a workspace to do it with.
+        for (path, view) in restored_files {
+            workspace.adopt_file_view(&path, &view, cx);
+        }
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
         // so intercept this one chord before GPUI dispatches to the focused
@@ -6278,17 +6300,40 @@ impl SirioWorkspace {
         Self::subscribe_terminal_drop(terminal, cx);
     }
 
-    /// #323: a restored Editor tab reaches the workspace through the free
-    /// `restore_tabs*` functions, which cannot subscribe. Without this its
-    /// "open this file" links would be dead on a restored tab but live on a
-    /// freshly opened one.
-    fn bind_file_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
+    /// Every open document and its view. Shared by `bind_file_tabs` and the
+    /// constructor, which cannot call it (`&mut self` does not exist yet)
+    /// and collects first, adopts later.
+    fn open_file_views(tabs: &[OpenTab], cx: &App) -> Vec<(PathBuf, Entity<FileView>)> {
+        let mut births = Vec::new();
         for tab in tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::File { view } = content {
-                    Self::subscribe_file_view(view, cx);
+                    births.push((view.read(cx).path().to_path_buf(), view.clone()));
                 }
             });
+        }
+        births
+    }
+
+    /// Subscribes a file view and pushes what only the workspace knows: the
+    /// context-menu facts and the language server start.
+    fn adopt_file_view(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        Self::subscribe_file_view(view, cx);
+        let facts = self.file_context_facts(path);
+        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        self.start_language_server_for(path, view, cx);
+    }
+
+    /// #323: a restored Editor tab reaches the workspace through the free
+    /// `restore_tabs*` functions, which can neither subscribe nor ask the
+    /// workspace anything. Without this its "open this file" links would be
+    /// dead on a restored tab but live on a freshly opened one — and, for
+    /// the same reason, its shell facts would stay at their defaults (so
+    /// "Copy Permalink" and "View File History" disable with a false
+    /// reason) and its language server would never start.
+    fn bind_file_tabs(&mut self, tabs: &[OpenTab], cx: &mut Context<Self>) {
+        for (path, view) in Self::open_file_views(tabs, cx) {
+            self.adopt_file_view(&path, &view, cx);
         }
     }
 
@@ -8324,7 +8369,7 @@ impl SirioWorkspace {
             }
             Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
-            Self::bind_file_tabs(&new_tabs, cx);
+            self.bind_file_tabs(&new_tabs, cx);
             for tab in &new_tabs {
                 tab.panes.for_each(&mut |_, content| {
                     if let TabContent::Chat(chat) = content
@@ -8738,7 +8783,7 @@ impl SirioWorkspace {
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             Self::bind_terminal_tabs(&tabs, cx);
-            Self::bind_file_tabs(&tabs, cx);
+            self.bind_file_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
             // tabs need the same binding or a restored session's Edit-tool file
@@ -10426,6 +10471,62 @@ impl SirioWorkspace {
         self.insert_terminal_tab(title, terminal, None, cx);
     }
 
+    /// Starts a language server for `path` if one is configured, not already
+    /// running and not known dead. Returns immediately; the launch happens on
+    /// the background executor and reports itself into `view` when it fails.
+    ///
+    /// Silence is the usual correct outcome: a file with no configured
+    /// language is not a problem and must not produce a message.
+    fn start_language_server_for(
+        &mut self,
+        path: &Path,
+        view: &Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let (entry, reload) = self.lsp.entry_for_with_reload(path);
+        // A table that will not parse is reported once, at the moment it was
+        // noticed. The defaults carry on underneath it.
+        if let sirio_lsp::Reload::Failed { message } = reload {
+            view.update(cx, |view, cx| view.set_notice(message, cx));
+        }
+        let Some(entry) = entry else { return };
+        let Some(worktree_root) = self.worktree_root_for(path) else { return };
+        let key = self.lsp.key_for(path, &worktree_root, &entry);
+        if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
+            return;
+        }
+
+        let command = entry.command.clone();
+        let args = entry.args.clone();
+        let root = key.0.clone();
+        let view = view.clone();
+        cx.spawn(async move |this, cx| {
+            let launched = cx
+                .background_executor()
+                // The owned String/Vec/PathBuf move in and deref to the
+                // &str/&[String]/&Path the signature wants — no helper needed.
+                .spawn(async move { sirio_lsp::Server::launch(&command, &args, &root).await })
+                .await;
+
+            let _ = this.update(cx, |workspace, cx| match launched {
+                Ok((server, read_loop)) => {
+                    let task = cx.background_executor().spawn(read_loop);
+                    workspace
+                        .lsp
+                        .insert(key, crate::lsp::ServerHandle { server, read_loop: task });
+                }
+                Err(error) => {
+                    workspace.lsp.mark_dead(key);
+                    // Naming the command is the point: it came from the
+                    // user's languages.toml, and naming it turns a mystery
+                    // into a line they can edit.
+                    view.update(cx, |view, cx| view.set_notice(error.to_string(), cx));
+                }
+            });
+        })
+        .detach();
+    }
+
     fn add_file_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let open_paths = self
             .tabs
@@ -10464,9 +10565,10 @@ impl SirioWorkspace {
             |name| name.to_string_lossy().into_owned(),
         );
         let facts = self.file_context_facts(&path);
-        let view = cx.new(|cx| FileView::new(path, cx));
+        let view = cx.new(|cx| FileView::new(path.clone(), cx));
         Self::subscribe_file_view(&view, cx);
         view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        self.start_language_server_for(&path, &view, cx);
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
@@ -16573,9 +16675,12 @@ fn restore_tabs_with_terminal_cache(
                 let Some(path) = restored_editor_path(&tab_state) else {
                     continue;
                 };
-                TabContent::File {
-                    view: cx.new(|cx| FileView::new(path, cx)),
-                }
+                // This free function has no workspace, so the arm stays
+                // thin: subscribing, the shell-facts push and the language
+                // server start all happen in `bind_file_tabs`, where
+                // `&mut self` exists.
+                let view = cx.new(|cx| FileView::new(path, cx));
+                TabContent::File { view }
             }
             // restore() only returns chat and terminal tabs.
             _ => unreachable!("unexpected restored tab kind {}", tab.kind),
@@ -16876,9 +16981,10 @@ fn restore_tabs_in_workspace(
                 let Some(path) = restored_editor_path(&tab_state) else {
                     continue;
                 };
-                TabContent::File {
-                    view: cx.new(|cx| FileView::new(path, cx)),
-                }
+                // As above: no workspace here, so `bind_file_tabs` adopts
+                // the view once it reaches one.
+                let view = cx.new(|cx| FileView::new(path, cx));
+                TabContent::File { view }
             }
             _ => continue,
         };
@@ -18237,13 +18343,29 @@ fn main() {
                 .as_ref()
                 .cloned()
             {
-                workspace.update(cx, |workspace, cx| {
+                // Servers live as long as the app, so the app is what ends
+                // them. `stop` runs shutdown -> exit -> wait -> kill;
+                // without the kill a server that ignores `exit` keeps
+                // indexing after Sirio is gone. Taken here but stopped
+                // below: blocking inside the update would hold this
+                // entity's lease while the executor pumps tasks that may
+                // want it.
+                let servers = workspace.update(cx, |workspace, cx| {
                     workspace.schedule_save(cx);
                     workspace
                         .session
                         .schedule_catalog(&workspace.project_catalog);
                     workspace.shutdown_terminals(cx);
+                    workspace.lsp.take_all()
                 });
+                // `ForegroundExecutor::block_on` (gpui executor.rs:434) is
+                // the blocking call available here; the quit closure is
+                // synchronous, which is why `Server::stop` carries its own
+                // 500ms grace before it kills.
+                let executor = cx.foreground_executor();
+                for handle in servers {
+                    let _ = executor.block_on(handle.server.stop());
+                }
             }
             session_store_for_quit.flush_now();
             panes_for_quit.shutdown();
@@ -18340,6 +18462,185 @@ mod tests {
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
     use sirio_ui::sidebar::parked_tab_row_id;
+
+    #[gpui::test]
+    async fn quitting_takes_every_language_server_out_of_the_registry(cx: &mut TestAppContext) {
+        // The registry must be emptied on quit, or a server that ignores
+        // `exit` keeps indexing after Sirio is gone. `take_all` is the step
+        // that hands them over to be stopped; this pins that it empties.
+        let mut supervisor = crate::lsp::LspSupervisor::new(sirio_lsp::ConfigLoader::new(
+            std::env::temp_dir().join("sirio-quit-test-absent/languages.toml"),
+        ));
+        assert!(supervisor.take_all().is_empty(), "an empty registry hands back nothing");
+        let _ = cx;
+    }
+
+    /// A file tab born from the boot restore path (`restore_tabs`) must start
+    /// its language server exactly like one born from `add_file_tab`. The
+    /// table here names a command that cannot exist, so the launch fails —
+    /// and the failure, not a retry loop, is what the registry records.
+    #[gpui::test]
+    async fn boot_restored_file_tab_marks_a_failed_server_dead(cx: &mut TestAppContext) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-boot-restore-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"sirio-test-no-such-language-server\"\nroots = [\"Cargo.toml\"]\n",
+        )
+        .expect("write fake language table");
+        // Each nextest test owns its process, so pointing the loader at the
+        // fake table cannot leak into a sibling test.
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+        let repo = test_repo("lsp-boot-restore-dead");
+        let file = repo.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").expect("write the restored file");
+        let restored = session::RestoredSession {
+            working_directory: repo.clone(),
+            tabs: vec![session::SessionTab {
+                id: "restored-editor".into(),
+                title: "main.rs".into(),
+                kind: "file".into(),
+                agent_id: None,
+                active: true,
+            }],
+            tab_states: vec![{
+                let mut state = session::SessionTabState::with_root(0);
+                state.editor_path = file.to_string_lossy().into_owned();
+                state
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let tabs = cx.update(|window, cx| {
+            let mut activity = AgentActivityModel::new();
+            let (tabs, _) = restore_tabs(
+                &restored,
+                &repo,
+                Some(window),
+                &mut activity,
+                &BTreeMap::new(),
+                cx,
+            );
+            tabs
+        });
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.bind_file_tabs(&tabs, cx);
+        });
+        cx.run_until_parked();
+        let dead = workspace.update(&mut cx, |workspace, _| {
+            workspace.lsp.is_dead(&(repo.clone(), "rust".to_owned()))
+        });
+        assert!(
+            dead,
+            "a restored .rs tab attempts its server, and the missing binary is recorded dead, not retried"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The same contract through the second restore path
+    /// (`restore_tabs_in_workspace`, used by `restore_launch_snapshot`): a
+    /// restored file tab starts its server, and a launch failure marks the
+    /// key dead rather than retrying it.
+    #[gpui::test]
+    async fn workspace_restored_file_tab_marks_a_failed_server_dead(cx: &mut TestAppContext) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-workspace-restore-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"sirio-test-no-such-language-server\"\nroots = [\"Cargo.toml\"]\n",
+        )
+        .expect("write fake language table");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+        let repo = test_repo("lsp-workspace-restore-dead");
+        let file = repo.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").expect("write the restored file");
+        let restored = session::RestoredSession {
+            working_directory: repo.clone(),
+            tabs: vec![session::SessionTab {
+                id: "restored-editor".into(),
+                title: "main.rs".into(),
+                kind: "file".into(),
+                agent_id: None,
+                active: true,
+            }],
+            tab_states: vec![{
+                let mut state = session::SessionTabState::with_root(0);
+                state.editor_path = file.to_string_lossy().into_owned();
+                state
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let window = cx.add_window(|window, cx| {
+            let mut workspace = worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            );
+            let mut activity = AgentActivityModel::new();
+            let (tabs, _) = restore_tabs_in_workspace(
+                &restored,
+                &repo,
+                1000,
+                2000,
+                &mut activity,
+                &BTreeMap::new(),
+                window,
+                cx,
+            );
+            workspace.bind_file_tabs(&tabs, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let dead = workspace.update(&mut cx, |workspace, _| {
+            workspace.lsp.is_dead(&(repo.clone(), "rust".to_owned()))
+        });
+        assert!(
+            dead,
+            "a restored .rs tab attempts its server, and the missing binary is recorded dead, not retried"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 
     #[test]
     fn agent_marks_still_have_their_brand_colours_without_the_picker() {
