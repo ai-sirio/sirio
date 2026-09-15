@@ -26,6 +26,7 @@ pub mod git_status_style;
 pub mod loading;
 pub mod modal;
 pub mod orbit;
+pub mod outline;
 pub mod project_forms;
 pub mod project_identity;
 pub mod right_panel;
