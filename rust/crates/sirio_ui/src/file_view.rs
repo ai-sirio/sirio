@@ -124,6 +124,10 @@ pub struct FileView {
     /// worktree has an agent chat open. Each costs a subprocess or a walk of
     /// the open tabs, so they are pushed down rather than asked per click.
     shell_facts: FileContextFacts,
+    /// Findings published by the language server for this file, in buffer
+    /// terms. Replaced wholesale on every publish — an empty list is how a
+    /// server says the errors are gone, so it must clear, not be ignored.
+    diagnostics: Vec<FileDiagnostic>,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -173,6 +177,28 @@ pub enum FileViewEvent {
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
+
+/// How bad a diagnostic is, in the only terms the view needs. Ordered
+/// worst-first so `min()` over a line picks the mark to paint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+/// One finding, already in this view's own terms: a line index and a byte
+/// range into the buffer. The conversion from the protocol's UTF-16
+/// positions happens in the app, which owns the buffer — this crate never
+/// learns what a UTF-16 code unit is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDiagnostic {
+    pub line: usize,
+    pub range: std::ops::Range<usize>,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+}
 
 /// Installs bezel-editor's key bindings for the application. The app crate
 /// calls through this module so the dependency remains owned by `sirio_ui`.
@@ -231,6 +257,7 @@ impl FileView {
             scroll: SurfaceScroll::new(Painter::of(cx)),
             context_menu: None,
             shell_facts: FileContextFacts::default(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -285,6 +312,15 @@ impl FileView {
             self.shell_facts = facts;
             cx.notify();
         }
+    }
+
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<FileDiagnostic>, cx: &mut Context<Self>) {
+        self.diagnostics = diagnostics;
+        cx.notify();
+    }
+
+    pub fn diagnostics(&self) -> &[FileDiagnostic] {
+        &self.diagnostics
     }
 
     /// The shell's facts plus the two this view answers itself.
