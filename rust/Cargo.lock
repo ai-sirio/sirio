@@ -7207,6 +7207,7 @@ dependencies = [
  "sirio_apply",
  "sirio_control",
  "sirio_git",
+ "sirio_lsp",
  "sirio_perf",
  "sirio_persistence",
  "sirio_project",

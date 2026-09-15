@@ -127,6 +127,7 @@ mod command_palette;
 mod display_backend;
 #[cfg(not(windows))]
 mod login_path;
+mod lsp;
 #[cfg(feature = "perf-native")]
 mod native_perf;
 mod panel_layout;
