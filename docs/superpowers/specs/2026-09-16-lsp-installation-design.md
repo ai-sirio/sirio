@@ -200,6 +200,35 @@ pub enum Recipe {
     /// Why it cannot be installed, in terms a reader can act on.
     Manual { needs: &'static str, url: &'static str },
 }
+
+```
+
+One asset is one pinned file — URL, hash and size together, so the size is
+known before the click and every binary install is verified:
+
+```rust
+pub struct Asset {
+    pub url: &'static str,
+    /// Lower-case hex. GitHub publishes this on every asset, so unlike the
+    /// ACP registry — where 47 of 95 artifacts publish nothing — every
+    /// install here is verified.
+    pub sha256: &'static str,
+    pub bytes: u64,
+}
+```
+
+And two helpers the surfaces read instead of matching:
+
+```rust
+impl Recipe {
+    /// `false` for `Manual`: an explanation, not an offer.
+    pub fn is_installable(&self) -> bool { ... }
+
+    /// The store directory: the package for `Npm`, the repository for
+    /// `Release`, `None` for `Manual`. Shared on purpose — json, html and
+    /// css resolve to one id, so one download.
+    pub fn store_id(&self) -> Option<&'static str> { ... }
+}
 ```
 
 `Manual` is the arm Zed has no equivalent for. Where Zed says nothing, Sirio

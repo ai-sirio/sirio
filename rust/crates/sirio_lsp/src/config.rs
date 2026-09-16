@@ -10,6 +10,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::{Asset, Recipe};
+
 /// One language's server, as the user writes it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LanguageEntry {
@@ -23,6 +25,14 @@ pub struct LanguageEntry {
     /// the file. Absent means none, which roots the server at the worktree.
     #[serde(default)]
     pub roots: Vec<String>,
+    /// How to get `command`, when Sirio can get it. `#[serde(skip)]` is the
+    /// decision, not an oversight: which npm package is the right one is
+    /// Sirio's knowledge, not the reader's to configure — and an entry
+    /// written in `languages.toml` therefore carries `None`, which is the
+    /// right answer. If you point Sirio at your own jdtls it must not offer
+    /// to download another one underneath it.
+    #[serde(skip)]
+    pub install: Option<crate::Recipe>,
 }
 
 /// The whole table, in the order entries were written. Order is meaningful:
@@ -89,6 +99,7 @@ impl LanguageTable {
             command: &str,
             args: &[&str],
             roots: &[&str],
+            install: Option<crate::Recipe>,
         ) -> LanguageEntry {
             LanguageEntry {
                 name: name.to_owned(),
@@ -96,18 +107,80 @@ impl LanguageTable {
                 command: command.to_owned(),
                 args: args.iter().map(|value| (*value).to_owned()).collect(),
                 roots: roots.iter().map(|value| (*value).to_owned()).collect(),
+                install,
             }
         }
 
         Self {
             entries: vec![
-                entry("rust", &["rs"], "rust-analyzer", &[], &["Cargo.toml"]),
+                entry(
+                    "rust",
+                    &["rs"],
+                    "rust-analyzer",
+                    &[],
+                    &["Cargo.toml"],
+                    Some(
+                        // rust-analyzer 2026-09-14
+                        Recipe::Release {
+                            id: "rust-analyzer",
+                            version: "2026-09-14",
+                            bin: "rust-analyzer",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+                                        sha256: "7609ba53f85cd80a3bde77a4b2e94e304d0f94650e4f4cffc061b9bca454ba75",
+                                        bytes: 14853937,
+                                    },
+                                ),
+                                (
+                                    "linux-aarch64",
+                                    Asset {
+                                        url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+                                        sha256: "3d32c50aebf9288c2fd11b559813441bdff2aa57fbbb7177ad0ffe5ac4e9ad3d",
+                                        bytes: 14327723,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-aarch64-apple-darwin.gz",
+                                        sha256: "0c579403271f4021eb1efdfaa9bedb43e099595d02a02ee9b1f34c6c51a3ac26",
+                                        bytes: 13877061,
+                                    },
+                                ),
+                                (
+                                    "darwin-x86_64",
+                                    Asset {
+                                        url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-x86_64-apple-darwin.gz",
+                                        sha256: "58d827adc7bde3b8986ff52795484f462564a2beed3ba4f4b2cbc3cfd58ae05e",
+                                        bytes: 14637240,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-x86_64-pc-windows-msvc.zip",
+                                        sha256: "631ea40942cbc1e70a3465218f27f49fd73d82d9c0dd21e5279d8417f7f2dd93",
+                                        bytes: 17515427,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                ),
                 entry(
                     "typescript",
                     &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
                     "typescript-language-server",
                     &["--stdio"],
                     &["package.json", "tsconfig.json"],
+                    Some(Recipe::Npm {
+                        package: "typescript-language-server",
+                        version: "6.0.0",
+                        bin: "node_modules/.bin/typescript-language-server",
+                    }),
                 ),
                 entry(
                     "python",
@@ -115,8 +188,23 @@ impl LanguageTable {
                     "pyright-langserver",
                     &["--stdio"],
                     &["pyproject.toml", "setup.py", "requirements.txt"],
+                    Some(Recipe::Npm {
+                        package: "pyright",
+                        version: "1.1.414",
+                        bin: "node_modules/.bin/pyright-langserver",
+                    }),
                 ),
-                entry("go", &["go"], "gopls", &[], &["go.mod"]),
+                entry(
+                    "go",
+                    &["go"],
+                    "gopls",
+                    &[],
+                    &["go.mod"],
+                    Some(Recipe::Manual {
+                        needs: "Go, then `go install golang.org/x/tools/gopls@latest`",
+                        url: "https://github.com/golang/tools/tree/master/gopls#installation",
+                    }),
+                ),
                 // clangd is one server for both languages, and keying it as
                 // one entry is what keeps a project from running two of
                 // them over the same compilation database.
@@ -132,6 +220,40 @@ impl LanguageTable {
                         "CMakeLists.txt",
                         "Makefile",
                     ],
+                    Some(
+                        // clangd 22.1.6
+                        Recipe::Release {
+                            id: "clangd",
+                            version: "22.1.6",
+                            bin: "clangd_22.1.6/bin/clangd",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
+                                        sha256: "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
+                                        bytes: 114790601,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-mac-22.1.6.zip",
+                                        sha256: "631aef462556cbd74e0ebaae1778a38d1997d0ba3371652ca54f82652a179e7d",
+                                        bytes: 98113276,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-windows-22.1.6.zip",
+                                        sha256: "ce54f16e0b4fd76d450eeda9664420b195360b73febcfe40e661108fa57f2ce1",
+                                        bytes: 28198778,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
                 ),
                 entry(
                     "java",
@@ -146,6 +268,10 @@ impl LanguageTable {
                         "settings.gradle.kts",
                         ".project",
                     ],
+                    Some(Recipe::Manual {
+                        needs: "a JVM (Java 21 or newer)",
+                        url: "https://github.com/eclipse-jdtls/eclipse.jdt.ls#installation",
+                    }),
                 ),
                 entry(
                     "kotlin",
@@ -158,14 +284,32 @@ impl LanguageTable {
                         "build.gradle.kts",
                         "pom.xml",
                     ],
+                    Some(Recipe::Manual {
+                        needs: "a JVM (Java 17 or newer)",
+                        url: "https://github.com/fwcd/kotlin-language-server#installation",
+                    }),
                 ),
-                entry("swift", &["swift"], "sourcekit-lsp", &[], &["Package.swift"]),
+                entry(
+                    "swift",
+                    &["swift"],
+                    "sourcekit-lsp",
+                    &[],
+                    &["Package.swift"],
+                    Some(Recipe::Manual {
+                        needs: "a Swift toolchain, which carries sourcekit-lsp",
+                        url: "https://github.com/swiftlang/sourcekit-lsp#installation",
+                    }),
+                ),
                 entry(
                     "ruby",
                     &["rb"],
                     "ruby-lsp",
                     &[],
                     &["Gemfile", ".ruby-version"],
+                    Some(Recipe::Manual {
+                        needs: "Ruby, then `gem install ruby-lsp`",
+                        url: "https://shopify.github.io/ruby-lsp/",
+                    }),
                 ),
                 entry(
                     "php",
@@ -173,6 +317,11 @@ impl LanguageTable {
                     "intelephense",
                     &["--stdio"],
                     &["composer.json"],
+                    Some(Recipe::Npm {
+                        package: "intelephense",
+                        version: "1.18.5",
+                        bin: "node_modules/.bin/intelephense",
+                    }),
                 ),
                 entry(
                     "lua",
@@ -180,6 +329,48 @@ impl LanguageTable {
                     "lua-language-server",
                     &[],
                     &[".luarc.json", ".luarc.jsonc", "stylua.toml"],
+                    Some(
+                        // lua-language-server 3.19.1
+                        Recipe::Release {
+                            id: "lua-language-server",
+                            version: "3.19.1",
+                            bin: "bin/lua-language-server",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-linux-x64.tar.gz",
+                                        sha256: "e9235d2d72ef55bc41cf8c99cda2ed64777682024b4bb81f5dea425060c5cbb8",
+                                        bytes: 3677772,
+                                    },
+                                ),
+                                (
+                                    "linux-aarch64",
+                                    Asset {
+                                        url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-linux-arm64.tar.gz",
+                                        sha256: "abd2572e8fc929dc838a81ffb8473c5bce0bf39bfe8edb4b120b3b623176ce83",
+                                        bytes: 2613202,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-darwin-arm64.tar.gz",
+                                        sha256: "0bc077f4447f076b4c92c14e9fd303f5b569eda2ec74b4dca2b55f75fae2e90c",
+                                        bytes: 3284464,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-win32-x64.zip",
+                                        sha256: "fdb9a59108cf62517813c97fa5549b0e16d1ef0688306bac728b08434db7e4cd",
+                                        bytes: 4453980,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
                 ),
                 entry(
                     "zig",
@@ -187,6 +378,10 @@ impl LanguageTable {
                     "zls",
                     &[],
                     &["build.zig", "build.zig.zon"],
+                    Some(Recipe::Manual {
+                        needs: "zls, which publishes only .tar.xz archives Sirio cannot yet unpack",
+                        url: "https://github.com/zigtools/zls#installation",
+                    }),
                 ),
                 entry(
                     "yaml",
@@ -194,6 +389,11 @@ impl LanguageTable {
                     "yaml-language-server",
                     &["--stdio"],
                     &[],
+                    Some(Recipe::Npm {
+                        package: "yaml-language-server",
+                        version: "1.24.0",
+                        bin: "node_modules/.bin/yaml-language-server",
+                    }),
                 ),
                 // The three servers VS Code's own web tooling is published
                 // as, and the only maintained ones for these languages.
@@ -203,6 +403,11 @@ impl LanguageTable {
                     "vscode-json-language-server",
                     &["--stdio"],
                     &[],
+                    Some(Recipe::Npm {
+                        package: "vscode-langservers-extracted",
+                        version: "4.10.0",
+                        bin: "node_modules/.bin/vscode-json-language-server",
+                    }),
                 ),
                 entry(
                     "html",
@@ -210,6 +415,11 @@ impl LanguageTable {
                     "vscode-html-language-server",
                     &["--stdio"],
                     &[],
+                    Some(Recipe::Npm {
+                        package: "vscode-langservers-extracted",
+                        version: "4.10.0",
+                        bin: "node_modules/.bin/vscode-html-language-server",
+                    }),
                 ),
                 entry(
                     "css",
@@ -217,6 +427,11 @@ impl LanguageTable {
                     "vscode-css-language-server",
                     &["--stdio"],
                     &[],
+                    Some(Recipe::Npm {
+                        package: "vscode-langservers-extracted",
+                        version: "4.10.0",
+                        bin: "node_modules/.bin/vscode-css-language-server",
+                    }),
                 ),
                 // `start` is the subcommand; without it the binary prints
                 // usage and exits, which reads as a server that died.
@@ -226,17 +441,194 @@ impl LanguageTable {
                     "bash-language-server",
                     &["start"],
                     &[],
+                    Some(Recipe::Npm {
+                        package: "bash-language-server",
+                        version: "5.7.1",
+                        bin: "node_modules/.bin/bash-language-server",
+                    }),
                 ),
-                entry("toml", &["toml"], "taplo", &["lsp", "stdio"], &[]),
+                entry(
+                    "toml",
+                    &["toml"],
+                    "taplo",
+                    &["lsp", "stdio"],
+                    &[],
+                    Some(
+                        // taplo 0.10.0
+                        Recipe::Release {
+                            id: "taplo",
+                            version: "0.10.0",
+                            bin: "taplo",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-linux-x86_64.gz",
+                                        sha256: "8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156",
+                                        bytes: 5116068,
+                                    },
+                                ),
+                                (
+                                    "linux-aarch64",
+                                    Asset {
+                                        url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-linux-aarch64.gz",
+                                        sha256: "033681d01eec8376c3fd38fa3703c79316f5e14bb013d859943b60a07bccdcc3",
+                                        bytes: 4631779,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-darwin-aarch64.gz",
+                                        sha256: "713734314c3e71894b9e77513c5349835eefbd52908445a0d73b0c7dc469347d",
+                                        bytes: 4616415,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-windows-x86_64.zip",
+                                        sha256: "1615eed140039bd58e7089109883b1c434de5d6de8f64a993e6e8c80ca57bdf9",
+                                        bytes: 5182591,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                ),
                 entry(
                     "markdown",
                     &["md", "markdown"],
                     "marksman",
                     &["server"],
                     &[".marksman.toml"],
+                    Some(
+                        // marksman 2026-02-08
+                        Recipe::Release {
+                            id: "marksman",
+                            version: "2026-02-08",
+                            bin: "marksman",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-linux-x64",
+                                        sha256: "be5098e8213219269c47fc0d916a66fa31ce0602ec967475c722260aabf26087",
+                                        bytes: 22500875,
+                                    },
+                                ),
+                                (
+                                    "linux-aarch64",
+                                    Asset {
+                                        url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-linux-arm64",
+                                        sha256: "db8e124527f7f8048e3e6c91821b9c52ef173d92c01e47d221bf1337afd962fb",
+                                        bytes: 21851058,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-macos",
+                                        sha256: "6a801c17b5ac0dba69787c5282b3b3bd416e66c96253fae098d311c6bbd1833b",
+                                        bytes: 43856208,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman.exe",
+                                        sha256: "a6d05beb08ebe41b0a9f09c98a438540421436fa5531424c22e0bb1d22529705",
+                                        bytes: 20502938,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
                 ),
-                entry("xml", &["xml"], "lemminx", &[], &[]),
-                entry("sql", &["sql"], "sqls", &[], &[]),
+                entry(
+                    "xml",
+                    &["xml"],
+                    "lemminx",
+                    &[],
+                    &[],
+                    Some(
+                        // lemminx 0.29.3
+                        // Each zip holds one platform-named file (lemminx-linux-x86_64, …),
+                        // not `lemminx`: no single `bin` fits all three (see the task report).
+                        Recipe::Release {
+                            id: "lemminx",
+                            version: "0.29.3",
+                            bin: "lemminx",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/redhat-developer/vscode-xml/releases/download/0.29.3/lemminx-linux-x86_64.zip",
+                                        sha256: "1acc44e24201c1d2f5ccb4e43e7426ed0df6909207a81ff199810e2808104d89",
+                                        bytes: 16903991,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/redhat-developer/vscode-xml/releases/download/0.29.3/lemminx-osx-aarch_64.zip",
+                                        sha256: "185db5630ce85be43ea0fab034e7841b1327c2793db05ab481e029cf493d86ce",
+                                        bytes: 16271050,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/redhat-developer/vscode-xml/releases/download/0.29.3/lemminx-win32.zip",
+                                        sha256: "7eaefaac68253b0ec8e0ad1f1c0f2d0755423d4e99e52497428b52f80df28eb7",
+                                        bytes: 16578930,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                ),
+                entry(
+                    "sql",
+                    &["sql"],
+                    "sqls",
+                    &[],
+                    &[],
+                    Some(
+                        // sqls v0.2.48
+                        Recipe::Release {
+                            id: "sqls",
+                            version: "v0.2.48",
+                            bin: "sqls",
+                            assets: &[
+                                (
+                                    "linux-x86_64",
+                                    Asset {
+                                        url: "https://github.com/sqls-server/sqls/releases/download/v0.2.48/sqls-linux-0.2.48.zip",
+                                        sha256: "30047b92c41658c821b7803d2c2a3a1ce4e17ee769ceff6f24bb9e3daaf5d4dc",
+                                        bytes: 10736904,
+                                    },
+                                ),
+                                (
+                                    "darwin-aarch64",
+                                    Asset {
+                                        url: "https://github.com/sqls-server/sqls/releases/download/v0.2.48/sqls-darwin-0.2.48.zip",
+                                        sha256: "b44165ca597a4b4298d56657bc911aa3ca8a591befefde4e29566923c6229f3d",
+                                        bytes: 10731807,
+                                    },
+                                ),
+                                (
+                                    "windows-x86_64",
+                                    Asset {
+                                        url: "https://github.com/sqls-server/sqls/releases/download/v0.2.48/sqls-windows-0.2.48.zip",
+                                        sha256: "df6453b2ddcb4e748547d0288b826251a24af099749dc7a9ddea587aac3d4365",
+                                        bytes: 10743962,
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                ),
             ],
         }
     }
@@ -472,6 +864,79 @@ extensions = ["rs"]
     #[test]
     fn defaults_appended_to_an_empty_table_are_just_the_defaults() {
         let table = LanguageTable::parse("").unwrap().with_defaults_appended();
-        assert_eq!(table.entries().len(), LanguageTable::defaults().entries().len());
+        assert_eq!(
+            table.entries().len(),
+            LanguageTable::defaults().entries().len()
+        );
+    }
+
+    #[test]
+    fn every_default_entry_says_how_to_get_its_server() {
+        // The failure this forbids is silence. A row added without an answer
+        // reaches the reader as a disabled menu entry and no way forward,
+        // which is exactly the 0.18.0 bug wearing a different coat.
+        for entry in LanguageTable::defaults().entries() {
+            assert!(
+                entry.install.is_some(),
+                "`{}` names `{}` and says nothing about how to get it",
+                entry.name,
+                entry.command
+            );
+        }
+    }
+
+    #[test]
+    fn a_recipe_that_cannot_install_says_what_is_needed_first() {
+        for entry in LanguageTable::defaults().entries() {
+            if let Some(crate::Recipe::Manual { needs, url }) = &entry.install {
+                assert!(!needs.is_empty(), "`{}` gives no reason", entry.name);
+                assert!(
+                    url.starts_with("https://"),
+                    "`{}` gives no place to go",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn three_languages_share_one_npm_package() {
+        // json, html and css all come from vscode-langservers-extracted. The
+        // store is keyed on the package, so they must resolve to one id or the
+        // same download happens three times.
+        let table = LanguageTable::defaults();
+        let ids: Vec<Option<&str>> = ["json", "html", "css"]
+            .iter()
+            .map(|name| {
+                table
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.name == *name)
+                    .expect("the entry exists")
+                    .install
+                    .as_ref()
+                    .and_then(crate::Recipe::store_id)
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("vscode-langservers-extracted"),
+                Some("vscode-langservers-extracted"),
+                Some("vscode-langservers-extracted"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_user_entry_carries_no_recipe() {
+        // `#[serde(skip)]` holds: a table written by hand cannot name a
+        // download, and an override of a language Sirio knows loses the recipe
+        // along with the command it replaces.
+        let table = LanguageTable::parse(
+            "[[language]]\nname = \"java\"\nextensions = [\"java\"]\ncommand = \"/opt/my/jdtls\"\n",
+        )
+        .expect("a hand-written table parses");
+        assert!(table.entries()[0].install.is_none());
     }
 }
