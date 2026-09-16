@@ -60,6 +60,11 @@ pub enum InstallError {
 pub enum UnpackKind {
     Zip,
     TarGz,
+    /// One gzipped file, no tar inside. rust-analyzer and taplo ship this.
+    /// Split from `BareExecutable` because the bytes must be inflated
+    /// before they are a program, and from `TarGz` because there is no
+    /// archive to walk.
+    Gz,
     /// Not an archive: `sigit` publishes bare executables.
     BareExecutable,
     /// `.tar.bz2` (goose). Named rather than silently skipped.
@@ -80,6 +85,8 @@ pub fn unpack_kind(url: &str) -> UnpackKind {
         UnpackKind::Zip
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         UnpackKind::TarGz
+    } else if name.ends_with(".gz") {
+        UnpackKind::Gz
     } else if name.ends_with(".tar.bz2") || name.ends_with(".tar.xz") {
         UnpackKind::Unsupported
     } else {
@@ -346,6 +353,12 @@ impl Installer {
                 std::fs::write(staging.join(name), &bytes)
                     .map_err(|error| fail(error.to_string()))?;
             }
+            UnpackKind::Gz => unpack_gz(
+                &agent.id,
+                &bytes,
+                &staging,
+                artifact.cmd.trim_start_matches("./"),
+            )?,
             UnpackKind::Unsupported => unreachable!("rejected above"),
         }
 
@@ -693,6 +706,25 @@ fn unpack_tar_gz(agent: &str, bytes: &[u8], destination: &Path) -> Result<(), In
     unpack_tar_gz_capped(agent, bytes, destination, MAX_UNPACKED_BYTES)
 }
 
+/// One gzip member, written under the name the artifact's `cmd` gives it.
+/// There is no archive to walk, so there are no entry paths to validate —
+/// the single output path is ours, which is why this needs none of
+/// [`unpack_tar_gz`]'s traversal guards.
+fn unpack_gz(agent: &str, bytes: &[u8], staging: &Path, name: &str) -> Result<(), InstallError> {
+    use std::io::Read as _;
+    let mut inflated = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_end(&mut inflated)
+        .map_err(|error| InstallError::Failed {
+            agent: agent.to_string(),
+            message: format!("could not inflate the downloaded gzip: {error}"),
+        })?;
+    std::fs::write(staging.join(name), &inflated).map_err(|error| InstallError::Failed {
+        agent: agent.to_string(),
+        message: error.to_string(),
+    })
+}
+
 /// Same actual-bytes accounting as [`unpack_zip_capped`] — for tar the
 /// header size usually tells the truth, but one code path for both keeps
 /// them behaving identically.
@@ -830,6 +862,53 @@ mod tests {
             unpack_kind("https://x/sigit-win-amd64.exe"),
             UnpackKind::BareExecutable
         );
+    }
+
+    #[test]
+    fn a_single_member_gzip_is_not_a_bare_executable() {
+        // rust-analyzer and taplo both publish one gzipped binary, no tar.
+        // Classified as BareExecutable it installs the compressed bytes and
+        // marks them executable: the failure arrives at exec, with nothing
+        // to read.
+        assert_eq!(
+            unpack_kind(
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-08/rust-analyzer-x86_64-unknown-linux-gnu.gz"
+            ),
+            UnpackKind::Gz
+        );
+        assert_eq!(
+            unpack_kind("https://x/taplo-linux-x86_64.gz"),
+            UnpackKind::Gz
+        );
+        // And the distinction that makes it necessary:
+        assert_eq!(
+            unpack_kind("https://x/agent-linux.tar.gz"),
+            UnpackKind::TarGz
+        );
+        assert_eq!(unpack_kind("https://x/agent-linux.tgz"), UnpackKind::TarGz);
+    }
+
+    #[test]
+    fn a_gzipped_binary_is_inflated_before_it_is_installed() {
+        use std::io::Write as _;
+        let staging = std::env::temp_dir().join(format!("sirio-gz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).expect("staging");
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(b"#!/bin/sh\necho hello\n")
+            .expect("compress");
+        let gzipped = encoder.finish().expect("finish");
+
+        unpack_gz("probe", &gzipped, &staging, "rust-analyzer").expect("inflate");
+
+        assert_eq!(
+            std::fs::read(staging.join("rust-analyzer")).expect("the written file"),
+            b"#!/bin/sh\necho hello\n",
+            "the installed bytes are the program, not the gzip container"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
     }
 
     #[test]
