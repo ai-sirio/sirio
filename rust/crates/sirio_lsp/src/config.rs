@@ -183,7 +183,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "typescript-language-server",
                         version: "6.0.0",
-                        bin: "node_modules/.bin/typescript-language-server",
+                        bin: "typescript-language-server",
                     }),
                 ),
                 entry(
@@ -195,7 +195,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "pyright",
                         version: "1.1.414",
-                        bin: "node_modules/.bin/pyright-langserver",
+                        bin: "pyright-langserver",
                     }),
                 ),
                 entry(
@@ -326,7 +326,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "intelephense",
                         version: "1.18.5",
-                        bin: "node_modules/.bin/intelephense",
+                        bin: "intelephense",
                     }),
                 ),
                 entry(
@@ -401,7 +401,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "yaml-language-server",
                         version: "1.24.0",
-                        bin: "node_modules/.bin/yaml-language-server",
+                        bin: "yaml-language-server",
                     }),
                 ),
                 // The three servers VS Code's own web tooling is published
@@ -415,7 +415,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "vscode-langservers-extracted",
                         version: "4.10.0",
-                        bin: "node_modules/.bin/vscode-json-language-server",
+                        bin: "vscode-json-language-server",
                     }),
                 ),
                 entry(
@@ -427,7 +427,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "vscode-langservers-extracted",
                         version: "4.10.0",
-                        bin: "node_modules/.bin/vscode-html-language-server",
+                        bin: "vscode-html-language-server",
                     }),
                 ),
                 entry(
@@ -439,7 +439,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "vscode-langservers-extracted",
                         version: "4.10.0",
-                        bin: "node_modules/.bin/vscode-css-language-server",
+                        bin: "vscode-css-language-server",
                     }),
                 ),
                 // `start` is the subcommand; without it the binary prints
@@ -453,7 +453,7 @@ impl LanguageTable {
                     Some(Recipe::Npm {
                         package: "bash-language-server",
                         version: "5.7.1",
-                        bin: "node_modules/.bin/bash-language-server",
+                        bin: "bash-language-server",
                     }),
                 ),
                 entry(

@@ -20300,6 +20300,7 @@ done
             distributions: vec![sirio_registry::Distribution::Npx {
                 package: "@agentclientprotocol/codex-acp@1.6.2".into(),
                 args: vec![],
+                bin: None,
             }],
         };
         assert!(agent_command_for(&sirio_registry::LaunchSource::Installable { agent }).is_none());
@@ -20333,6 +20334,7 @@ done
                     distributions: vec![sirio_registry::Distribution::Npx {
                         package: format!("{id}@1.0.0"),
                         args: Vec::new(),
+                        bin: None,
                     }],
                 }],
             };

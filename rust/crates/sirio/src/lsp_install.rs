@@ -24,7 +24,9 @@ pub fn agent_for(recipe: &Recipe, platform: &str) -> Option<RegistryAgent> {
     let (id, version, distribution) = match recipe {
         Recipe::Manual { .. } => return None,
         Recipe::Npm {
-            package, version, ..
+            package,
+            version,
+            bin,
         } => (
             *package,
             *version,
@@ -34,6 +36,12 @@ pub fn agent_for(recipe: &Recipe, platform: &str) -> Option<RegistryAgent> {
                 // passes through untouched.
                 package: format!("{package}@{version}"),
                 args: Vec::new(),
+                // The bare entry name inside the package's
+                // `node_modules/.bin`. Passing a path through would make
+                // the installer look for it *inside* that directory, and
+                // hand back the POSIX script rather than the `.cmd` shim
+                // on Windows.
+                bin: Some((*bin).to_string()),
             },
         ),
         Recipe::Release {
@@ -160,6 +168,53 @@ mod tests {
             }
             other => panic!("expected one binary distribution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_npm_recipe_carries_the_executable_it_wants() {
+        // Without this the pyright row installs the `pyright` CLI and the three
+        // vscode-langservers-extracted rows install nothing at all.
+        let recipe = sirio_lsp::Recipe::Npm {
+            package: "vscode-langservers-extracted",
+            version: "4.10.0",
+            bin: "vscode-json-language-server",
+        };
+        let agent = agent_for(&recipe, "linux-x86_64").expect("npm works everywhere");
+        match &agent.distributions[..] {
+            [sirio_registry::Distribution::Npx { package, bin, .. }] => {
+                assert_eq!(package, "vscode-langservers-extracted@4.10.0");
+                assert_eq!(bin.as_deref(), Some("vscode-json-language-server"));
+            }
+            other => panic!("expected one npx distribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_npm_recipe_names_a_bare_executable() {
+        // The two ends of the npm arm agree here or nowhere. `sirio_lsp`
+        // names the file; `install_npx` looks that name up *inside*
+        // `node_modules/.bin`, and adds the `.cmd` spelling itself on
+        // Windows. A path, or a shim suffix written into the table, is a
+        // name nothing installs under — which is what json, html and css
+        // did when this table carried `node_modules/.bin/<name>`.
+        let mut seen = 0;
+        for entry in sirio_lsp::LanguageTable::defaults().entries() {
+            let Some(sirio_lsp::Recipe::Npm { bin, .. }) = &entry.install else {
+                continue;
+            };
+            seen += 1;
+            assert!(
+                !bin.contains('/'),
+                "`{}` names a path, not the entry inside node_modules/.bin: {bin}",
+                entry.name
+            );
+            assert!(
+                !bin.ends_with(".cmd") && !bin.ends_with(".ps1"),
+                "`{}` names a Windows shim the installer adds itself: {bin}",
+                entry.name
+            );
+        }
+        assert_eq!(seen, 8, "the npm rows this test pins");
     }
 
     #[test]
