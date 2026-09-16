@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.17.2",
-  "notes": "One fix to the file editor, to a message that took the file away.\n\n**A message about your file is no longer shown instead of it**\n\nAsking where something is defined, and getting no answer, replaced the\nwhole editor with the sentence \"No definition found\" — and left it\nthere. Nothing in the app ever took it back down, so the file stayed\ngone until you closed the tab and opened it again.\n\nFour other messages went the same way, for the same reason: a language\ntable that would not parse, a language server that would not start, an\nerror answering a definition, and a failed save. The last is the worst\nof them, because it removed from the screen exactly the text you were\ntrying to rescue.\n\nAll five now appear on a small card over the file, which stays where it\nis and stays readable. A click dismisses the card.\n\n**And the answer appears where you asked the question**\n\nAn answer about a definition is shown next to the place you asked —\nwhere you right-clicked, or where you held the platform key and clicked\n— rather than in the middle of the window. Messages that nothing\npointed at, like a failed save, settle into the corner of the view\ninstead of borrowing a position from somewhere you are no longer\nlooking.\n\nWhen a definition *is* found, its file opens in its own tab, and an\nalready-open file is brought forward rather than opened twice. That part\nalready worked; it had simply never been covered by a test, and now it\nis. It looked broken in 0.17.0 because every request failed before it\ncould get that far — that was 0.17.1's fix.",
+  "version": "0.18.0",
+  "notes": "Sirio has recognised twenty-three languages since the file editor arrived.\nEight of them were coloured, and four could answer a question. This release\nmakes it all twenty-three, in both senses.\n\n**Every language you can open is coloured**\n\nJava, C, C++, Swift, Kotlin, Ruby, PHP, Lua, Zig, YAML, HTML, CSS, SQL,\nXML and Markdown join Rust, Python, TypeScript, JavaScript, Go, JSON, TOML\nand shell scripts. Nothing to install and nothing to turn on: the grammars\nare part of the app, and a file is coloured the moment it opens.\n\nThis is what was wrong with Java. The editor knew the file was Java — it\nsaid so in the status line — and then drew it as if it were a text file,\nbecause there was no grammar behind the name. There was no message about\nit, and there could not have been: a language with nothing to colour and a\nlanguage with no colours available look exactly alike from the inside.\n\nComments in Swift, SQL and Zig deserve a mention of their own. Those three\ngrammars ask for two things at once on a comment, and the second one wins\n— so shipping them as written would have painted every comment in those\nlanguages the same colour as ordinary text. They are the reason this was\nworth testing rather than trusting.\n\nPython stub files (`.pyi`) and JSON-with-comments (`.jsonc`) are coloured\ntoo; `.pyi` in particular had been able to reach a language server for\nmonths while still being drawn as plain text.\n\n**And every language can have a language server**\n\n\"Go to Definition\", \"Find References\", the outline and the error markers\nneed a language server — a separate program, on your `PATH`, that\nunderstands the project. Sirio now knows which one each language uses:\n`clangd` for C and C++, `jdtls` for Java, `sourcekit-lsp` for Swift,\n`ruby-lsp`, `intelephense`, `zls`, `lua-language-server`, `marksman`,\n`taplo` and the rest, alongside the `rust-analyzer`, `gopls`, `pyright`\nand `typescript-language-server` that were already there.\n\nKnowing the name is not the same as having the program. Install the one\nyou want and reopen the file; the actions appear. Until then nothing is\nsaid about it — a server you have not installed is not a problem, and a\nmessage on every file you open would bury the one case that is worth\ntelling you about, a server that *is* installed and failed to start. That\none still says so, and names the command.\n\nAny of these can be replaced in `~/.config/sirio/languages.toml` by adding\nan entry for the same file extension. Your entries are read first, so\noverriding one takes a few lines and no hunting.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.2/Sirio-0.17.2.dmg",
-      "sha256": "0a6bb82c8c4ac38bb0b43a17ff74246ac5abbff9b3ee2eb08e4d0cbf40c0bfb0",
-      "signature": "JoBouS49bnXfRX3XW8TVgQuOTMoqGx56sfmrDBzajc/loZtcbrzv0Kh4UyUT+YmiN8YXNn8Koyut8rG05lcvCg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.18.0/Sirio-0.18.0.dmg",
+      "sha256": "173395d752773408a367c49dd55675548c0d02ad05764dbda6c0600986acbf94",
+      "signature": "7T79zaA6XbCG8gadFcHvjFW2EJYGEYos9iWBVefhrfEG3EuRFRHxAMPieo6O6lp4dax2y5DVcH6Kn5TEeCuCBg=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.2/Sirio-0.17.2-x86_64.AppImage",
-      "sha256": "cf3dc6496af32242dbc75a2fa882764d23a6175612c6a5901083f9fde08254ee",
-      "signature": "TnqoKsfCoP7DWeGy/Cp0akNCmohYtwqeHMGRgl6GABQBKj8NFMd0qR4tba8INgqvOg8vFXQa/teWkkphwQg+Bg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.18.0/Sirio-0.18.0-x86_64.AppImage",
+      "sha256": "feaa4b0321f8c789e366fbb3e30f2f30ad914dd89c83776fed21df9276585775",
+      "signature": "VDr9rbj7FPJkunfuMaG0d5SkqAA+jgr06ydb92G7vwYi1BxHwehSuni5+roakIu2tSZ176fUwZsH53hTzA53Bg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.2/SirioSetup-0.17.2.exe",
-      "sha256": "ccdf857b242a396d7142caf5d3dae7846b234899b34c80ed4d24ee9ade7e59a6",
-      "signature": "J2MUNJFn8VMJpefgrIQbu1OlD1DIln85Y8ehVrjcwe3Zjc9e6kJZHdbXxCxJ4fuAFFkVwjktg1M7RMO20i7AAw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.18.0/SirioSetup-0.18.0.exe",
+      "sha256": "baf8052c2d0e5d82625e68a16cf66d4914bd9cf981e946c87bdde0bf73a088da",
+      "signature": "nG4HWY4ffkV6JznYYsqEn0egrqDm+W+bror5V3R2OiC5xyiju618ksTuBp8SHVvI3uC0NVW/AE/pnNXHiNcUAA=="
     }
   }
 }
