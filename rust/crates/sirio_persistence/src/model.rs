@@ -508,6 +508,19 @@ pub struct AppSettings {
     /// hand-edited value driving a pane to zero width. What actually governs
     /// the split is the 320px per-pane floor applied at render.
     pub center_split_ratio: i64,
+    /// "lsp.silencedLanguages" — default: `[]`. A JSON array of language
+    /// names whose install offer has been declined for good.
+    ///
+    /// One key holding a list rather than twenty-one booleans, and not a
+    /// table of its own: for a set bounded at twenty-one short names, a
+    /// migration costs more than it returns. `sirio`'s `session.rs` already
+    /// stores values through `serde_json::to_string`.
+    ///
+    /// A stored value that does not parse as a JSON array of strings reads
+    /// back as `[]`: the cost of being wrong is one more offer, where a
+    /// value that cannot be read at all would poison the whole settings
+    /// load.
+    pub lsp_silenced_languages: String,
 }
 
 impl Default for AppSettings {
@@ -536,6 +549,7 @@ impl Default for AppSettings {
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 500,
+            lsp_silenced_languages: "[]".to_string(),
         }
     }
 }
@@ -569,6 +583,9 @@ pub mod settings_keys {
     /// Linux-rewrite-only: no Swift antecedent.
     pub const RIGHT_PANEL_WIDTH: &str = "appearance.rightPanelWidth";
     pub const CENTER_SPLIT_RATIO: &str = "appearance.centerSplitRatio";
+    /// Linux-rewrite-only: no Swift antecedent. Holds a JSON array of
+    /// language names, not a scalar — see `AppSettings::lsp_silenced_languages`.
+    pub const LSP_SILENCED_LANGUAGES: &str = "lsp.silencedLanguages";
 }
 
 /// The Swift ranges settings values are clamped into.

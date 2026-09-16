@@ -532,6 +532,78 @@ fn base_colour_survives_a_relaunch() {
 }
 
 #[test]
+fn a_silenced_language_survives_the_round_trip() {
+    let dir = TempDir::new();
+    let path = dir.db_path("silenced-languages");
+
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        let settings = AppSettings {
+            lsp_silenced_languages: r#"["java","kotlin"]"#.to_string(),
+            ..AppSettings::default()
+        };
+        db.save_settings(&settings).expect("save settings");
+    }
+    // Drop closes the connection; reopen simulates a relaunch.
+    let db = AppDatabase::open(&path).expect("reopen");
+    assert_eq!(
+        db.settings().expect("load settings").lsp_silenced_languages,
+        r#"["java","kotlin"]"#
+    );
+}
+
+#[test]
+fn nothing_is_silenced_by_default() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("silenced-default")).expect("open");
+    assert_eq!(
+        db.settings().expect("load settings").lsp_silenced_languages,
+        "[]"
+    );
+}
+
+#[test]
+fn a_corrupt_silenced_language_list_reads_back_as_empty() {
+    let dir = TempDir::new();
+
+    // Not JSON, valid JSON of the wrong shape, and a bare scalar: each must
+    // read as the empty set instead of poisoning the whole settings load.
+    for (index, corrupt) in ["not json", r#"{"java":true}"#, "42"]
+        .into_iter()
+        .enumerate()
+    {
+        let path = dir.db_path(&format!("silenced-corrupt-{index}"));
+        {
+            let db = AppDatabase::open(&path).expect("open");
+            db.save_settings(&AppSettings::default())
+                .expect("save settings");
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open raw");
+            let changed = conn
+                .execute(
+                    "UPDATE setting SET value = ?1 WHERE key = 'lsp.silencedLanguages'",
+                    [corrupt],
+                )
+                .expect("corrupt the key");
+            assert_eq!(changed, 1, "save_settings wrote the key being corrupted");
+        }
+
+        let db = AppDatabase::open(&path).expect("reopen");
+        let settings = db.settings().expect("load settings");
+        assert_eq!(
+            settings.lsp_silenced_languages, "[]",
+            "{corrupt} must read as the empty set"
+        );
+        assert_eq!(
+            settings.appearance,
+            AppearanceMode::System,
+            "a corrupt silenced-language list does not poison its neighbours"
+        );
+    }
+}
+
+#[test]
 fn chat_transcript_survives_process_relaunch_with_tool_and_permission_outcome() {
     let dir = TempDir::new();
     let path = dir.db_path("chat-relaunch");
