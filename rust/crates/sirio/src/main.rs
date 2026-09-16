@@ -10917,7 +10917,7 @@ impl SirioWorkspace {
                 .spawn(async move { sirio_lsp::hover(&client, &path, position).await })
                 .await;
             if let Ok(text) = answer {
-                let _ = view.update(cx, |view, cx| view.set_hover(seq, text, cx));
+                view.update(cx, |view, cx| view.set_hover(seq, text, cx));
             }
         })
         .detach();
@@ -15184,6 +15184,8 @@ impl SirioWorkspace {
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
                 settings.center_split_ratio = center_split;
+                settings.lsp_silenced_languages =
+                    this.session.load_settings().lsp_silenced_languages;
                 this.session.save_settings(&settings);
             });
         }));
@@ -18134,13 +18136,15 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
         translucency: snapshot.translucency,
         // Not in the Settings UI snapshot: the widths and the centre split
-        // belong to the drag. Callers must re-apply the live values — see
-        // the `on_change` handler below. Filling these from `Default` here
-        // would reset a dragged panel every time any unrelated setting
-        // changed.
+        // belong to the drag, and the silenced-language list to the LSP
+        // install offer. Callers must re-apply the live values — see the
+        // `on_change` handler below. Filling these from `Default` here would
+        // reset a dragged panel, or un-silence a language, every time any
+        // unrelated setting changed.
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
+        lsp_silenced_languages: AppSettings::default().lsp_silenced_languages,
     }
 }
 
@@ -18856,6 +18860,7 @@ fn main() {
                             settings.sidebar_width = stored.sidebar_width;
                             settings.right_panel_width = stored.right_panel_width;
                             settings.center_split_ratio = stored.center_split_ratio;
+                            settings.lsp_silenced_languages = stored.lsp_silenced_languages;
                             session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
@@ -28891,6 +28896,7 @@ done
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 610,
+            lsp_silenced_languages: "[]".to_string(),
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -28996,6 +29002,7 @@ done
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 610,
+            lsp_silenced_languages: "[]".to_string(),
         };
         store.save_settings(&persisted);
 
