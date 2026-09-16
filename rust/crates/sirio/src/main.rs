@@ -232,6 +232,7 @@ mod display_backend;
 #[cfg(not(windows))]
 mod login_path;
 mod lsp;
+mod lsp_install;
 #[cfg(feature = "perf-native")]
 mod native_perf;
 mod panel_layout;
