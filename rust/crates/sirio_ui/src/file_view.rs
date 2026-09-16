@@ -177,6 +177,13 @@ impl SurfaceScroll {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileViewEvent {
     OpenFile(PathBuf),
+    /// The background read landed and this view now has a buffer.
+    ///
+    /// Emitted because the shell cannot tell from the outside: a `FileView`
+    /// is `ViewState::Loading` for its first turns, and anything that reads
+    /// `editor()` before this arrives sees `None`. Telling a language server
+    /// about a file at that moment describes it as empty.
+    Loaded(PathBuf),
     SendSelectionToAgent {
         path: PathBuf,
         lines: (usize, usize),
@@ -240,6 +247,7 @@ impl FileView {
                 view.state = ViewState::Ready(editor);
                 view.load_task = None;
                 view.apply_pending_reveal(cx);
+                cx.emit(FileViewEvent::Loaded(view.path.clone()));
                 cx.notify();
             });
         });
@@ -1158,7 +1166,7 @@ impl FileView {
                             self.source_selection,
                             caret_visible,
                             caret_offset,
-                            bezel::theme::Theme::of(cx).syntax.clone(),
+                            theme.syntax_palette(),
                             &self.scroll,
                         ))
                         .into_any_element()
@@ -1192,8 +1200,10 @@ impl Render for FileView {
         let theme = *Theme::get(cx);
         // Production installs bezel alongside Sirio's theme. Some isolated
         // shell fixtures set only the Sirio global, so establish the same
-        // invariant before the content path reads bezel's syntax palette
-        // (mirrors the sidebar's popup guard).
+        // invariant before anything below reaches for a bezel component
+        // (mirrors the sidebar's popup guard). The source surface no longer
+        // depends on it — its palette is `Theme::syntax_palette` — but the
+        // bezel primitives this view renders still do.
         if cx.try_global::<bezel::theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
@@ -1239,7 +1249,7 @@ impl Render for FileView {
                 .rounded(theme.radii.user_pill)
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.surface_raised)
+                .bg(theme.menu_surface())
                 .shadow_lg();
 
             let items = file_context_menu::items(&self.menu_facts());
@@ -1868,17 +1878,17 @@ fn render_source_line(
         ))
 }
 
+/// One classified span of a source line, in bezel-syntax's own vocabulary.
+///
+/// The kind is `bezel::theme::HighlightKind` rather than a reduction of it:
+/// an earlier version funnelled 24 kinds into keyword/literal/comment and
+/// dropped the rest, which is how a tree-sitter parse came out looking like
+/// a three-colour regex highlighter — and how a number ended up painted in
+/// the string colour.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeSpan {
     pub(crate) range: std::ops::Range<usize>,
-    pub(crate) kind: CodeSpanKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CodeSpanKind {
-    Keyword,
-    Literal,
-    Comment,
+    pub(crate) kind: bezel::theme::HighlightKind,
 }
 
 fn bezel_syntax_tag(language: Language) -> Option<&'static str> {
@@ -1905,21 +1915,7 @@ pub(crate) fn code_spans(language: Language, line: &str) -> Vec<CodeSpan> {
     syntax::highlight(line, tag)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(range, kind)| {
-            use bezel::theme::HighlightKind;
-            let kind = match kind {
-                HighlightKind::Comment => CodeSpanKind::Comment,
-                HighlightKind::String
-                | HighlightKind::StringSpecial
-                | HighlightKind::Escape
-                | HighlightKind::Number
-                | HighlightKind::Boolean
-                | HighlightKind::Constant => CodeSpanKind::Literal,
-                HighlightKind::Keyword => CodeSpanKind::Keyword,
-                _ => return None,
-            };
-            Some(CodeSpan { range, kind })
-        })
+        .map(|(range, kind)| CodeSpan { range, kind })
         .collect()
 }
 
@@ -1979,12 +1975,7 @@ impl EditableLine {
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = code_spans(language, &line)
             .into_iter()
             .map(|span| {
-                let kind = match span.kind {
-                    CodeSpanKind::Keyword => bezel::theme::HighlightKind::Keyword,
-                    CodeSpanKind::Literal => bezel::theme::HighlightKind::String,
-                    CodeSpanKind::Comment => bezel::theme::HighlightKind::Comment,
-                };
-                let color = syntax_palette.color(kind);
+                let color = syntax_palette.color(span.kind);
                 (
                     span.range,
                     HighlightStyle {
@@ -2282,7 +2273,7 @@ fn hover_card(text: &str, theme: Theme) -> AnyElement {
         .max_h(px(240.0))
         .overflow_hidden()
         .p(px(8.0))
-        .bg(theme.surface_raised)
+        .bg(theme.menu_surface())
         .border_1()
         .border_color(theme.border)
         .rounded(theme.radii.control)
@@ -2465,15 +2456,15 @@ mod tests {
 
         assert!(
             rust.iter()
-                .any(|span| { span.kind == CodeSpanKind::Keyword && span.range == (0..2) })
+                .any(|span| { span.kind == bezel::theme::HighlightKind::Keyword && span.range == (0..2) })
         );
         assert!(
             python
                 .iter()
-                .any(|span| { span.kind == CodeSpanKind::Keyword && span.range == (0..3) })
+                .any(|span| { span.kind == bezel::theme::HighlightKind::Keyword && span.range == (0..3) })
         );
-        assert!(rust.iter().any(|span| span.kind == CodeSpanKind::Literal));
-        assert!(python.iter().any(|span| span.kind == CodeSpanKind::Literal));
+        assert!(rust.iter().any(|span| span.kind == bezel::theme::HighlightKind::String));
+        assert!(python.iter().any(|span| span.kind == bezel::theme::HighlightKind::String));
         assert_ne!(
             rust, python,
             "language detection must select different spans"
@@ -2487,9 +2478,66 @@ mod tests {
         let spans = code_spans(Language::Rust, source);
         assert!(
             spans.iter().any(|span| {
-                span.kind == CodeSpanKind::Literal && &source[span.range.clone()] == "42"
+                matches!(span.kind, bezel::theme::HighlightKind::Number | bezel::theme::HighlightKind::Constant)
+                    && &source[span.range.clone()] == "42"
             }),
             "bezel-syntax's tree-sitter classification must reach the custom code surface; raw={raw:?} spans={spans:?}"
+        );
+    }
+
+    /// The editor must paint what tree-sitter actually classified, not a
+    /// three-bucket reduction of it. bezel-syntax resolves `usize` as
+    /// `TypeBuiltin` and `compute_total` as `Function`; a surface that
+    /// keeps only keyword/literal/comment is the pre-tree-sitter colour
+    /// scheme wearing a tree-sitter parser.
+    #[test]
+    fn every_kind_bezel_classifies_reaches_the_code_surface() {
+        let source = "let count: usize = compute_total(&items) + 42; // note";
+        let offered = syntax::highlight(source, "rust").unwrap_or_default();
+        let kept = code_spans(Language::Rust, source);
+
+        let painted = |needle: &str| {
+            let at = source.find(needle).expect("needle is in the fixture");
+            let span = at..at + needle.len();
+            kept.iter().any(|kept| kept.range == span)
+        };
+
+        assert!(painted("usize"), "a type name must be painted: kept={kept:?}");
+        assert!(
+            painted("compute_total"),
+            "a function name must be painted: kept={kept:?}"
+        );
+        assert_eq!(
+            kept.len(),
+            offered.len(),
+            "every span bezel-syntax classified must survive; offered={offered:?} kept={kept:?}"
+        );
+    }
+
+    /// A number and a string are different colours in every editor Sirio is
+    /// measured against. Collapsing both into one `Literal` bucket and then
+    /// resolving that bucket as `HighlightKind::String` paints `42` in the
+    /// string hue.
+    #[test]
+    fn a_number_is_not_painted_in_the_string_colour() {
+        let palette = Theme::dark().syntax_palette();
+        let source = "let n = 42; let s = \"text\";";
+        let kept = code_spans(Language::Rust, source);
+
+        let colour_of = |needle: &str| {
+            let at = source.find(needle).expect("needle is in the fixture");
+            let span = kept
+                .iter()
+                .find(|kept| kept.range == (at..at + needle.len()))
+                .unwrap_or_else(|| panic!("{needle} must be classified: kept={kept:?}"));
+            // Exactly what `EditableLine::new` paints with.
+            palette.color(span.kind)
+        };
+
+        assert_ne!(
+            colour_of("42"),
+            colour_of("\"text\""),
+            "a numeric literal must not resolve to the string colour"
         );
     }
 

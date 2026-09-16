@@ -327,7 +327,117 @@ fn opaque_hsla(hex: u32) -> gpui::Hsla {
     gpui::Hsla::from(rgb_hex(hex))
 }
 
+/// Sirio's source-code palette — the one place this crate owns colour rather
+/// than re-exporting bezel's.
+///
+/// bezel's own `SyntaxPalette` is derived from the git history graph's lane
+/// hues (indigo, pink, emerald, amber). That reads well as *lanes*, but it
+/// paints a function call the same indigo as `fn`, and a type the same amber
+/// as a number — distinctions a reader of code relies on. The editor was
+/// asked to read like Zed, so the token hues below are Zed's One Dark and
+/// One Light, which is the reference this surface is measured against.
+///
+/// Four entries deliberately stay the theme's own rather than Zed's, so the
+/// palette still tracks appearance and base-colour changes: `variable` and
+/// `parameter` take the body text colour, `punctuation` the dimmed one, and
+/// `invalid` the theme's danger. Everything else is a fixed hue.
+///
+/// This is a deliberate exception to this crate's "no palette of its own"
+/// rule, and the only one: every non-syntax colour still comes from bezel.
+/// The rule exists so a bezel bump stays reviewable as a visual change —
+/// which is exactly why the exception is confined to this one function
+/// rather than spread across `ThemeColors`.
+mod zed_syntax {
+    //! One Dark / One Light token hues, by role.
+    pub const DARK_RED: u32 = 0xE06C75;
+    pub const DARK_ORANGE: u32 = 0xD19A66;
+    pub const DARK_YELLOW: u32 = 0xE5C07B;
+    pub const DARK_GREEN: u32 = 0x98C379;
+    pub const DARK_CYAN: u32 = 0x56B6C2;
+    pub const DARK_BLUE: u32 = 0x61AFEF;
+    pub const DARK_PURPLE: u32 = 0xC678DD;
+    pub const DARK_COMMENT: u32 = 0x5C6370;
+
+    pub const LIGHT_RED: u32 = 0xE45649;
+    pub const LIGHT_ORANGE: u32 = 0x986801;
+    pub const LIGHT_YELLOW: u32 = 0xC18401;
+    pub const LIGHT_GREEN: u32 = 0x50A14F;
+    pub const LIGHT_CYAN: u32 = 0x0184BC;
+    pub const LIGHT_BLUE: u32 = 0x4078F2;
+    pub const LIGHT_PURPLE: u32 = 0xA626A4;
+    pub const LIGHT_COMMENT: u32 = 0xA0A1A7;
+}
+
+impl Theme {
+    /// The palette the file editor paints source tokens with.
+    ///
+    /// Returns bezel's `SyntaxPalette` *type* — the shape every highlighter
+    /// and renderer already speaks — carrying Sirio's hues. Swapping the
+    /// values rather than the type is what keeps `sirio_ui` free of a second
+    /// palette vocabulary.
+    pub fn syntax_palette(&self) -> bezel::theme::SyntaxPalette {
+        use zed_syntax::*;
+        let dark = self.appearance == Appearance::Dark;
+        let pick = |on_dark: u32, on_light: u32| {
+            opaque_hsla(if dark { on_dark } else { on_light })
+        };
+        let red = pick(DARK_RED, LIGHT_RED);
+        let orange = pick(DARK_ORANGE, LIGHT_ORANGE);
+        let yellow = pick(DARK_YELLOW, LIGHT_YELLOW);
+        let green = pick(DARK_GREEN, LIGHT_GREEN);
+        let cyan = pick(DARK_CYAN, LIGHT_CYAN);
+        let blue = pick(DARK_BLUE, LIGHT_BLUE);
+        let purple = pick(DARK_PURPLE, LIGHT_PURPLE);
+        let comment = pick(DARK_COMMENT, LIGHT_COMMENT);
+        // The theme's own, so a base-colour change still moves the text.
+        let text = gpui::Hsla::from(self.colors.text);
+        let dimmed = gpui::Hsla::from(self.colors.text_faint);
+
+        bezel::theme::SyntaxPalette {
+            comment,
+            keyword: purple,
+            string: green,
+            string_special: cyan,
+            escape: cyan,
+            number: orange,
+            boolean: orange,
+            type_name: yellow,
+            type_builtin: yellow,
+            constructor: yellow,
+            function: blue,
+            function_builtin: blue,
+            macro_name: purple,
+            property: red,
+            constant: orange,
+            variable: text,
+            variable_special: red,
+            parameter: text,
+            operator: cyan,
+            // Muted on purpose: brackets and commas are structure, and
+            // painting them at full strength is what makes a dense line
+            // read as noise.
+            punctuation: dimmed,
+            tag: red,
+            attribute: orange,
+            label: orange,
+            invalid: gpui::Hsla::from(self.colors.danger),
+        }
+    }
+}
+
 impl ThemeColors {
+    /// The fill of a menu an interaction puts up over the shell: the file and
+    /// terminal context menus, and any popover that must be *read* rather than
+    /// merely seen.
+    ///
+    /// A menu is an event-opened surface in exactly the sense
+    /// [`ThemeColors::floating_surface`] describes, so it must not fade with
+    /// the panels — a menu the desktop shows through is unreadable at the one
+    /// moment it is being asked to be read.
+    pub fn menu_surface(&self) -> Rgba {
+        self.floating_surface
+    }
+
     /// Picks the dark or light variant. Call sites pass dark first, then
     /// light, matching the "dark / light" order every palette table in the
     /// reference document uses.
@@ -3047,6 +3157,63 @@ mod tests {
     /// and neither may fade with the structural panels: a sheet the desktop
     /// shows through is unreadable exactly when it is asking for input.
     #[test]
+    /// The distinctions bezel's own palette does not make. Its hues come
+    /// from the git graph's lanes, which paint `fn` and a call site the same
+    /// indigo and a type the same amber as a number — the collapse this
+    /// palette exists to undo.
+    #[test]
+    fn source_tokens_keep_the_roles_zed_distinguishes() {
+        use bezel::theme::HighlightKind as Kind;
+        for base in [Theme::dark(), Theme::light()] {
+            let palette = base.syntax_palette();
+            let distinct = [
+                (Kind::Keyword, Kind::Function),
+                (Kind::TypeName, Kind::Number),
+                (Kind::Number, Kind::String),
+                (Kind::Property, Kind::Variable),
+                (Kind::Punctuation, Kind::Variable),
+            ];
+            for (left, right) in distinct {
+                assert_ne!(
+                    palette.color(left),
+                    palette.color(right),
+                    "{left:?} and {right:?} must not share a colour"
+                );
+            }
+            assert_eq!(
+                palette.color(Kind::Variable),
+                gpui::Hsla::from(base.text),
+                "a plain identifier stays the body text colour"
+            );
+        }
+    }
+
+    /// A context menu is opened by an interaction and must stay readable
+    /// over a blurred shell. It is the same contract
+    /// `event_opened_surfaces_stay_opaque_when_the_panels_fade` holds for
+    /// dialogs and toasts — a menu is no less event-opened than a toast.
+    #[test]
+    fn a_menu_stays_opaque_over_a_blurred_shell() {
+        for base in [Theme::dark(), Theme::light()] {
+            let opaque = base.menu_surface();
+            let translucent = base.with_translucency(true);
+            assert!(
+                translucent.surface_raised.a < 1.0,
+                "the fixture must actually fade the panels, or this proves nothing"
+            );
+            assert_eq!(
+                translucent.menu_surface().a,
+                1.0,
+                "a context menu the desktop shows through is unreadable"
+            );
+            assert_eq!(
+                (translucent.menu_surface().r, translucent.menu_surface().g),
+                (opaque.r, opaque.g),
+                "staying opaque must not change the menu's tone"
+            );
+        }
+    }
+
     fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
         for base in [Theme::dark(), Theme::light()] {
             assert_eq!(
