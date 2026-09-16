@@ -124,7 +124,6 @@ impl LanguageTable {
                         Recipe::Release {
                             id: "rust-analyzer",
                             version: "2026-09-14",
-                            bin: "rust-analyzer",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -132,6 +131,7 @@ impl LanguageTable {
                                         url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-x86_64-unknown-linux-gnu.gz",
                                         sha256: "7609ba53f85cd80a3bde77a4b2e94e304d0f94650e4f4cffc061b9bca454ba75",
                                         bytes: 14853937,
+                                        bin: "rust-analyzer",
                                     },
                                 ),
                                 (
@@ -140,6 +140,7 @@ impl LanguageTable {
                                         url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-aarch64-unknown-linux-gnu.gz",
                                         sha256: "3d32c50aebf9288c2fd11b559813441bdff2aa57fbbb7177ad0ffe5ac4e9ad3d",
                                         bytes: 14327723,
+                                        bin: "rust-analyzer",
                                     },
                                 ),
                                 (
@@ -148,6 +149,7 @@ impl LanguageTable {
                                         url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-aarch64-apple-darwin.gz",
                                         sha256: "0c579403271f4021eb1efdfaa9bedb43e099595d02a02ee9b1f34c6c51a3ac26",
                                         bytes: 13877061,
+                                        bin: "rust-analyzer",
                                     },
                                 ),
                                 (
@@ -156,6 +158,7 @@ impl LanguageTable {
                                         url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-x86_64-apple-darwin.gz",
                                         sha256: "58d827adc7bde3b8986ff52795484f462564a2beed3ba4f4b2cbc3cfd58ae05e",
                                         bytes: 14637240,
+                                        bin: "rust-analyzer",
                                     },
                                 ),
                                 (
@@ -164,6 +167,7 @@ impl LanguageTable {
                                         url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-14/rust-analyzer-x86_64-pc-windows-msvc.zip",
                                         sha256: "631ea40942cbc1e70a3465218f27f49fd73d82d9c0dd21e5279d8417f7f2dd93",
                                         bytes: 17515427,
+                                        bin: "rust-analyzer.exe",
                                     },
                                 ),
                             ],
@@ -225,7 +229,6 @@ impl LanguageTable {
                         Recipe::Release {
                             id: "clangd",
                             version: "22.1.6",
-                            bin: "clangd_22.1.6/bin/clangd",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -233,6 +236,7 @@ impl LanguageTable {
                                         url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
                                         sha256: "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
                                         bytes: 114790601,
+                                        bin: "clangd_22.1.6/bin/clangd",
                                     },
                                 ),
                                 (
@@ -241,6 +245,7 @@ impl LanguageTable {
                                         url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-mac-22.1.6.zip",
                                         sha256: "631aef462556cbd74e0ebaae1778a38d1997d0ba3371652ca54f82652a179e7d",
                                         bytes: 98113276,
+                                        bin: "clangd_22.1.6/bin/clangd",
                                     },
                                 ),
                                 (
@@ -249,6 +254,7 @@ impl LanguageTable {
                                         url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-windows-22.1.6.zip",
                                         sha256: "ce54f16e0b4fd76d450eeda9664420b195360b73febcfe40e661108fa57f2ce1",
                                         bytes: 28198778,
+                                        bin: "clangd_22.1.6/bin/clangd.exe",
                                     },
                                 ),
                             ],
@@ -334,7 +340,6 @@ impl LanguageTable {
                         Recipe::Release {
                             id: "lua-language-server",
                             version: "3.19.1",
-                            bin: "bin/lua-language-server",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -342,6 +347,7 @@ impl LanguageTable {
                                         url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-linux-x64.tar.gz",
                                         sha256: "e9235d2d72ef55bc41cf8c99cda2ed64777682024b4bb81f5dea425060c5cbb8",
                                         bytes: 3677772,
+                                        bin: "bin/lua-language-server",
                                     },
                                 ),
                                 (
@@ -350,6 +356,7 @@ impl LanguageTable {
                                         url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-linux-arm64.tar.gz",
                                         sha256: "abd2572e8fc929dc838a81ffb8473c5bce0bf39bfe8edb4b120b3b623176ce83",
                                         bytes: 2613202,
+                                        bin: "bin/lua-language-server",
                                     },
                                 ),
                                 (
@@ -358,6 +365,7 @@ impl LanguageTable {
                                         url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-darwin-arm64.tar.gz",
                                         sha256: "0bc077f4447f076b4c92c14e9fd303f5b569eda2ec74b4dca2b55f75fae2e90c",
                                         bytes: 3284464,
+                                        bin: "bin/lua-language-server",
                                     },
                                 ),
                                 (
@@ -366,6 +374,7 @@ impl LanguageTable {
                                         url: "https://github.com/LuaLS/lua-language-server/releases/download/3.19.1/lua-language-server-3.19.1-win32-x64.zip",
                                         sha256: "fdb9a59108cf62517813c97fa5549b0e16d1ef0688306bac728b08434db7e4cd",
                                         bytes: 4453980,
+                                        bin: "bin/lua-language-server.exe",
                                     },
                                 ),
                             ],
@@ -458,7 +467,6 @@ impl LanguageTable {
                         Recipe::Release {
                             id: "taplo",
                             version: "0.10.0",
-                            bin: "taplo",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -466,6 +474,7 @@ impl LanguageTable {
                                         url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-linux-x86_64.gz",
                                         sha256: "8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156",
                                         bytes: 5116068,
+                                        bin: "taplo",
                                     },
                                 ),
                                 (
@@ -474,6 +483,7 @@ impl LanguageTable {
                                         url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-linux-aarch64.gz",
                                         sha256: "033681d01eec8376c3fd38fa3703c79316f5e14bb013d859943b60a07bccdcc3",
                                         bytes: 4631779,
+                                        bin: "taplo",
                                     },
                                 ),
                                 (
@@ -482,6 +492,7 @@ impl LanguageTable {
                                         url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-darwin-aarch64.gz",
                                         sha256: "713734314c3e71894b9e77513c5349835eefbd52908445a0d73b0c7dc469347d",
                                         bytes: 4616415,
+                                        bin: "taplo",
                                     },
                                 ),
                                 (
@@ -490,6 +501,7 @@ impl LanguageTable {
                                         url: "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-windows-x86_64.zip",
                                         sha256: "1615eed140039bd58e7089109883b1c434de5d6de8f64a993e6e8c80ca57bdf9",
                                         bytes: 5182591,
+                                        bin: "taplo.exe",
                                     },
                                 ),
                             ],
@@ -507,7 +519,6 @@ impl LanguageTable {
                         Recipe::Release {
                             id: "marksman",
                             version: "2026-02-08",
-                            bin: "marksman",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -515,6 +526,7 @@ impl LanguageTable {
                                         url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-linux-x64",
                                         sha256: "be5098e8213219269c47fc0d916a66fa31ce0602ec967475c722260aabf26087",
                                         bytes: 22500875,
+                                        bin: "marksman",
                                     },
                                 ),
                                 (
@@ -523,6 +535,7 @@ impl LanguageTable {
                                         url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-linux-arm64",
                                         sha256: "db8e124527f7f8048e3e6c91821b9c52ef173d92c01e47d221bf1337afd962fb",
                                         bytes: 21851058,
+                                        bin: "marksman",
                                     },
                                 ),
                                 (
@@ -531,6 +544,7 @@ impl LanguageTable {
                                         url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman-macos",
                                         sha256: "6a801c17b5ac0dba69787c5282b3b3bd416e66c96253fae098d311c6bbd1833b",
                                         bytes: 43856208,
+                                        bin: "marksman",
                                     },
                                 ),
                                 (
@@ -539,6 +553,7 @@ impl LanguageTable {
                                         url: "https://github.com/artempyanykh/marksman/releases/download/2026-02-08/marksman.exe",
                                         sha256: "a6d05beb08ebe41b0a9f09c98a438540421436fa5531424c22e0bb1d22529705",
                                         bytes: 20502938,
+                                        bin: "marksman",
                                     },
                                 ),
                             ],
@@ -553,12 +568,9 @@ impl LanguageTable {
                     &[],
                     Some(
                         // lemminx 0.29.3
-                        // Each zip holds one platform-named file (lemminx-linux-x86_64, …),
-                        // not `lemminx`: no single `bin` fits all three (see the task report).
                         Recipe::Release {
                             id: "lemminx",
                             version: "0.29.3",
-                            bin: "lemminx",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -566,6 +578,7 @@ impl LanguageTable {
                                         url: "https://github.com/redhat-developer/vscode-xml/releases/download/0.29.3/lemminx-linux-x86_64.zip",
                                         sha256: "1acc44e24201c1d2f5ccb4e43e7426ed0df6909207a81ff199810e2808104d89",
                                         bytes: 16903991,
+                                        bin: "lemminx-linux-x86_64",
                                     },
                                 ),
                                 (
@@ -574,6 +587,7 @@ impl LanguageTable {
                                         url: "https://github.com/redhat-developer/vscode-xml/releases/download/0.29.3/lemminx-osx-aarch_64.zip",
                                         sha256: "185db5630ce85be43ea0fab034e7841b1327c2793db05ab481e029cf493d86ce",
                                         bytes: 16271050,
+                                        bin: "lemminx-osx-aarch_64",
                                     },
                                 ),
                                 (
@@ -582,6 +596,7 @@ impl LanguageTable {
                                         url: "https://github.com/redhat-developer/vscode-xml/releases/download/0.29.3/lemminx-win32.zip",
                                         sha256: "7eaefaac68253b0ec8e0ad1f1c0f2d0755423d4e99e52497428b52f80df28eb7",
                                         bytes: 16578930,
+                                        bin: "lemminx-win32.exe",
                                     },
                                 ),
                             ],
@@ -599,7 +614,6 @@ impl LanguageTable {
                         Recipe::Release {
                             id: "sqls",
                             version: "v0.2.48",
-                            bin: "sqls",
                             assets: &[
                                 (
                                     "linux-x86_64",
@@ -607,6 +621,7 @@ impl LanguageTable {
                                         url: "https://github.com/sqls-server/sqls/releases/download/v0.2.48/sqls-linux-0.2.48.zip",
                                         sha256: "30047b92c41658c821b7803d2c2a3a1ce4e17ee769ceff6f24bb9e3daaf5d4dc",
                                         bytes: 10736904,
+                                        bin: "sqls",
                                     },
                                 ),
                                 (
@@ -615,6 +630,7 @@ impl LanguageTable {
                                         url: "https://github.com/sqls-server/sqls/releases/download/v0.2.48/sqls-darwin-0.2.48.zip",
                                         sha256: "b44165ca597a4b4298d56657bc911aa3ca8a591befefde4e29566923c6229f3d",
                                         bytes: 10731807,
+                                        bin: "sqls",
                                     },
                                 ),
                                 (
@@ -623,6 +639,7 @@ impl LanguageTable {
                                         url: "https://github.com/sqls-server/sqls/releases/download/v0.2.48/sqls-windows-0.2.48.zip",
                                         sha256: "df6453b2ddcb4e748547d0288b826251a24af099749dc7a9ddea587aac3d4365",
                                         bytes: 10743962,
+                                        bin: "sqls.exe",
                                     },
                                 ),
                             ],

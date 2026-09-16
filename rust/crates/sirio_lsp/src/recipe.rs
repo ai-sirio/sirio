@@ -17,6 +17,13 @@ pub struct Asset {
     /// Shown before the button is pressed. clangd is 114 MB, and an
     /// `[Install]` that does not say so is a dishonest button.
     pub bytes: u64,
+    /// Path of the executable inside the unpacked archive, for this
+    /// platform's file. Per asset rather than per recipe because archives
+    /// are platform-named — lemminx ships `lemminx-linux-x86_64` where
+    /// macOS gets `lemminx-osx-aarch_64` — and because Windows archives
+    /// hold a `.exe` the other platforms do not have. One `bin` per recipe
+    /// cannot say either.
+    pub bin: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,8 +43,6 @@ pub enum Recipe {
     Release {
         id: &'static str,
         version: &'static str,
-        /// Path of the executable inside the unpacked archive.
-        bin: &'static str,
         assets: &'static [(&'static str, Asset)],
     },
     /// Why it cannot be installed, in terms a reader can act on. The arm

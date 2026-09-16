@@ -178,9 +178,13 @@ pub install: Option<Recipe>,
 
 `Recipe` is plain data in `sirio_lsp`, with no dependency on
 `sirio_registry` — both stay leaves. `Release` carries **one asset per
-platform**, not one asset: `Installer::install` resolves
-`Distribution::Binary(map).get(platform_key)`, so a single-platform recipe
-could never be handed to it.
+platform**, not one asset, and each asset names its own executable:
+`Installer::install` resolves `Distribution::Binary(map).get(platform_key)`,
+so a single-platform recipe could never be handed to it — and one `bin` per
+recipe cannot describe archives whose executable is platform-named
+(lemminx ships `lemminx-linux-x86_64` where macOS gets
+`lemminx-osx-aarch_64`), nor the `.exe` suffix Windows archives carry and
+the other platforms do not.
 
 ```rust
 pub enum Recipe {
@@ -194,7 +198,6 @@ pub enum Recipe {
     Release {
         id: &'static str,
         version: &'static str,
-        bin: &'static str,
         assets: &'static [(&'static str, Asset)],
     },
     /// Why it cannot be installed, in terms a reader can act on.
@@ -203,8 +206,8 @@ pub enum Recipe {
 
 ```
 
-One asset is one pinned file — URL, hash and size together, so the size is
-known before the click and every binary install is verified:
+One asset is one pinned file — URL, hash, size and executable together, so
+the size is known before the click and every binary install is verified:
 
 ```rust
 pub struct Asset {
@@ -214,6 +217,9 @@ pub struct Asset {
     /// install here is verified.
     pub sha256: &'static str,
     pub bytes: u64,
+    /// Path of the executable inside the unpacked archive, for this
+    /// platform's file.
+    pub bin: &'static str,
 }
 ```
 
