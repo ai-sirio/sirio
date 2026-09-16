@@ -3157,6 +3157,37 @@ mod tests {
     /// and neither may fade with the structural panels: a sheet the desktop
     /// shows through is unreadable exactly when it is asking for input.
     #[test]
+    fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
+        for base in [Theme::dark(), Theme::light()] {
+            assert_eq!(
+                base.dialog_surface, base.surface,
+                "opaque twin of the panel surface"
+            );
+            assert_eq!(
+                base.floating_surface, base.surface_raised,
+                "opaque twin of the raised surface"
+            );
+            for translucent in [
+                base.with_translucency(true),
+                base.with_translucency_at(true, 0.70),
+                base.with_translucency_at(true, 0.9),
+            ] {
+                assert!(
+                    translucent.surface.a < base.surface.a,
+                    "precondition: panels fade"
+                );
+                assert!(
+                    translucent.surface_raised.a < base.surface_raised.a,
+                    "precondition: raised cards fade"
+                );
+                assert_eq!(translucent.dialog_surface, base.dialog_surface);
+                assert_eq!(translucent.floating_surface, base.floating_surface);
+                assert_eq!(translucent.dialog_surface.a, 1.0);
+                assert_eq!(translucent.floating_surface.a, 1.0);
+            }
+        }
+    }
+
     /// The distinctions bezel's own palette does not make. Its hues come
     /// from the git graph's lanes, which paint `fn` and a call site the same
     /// indigo and a type the same amber as a number — the collapse this
@@ -3211,37 +3242,6 @@ mod tests {
                 (opaque.r, opaque.g),
                 "staying opaque must not change the menu's tone"
             );
-        }
-    }
-
-    fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
-        for base in [Theme::dark(), Theme::light()] {
-            assert_eq!(
-                base.dialog_surface, base.surface,
-                "opaque twin of the panel surface"
-            );
-            assert_eq!(
-                base.floating_surface, base.surface_raised,
-                "opaque twin of the raised surface"
-            );
-            for translucent in [
-                base.with_translucency(true),
-                base.with_translucency_at(true, 0.70),
-                base.with_translucency_at(true, 0.9),
-            ] {
-                assert!(
-                    translucent.surface.a < base.surface.a,
-                    "precondition: panels fade"
-                );
-                assert!(
-                    translucent.surface_raised.a < base.surface_raised.a,
-                    "precondition: raised cards fade"
-                );
-                assert_eq!(translucent.dialog_surface, base.dialog_surface);
-                assert_eq!(translucent.floating_surface, base.floating_surface);
-                assert_eq!(translucent.dialog_surface.a, 1.0);
-                assert_eq!(translucent.floating_surface.a, 1.0);
-            }
         }
     }
 
