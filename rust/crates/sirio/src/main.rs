@@ -6154,6 +6154,13 @@ impl SirioWorkspace {
             references_available: worktree
                 .as_deref()
                 .is_some_and(|root| self.lsp.references_available(path, root)),
+            // Only ever `Some` after a launch has been attempted and found
+            // nothing to launch, which is why the failure path below pushes
+            // these facts again: at the moment the tab opened, nobody had
+            // yet looked for the program.
+            missing_language_server: worktree
+                .as_deref()
+                .and_then(|root| self.lsp.missing_command_for(path, root)),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -10694,17 +10701,30 @@ impl SirioWorkspace {
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     workspace.sync_document_with_server(&path_for_facts, &view, cx);
                 }
-                Err(sirio_lsp::LspError::NotInstalled { .. }) => {
+                Err(sirio_lsp::LspError::NotInstalled { command }) => {
                     // The shipped table offers a server for every language
                     // Sirio can open, so "not installed" is the answer for
                     // most of it on any given machine. Saying so on every
                     // .yaml file would make the message worthless for the
                     // case that matters — a server that *is* there and
-                    // broke. Marked dead, so it is tried once and not again.
-                    workspace.lsp.mark_dead(key);
+                    // broke. So: no card, ever.
+                    //
+                    // The context menu is the other half of that bargain,
+                    // and it is not silence. A reader who right-clicks has
+                    // asked a direct question, and answering it with "no
+                    // language server offers definitions here" describes
+                    // Sirio rather than their machine. The name is kept for
+                    // the menu to give back, and the facts are pushed again
+                    // because the tab computed them before anyone had
+                    // looked. Marked dead, so it is tried once and not again.
+                    workspace
+                        .lsp
+                        .mark_dead(key, crate::lsp::Dead::NotInstalled { command });
+                    let facts = workspace.file_context_facts(&path_for_facts);
+                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                 }
                 Err(error) => {
-                    workspace.lsp.mark_dead(key);
+                    workspace.lsp.mark_dead(key, crate::lsp::Dead::Failed);
                     // Naming the command is the point: it came from the
                     // user's languages.toml, and naming it turns a mystery
                     // into a line they can edit.
@@ -19639,14 +19659,23 @@ done
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// The shipped table went from four language servers to nineteen, so
+    /// The shipped table went from four language servers to twenty-one, so
     /// "that command is not on this machine" stopped being a mistake and
     /// became the ordinary answer for most of it. A card for every one of
     /// them would be a card on almost every file opened — and would drown
     /// the case the card is *for*, a server that is installed and broke.
+    ///
+    /// The half that was missing: silence was applied to the *menu* too,
+    /// where nothing is volunteered and the reader has asked outright. A
+    /// Java file on a machine with no `jdtls` read "No language server
+    /// offers definitions here" — a sentence about Sirio, arriving in the
+    /// release that gave Java a server. Unprompted, nothing; asked, the
+    /// name of the program to install.
     #[cfg(unix)]
     #[gpui::test]
-    async fn a_language_server_that_is_not_installed_says_nothing(cx: &mut TestAppContext) {
+    async fn a_language_server_that_is_not_installed_says_nothing_until_asked(
+        cx: &mut TestAppContext,
+    ) {
         let tag = "uninstalled";
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{}-{}-{}",
@@ -19723,6 +19752,39 @@ done
             cx.debug_bounds("file-text-scroll").is_some(),
             "and the file itself is on screen"
         );
+
+        // The menu is the other half of the bargain. Nothing is volunteered,
+        // but a right-click is a direct question, and the answer names the
+        // program rather than describing Sirio.
+        //
+        // Asked of the *view*, not of the workspace: the facts reach it by a
+        // push, the tab computed its own before anyone had looked for the
+        // program, and only the failure path can correct them. A test that
+        // asked the workspace what it would say would pass with that push
+        // missing, which is how this shipped.
+        use sirio_ui::file_context_menu::FileContextAction;
+        let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
+        let reasons: Vec<Option<String>> = view.read_with(&cx.cx, |view, _| {
+            view.context_menu_items()
+                .into_iter()
+                .filter(|item| {
+                    matches!(
+                        item.action,
+                        FileContextAction::GoToDefinition | FileContextAction::FindReferences
+                    )
+                })
+                .map(|item| item.disabled_reason)
+                .collect()
+        });
+        assert_eq!(
+            reasons,
+            vec![
+                Some("sirio-no-such-language-server is not on PATH".to_owned()),
+                Some("sirio-no-such-language-server is not on PATH".to_owned()),
+            ],
+            "both navigation entries name the missing program"
+        );
+
         let _ = std::fs::remove_dir_all(&scratch);
     }
 

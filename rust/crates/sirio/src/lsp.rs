@@ -145,10 +145,11 @@ pub struct LspSupervisor {
     /// The version each open document is at, per the protocol's requirement
     /// that it only ever rise.
     versions: sirio_lsp::DocumentVersions,
-    /// Keys whose server died. Kept so a crashed server is not restarted in
-    /// a loop: one that crashes on a file crashes again on restart, and on
-    /// rust-analyzer that means re-indexing the repository forever.
-    dead: Vec<(PathBuf, String)>,
+    /// Keys with no server, and why. Kept so a crashed server is not
+    /// restarted in a loop: one that crashes on a file crashes again on
+    /// restart, and on rust-analyzer that means re-indexing the repository
+    /// forever.
+    dead: HashMap<(PathBuf, String), Dead>,
     /// The text each open document was last *sent* with.
     ///
     /// The server's copy of a file is only ever as good as this, so this is
@@ -158,6 +159,23 @@ pub struct LspSupervisor {
     /// `Editor`'s eleven buffer-write sites, and a `String` comparison
     /// checks length before it reads a byte.
     synced: HashMap<PathBuf, String>,
+}
+
+/// Why a key has no server and will not be tried again.
+///
+/// The distinction is the whole reason this is not a bare flag. A server
+/// that launched and then broke has already been reported on a card at the
+/// moment it broke, and the reader owes it no further thought. A command
+/// that is not on `PATH` was never reported at all — deliberately, because
+/// the shipped table names a server for every language Sirio opens and
+/// nobody installs all twenty-one. But it is the one case the reader can
+/// act on, so the name survives, for the context menu to say when asked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Dead {
+    /// The command names a program that is not installed.
+    NotInstalled { command: String },
+    /// It launched and then failed. Already shown; nothing further is owed.
+    Failed,
 }
 
 /// What a document needs told to a server, if anything.
@@ -175,7 +193,7 @@ impl LspSupervisor {
             loader,
             servers: HashMap::new(),
             versions: sirio_lsp::DocumentVersions::default(),
-            dead: Vec::new(),
+            dead: HashMap::new(),
             synced: HashMap::new(),
         }
     }
@@ -265,13 +283,26 @@ impl LspSupervisor {
     }
 
     pub fn is_dead(&self, key: &(PathBuf, String)) -> bool {
-        self.dead.contains(key)
+        self.dead.contains_key(key)
     }
 
-    pub fn mark_dead(&mut self, key: (PathBuf, String)) {
+    pub fn mark_dead(&mut self, key: (PathBuf, String), reason: Dead) {
         self.servers.remove(&key);
-        if !self.dead.contains(&key) {
-            self.dead.push(key);
+        self.dead.entry(key).or_insert(reason);
+    }
+
+    /// The command this file's language names and could not find, if that
+    /// is why it has no server.
+    ///
+    /// `None` covers three different situations that need no name: no entry
+    /// claims the extension, a server is running, or one ran and broke. Only
+    /// the missing program is worth telling the reader about, because it is
+    /// the only one they can fix.
+    pub fn missing_command_for(&self, file: &Path, worktree_root: &Path) -> Option<String> {
+        let key = key_for_file(self.table(), file, worktree_root)?;
+        match self.dead.get(&key)? {
+            Dead::NotInstalled { command } => Some(command.clone()),
+            Dead::Failed => None,
         }
     }
 
@@ -637,5 +668,56 @@ mod tests {
         assert!(supervisor.capability_for(file, root).is_none());
         assert!(!supervisor.definition_available(file, root));
         assert!(!supervisor.references_available(file, root));
+    }
+
+    #[test]
+    fn a_command_nobody_has_is_remembered_by_name() {
+        // `capabilities_are_absent_while_no_server_runs` above is the same
+        // "no" this returns — and that is exactly the problem it answers.
+        // Both a Java file with no `jdtls` and a `.txt` with no language
+        // reach the menu as a bare false, and the reader is owed different
+        // sentences for the two.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/Main.java");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("java is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        supervisor.mark_dead(
+            key,
+            Dead::NotInstalled {
+                command: entry.command.clone(),
+            },
+        );
+        assert_eq!(
+            supervisor.missing_command_for(file, root).as_deref(),
+            Some("jdtls")
+        );
+    }
+
+    #[test]
+    fn a_server_that_launched_and_then_broke_offers_no_name() {
+        // It was already reported on a card when it broke. Naming it again
+        // in the menu would turn one failure into two, and "jdtls is not
+        // installed" would be a lie about a program that is.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/Main.java");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("java is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        supervisor.mark_dead(key, Dead::Failed);
+        assert!(supervisor.missing_command_for(file, root).is_none());
+    }
+
+    #[test]
+    fn a_file_no_entry_claims_has_no_command_to_miss() {
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        assert!(
+            supervisor
+                .missing_command_for(
+                    std::path::Path::new("/repo/NOTES.txt"),
+                    std::path::Path::new("/repo")
+                )
+                .is_none()
+        );
     }
 }

@@ -52,7 +52,11 @@ pub struct FileContextItem {
 }
 
 /// Everything the table needs to decide what to hide and what to disable.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// Not `Copy`, for one field. `missing_language_server` carries a command
+/// name read from the user's `languages.toml`, and a name that cannot be
+/// shown is the whole failure this field exists to end.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FileContextFacts {
     pub has_selection: bool,
     pub is_markdown: bool,
@@ -61,6 +65,10 @@ pub struct FileContextFacts {
     pub has_agent_chat: bool,
     pub definition_available: bool,
     pub references_available: bool,
+    /// The program this file's language names and the machine does not
+    /// have. `Some` only in that case: a server that is running, or that
+    /// ran and broke, leaves it `None`.
+    pub missing_language_server: Option<String>,
 }
 
 const ITEMS: [FileContextItem; 12] = [
@@ -192,17 +200,38 @@ fn disabled_reason(action: FileContextAction, facts: &FileContextFacts) -> Optio
         FileContextAction::ViewFileHistory => {
             (!facts.in_git_repo).then(|| NOT_IN_GIT.to_owned())
         }
-        FileContextAction::GoToDefinition => {
-            (!facts.definition_available).then(|| NO_DEFINITION.to_owned())
-        }
-        FileContextAction::FindReferences => {
-            (!facts.references_available).then(|| NO_REFERENCES.to_owned())
-        }
+        FileContextAction::GoToDefinition => (!facts.definition_available)
+            .then(|| not_on_path(facts).unwrap_or_else(|| NO_DEFINITION.to_owned())),
+        FileContextAction::FindReferences => (!facts.references_available)
+            .then(|| not_on_path(facts).unwrap_or_else(|| NO_REFERENCES.to_owned())),
         FileContextAction::Paste
         | FileContextAction::RevealInFileManager
         | FileContextAction::OpenInTerminal
         | FileContextAction::OpenMarkdownPreview => None,
     }
+}
+
+/// Why the navigation entries are off, when the reason is a program the
+/// reader can go and find.
+///
+/// The generic sentence they fall back to is a statement about Sirio, and
+/// reads as "this build cannot do Java". That is the opposite of true: the
+/// table names a server for every language the editor opens, and the only
+/// thing missing is on the reader's own machine. Naming it turns a dead end
+/// into an errand.
+///
+/// **"not on PATH", not "not installed."** The spawn failed with
+/// `NotFound`, which is a fact about `PATH` and not about the machine. The
+/// difference is routine: a server installed by mason, asdf, mise or a
+/// language's own package manager is on disk and invisible here, and
+/// "lua-language-server is not installed" would send its owner to reinstall
+/// something they already have. Naming `PATH` points at the actual fix in
+/// both cases.
+fn not_on_path(facts: &FileContextFacts) -> Option<String> {
+    facts
+        .missing_language_server
+        .as_ref()
+        .map(|command| format!("{command} is not on PATH"))
 }
 
 /// Drops the indentation every non-blank line shares, so a snippet copied out
@@ -317,6 +346,7 @@ mod tests {
             has_agent_chat: true,
             definition_available: true,
             references_available: true,
+            missing_language_server: None,
         }
     }
 
@@ -558,4 +588,53 @@ fn a_path_with_a_space_is_escaped() {
         "spaces must be percent-encoded"
     );
 }
+
+    #[test]
+    fn a_language_server_that_cannot_be_found_is_named_rather_than_described() {
+        // The bug this replaces: a Java file on a machine with no `jdtls`
+        // read "No language server offers definitions here", which is a
+        // sentence about Sirio. The table names a server for every language
+        // the editor opens; the only thing missing was on the reader's own
+        // machine, and the menu was the one place that could say so.
+        let facts = FileContextFacts {
+            definition_available: false,
+            references_available: false,
+            missing_language_server: Some("jdtls".to_owned()),
+            ..FileContextFacts::default()
+        };
+        let reasons: Vec<Option<String>> = items(&facts)
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item.action,
+                    FileContextAction::GoToDefinition | FileContextAction::FindReferences
+                )
+            })
+            .map(|item| item.disabled_reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                Some("jdtls is not on PATH".to_owned()),
+                Some("jdtls is not on PATH".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_server_that_is_there_and_answers_nothing_still_says_so_generically() {
+        // The other half: when the program exists, "not installed" would be
+        // a lie, and the honest answer is the one about this position.
+        let facts = FileContextFacts {
+            definition_available: false,
+            references_available: false,
+            missing_language_server: None,
+            ..FileContextFacts::default()
+        };
+        let entry = items(&facts)
+            .into_iter()
+            .find(|item| item.action == FileContextAction::GoToDefinition)
+            .expect("the entry is present even when it cannot run");
+        assert_eq!(entry.disabled_reason.as_deref(), Some(NO_DEFINITION));
+    }
 }

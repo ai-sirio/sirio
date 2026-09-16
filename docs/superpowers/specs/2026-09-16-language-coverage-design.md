@@ -85,7 +85,7 @@ for.
 
 ## §2 Servers — the shipped table
 
-`LanguageTable::defaults` grows from four entries to twenty-two, one per
+`LanguageTable::defaults` grows from four entries to twenty-one, one per
 language, each naming the command its own project documents with the
 arguments that put it on stdio.
 
@@ -126,7 +126,7 @@ The parent spec's §5 said a binary that is not found gets *a visible
 notice naming the command, once*. That was right when the table held four
 servers: a missing one then meant a typo in the user's `languages.toml`.
 
-With twenty-two, "not installed" becomes the ordinary state of most of the
+With twenty-one, "not installed" becomes the ordinary state of most of the
 table on any given machine — nobody has all of them — so the notice would
 appear on nearly every file opened and would drown the case it exists for,
 a server that *is* installed and broke. `LspError::NotInstalled` is
@@ -137,6 +137,54 @@ variant carries the command for any caller that does want to name it.
 
 This is the same distinction `LspError::NotReady` already draws: not every
 non-answer is a fault.
+
+### §2.2 …but the menu is asked, and answers (added 2026-09-16, after 0.18.0)
+
+§2.1 above was applied one step too far, and 0.18.0 shipped with the
+result. Silence is a rule about what Sirio *volunteers*: a card over a file
+nobody asked about. The context menu volunteers nothing — it opens because
+the reader right-clicked, and every row in it is an answer to a question
+they asked outright.
+
+What they got was `No language server offers definitions here`. That is a
+sentence about Sirio, and it reads as *this build cannot do Java* — in the
+release whose entire subject was giving Java a server. The information
+needed to say something better was already in hand and being dropped:
+`LspError::NotInstalled { command }` reached `mark_dead` and the name went
+no further.
+
+So `LspSupervisor` now records **why** a key is dead (`lsp::Dead`), and
+`FileContextFacts::missing_language_server` carries the name to the menu,
+which says `jdtls is not on PATH`. Three states, three sentences:
+
+| state | what the menu says |
+|---|---|
+| no entry claims the extension | `No language server offers definitions here` |
+| an entry names a command that is not on `PATH` | `<command> is not on PATH` |
+| a server is running and does not offer the capability | `No language server offers definitions here` |
+
+The sentence names `PATH`, not installation, and that is a second finding
+rather than a style choice. The spawn failed with `io::ErrorKind::NotFound`,
+which is a fact about `PATH`. On the maintainer's own machine
+`lua-language-server` sits in `~/.local/share/nvim/mason/bin/` and is not on
+`PATH`, so "lua-language-server is not installed" would send its owner to
+reinstall something they already have. `LspError::NotInstalled` keeps its
+name — it is the right name for the variant's ordinary cause — but the
+sentence shown to a reader points at the thing they can check.
+
+Two details are load-bearing, and both are pinned by
+`a_language_server_that_is_not_installed_says_nothing_until_asked`:
+
+- **The facts are pushed again from the failure path.** A tab computes its
+  context-menu facts when it opens, which is before anyone has looked for
+  the program. Without the second push the menu keeps the sentence it was
+  born with, and the fix is invisible.
+- **The test asks the view, not the workspace.** `file_context_facts` would
+  answer correctly with that push missing. Only the view knows what it was
+  actually told.
+
+The card rule is unchanged: still nothing, ever, for a command that is not
+installed.
 
 ## §3 The tests that keep the lists together
 

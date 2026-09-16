@@ -73,7 +73,7 @@ impl LanguageTable {
     /// offer the action, which reads as "this build has no LSP".
     ///
     /// Naming a server is not promising one is installed. Nobody has all
-    /// nineteen of these. A command that is not on `PATH` resolves to
+    /// twenty-one of these. A command that is not on `PATH` resolves to
     /// [`crate::LspError::NotInstalled`], which the shell deliberately says
     /// nothing about; the entry costs nothing until the day the user
     /// installs `jdtls`, and then it costs nothing to discover either.
@@ -368,6 +368,15 @@ roots = ["go.mod"]
                 .unwrap_or_else(|| panic!("no default entry for .{extension}"));
             assert_eq!(entry.command, command, "for .{extension}");
         }
+    }
+
+    #[test]
+    fn the_shipped_table_names_twenty_one_servers() {
+        // Four comments in this repository claimed nineteen or twenty-two on
+        // 2026-09-16, none of them right. Prose cannot be diffed; this can.
+        // Twenty-three is the count of *languages*: clangd covers two of them
+        // and typescript six.
+        assert_eq!(LanguageTable::defaults().entries().len(), 21);
     }
 
     #[test]

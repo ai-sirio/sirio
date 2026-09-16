@@ -531,6 +531,17 @@ impl FileView {
         }
     }
 
+    /// The menu exactly as it would be drawn right now.
+    ///
+    /// Public for the workspace's own tests, and used by `render` below so
+    /// the two cannot drift. The facts reach this view by a push, and a
+    /// test that asks the workspace what it *would* say cannot tell a push
+    /// that happened from one that did not — which is the failure this
+    /// accessor exists to make visible.
+    pub fn context_menu_items(&self) -> Vec<file_context_menu::FileContextItem> {
+        file_context_menu::items(&self.menu_facts())
+    }
+
     /// The shell's facts plus the two this view answers itself.
     fn menu_facts(&self) -> FileContextFacts {
         let has_selection = self
@@ -540,7 +551,7 @@ impl FileView {
         FileContextFacts {
             has_selection,
             is_markdown: self.is_markdown(),
-            ..self.shell_facts
+            ..self.shell_facts.clone()
         }
     }
 
@@ -1307,7 +1318,7 @@ impl Render for FileView {
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
-            let items = file_context_menu::items(&self.menu_facts());
+            let items = self.context_menu_items();
             let mut previous_group = None;
             for (index, item) in items.iter().enumerate() {
                 if previous_group.is_some_and(|group| group != item.group) {
