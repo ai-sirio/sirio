@@ -10250,6 +10250,7 @@ two"
         );
     }
 
+    #[gpui::test]
     async fn narrow_composer_stays_inside_chat_pane_and_keeps_send_reachable(
         cx: &mut TestAppContext,
     ) {
