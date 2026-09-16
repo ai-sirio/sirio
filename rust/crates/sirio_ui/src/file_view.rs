@@ -177,6 +177,13 @@ impl SurfaceScroll {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileViewEvent {
     OpenFile(PathBuf),
+    /// The background read landed and this view now has a buffer.
+    ///
+    /// Emitted because the shell cannot tell from the outside: a `FileView`
+    /// is `ViewState::Loading` for its first turns, and anything that reads
+    /// `editor()` before this arrives sees `None`. Telling a language server
+    /// about a file at that moment describes it as empty.
+    Loaded(PathBuf),
     SendSelectionToAgent {
         path: PathBuf,
         lines: (usize, usize),
@@ -240,6 +247,7 @@ impl FileView {
                 view.state = ViewState::Ready(editor);
                 view.load_task = None;
                 view.apply_pending_reveal(cx);
+                cx.emit(FileViewEvent::Loaded(view.path.clone()));
                 cx.notify();
             });
         });

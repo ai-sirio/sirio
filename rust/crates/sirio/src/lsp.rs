@@ -149,6 +149,24 @@ pub struct LspSupervisor {
     /// a loop: one that crashes on a file crashes again on restart, and on
     /// rust-analyzer that means re-indexing the repository forever.
     dead: Vec<(PathBuf, String)>,
+    /// The text each open document was last *sent* with.
+    ///
+    /// The server's copy of a file is only ever as good as this, so this is
+    /// what "has the document changed" is answered against — not the view's
+    /// notify, which also fires for a caret blink. Holding the text rather
+    /// than a revision counter is deliberate: it needs no cooperation from
+    /// `Editor`'s eleven buffer-write sites, and a `String` comparison
+    /// checks length before it reads a byte.
+    synced: HashMap<PathBuf, String>,
+}
+
+/// What a document needs told to a server, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentSync {
+    /// The server has never seen this document: send `textDocument/didOpen`.
+    Open { version: i32 },
+    /// The server's copy is stale: send `textDocument/didChange`.
+    Change { version: i32 },
 }
 
 impl LspSupervisor {
@@ -158,7 +176,60 @@ impl LspSupervisor {
             servers: HashMap::new(),
             versions: sirio_lsp::DocumentVersions::default(),
             dead: Vec::new(),
+            synced: HashMap::new(),
         }
+    }
+
+    /// Records that `path` is about to be sent as `text`, and says which
+    /// notification that is. `None` when the server already has this exact
+    /// text — the common answer, since every caret move asks.
+    ///
+    /// Recording happens here rather than at the send site because the send
+    /// is asynchronous: two notifies arriving before the first write lands
+    /// would otherwise both decide the server needs telling.
+    pub fn sync_text(&mut self, path: &Path, text: &str) -> Option<DocumentSync> {
+        match self.synced.get(path) {
+            Some(sent) if sent == text => None,
+            Some(_) => {
+                self.synced.insert(path.to_path_buf(), text.to_owned());
+                Some(DocumentSync::Change {
+                    version: self.versions.changed(path),
+                })
+            }
+            None => {
+                self.synced.insert(path.to_path_buf(), text.to_owned());
+                Some(DocumentSync::Open {
+                    version: self.versions.opened(path),
+                })
+            }
+        }
+    }
+
+    /// The entry a file wants, from the table **as already loaded**.
+    ///
+    /// [`Self::entry_for`] re-reads the table from disk first, which is the
+    /// right freshness step when a file is being opened and the wrong one
+    /// on a path that runs on every view notify. Opening still refreshes;
+    /// keeping a server in step does not need to.
+    pub fn known_entry_for(&self, file: &Path) -> Option<LanguageEntry> {
+        self.loader.table().for_path(file).cloned()
+    }
+
+    /// Whether the server already holds exactly this text.
+    ///
+    /// Read-only and cheap on purpose: the observer that watches a file view
+    /// fires on every notify — a caret blink included — and this is what
+    /// keeps that from reaching a config-file stat twice a second.
+    pub fn is_synced(&self, path: &Path, text: &str) -> bool {
+        self.synced.get(path).is_some_and(|sent| sent == text)
+    }
+
+    /// Forgets what a closed document was synced with, so reopening it is a
+    /// fresh `didOpen` rather than a `didChange` against a document the
+    /// server no longer holds.
+    pub fn forget_synced(&mut self, path: &Path) {
+        self.synced.remove(path);
+        self.versions.closed(path);
     }
 
     /// The entry a file wants, re-reading the table first if it has moved.
@@ -206,10 +277,6 @@ impl LspSupervisor {
 
     pub fn insert(&mut self, key: (PathBuf, String), handle: ServerHandle) {
         self.servers.insert(key, handle);
-    }
-
-    pub fn versions_mut(&mut self) -> &mut sirio_lsp::DocumentVersions {
-        &mut self.versions
     }
 
     /// The running server a path would use, if there is one.

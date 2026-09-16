@@ -6064,10 +6064,23 @@ impl SirioWorkspace {
     /// Routes through the same de-duplicating `add_file_tab` path as the
     /// Files panel and chat transcript link clicks.
     fn subscribe_file_view(file_view: &Entity<FileView>, cx: &mut Context<Self>) {
+        // Editing goes through eleven buffer-write sites in `Editor`, none of
+        // which emits anything. Observing the view instead catches all of
+        // them — and `sync_document_with_server` opens with the text
+        // comparison that makes the other 99% of notifies free.
+        cx.observe(file_view, |workspace, view, cx| {
+            let path = view.read(cx).path().to_path_buf();
+            workspace.sync_document_with_server(&path, &view, cx);
+        })
+        .detach();
         cx.subscribe(
             file_view,
             |workspace, view, event: &FileViewEvent, cx| match event {
                 FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                // The one moment a freshly opened tab has text to describe.
+                FileViewEvent::Loaded(path) => {
+                    workspace.sync_document_with_server(path, &view, cx);
+                }
                 FileViewEvent::RevealInFileManager(path) => {
                     if let Some(mut command) = reveal_command(path) {
                         command
@@ -10645,7 +10658,7 @@ impl SirioWorkspace {
         };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
         if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
-            self.open_document_on_server(path, view, cx);
+            self.sync_document_with_server(path, view, cx);
             return;
         }
 
@@ -10679,7 +10692,7 @@ impl SirioWorkspace {
                     // false when the tab opened. Push them again.
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
-                    workspace.open_document_on_server(&path_for_facts, &view, cx);
+                    workspace.sync_document_with_server(&path_for_facts, &view, cx);
                 }
                 Err(error) => {
                     workspace.lsp.mark_dead(key);
@@ -10740,27 +10753,59 @@ impl SirioWorkspace {
             if !paths_name_the_same_document(&open_path, &path) {
                 continue;
             }
-            let text = view
+            // A publish can land while this view is still reading its file.
+            // Converting against an empty buffer does not fail — it gives
+            // every finding the byte range `0..0`, a mark on the right line
+            // pointing at nothing. Skipping is honest, and costs nothing:
+            // a server republishes this file's diagnostics on its next
+            // change, and the gutter is empty until then rather than wrong.
+            let Some(text) = view
                 .read(cx)
                 .editor()
                 .map(|editor| editor.buffer().to_owned())
-                .unwrap_or_default();
+            else {
+                continue;
+            };
             let converted = crate::lsp::view_diagnostics(&text, &raw);
             view.update(cx, |view, cx| view.set_diagnostics(converted, cx));
         }
     }
 
-    /// Tells the server about a file, from either of the two orders in
-    /// which they can meet: the server finished launching for a file that
-    /// was already open, or a file opened onto a server already running.
-    /// Both happen, because the launch is asynchronous.
-    fn open_document_on_server(
+    /// Brings a server's copy of a file up to date with the view's buffer.
+    ///
+    /// Called from all three orders in which a view, a server and a loaded
+    /// buffer can meet: the server finished launching for a file already
+    /// open, a file opened onto a server already running, and — the one
+    /// that was missing — the view's background read landing after both.
+    ///
+    /// **A view that has not loaded is not described as empty.** The buffer
+    /// lives behind `ViewState::Loading` until its background read returns,
+    /// and `FileView::new` is followed by `start_language_server_for` on the
+    /// same synchronous turn, so the editor is reliably absent here for a
+    /// freshly opened tab. An earlier version read it with
+    /// `.unwrap_or_default()`, which sent `"text": ""` — and since nothing
+    /// sent `didChange` afterwards, the server kept a zero-length line index
+    /// for the life of the tab and refused every position against it:
+    ///
+    /// ```text
+    /// language server returned error -32603: Invalid offset
+    /// LineCol { line: 36, col: 28 } (line index length: 0)
+    /// ```
+    ///
+    /// Returning early is the whole fix: `FileViewEvent::Loaded` brings the
+    /// text back here the moment there is any.
+    fn sync_document_with_server(
         &mut self,
         path: &Path,
         view: &Entity<FileView>,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.lsp.entry_for(path) else {
+        // Ordered by cost, because the observer in `subscribe_file_view`
+        // reaches this on every notify a file view makes — a caret blink
+        // included. Nothing here reads the disk (`known_entry_for` uses the
+        // table already loaded) and nothing copies the buffer until a send
+        // is certain.
+        let Some(entry) = self.lsp.known_entry_for(path) else {
             return;
         };
         let Some(worktree_root) = self.worktree_root_for(path) else {
@@ -10771,17 +10816,29 @@ impl SirioWorkspace {
             return;
         };
         let client = server.client().clone();
-        let version = self.lsp.versions_mut().opened(path);
-        let text = view
-            .read(cx)
-            .editor()
-            .map(|editor| editor.buffer().to_owned())
-            .unwrap_or_default();
+        let view_state = view.read(cx);
+        let Some(buffer) = view_state.editor().map(|editor| editor.buffer()) else {
+            return;
+        };
+        if self.lsp.is_synced(path, buffer) {
+            return;
+        }
+        let text = buffer.to_owned();
+        let Some(sync) = self.lsp.sync_text(path, &text) else {
+            return;
+        };
         let path = path.to_path_buf();
         let language = entry.name.clone();
         cx.background_executor()
             .spawn(async move {
-                let _ = sirio_lsp::did_open(&client, &path, &language, version, &text).await;
+                let _ = match sync {
+                    crate::lsp::DocumentSync::Open { version } => {
+                        sirio_lsp::did_open(&client, &path, &language, version, &text).await
+                    }
+                    crate::lsp::DocumentSync::Change { version } => {
+                        sirio_lsp::did_change(&client, &path, version, &text).await
+                    }
+                };
             })
             .detach();
     }
@@ -10810,11 +10867,19 @@ impl SirioWorkspace {
             return;
         }
         let client = server.client().clone();
-        let text = view
+        let Some(text) = view
             .read(cx)
             .editor()
             .map(|editor| editor.buffer().to_owned())
-            .unwrap_or_default();
+        else {
+            return;
+        };
+        // An empty buffer would not fail here — `LineIndex::new("")` answers
+        // `Position { line: 0, character: 0 }` for every offset, and the
+        // server would be asked about the top of the file wherever the
+        // pointer actually is. Unreachable today (the source surface exists
+        // only once the editor is `Ready`), and written as a refusal anyway:
+        // this is the idiom that sent an empty document to a server.
         let position = sirio_lsp::LineIndex::new(&text).position(offset);
         cx.spawn(async move |_this, cx| {
             let answer = cx
@@ -10849,11 +10914,19 @@ impl SirioWorkspace {
             return;
         }
         let client = server.client().clone();
-        let text = view
+        let Some(text) = view
             .read(cx)
             .editor()
             .map(|editor| editor.buffer().to_owned())
-            .unwrap_or_default();
+        else {
+            return;
+        };
+        // An empty buffer would not fail here — `LineIndex::new("")` answers
+        // `Position { line: 0, character: 0 }` for every offset, and the
+        // server would be asked about the top of the file wherever the
+        // pointer actually is. Unreachable today (the source surface exists
+        // only once the editor is `Ready`), and written as a refusal anyway:
+        // this is the idiom that sent an empty document to a server.
         let position = sirio_lsp::LineIndex::new(&text).position(offset);
         let source = path.clone();
         cx.spawn(async move |this, cx| {
@@ -10903,11 +10976,19 @@ impl SirioWorkspace {
             return;
         }
         let client = server.client().clone();
-        let text = view
+        let Some(text) = view
             .read(cx)
             .editor()
             .map(|editor| editor.buffer().to_owned())
-            .unwrap_or_default();
+        else {
+            return;
+        };
+        // An empty buffer would not fail here — `LineIndex::new("")` answers
+        // `Position { line: 0, character: 0 }` for every offset, and the
+        // server would be asked about the top of the file wherever the
+        // pointer actually is. Unreachable today (the source surface exists
+        // only once the editor is `Ready`), and written as a refusal anyway:
+        // this is the idiom that sent an empty document to a server.
         let symbol = symbol_at(&text, offset);
         let position = sirio_lsp::LineIndex::new(&text).position(offset);
 
@@ -11041,7 +11122,7 @@ impl SirioWorkspace {
             return;
         };
         let client = server.client().clone();
-        self.lsp.versions_mut().closed(path);
+        self.lsp.forget_synced(path);
         let path = path.to_path_buf();
         cx.background_executor()
             .spawn(async move {
@@ -19134,6 +19215,310 @@ mod tests {
         });
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].preview, "");
+    }
+
+    /// A server is told what is *in* a file, not that the file is empty.
+    ///
+    /// `sync_document_with_server` reads the buffer out of the `FileView`, but
+    /// a freshly opened `FileView` is `ViewState::Loading` until its
+    /// background read lands — and the send happens on the same synchronous
+    /// turn as `FileView::new`. `.unwrap_or_default()` turns "not loaded
+    /// yet" into "this file is empty", and nothing ever sends `did_change`
+    /// to correct it, so the server's line index stays zero-length for the
+    /// life of the tab. Every later position then fails:
+    ///
+    ///   language server returned error -32603: Invalid offset
+    ///   LineCol { line: 36, col: 28 } (line index length: 0)
+    ///
+    /// The second file is the minimal repro: by then the server is already
+    /// running, so the send is synchronous rather than racing the launch.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_opened_document_reaches_the_server_with_its_text(cx: &mut TestAppContext) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-didopen-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        let log = scratch.join("wire.log");
+
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            format!(
+                "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"/bin/sh\"\nargs = [\"-c\", {}]\nroots = [\"Cargo.toml\"]\n",
+                toml_string_literal(&recording_server_script(&log))
+            ),
+        )
+        .expect("write the recording language table");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        let repo = test_repo("lsp-didopen-text");
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the root marker");
+        let first = repo.join("first.rs");
+        let second = repo.join("second.rs");
+        std::fs::write(&first, "fn first() {}\n").expect("write the first file");
+        let second_text = "fn second() -> u32 {\n    7\n}\n";
+        std::fs::write(&second, second_text).expect("write the second file");
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // First file: starts the server. Second file: the server is already
+        // running, which is the branch that sends synchronously.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(first.clone(), cx);
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if workspace.update(&mut cx, |workspace, _| {
+                workspace.lsp.is_running(&(repo.clone(), "rust".to_owned()))
+            }) {
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(second.clone(), cx);
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("second.rs")
+            {
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+
+        let wire = std::fs::read_to_string(&log).unwrap_or_default();
+        let opened: Vec<serde_json::Value> = wire
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|message| message["method"] == "textDocument/didOpen")
+            .collect();
+        let for_second = opened
+            .iter()
+            .find(|message| {
+                message["params"]["textDocument"]["uri"]
+                    .as_str()
+                    .is_some_and(|uri| uri.ends_with("second.rs"))
+            })
+            .unwrap_or_else(|| panic!("second.rs must be opened on the server; wire={wire}"));
+
+        assert_eq!(
+            for_second["params"]["textDocument"]["text"]
+                .as_str()
+                .expect("didOpen carries text"),
+            second_text,
+            "the server must be told what is in the file, not that it is empty"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// An edit after the open reaches the server as `didChange`.
+    ///
+    /// Nothing in `Editor` announces a buffer write, so this rides the view's
+    /// own notify — and the same notify fires for a caret blink, which is
+    /// why the send is gated on the text having actually changed rather than
+    /// on the notify itself.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_edit_after_the_open_reaches_the_server(cx: &mut TestAppContext) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-didchange-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        let log = scratch.join("wire.log");
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            format!(
+                "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"/bin/sh\"\nargs = [\"-c\", {}]\nroots = [\"Cargo.toml\"]\n",
+                toml_string_literal(&recording_server_script(&log))
+            ),
+        )
+        .expect("write the recording language table");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        let repo = test_repo("lsp-didchange-text");
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the root marker");
+        let file = repo.join("edited.rs");
+        std::fs::write(&file, "fn edited() {}\n").expect("write the file");
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(file.clone(), cx);
+        });
+        let opened = wait_for_wire(&mut cx, &log, |wire| {
+            wire.contains("textDocument/didOpen")
+        })
+        .await;
+        assert!(opened, "the open must land before the edit is meaningful");
+
+        // Edit through the view the way the shell's own edit path does.
+        let view = workspace.update(&mut cx, |workspace, cx| {
+            first_open_file_view(workspace, cx)
+        });
+        view.update(&mut cx, |view, cx| {
+            view.editor_mut()
+                .expect("the editor is loaded by now")
+                .replace(sirio_ui::editor::Selection { start: 3, end: 9 }, "renamed")
+                .expect("the replacement applies");
+            cx.notify();
+        });
+
+        let changed = wait_for_wire(&mut cx, &log, |wire| {
+            wire.contains("textDocument/didChange")
+        })
+        .await;
+        let wire = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            changed,
+            "an edit must reach the server, or its answers describe text that is no longer there; wire={wire}"
+        );
+        let change = wire
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|message| message["method"] == "textDocument/didChange")
+            .expect("a didChange was seen");
+        assert_eq!(
+            change["params"]["contentChanges"][0]["text"]
+                .as_str()
+                .expect("a full-text change"),
+            "fn renamed() {}\n",
+            "the change carries the edited buffer"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The first open file view in the workspace. The edit test needs the
+    /// entity the workspace actually subscribed to, not a fresh one.
+    fn first_open_file_view(
+        workspace: &SirioWorkspace,
+        cx: &App,
+    ) -> Entity<sirio_ui::file_view::FileView> {
+        SirioWorkspace::open_file_views(&workspace.tabs, cx)
+            .into_iter()
+            .next()
+            .expect("one open file view")
+            .1
+    }
+
+    /// Polls `log` until `ready` is satisfied, or gives up. Returns whether
+    /// it was satisfied, so the caller can assert with the wire in the
+    /// message rather than on a bare timeout.
+    async fn wait_for_wire(
+        cx: &mut VisualTestContext,
+        log: &Path,
+        ready: impl Fn(&str) -> bool,
+    ) -> bool {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if ready(&std::fs::read_to_string(log).unwrap_or_default()) {
+                return true;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        false
+    }
+
+    /// A language server that answers `initialize` and records every framed
+    /// body it is handed. POSIX-only, the same shell shape `sirio_lsp`'s own
+    /// fixture uses — see its comment on why the carriage return is stripped
+    /// after the read rather than matched in the `case` pattern.
+    #[cfg(unix)]
+    fn recording_server_script(log: &Path) -> String {
+        format!(
+            r#"
+while IFS= read -r line; do
+  header=$(printf '%s' "$line" | tr -d '\r')
+  case "$header" in
+    Content-Length:*) len=$(printf '%s' "$header" | tr -dc '0-9') ;;
+    '')
+      body=$(dd bs=1 count="$len" 2>/dev/null)
+      printf '%s\n' "$body" >> '{log}'
+      case "$body" in
+        *'"method":"initialize"'*)
+          id=$(printf '%s' "$body" | sed -E 's/.*"id":([0-9]+).*/\1/')
+          payload='{{"jsonrpc":"2.0","id":'"$id"',"result":{{"capabilities":{{"hoverProvider":true,"definitionProvider":true,"referencesProvider":true}}}}}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${{#payload}}" "$payload"
+          ;;
+      esac
+      ;;
+  esac
+done
+"#,
+            log = log.display()
+        )
+    }
+
+    /// TOML basic-string literal for the fixture script. The script contains
+    /// quotes, backslashes and newlines, none of which may reach the table raw.
+    fn toml_string_literal(value: &str) -> String {
+        let mut out = String::from("\"");
+        for character in value.chars() {
+            match character {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out
     }
 
     #[gpui::test]
