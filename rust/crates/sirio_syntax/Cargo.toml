@@ -1,0 +1,42 @@
+[package]
+name = "sirio_syntax"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# bezel's own classifier: its seven languages, its capture vocabulary, and
+# the `Lang` extension point every grammar below is registered through.
+bezel-syntax.workspace = true
+# The `HighlightKind` those spans are expressed in. Pinned with bezel, and
+# already in the graph underneath it -- `bezel-syntax` takes the same crate
+# at the same version, so this adds an edge, not a dependency.
+theme = { package = "bezel-theme", version = "=0.1.4" }
+
+# One grammar per language `sirio_ui::editor::Language` knows and
+# `bezel-syntax` does not. Each is a C parser plus the grammar author's own
+# highlights.scm; the versions are the ones whose queries are verified to
+# compile by `every_query_compiles_against_its_grammar`.
+#
+# All of them reach tree-sitter through `tree-sitter-language`, never through
+# `tree-sitter` itself, which is what keeps them on the exact tree-sitter
+# `bezel-syntax` was built against. A grammar crate that names a
+# `tree-sitter` version of its own is a grammar crate that cannot be used
+# here: its `Language` is a different type with the same name. That ruled out
+# `tree-sitter-kotlin`, which pins `>= 0.21, < 0.23`, in favour of
+# `tree-sitter-kotlin-sg`.
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-html = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-kotlin-sg = "0.4"
+tree-sitter-lua = "0.5"
+tree-sitter-md = "0.5"
+tree-sitter-php = "0.24"
+tree-sitter-ruby = "0.23"
+tree-sitter-sequel = "0.3"
+tree-sitter-swift = "0.7"
+tree-sitter-xml = "0.7"
+tree-sitter-yaml = "0.7"
+tree-sitter-zig = "1.1"
