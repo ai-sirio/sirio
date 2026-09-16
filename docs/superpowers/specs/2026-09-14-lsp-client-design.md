@@ -230,7 +230,7 @@ already prefers to fail over inventing an install path.
 
 | Failure | Behaviour |
 |---|---|
-| binary not found | a visible notice **naming the command** read from `languages.toml`, once |
+| binary not found | **silence**; the pair is marked dead so it is tried once. Revised 2026-09-16: the original rule was a visible notice naming the command, which was right while the shipped table held four servers — a missing one then meant a typo in `languages.toml`. The table now names one server per language the editor can open, nineteen of them, and nobody has all nineteen, so the notice would appear on nearly every file and drown the row below it. `LspError::NotInstalled` carries the command for any caller that does want to name it |
 | server crashed | that (worktree, language) pair is marked dead; **no automatic restart loop**; restart is offered |
 | malformed frame | the stream is desynchronised and cannot be recovered mid-stream: terminate that server and say so |
 | request unanswered | a per-request timeout answers "no response" instead of hanging the UI |

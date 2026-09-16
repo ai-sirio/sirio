@@ -79,9 +79,13 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
     ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_agents, sirio_activity, sirio_markdown, sirio_usage,
-sirio_registry, sirio_release   (leaves — no local deps beyond sirio_perf;
+sirio_registry, sirio_release, sirio_lsp,
+sirio_syntax                    (leaves — no local deps beyond sirio_perf;
                                  sirio_theme and sirio_ui take the external
-                                 `bezel` crate, pinned `=0.1.4`)
+                                 `bezel` crate, pinned `=0.1.4`, and
+                                 sirio_syntax takes `bezel-syntax` plus the
+                                 fifteen tree-sitter grammars bezel does not
+                                 carry)
     ^
 sirio_acp        (-> sirio_persistence)
 sirio_terminal    (-> sirio_project, sirio_theme)
@@ -90,8 +94,8 @@ sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
 sirio_ui         (-> sirio_acp, sirio_agents, sirio_git, sirio_markdown,
-                      sirio_persistence, sirio_project, sirio_registry, sirio_theme,
-                      sirio_usage)
+                      sirio_persistence, sirio_project, sirio_registry, sirio_syntax,
+                      sirio_theme, sirio_usage)
     ^
 sirio            (the app: main.rs — the only crate that depends on everything above,
                     including sirio_terminal, sirio_control, and sirio_activity, which
@@ -161,6 +165,35 @@ app, and drives the real `Updater` through check → download → verify → app
 on Windows, the real silent spawn of the staged extensionless PE. Run it after any change
 to the three crates or to the compiled-in environment; `Scripts/ci-linux.sh` runs it as a
 stage.
+
+### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
+
+`sirio_ui::editor::Language` is the list of what Sirio recognises — twenty-three
+languages plus plain text, resolved from the extension, never from content. Two
+separate things hang off it, and they failed independently for most of the
+project's life:
+
+- **Colour** is compiled in. `sirio_syntax` holds one tree-sitter grammar per
+  language `bezel-syntax` does not carry, registered through bezel's own
+  `Lang::new` extension point so the spans are ordinary `HighlightKind`s and
+  reach `Theme::syntax_palette` with no second code path. A grammar crate
+  qualifies only if it reaches tree-sitter through `tree-sitter-language`
+  rather than naming a `tree-sitter` version of its own — two tree-sitters in
+  the graph are two unrelated `Language` types with one name.
+- **Navigation** needs a program on `PATH`. `sirio_lsp::LanguageTable::defaults`
+  names one server per language; naming it is not shipping it, and a command
+  that is not installed resolves to `LspError::NotInstalled`, which the shell
+  says nothing about.
+
+The failure mode both halves share is silence: an unlisted language is detected,
+named in the status line, and then rendered as plain text with no action in its
+context menu — indistinguishable from a file with nothing to say. The three
+tests that make the lists agree are
+`sirio_ui`'s `every_language_the_editor_recognises_has_a_grammar`,
+`sirio`'s `every_language_the_editor_recognises_has_a_server`, and
+`sirio_syntax`'s `every_query_compiles_against_its_grammar`.
+`docs/superpowers/specs/2026-09-16-language-coverage-design.md` carries the table
+of which server each language names and why a missing one says nothing.
 
 ### Agent adapters (`sirio_agents`)
 

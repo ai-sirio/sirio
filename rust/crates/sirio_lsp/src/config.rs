@@ -63,7 +63,25 @@ impl LanguageTable {
     }
 
     /// The compiled-in table, used when no file exists and when one exists
-    /// but will not parse. Four languages: the ones the agents work in most.
+    /// but will not parse.
+    ///
+    /// One entry per language `sirio_ui::editor::Language` recognises, so
+    /// the set of files Sirio colours and the set it can answer "go to
+    /// definition" for are the same set. They were not: the table held four
+    /// languages while the editor knew twenty-four, and the twenty
+    /// in between had no way to say so — the context menu simply did not
+    /// offer the action, which reads as "this build has no LSP".
+    ///
+    /// Naming a server is not promising one is installed. Nobody has all
+    /// nineteen of these. A command that is not on `PATH` resolves to
+    /// [`crate::LspError::NotInstalled`], which the shell deliberately says
+    /// nothing about; the entry costs nothing until the day the user
+    /// installs `jdtls`, and then it costs nothing to discover either.
+    ///
+    /// Each command is the one its own project documents, with the
+    /// arguments that put it on stdio. Anything here can be overridden by
+    /// adding an entry for the same extension to `languages.toml`, which is
+    /// consulted first.
     pub fn defaults() -> Self {
         fn entry(
             name: &str,
@@ -99,6 +117,126 @@ impl LanguageTable {
                     &["pyproject.toml", "setup.py", "requirements.txt"],
                 ),
                 entry("go", &["go"], "gopls", &[], &["go.mod"]),
+                // clangd is one server for both languages, and keying it as
+                // one entry is what keeps a project from running two of
+                // them over the same compilation database.
+                entry(
+                    "c",
+                    &["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx"],
+                    "clangd",
+                    &[],
+                    &[
+                        "compile_commands.json",
+                        "compile_flags.txt",
+                        ".clangd",
+                        "CMakeLists.txt",
+                        "Makefile",
+                    ],
+                ),
+                entry(
+                    "java",
+                    &["java"],
+                    "jdtls",
+                    &[],
+                    &[
+                        "pom.xml",
+                        "build.gradle",
+                        "build.gradle.kts",
+                        "settings.gradle",
+                        "settings.gradle.kts",
+                        ".project",
+                    ],
+                ),
+                entry(
+                    "kotlin",
+                    &["kt", "kts"],
+                    "kotlin-language-server",
+                    &[],
+                    &[
+                        "settings.gradle.kts",
+                        "settings.gradle",
+                        "build.gradle.kts",
+                        "pom.xml",
+                    ],
+                ),
+                entry("swift", &["swift"], "sourcekit-lsp", &[], &["Package.swift"]),
+                entry(
+                    "ruby",
+                    &["rb"],
+                    "ruby-lsp",
+                    &[],
+                    &["Gemfile", ".ruby-version"],
+                ),
+                entry(
+                    "php",
+                    &["php"],
+                    "intelephense",
+                    &["--stdio"],
+                    &["composer.json"],
+                ),
+                entry(
+                    "lua",
+                    &["lua"],
+                    "lua-language-server",
+                    &[],
+                    &[".luarc.json", ".luarc.jsonc", "stylua.toml"],
+                ),
+                entry(
+                    "zig",
+                    &["zig"],
+                    "zls",
+                    &[],
+                    &["build.zig", "build.zig.zon"],
+                ),
+                entry(
+                    "yaml",
+                    &["yaml", "yml"],
+                    "yaml-language-server",
+                    &["--stdio"],
+                    &[],
+                ),
+                // The three servers VS Code's own web tooling is published
+                // as, and the only maintained ones for these languages.
+                entry(
+                    "json",
+                    &["json", "jsonc"],
+                    "vscode-json-language-server",
+                    &["--stdio"],
+                    &[],
+                ),
+                entry(
+                    "html",
+                    &["html", "htm"],
+                    "vscode-html-language-server",
+                    &["--stdio"],
+                    &[],
+                ),
+                entry(
+                    "css",
+                    &["css"],
+                    "vscode-css-language-server",
+                    &["--stdio"],
+                    &[],
+                ),
+                // `start` is the subcommand; without it the binary prints
+                // usage and exits, which reads as a server that died.
+                entry(
+                    "bash",
+                    &["sh", "bash", "zsh"],
+                    "bash-language-server",
+                    &["start"],
+                    &[],
+                ),
+                entry("toml", &["toml"], "taplo", &["lsp", "stdio"], &[]),
+                entry(
+                    "markdown",
+                    &["md", "markdown"],
+                    "marksman",
+                    &["server"],
+                    &[".marksman.toml"],
+                ),
+                entry("xml", &["xml"], "lemminx", &[], &[]),
+                entry("sql", &["sql"], "sqls", &[], &[]),
             ],
         }
     }
@@ -193,20 +331,82 @@ roots = ["go.mod"]
         assert!(table.for_path(std::path::Path::new("/tmp/x/README")).is_none());
     }
 
+    /// The table and `sirio_ui::editor::Language` have to agree on which
+    /// files Sirio understands. This crate cannot see that enum — it sits
+    /// below it — so the pairing is checked from `sirio`, in
+    /// `lsp::tests::every_language_the_editor_recognises_has_a_server`.
+    /// What is checked here is the table's own content.
     #[test]
-    fn the_shipped_defaults_cover_rust_typescript_python_and_go() {
+    fn the_shipped_defaults_name_a_server_for_every_language_sirio_opens() {
         let defaults = LanguageTable::defaults();
         for (extension, command) in [
             ("rs", "rust-analyzer"),
             ("ts", "typescript-language-server"),
             ("py", "pyright-langserver"),
             ("go", "gopls"),
+            ("c", "clangd"),
+            ("cpp", "clangd"),
+            ("java", "jdtls"),
+            ("kt", "kotlin-language-server"),
+            ("swift", "sourcekit-lsp"),
+            ("rb", "ruby-lsp"),
+            ("php", "intelephense"),
+            ("lua", "lua-language-server"),
+            ("zig", "zls"),
+            ("yml", "yaml-language-server"),
+            ("json", "vscode-json-language-server"),
+            ("html", "vscode-html-language-server"),
+            ("css", "vscode-css-language-server"),
+            ("sh", "bash-language-server"),
+            ("toml", "taplo"),
+            ("md", "marksman"),
+            ("xml", "lemminx"),
+            ("sql", "sqls"),
         ] {
             let entry = defaults
                 .for_extension(extension)
                 .unwrap_or_else(|| panic!("no default entry for .{extension}"));
-            assert_eq!(entry.command, command);
+            assert_eq!(entry.command, command, "for .{extension}");
         }
+    }
+
+    #[test]
+    fn no_two_default_entries_claim_the_same_extension() {
+        // `for_extension` takes the first match, so a duplicate would
+        // silently shadow — and C and C++ sharing one clangd entry is
+        // exactly the shape that makes this easy to get wrong.
+        let defaults = LanguageTable::defaults();
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        for entry in defaults.entries() {
+            for extension in &entry.extensions {
+                if let Some((_, owner)) = seen
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(extension))
+                {
+                    panic!(
+                        ".{extension} is claimed by both `{owner}` and `{}`",
+                        entry.name
+                    );
+                }
+                seen.push((extension, &entry.name));
+            }
+        }
+    }
+
+    #[test]
+    fn every_default_entry_has_a_distinct_name() {
+        // The name is half the key a running server is stored under, so two
+        // entries sharing one would share a server.
+        let defaults = LanguageTable::defaults();
+        let mut names: Vec<&str> = defaults
+            .entries()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "duplicate language name in the defaults");
     }
 
     #[test]

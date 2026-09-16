@@ -543,6 +543,90 @@ mod tests {
         assert_eq!(converted[1].kind, sirio_ui::outline::OutlineKind::Field);
     }
 
+    /// One filename per language the editor recognises, and the language it
+    /// must resolve to. Two lists that have to agree — the editor's and the
+    /// server table's — and this is the only place both are visible, since
+    /// `sirio_lsp` sits below `sirio_ui` and cannot see `Language` at all.
+    const SAMPLE_FILES: &[(sirio_ui::editor::Language, &str)] = &[
+        (sirio_ui::editor::Language::Markdown, "README.md"),
+        (sirio_ui::editor::Language::Rust, "main.rs"),
+        (sirio_ui::editor::Language::Python, "app.py"),
+        (sirio_ui::editor::Language::JavaScript, "index.js"),
+        (sirio_ui::editor::Language::TypeScript, "index.ts"),
+        (sirio_ui::editor::Language::Shell, "build.sh"),
+        (sirio_ui::editor::Language::Json, "package.json"),
+        (sirio_ui::editor::Language::Yaml, "ci.yml"),
+        (sirio_ui::editor::Language::Toml, "Cargo.toml"),
+        (sirio_ui::editor::Language::C, "main.c"),
+        (sirio_ui::editor::Language::Cpp, "main.cpp"),
+        (sirio_ui::editor::Language::Go, "main.go"),
+        (sirio_ui::editor::Language::Swift, "App.swift"),
+        (sirio_ui::editor::Language::Kotlin, "Main.kt"),
+        (sirio_ui::editor::Language::Java, "Main.java"),
+        (sirio_ui::editor::Language::Ruby, "app.rb"),
+        (sirio_ui::editor::Language::Php, "index.php"),
+        (sirio_ui::editor::Language::Html, "index.html"),
+        (sirio_ui::editor::Language::Css, "site.css"),
+        (sirio_ui::editor::Language::Sql, "schema.sql"),
+        (sirio_ui::editor::Language::Xml, "pom.xml"),
+        (sirio_ui::editor::Language::Lua, "init.lua"),
+        (sirio_ui::editor::Language::Zig, "main.zig"),
+    ];
+
+    /// What "Java isn't there" actually was. The editor recognised
+    /// `Main.java`, named it in the status line, and the shipped table had
+    /// no entry for `.java` — so no server started, no capability was
+    /// negotiated, and "Go to Definition" was never offered. Nothing
+    /// reported a gap at any layer; the action simply was not in the menu.
+    #[test]
+    fn every_language_the_editor_recognises_has_a_server() {
+        let table = sirio_lsp::LanguageTable::defaults();
+        for (language, file) in SAMPLE_FILES {
+            let path = std::path::Path::new(file);
+            assert_eq!(
+                sirio_ui::editor::Language::from_path(path),
+                *language,
+                "{file} is the sample for {}, so it has to resolve to it",
+                language.name()
+            );
+            assert!(
+                table.for_path(path).is_some(),
+                "{} is offered in the editor with no server entry for {file}",
+                language.name()
+            );
+        }
+        for language in sirio_ui::editor::Language::ALL {
+            if language.is_plain_text() {
+                continue;
+            }
+            assert!(
+                SAMPLE_FILES.iter().any(|(sample, _)| *sample == language),
+                "{} was added to the editor and never checked here",
+                language.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_the_editor_cannot_colour_gets_no_server_either() {
+        // The other direction. A `.txt` has no language and must not drag a
+        // server in; every extension the table claims must be one the
+        // editor recognises, or the two lists have drifted.
+        let table = sirio_lsp::LanguageTable::defaults();
+        assert!(table.for_path(std::path::Path::new("notes.txt")).is_none());
+        for entry in table.entries() {
+            for extension in &entry.extensions {
+                let file = format!("sample.{extension}");
+                let language = sirio_ui::editor::Language::from_path(std::path::Path::new(&file));
+                assert!(
+                    !language.is_plain_text(),
+                    "`{}` claims .{extension}, which the editor renders as plain text",
+                    entry.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn capabilities_are_absent_while_no_server_runs() {
         // Nothing is running in a fresh supervisor, so every question about
