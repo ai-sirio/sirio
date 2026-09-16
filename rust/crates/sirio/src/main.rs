@@ -10650,7 +10650,7 @@ impl SirioWorkspace {
         // A table that will not parse is reported once, at the moment it was
         // noticed. The defaults carry on underneath it.
         if let sirio_lsp::Reload::Failed { message } = reload {
-            view.update(cx, |view, cx| view.set_notice(message, cx));
+            view.update(cx, |view, cx| view.set_message(message, cx));
         }
         let Some(entry) = entry else { return };
         let Some(worktree_root) = self.worktree_root_for(path) else {
@@ -10699,7 +10699,7 @@ impl SirioWorkspace {
                     // Naming the command is the point: it came from the
                     // user's languages.toml, and naming it turns a mystery
                     // into a line they can edit.
-                    view.update(cx, |view, cx| view.set_notice(error.to_string(), cx));
+                    view.update(cx, |view, cx| view.set_message(error.to_string(), cx));
                 }
             });
         })
@@ -10941,9 +10941,13 @@ impl SirioWorkspace {
                     }
                     // An honest answer, not silence: the user pressed
                     // something and deserves to know it was heard.
-                    None => view.update(cx, |view, cx| view.set_notice("No definition found", cx)),
+                    None => view.update(cx, |view, cx| {
+                        view.answer_definition("No definition found", cx)
+                    }),
                 },
-                Err(error) => view.update(cx, |view, cx| view.set_notice(error.to_string(), cx)),
+                Err(error) => {
+                    view.update(cx, |view, cx| view.answer_definition(error.to_string(), cx))
+                }
             });
         })
         .detach();
@@ -15282,7 +15286,7 @@ impl SirioWorkspace {
         for view in views {
             if let Err(error) = view.update(cx, |view, cx| view.save(cx)) {
                 view.update(cx, |view, cx| {
-                    view.set_notice(format!("[files] save failed: {error}"), cx)
+                    view.set_message(format!("[files] save failed: {error}"), cx)
                 });
             }
         }
@@ -19435,6 +19439,260 @@ mod tests {
                 .expect("a full-text change"),
             "fn renamed() {}\n",
             "the change carries the edited buffer"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A language server that answers `initialize` and, unlike its recording
+    /// sibling, `textDocument/definition` too — with whatever `result` the
+    /// caller asks for: `null` for "nothing is defined here", a Location
+    /// array for a hit. It still records every body it is handed, so a test
+    /// can wait on the wire instead of on a clock.
+    #[cfg(unix)]
+    fn defining_server_script(log: &Path, definition_result: &str) -> String {
+        format!(
+            r#"
+while IFS= read -r line; do
+  header=$(printf '%s' "$line" | tr -d '\r')
+  case "$header" in
+    Content-Length:*) len=$(printf '%s' "$header" | tr -dc '0-9') ;;
+    '')
+      body=$(dd bs=1 count="$len" 2>/dev/null)
+      printf '%s\n' "$body" >> '{log}'
+      id=$(printf '%s' "$body" | sed -E 's/.*"id":([0-9]+).*/\1/')
+      case "$body" in
+        *'"method":"initialize"'*)
+          payload='{{"jsonrpc":"2.0","id":'"$id"',"result":{{"capabilities":{{"hoverProvider":true,"definitionProvider":true,"referencesProvider":true}}}}}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${{#payload}}" "$payload"
+          ;;
+        *'"method":"textDocument/definition"'*)
+          payload='{{"jsonrpc":"2.0","id":'"$id"',"result":{result}}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${{#payload}}" "$payload"
+          ;;
+      esac
+      ;;
+  esac
+done
+"#,
+            log = log.display(),
+            result = definition_result,
+        )
+    }
+
+    /// Boots a workspace whose one language server answers `definition` with
+    /// `result`, opens `files` in it, and hands back everything the two
+    /// navigation tests below need. Split out because the boot is twenty
+    /// lines of fixture that say nothing about either behaviour.
+    #[cfg(unix)]
+    async fn workspace_with_defining_server(
+        cx: &mut TestAppContext,
+        tag: &str,
+        definition_result_for: impl Fn(&Path) -> String,
+        files: &[(&str, &str)],
+    ) -> (
+        VisualTestContext,
+        Entity<SirioWorkspace>,
+        PathBuf,
+        Vec<PathBuf>,
+    ) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-{}-{}-{}",
+            tag,
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        let log = scratch.join("wire.log");
+
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the root marker");
+        let written: Vec<PathBuf> = files
+            .iter()
+            .map(|(name, text)| {
+                let path = repo.join(name);
+                std::fs::write(&path, text).expect("write a fixture file");
+                path
+            })
+            .collect();
+
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            format!(
+                "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"/bin/sh\"\nargs = [\"-c\", {}]\nroots = [\"Cargo.toml\"]\n",
+                toml_string_literal(&defining_server_script(
+                    &log,
+                    &definition_result_for(&repo)
+                ))
+            ),
+        )
+        .expect("write the answering language table");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.cx.executor().allow_parking();
+        let workspace = visual.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut visual, |workspace, cx| {
+            workspace.add_file_tab(written[0].clone(), cx);
+        });
+        for _ in 0..200 {
+            visual.run_until_parked();
+            if workspace.update(&mut visual, |workspace, _| {
+                workspace.lsp.is_running(&(repo.clone(), "rust".to_owned()))
+            }) {
+                break;
+            }
+            visual
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+
+        (visual, workspace, scratch, written)
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_definition_that_is_not_found_leaves_the_file_on_screen(cx: &mut TestAppContext) {
+        // "No definition found" answers a gesture. It does not say the
+        // surface cannot show the file — but routing it through `set_notice`
+        // made it exactly that: `render_state` returns the notice before it
+        // ever looks at the content, and the notice fills the view. Nothing
+        // in the app calls `clear_notice`, so the file stayed gone until the
+        // tab was closed.
+        let (mut cx, workspace, scratch, files) =
+            workspace_with_defining_server(cx, "nodef", |_| "null".to_owned(), &[(
+                "only.rs",
+                "fn only() -> u32 {\n    7\n}\n",
+            )])
+            .await;
+        let source = files[0].clone();
+
+        let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.go_to_definition(source.clone(), 3, view.clone(), cx);
+        });
+
+        // Wait for the answer to be on screen in whichever shape it takes:
+        // either surface means the round trip finished, so the assertions
+        // below are about presentation and not about timing.
+        let mut delivered = false;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+            });
+            if cx.debug_bounds("file-view-message").is_some()
+                || cx.debug_bounds("file-view-notice").is_some()
+            {
+                delivered = true;
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        assert!(delivered, "the server's answer reached the view");
+
+        assert!(
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "the file is still on screen behind the answer, not replaced by it"
+        );
+        assert!(
+            cx.debug_bounds("file-view-notice").is_none(),
+            "a missing definition is not a reason to blank the surface"
+        );
+        assert!(
+            cx.debug_bounds("file-view-message").is_some(),
+            "and the answer itself is on screen: silence would be worse"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_found_definition_opens_the_target_in_its_own_tab(cx: &mut TestAppContext) {
+        // The other half of the same gesture: an answer that names a file
+        // opens that file, in its own tab, rather than reusing the one the
+        // question was asked from.
+        let (mut cx, workspace, scratch, files) = workspace_with_defining_server(
+            cx,
+            "gotodef",
+            |repo| {
+                let uri = sirio_lsp::uri_for_path(&repo.join("target.rs"))
+                    .expect("a file uri for the target");
+                let uri = uri.as_str();
+                format!(
+                    "[{{\"uri\":\"{uri}\",\"range\":{{\"start\":{{\"line\":1,\"character\":3}},\"end\":{{\"line\":1,\"character\":9}}}}}}]"
+                )
+            },
+            &[
+                ("caller.rs", "fn caller() {\n    target();\n}\n"),
+                ("target.rs", "// head\nfn target() -> u32 {\n    7\n}\n"),
+            ],
+        )
+        .await;
+        let source = files[0].clone();
+
+        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
+        let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.go_to_definition(source.clone(), 18, view.clone(), cx);
+        });
+
+        let mut opened = false;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().any(|tab| tab.title == "target.rs")
+            }) {
+                opened = true;
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+
+        let titles = workspace
+            .read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.title.clone())
+                    .collect::<Vec<_>>()
+            })
+            .join(", ");
+        assert!(
+            opened,
+            "the definition's file opens in its own tab; open tabs were: {titles}"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            before + 1,
+            "exactly one tab is added, not one per pane; open tabs were: {titles}"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
@@ -27430,7 +27688,7 @@ done
 
     #[cfg(target_os = "linux")]
     #[gpui::test]
-    async fn drawn_save_failure_surfaces_file_notice(cx: &mut TestAppContext) {
+    async fn drawn_save_failure_is_visible_without_hiding_the_file(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let path = PathBuf::from("/proc/self/status");
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
@@ -27469,8 +27727,12 @@ done
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("file-view-notice").is_some(),
+            cx.debug_bounds("file-view-message").is_some(),
             "a real read-only procfs save failure must be visible in the file view"
+        );
+        assert!(
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "and the text that failed to save is still on screen to be rescued"
         );
     }
 

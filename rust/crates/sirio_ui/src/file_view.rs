@@ -67,6 +67,26 @@ pub enum MarkdownMode {
     Preview,
 }
 
+/// A message the shell raises about an open file: a definition that does
+/// not exist, a save that failed, a language table that would not parse.
+///
+/// It is deliberately not the same thing as the messages `ViewState` shows
+/// ("Unable to open this file."). Those describe a surface that genuinely
+/// has nothing to display and are right to fill it. These answer something
+/// the user just did while the file is sitting there perfectly readable, so
+/// filling the surface with one throws away the very thing being talked
+/// about — and a failed save is the sharpest case, because it erases the
+/// text the user is trying to rescue. The two shared one field once; that
+/// is the whole of this bug.
+struct TransientMessage {
+    text: String,
+    /// Window-absolute point of the gesture that provoked it, when there
+    /// was one. `None` for messages nothing pointed at — a failed save, a
+    /// server that would not launch — which settle into the view's corner
+    /// instead of appearing at a stale coordinate.
+    at: Option<Point<Pixels>>,
+}
+
 /// A tab showing one path. The entity remains owned by the workspace while
 /// another tab is active, so switching away never reloads or loses content
 /// — and the editor's dirty/conflict state survives tab switches, which is
@@ -77,8 +97,17 @@ pub struct FileView {
     load_task: Option<Task<()>>,
     file_monitor: Option<FileSystemEventMonitor>,
     _file_monitor_task: Option<Task<()>>,
-    /// A user-visible message raised by the shell, such as a failed save.
-    notice: Option<String>,
+    /// A message that answers something the user just did: a definition
+    /// that does not exist, a save that failed, a language server that
+    /// would not start. It is *about* the file, never instead of it —
+    /// see `TransientMessage` for why that distinction is load-bearing.
+    message: Option<TransientMessage>,
+    /// Where the gesture asking "where is this defined?" happened,
+    /// window-absolute, so the answer can be put back where the question
+    /// was asked. Recorded when the request is made because the two places
+    /// that can ask — the context menu and platform-click — both know the
+    /// point and neither survives the round trip to the server.
+    definition_gesture: Option<Point<Pixels>>,
     /// F-EDIT-01: which Markdown mode is active. Only meaningful for
     /// Markdown files; other languages always render as code. A large
     /// Markdown file (preview locked, F-EDIT-03) starts in Code with the
@@ -273,7 +302,7 @@ impl FileView {
             load_task: Some(load_task),
             file_monitor,
             _file_monitor_task: file_monitor_task,
-            notice: None,
+            message: None,
             markdown_mode: MarkdownMode::Preview,
             source_selection: None,
             caret: 0,
@@ -286,6 +315,7 @@ impl FileView {
             editor_caret_visible: false,
             scroll: SurfaceScroll::new(Painter::of(cx)),
             context_menu: None,
+            definition_gesture: None,
             shell_facts: FileContextFacts::default(),
             diagnostics: Vec::new(),
             hover_offset: None,
@@ -331,14 +361,32 @@ impl FileView {
         self.editor().map_or(Conflict::None, Editor::conflict)
     }
 
-    pub fn set_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
-        self.notice = Some(notice.into());
+    /// Raises a message about this file that nothing pointed at — a save
+    /// that failed, a server that would not launch. It settles in the
+    /// view's corner, over the content rather than in place of it.
+    pub fn set_message(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.message = Some(TransientMessage {
+            text: text.into(),
+            at: None,
+        });
         cx.notify();
     }
 
-    pub fn clear_notice(&mut self, cx: &mut Context<Self>) {
-        self.notice = None;
+    /// Answers the definition gesture where it was made. The recorded point
+    /// is consumed: a later message that nothing pointed at must not
+    /// inherit this one's coordinate.
+    pub fn answer_definition(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.message = Some(TransientMessage {
+            text: text.into(),
+            at: self.definition_gesture.take(),
+        });
         cx.notify();
+    }
+
+    pub fn dismiss_message(&mut self, cx: &mut Context<Self>) {
+        if self.message.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Called by the workspace when the tab is opened and whenever the facts
@@ -438,7 +486,17 @@ impl FileView {
         cx.notify();
     }
 
-    pub fn request_definition(&mut self, offset: usize, cx: &mut Context<Self>) {
+    /// Asks where the symbol at `offset` is defined. `at` is where the
+    /// gesture happened, kept so the answer can be shown there; both real
+    /// callers know it, and it is the last moment anyone does.
+    pub fn request_definition(
+        &mut self,
+        offset: usize,
+        at: Option<Point<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.definition_gesture = at;
+        self.message = None;
         cx.emit(FileViewEvent::GoToDefinition {
             path: self.path.clone(),
             offset,
@@ -510,6 +568,10 @@ impl FileView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Read the menu's own point before dismissing it: `dismiss` takes
+        // the Option, and for Go to Definition that coordinate is the only
+        // record of where the user was looking.
+        let gesture = self.context_menu;
         self.dismiss_context_menu(cx);
         match action {
             FileContextAction::Copy => self.copy_selection(false, cx),
@@ -551,10 +613,7 @@ impl FileView {
                 cx.emit(FileViewEvent::ViewFileHistory(self.path.clone()));
             }
             FileContextAction::GoToDefinition => {
-                cx.emit(FileViewEvent::GoToDefinition {
-                    path: self.path.clone(),
-                    offset: self.caret,
-                });
+                self.request_definition(self.caret, gesture, cx);
             }
             FileContextAction::FindReferences => {
                 cx.emit(FileViewEvent::FindReferences {
@@ -1101,10 +1160,6 @@ impl FileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(message) = &self.notice {
-            return notice(message.clone(), theme);
-        }
-
         match &self.state {
             ViewState::Loading => div()
                 .id("file-loading")
@@ -1322,14 +1377,40 @@ impl Render for FileView {
             )
             .priority(1)
         });
+        // Where the answer goes. A gesture puts it back where the question
+        // was asked; a message nothing pointed at settles into the corner,
+        // because a stale coordinate is worse than an honest default.
+        // Either way it sits *over* the file — priority 2 so it stays above
+        // the menu that may have raised it.
+        let message = self.message.as_ref().map(|message| {
+            let card = message_card(&message.text, theme, entity.clone());
+            match message.at {
+                Some(at) => deferred(
+                    anchored()
+                        .position(at + point(px(8.), px(14.)))
+                        .snap_to_window()
+                        .child(card),
+                )
+                .priority(2)
+                .into_any_element(),
+                None => div()
+                    .absolute()
+                    .bottom(px(16.0))
+                    .right(px(16.0))
+                    .child(card)
+                    .into_any_element(),
+            }
+        });
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(theme.surface)
             .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
+            .when_some(message, |this, card| this.child(card))
             .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
@@ -2222,7 +2303,10 @@ impl Element for EditableLine {
                         } else {
                             // Not a link — in a code file the same gesture
                             // means "where is this defined?".
-                            view.update(cx, |view, cx| view.request_definition(up_global, cx));
+                            let at = Some(event.position);
+                            view.update(cx, |view, cx| {
+                                view.request_definition(up_global, at, cx)
+                            });
                         }
                     }
                 }
@@ -2281,6 +2365,34 @@ fn hover_card(text: &str, theme: Theme) -> AnyElement {
         .text_size(theme.typography.code_size)
         .text_color(theme.text)
         .child(text.to_owned())
+        .into_any_element()
+}
+
+/// The transient-message card. `menu_surface` for the same reason the
+/// context menu uses it: something an interaction puts up to be read must
+/// stay opaque when the window blurs. A click anywhere on it dismisses it,
+/// which is the dismissal the old full-surface notice never had.
+fn message_card(text: &str, theme: Theme, entity: gpui::Entity<FileView>) -> AnyElement {
+    div()
+        .id("file-view-message")
+        .debug_selector(|| "file-view-message".into())
+        .max_w(px(420.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .bg(theme.menu_surface())
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radii.control)
+        .font_family(theme.typography.ui_family)
+        .text_size(theme.typography.base_size)
+        .text_color(theme.text)
+        .child(text.to_owned())
+        .on_mouse_down(
+            MouseButton::Left,
+            move |_, _, cx| {
+                entity.update(cx, |view, cx| view.dismiss_message(cx));
+            },
+        )
         .into_any_element()
 }
 
@@ -2831,8 +2943,14 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn a_file_notice_is_drawn_and_can_be_cleared(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::new("notice", "hello\n");
+    async fn a_file_message_sits_over_the_file_and_can_be_dismissed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A failed save is the case that makes the rule obvious: the text
+        // the user is trying to rescue must stay on screen while they are
+        // being told it was not written. This used to replace the file with
+        // the sentence, permanently — nothing in the app cleared it.
+        let file = TempFile::new("message", "hello\n");
 
         cx.update(|cx| {
             Theme::init(cx);
@@ -2844,7 +2962,7 @@ mod tests {
 
         cx.update(|window, cx| {
             let view = window.root::<FileView>().flatten().expect("root");
-            view.update(cx, |view, cx| view.set_notice("save failed", cx));
+            view.update(cx, |view, cx| view.set_message("save failed", cx));
         });
         cx.update(|window, cx| {
             window.refresh();
@@ -2852,13 +2970,17 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-view-notice").is_some(),
-            "a raised notice is drawn in the file view"
+            cx.debug_bounds("file-view-message").is_some(),
+            "a raised message is drawn in the file view"
+        );
+        assert!(
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "and the file is still drawn underneath it, not replaced by it"
         );
 
         cx.update(|window, cx| {
             let view = window.root::<FileView>().flatten().expect("root");
-            view.update(cx, |view, cx| view.clear_notice(cx));
+            view.update(cx, |view, cx| view.dismiss_message(cx));
         });
         cx.update(|window, cx| {
             window.refresh();
@@ -2866,8 +2988,74 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-view-notice").is_none(),
-            "clearing the notice removes it from the drawn frame"
+            cx.debug_bounds("file-view-message").is_none(),
+            "dismissing the message removes it from the drawn frame"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_definition_answer_is_placed_at_the_gesture_that_asked(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The whole point of recording the gesture: the answer appears next
+        // to where the user was looking, not in the corner and not over the
+        // whole file.
+        let file = TempFile::new("gesture", "fn thing() -> u32 {\n    7\n}\n");
+
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let asked_at = point(px(220.), px(140.));
+        cx.update(|window, cx| {
+            let view = window.root::<FileView>().flatten().expect("root");
+            view.update(cx, |view, cx| {
+                view.request_definition(4, Some(asked_at), cx);
+                view.answer_definition("No definition found", cx);
+            });
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let bounds = cx
+            .debug_bounds("file-view-message")
+            .expect("the answer is drawn");
+        assert!(
+            (bounds.origin.x - asked_at.x).abs() < px(40.)
+                && (bounds.origin.y - asked_at.y).abs() < px(40.),
+            "the answer is drawn beside the gesture at {asked_at:?}, not at {:?}",
+            bounds.origin
+        );
+        assert!(
+            bounds.size.height < px(120.),
+            "and it is a card, not a takeover: {:?} high",
+            bounds.size.height
+        );
+
+        // The point is consumed with the answer: a later message that
+        // nothing pointed at must not inherit this coordinate.
+        cx.update(|window, cx| {
+            let view = window.root::<FileView>().flatten().expect("root");
+            view.update(cx, |view, cx| view.set_message("save failed", cx));
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let corner = cx
+            .debug_bounds("file-view-message")
+            .expect("the later message is drawn");
+        assert!(
+            (corner.origin.y - asked_at.y).abs() > px(40.),
+            "a message nothing pointed at does not reuse the old gesture point"
         );
     }
 
@@ -3075,7 +3263,7 @@ mod tests {
             .detach();
         });
 
-        view.update(&mut cx.cx, |view, cx| view.request_definition(12, cx));
+        view.update(&mut cx.cx, |view, cx| view.request_definition(12, None, cx));
         cx.cx.run_until_parked();
         assert_eq!(&*events.borrow(), &[12]);
     }
