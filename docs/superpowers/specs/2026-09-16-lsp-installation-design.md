@@ -152,11 +152,20 @@ estimated.
 |---|---|---|
 | npm | 8 | typescript-language-server, pyright, intelephense, yaml-language-server, bash-language-server, and json + html + css |
 | binary, format already supported | 5 | clangd `.zip`, lua-language-server `.tar.gz`, marksman (bare executable), sqls `.zip`, lemminx `.zip` |
-| binary, needs a format added | 3 | rust-analyzer `.gz`, taplo `.gz`, zls `.tar.xz` |
-| `Manual` — a toolchain must come first | 5 | gopls (Go), ruby-lsp (Ruby), jdtls (a JVM), kotlin-language-server (a JVM), sourcekit-lsp (Xcode) |
+| binary, needs a format added | 2 | rust-analyzer `.gz`, taplo `.gz` |
+| `Manual` — something must come first | 6 | gopls (Go), ruby-lsp (Ruby), jdtls (a JVM), kotlin-language-server (a JVM), sourcekit-lsp (Xcode), zls (see below) |
 
-Sixteen of twenty-one installable; five honest about why not. Zed installs
+Fifteen of twenty-one installable; six honest about why not. Zed installs
 thirteen and refers the rest to extensions.
+
+**zls is the one that moved during planning.** It publishes only `.tar.xz`,
+which `unpack_kind` names `Unsupported`, so it takes the `Manual` arm rather
+than dragging xz support into this work. The distinction the design turns on
+is not "we could not be bothered" but "there is a named thing standing in the
+way", and an unsupported archive format is exactly that — it simply happens to
+be ours rather than the reader's. Adding xz later moves one row and changes
+nothing else, which is the test that this was the right place to draw the
+line.
 
 ## §4 The data
 
@@ -168,16 +177,26 @@ pub install: Option<Recipe>,
 ```
 
 `Recipe` is plain data in `sirio_lsp`, with no dependency on
-`sirio_registry` — both stay leaves:
+`sirio_registry` — both stay leaves. `Release` carries **one asset per
+platform**, not one asset: `Installer::install` resolves
+`Distribution::Binary(map).get(platform_key)`, so a single-platform recipe
+could never be handed to it.
 
 ```rust
 pub enum Recipe {
     /// One npm package at one version. `bin` names which executable inside
     /// it, because three languages share `vscode-langservers-extracted`.
     Npm { package: &'static str, version: &'static str, bin: &'static str },
-    /// A pinned release asset. See §7 for why version, hash and size are
-    /// written here rather than queried.
-    Release { url: &'static str, sha256: &'static str, bytes: u64, bin: &'static str },
+    /// A pinned release asset per platform, keyed by
+    /// `sirio_registry::current_platform_key()`'s spelling. A platform the
+    /// project publishes nothing for is simply absent. See §7 for why the
+    /// version, hash and size are written here rather than queried.
+    Release {
+        id: &'static str,
+        version: &'static str,
+        bin: &'static str,
+        assets: &'static [(&'static str, Asset)],
+    },
     /// Why it cannot be installed, in terms a reader can act on.
     Manual { needs: &'static str, url: &'static str },
 }
@@ -351,12 +370,19 @@ sha256 and size as well.
 
 ```rust
 Recipe::Release {
-    url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
-    sha256: "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
-    bytes: 114_790_601,
+    id: "clangd",
+    version: "22.1.6",
     bin: "clangd_22.1.6/bin/clangd",
+    assets: &[("linux-x86_64", Asset {
+        url: "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip",
+        sha256: "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
+        bytes: 114_790_601,
+    })],
 }
 ```
+
+`Scripts/lsp-recipes.sh` generates these from the release API rather than
+having them retyped; refreshing a server is running it again.
 
 Three consequences:
 
@@ -383,7 +409,7 @@ the right default and is worth re-checking per recipe: a server whose
 postinstall step fetches its real payload will install empty and silent
 otherwise.
 
-### Node, for eight of the sixteen
+### Node, for eight of the fifteen
 
 The npm recipes run through `install_npx`, which shells out to `npm`. Without
 Node they fail — *after* the click, which is the worst moment to find out. So
@@ -452,8 +478,8 @@ things that touch the network and which `ci.sh` does not run:
 - **`test-lsp-install-e2e.sh`** — installs a real server into a temporary
   store, launches it, asks it for a definition. The same shape as
   `sirio_lsp/examples/lsp_probe.rs`, which is already written.
-- **`test-lsp-recipes.sh`** — the sixteen pinned recipes, each checked the
-  way its own arm can be: the eight release URLs still resolve and still
+- **`test-lsp-recipes.sh`** — the fifteen pinned recipes, each checked the
+  way its own arm can be: the seven release URLs still resolve and still
   hash to what is written, and the eight pinned `package@version` specs
   still exist on the registry. Goes red when upstream deletes a release or
   unpublishes a version, which is the only way to learn it before a reader
