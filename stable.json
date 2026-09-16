@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.17.1",
-  "notes": "Three fixes to the file editor 0.17.0 shipped.\n\n**Go to Definition works on the second file you open, not just the first**\n\nOpening a file told its language server the file was empty. The buffer\nis read in the background, and the tab asked its server about the file\nbefore that read had landed — so the server was handed `\"\"` and kept it,\nbecause nothing ever sent it a correction afterwards. Every question\nasked against that file then failed on a position the server believed\nwas past the end of a zero-length document:\n\n```\nlanguage server returned error -32603: Invalid offset\nLineCol { line: 36, col: 28 } (line index length: 0)\n```\n\nIt looked intermittent because it was: the first file you open in a\nproject waits for its server to start, and that wait is usually longer\nthan the file read, so that one worked. Every file after it went to an\nalready-running server and did not wait for anything.\n\nA file now tells its server what is in it the moment there is anything\nto tell, and an edit reaches the server too — which it did not before,\nso hover and definition on an edited file described text that was no\nlonger there.\n\n**Code reads like code**\n\nSyntax highlighting was parsing every file properly and then throwing\nmost of the answer away: of the twenty-four kinds of token the parser\ndistinguishes, three survived to the screen. Types, functions, macros,\nproperties, operators and punctuation were painted as plain text, and a\nnumber came out in the same colour as a string, because both had been\nfiled under \"literal\" on the way.\n\nEvery kind the parser finds is now painted, with the token colours Zed\nuses: keywords purple, strings green, numbers orange, types yellow,\nfunctions blue, punctuation dimmed so a dense line does not read as\nnoise. Plain identifiers stay your theme's text colour, so the palette\nstill follows the theme and the appearance you chose.\n\n**Menus you can read**\n\nThe editor's right-click menu, its hover card and the terminal's\nright-click menu were painted on a surface that goes translucent along\nwith the panels when the window is blurred — at 70% opacity, with the\ndesktop showing through the entries. A menu is something an interaction\nputs up to be read, so all three now stay opaque over a blurred shell,\nthe way dialogs and toasts already did.",
+  "version": "0.17.2",
+  "notes": "One fix to the file editor, to a message that took the file away.\n\n**A message about your file is no longer shown instead of it**\n\nAsking where something is defined, and getting no answer, replaced the\nwhole editor with the sentence \"No definition found\" — and left it\nthere. Nothing in the app ever took it back down, so the file stayed\ngone until you closed the tab and opened it again.\n\nFour other messages went the same way, for the same reason: a language\ntable that would not parse, a language server that would not start, an\nerror answering a definition, and a failed save. The last is the worst\nof them, because it removed from the screen exactly the text you were\ntrying to rescue.\n\nAll five now appear on a small card over the file, which stays where it\nis and stays readable. A click dismisses the card.\n\n**And the answer appears where you asked the question**\n\nAn answer about a definition is shown next to the place you asked —\nwhere you right-clicked, or where you held the platform key and clicked\n— rather than in the middle of the window. Messages that nothing\npointed at, like a failed save, settle into the corner of the view\ninstead of borrowing a position from somewhere you are no longer\nlooking.\n\nWhen a definition *is* found, its file opens in its own tab, and an\nalready-open file is brought forward rather than opened twice. That part\nalready worked; it had simply never been covered by a test, and now it\nis. It looked broken in 0.17.0 because every request failed before it\ncould get that far — that was 0.17.1's fix.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.1/Sirio-0.17.1.dmg",
-      "sha256": "d14b3b691d86ddc9e0fb6603e2dc8d6a447137a050aa694b62576040363aedc2",
-      "signature": "rzGL1mINVSiEgJxu0reQI+fQD1A6HqR5YtibFrHP1ThUyH8Mj12oibt48+UtJZWzBq6nX7oZNM0brA+j4D0yAg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.2/Sirio-0.17.2.dmg",
+      "sha256": "0a6bb82c8c4ac38bb0b43a17ff74246ac5abbff9b3ee2eb08e4d0cbf40c0bfb0",
+      "signature": "JoBouS49bnXfRX3XW8TVgQuOTMoqGx56sfmrDBzajc/loZtcbrzv0Kh4UyUT+YmiN8YXNn8Koyut8rG05lcvCg=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.1/Sirio-0.17.1-x86_64.AppImage",
-      "sha256": "0e91323b51dd2e9acad31addee2e039d8a04ea74723600b9241f6aa35c8d5724",
-      "signature": "9npRcVpabXRADZjkgNhltlKAkry0F2b8S1TA+8wzdUyVYAo46TQNkvyoR00ylhUsWp9b13oQn35etq/Llh3TBg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.2/Sirio-0.17.2-x86_64.AppImage",
+      "sha256": "cf3dc6496af32242dbc75a2fa882764d23a6175612c6a5901083f9fde08254ee",
+      "signature": "TnqoKsfCoP7DWeGy/Cp0akNCmohYtwqeHMGRgl6GABQBKj8NFMd0qR4tba8INgqvOg8vFXQa/teWkkphwQg+Bg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.1/SirioSetup-0.17.1.exe",
-      "sha256": "00e8d8449515124aceb574832763eda28572d69489f294a7cbb7eb111d40c5c3",
-      "signature": "33fYUWs4A+uGArzXZ/JM4hDH7jku+YY2dG6sMmZ+kYc4/PggMG8v/HChu+i/BtnxTNSdRM5zmYEKkhZYLh5MCg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.17.2/SirioSetup-0.17.2.exe",
+      "sha256": "ccdf857b242a396d7142caf5d3dae7846b234899b34c80ed4d24ee9ade7e59a6",
+      "signature": "J2MUNJFn8VMJpefgrIQbu1OlD1DIln85Y8ehVrjcwe3Zjc9e6kJZHdbXxCxJ4fuAFFkVwjktg1M7RMO20i7AAw=="
     }
   }
 }
