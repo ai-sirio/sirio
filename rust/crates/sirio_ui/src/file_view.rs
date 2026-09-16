@@ -1239,7 +1239,7 @@ impl Render for FileView {
                 .rounded(theme.radii.user_pill)
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.surface_raised)
+                .bg(theme.menu_surface())
                 .shadow_lg();
 
             let items = file_context_menu::items(&self.menu_facts());
@@ -2282,7 +2282,7 @@ fn hover_card(text: &str, theme: Theme) -> AnyElement {
         .max_h(px(240.0))
         .overflow_hidden()
         .p(px(8.0))
-        .bg(theme.surface_raised)
+        .bg(theme.menu_surface())
         .border_1()
         .border_color(theme.border)
         .rounded(theme.radii.control)

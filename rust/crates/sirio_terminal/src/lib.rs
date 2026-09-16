@@ -4536,7 +4536,7 @@ impl gpui::Render for TerminalView {
                 .rounded(theme.radii.user_pill)
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.surface_raised)
+                .bg(theme.menu_surface())
                 .shadow_lg();
 
             let items = match split_pane_size {

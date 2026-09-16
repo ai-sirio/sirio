@@ -426,6 +426,18 @@ impl ThemeColors {
         let text_faint = Rgba::from(bezel.text_faint);
         let text_dim = Rgba::from(bezel.text_dim);
         let raised = Rgba::from(bezel.surface_raised);
+    /// The fill of a menu an interaction puts up over the shell: the file and
+    /// terminal context menus, and any popover that must be *read* rather than
+    /// merely seen.
+    ///
+    /// A menu is an event-opened surface in exactly the sense
+    /// [`ThemeColors::floating_surface`] describes, so it must not fade with
+    /// the panels — a menu the desktop shows through is unreadable at the one
+    /// moment it is being asked to be read.
+    pub fn menu_surface(&self) -> Rgba {
+        self.floating_surface
+    }
+
         // One step *into* the page, and derived from the measured surface for
         // the same reason `sidebar` is: a well is a relationship to the page
         // it is cut into, so it should move when the page does. The two
@@ -3035,6 +3047,32 @@ mod tests {
         let translucent = base.with_translucency(true);
         assert!(
             translucent.input_bg.a <= base.input_bg.a,
+    /// A context menu is opened by an interaction and must stay readable
+    /// over a blurred shell. It is the same contract
+    /// `event_opened_surfaces_stay_opaque_when_the_panels_fade` holds for
+    /// dialogs and toasts — a menu is no less event-opened than a toast.
+    #[test]
+    fn a_menu_stays_opaque_over_a_blurred_shell() {
+        for base in [Theme::dark(), Theme::light()] {
+            let opaque = base.menu_surface();
+            let translucent = base.with_translucency(true);
+            assert!(
+                translucent.surface_raised.a < 1.0,
+                "the fixture must actually fade the panels, or this proves nothing"
+            );
+            assert_eq!(
+                translucent.menu_surface().a,
+                1.0,
+                "a context menu the desktop shows through is unreadable"
+            );
+            assert_eq!(
+                (translucent.menu_surface().r, translucent.menu_surface().g),
+                (opaque.r, opaque.g),
+                "staying opaque must not change the menu's tone"
+            );
+        }
+    }
+
             "fading made the veil more opaque: {} -> {}",
             base.input_bg.a,
             translucent.input_bg.a
