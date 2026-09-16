@@ -46,7 +46,16 @@ impl Server {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
-                LspError::Launch(format!("could not launch `{command}`: {error}"))
+                // "not on PATH" is the answer for every language the user
+                // does not work in, so it gets its own variant and the
+                // caller gets to stay quiet about it.
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    LspError::NotInstalled {
+                        command: command.to_owned(),
+                    }
+                } else {
+                    LspError::Launch(format!("could not launch `{command}`: {error}"))
+                }
             })?;
 
         let stdin = child
@@ -202,8 +211,15 @@ done
         });
     }
 
+    /// Renamed from `a_missing_binary_is_a_launch_error_naming_the_command`
+    /// when the table grew to nineteen servers. "Not on PATH" stopped being
+    /// a mistake in the user's `languages.toml` and became the ordinary
+    /// state of most of a shipped table, so it is its own variant now and
+    /// the shell says nothing about it. The command is still named, because
+    /// that is what makes the variant actionable when something does look
+    /// at it.
     #[test]
-    fn a_missing_binary_is_a_launch_error_naming_the_command() {
+    fn a_missing_binary_reports_that_it_is_not_installed_and_names_it() {
         futures::executor::block_on(async {
             // `.err()` rather than `.unwrap_err()`: the `Ok` half holds
             // the `Server` and its read-loop future, neither of which is
@@ -217,11 +233,12 @@ done
             .err()
             .expect("launching a missing binary must fail");
             match error {
-                LspError::Launch(detail) => assert!(
-                    detail.contains("sirio-no-such-language-server"),
-                    "the error must name the command so the user can fix their languages.toml: {detail}"
+                LspError::NotInstalled { command } => assert_eq!(
+                    command, "sirio-no-such-language-server",
+                    "the variant carries the command, so a caller that does \
+                     want to mention it can"
                 ),
-                other => panic!("expected a launch error, got {other}"),
+                other => panic!("expected a not-installed error, got {other}"),
             }
         });
     }

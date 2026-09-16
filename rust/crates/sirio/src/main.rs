@@ -10694,6 +10694,15 @@ impl SirioWorkspace {
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     workspace.sync_document_with_server(&path_for_facts, &view, cx);
                 }
+                Err(sirio_lsp::LspError::NotInstalled { .. }) => {
+                    // The shipped table offers a server for every language
+                    // Sirio can open, so "not installed" is the answer for
+                    // most of it on any given machine. Saying so on every
+                    // .yaml file would make the message worthless for the
+                    // case that matters — a server that *is* there and
+                    // broke. Marked dead, so it is tried once and not again.
+                    workspace.lsp.mark_dead(key);
+                }
                 Err(error) => {
                     workspace.lsp.mark_dead(key);
                     // Naming the command is the point: it came from the
@@ -19626,6 +19635,93 @@ done
         assert!(
             cx.debug_bounds("file-view-message").is_some(),
             "and the answer itself is on screen: silence would be worse"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The shipped table went from four language servers to nineteen, so
+    /// "that command is not on this machine" stopped being a mistake and
+    /// became the ordinary answer for most of it. A card for every one of
+    /// them would be a card on almost every file opened — and would drown
+    /// the case the card is *for*, a server that is installed and broke.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_language_server_that_is_not_installed_says_nothing(cx: &mut TestAppContext) {
+        let tag = "uninstalled";
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-{}-{}-{}",
+            tag,
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the root marker");
+        let source = repo.join("only.rs");
+        std::fs::write(&source, "fn only() -> u32 {\n    7\n}\n").expect("write the fixture");
+
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"sirio-no-such-language-server\"\nroots = [\"Cargo.toml\"]\n",
+        )
+        .expect("write a table naming a server nobody has");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(source.clone(), cx);
+        });
+
+        // Wait for the launch to have been attempted and given up on: the
+        // key is marked dead exactly once, on the failure path.
+        let key = (repo.clone(), "rust".to_owned());
+        let mut settled = false;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if workspace.update(&mut cx, |workspace, _| workspace.lsp.is_dead(&key)) {
+                settled = true;
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        assert!(settled, "the launch was attempted and failed");
+
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-view-message").is_none(),
+            "a server nobody installed is not news; the file is opened in silence"
+        );
+        assert!(
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "and the file itself is on screen"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

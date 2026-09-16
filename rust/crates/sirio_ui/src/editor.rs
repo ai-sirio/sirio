@@ -174,11 +174,15 @@ impl Language {
         match extension.as_str() {
             "md" | "markdown" => Language::Markdown,
             "rs" => Language::Rust,
-            "py" | "pyw" => Language::Python,
+            // `.pyi` is a Python stub: Python syntax, and the language
+            // table has offered it a Python server since it was written.
+            "py" | "pyw" | "pyi" => Language::Python,
             "js" | "mjs" | "cjs" | "jsx" => Language::JavaScript,
             "ts" | "mts" | "cts" | "tsx" => Language::TypeScript,
             "sh" | "bash" | "zsh" | "fish" => Language::Shell,
-            "json" => Language::Json,
+            // JSON with comments. The grammar parses them; `tsconfig.json`
+            // and every VS Code settings file are written in it.
+            "json" | "jsonc" => Language::Json,
             "yaml" | "yml" => Language::Yaml,
             "toml" => Language::Toml,
             "c" | "h" => Language::C,

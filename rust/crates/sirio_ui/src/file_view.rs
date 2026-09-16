@@ -1972,28 +1972,21 @@ pub(crate) struct CodeSpan {
     pub(crate) kind: bezel::theme::HighlightKind,
 }
 
-fn bezel_syntax_tag(language: Language) -> Option<&'static str> {
-    match language {
-        Language::Rust => Some("rust"),
-        Language::Python => Some("python"),
-        Language::JavaScript => Some("javascript"),
-        Language::TypeScript => Some("typescript"),
-        Language::Shell => Some("bash"),
-        Language::Json => Some("json"),
-        Language::Toml => Some("toml"),
-        Language::Go => Some("go"),
-        _ => None,
-    }
-}
-
 /// F-EDIT-07's code path stays Sirio's no-wrap editor; only token
-/// classification is delegated to bezel-syntax. Unsupported grammars remain
-/// legible plain text, which is bezel-syntax's documented fallback.
+/// classification is delegated — to `sirio_syntax`, which answers for
+/// bezel's own seven grammars and for the seventeen it adds.
+///
+/// The tag is [`Language::fence_tag`] rather than a second table mapping
+/// variants to grammar names. There used to be one, it covered eight of the
+/// twenty-four variants, and the other sixteen — Java among them — reached
+/// this function and left with an empty `Vec`: parsed, measured, laid out
+/// and painted in one colour, with nothing anywhere reporting a gap. One
+/// list is harder to leave half-finished than two.
 pub(crate) fn code_spans(language: Language, line: &str) -> Vec<CodeSpan> {
-    let Some(tag) = bezel_syntax_tag(language) else {
+    if language.is_plain_text() {
         return Vec::new();
-    };
-    syntax::highlight(line, tag)
+    }
+    sirio_syntax::highlight(line, language.fence_tag())
         .unwrap_or_default()
         .into_iter()
         .map(|(range, kind)| CodeSpan { range, kind })
@@ -2581,6 +2574,48 @@ mod tests {
             rust, python,
             "language detection must select different spans"
         );
+    }
+
+    /// The gap this guards: `Language` has recognised twenty-four languages
+    /// since F-EDIT-07, and for most of that time eight of them had a
+    /// grammar. Opening `Main.java` produced a correctly detected `Java`, a
+    /// correct status line, and no colour at all — and nothing in the app
+    /// could tell that apart from a file with nothing to classify.
+    #[test]
+    fn every_language_the_editor_recognises_has_a_grammar() {
+        for language in Language::ALL {
+            let supported = sirio_syntax::is_supported(language.fence_tag());
+            if language.is_plain_text() {
+                assert!(
+                    !supported,
+                    "plain text is the fallback; it must not resolve to a grammar"
+                );
+            } else {
+                assert!(
+                    supported,
+                    "{} ({}) is offered in the status line with no grammar behind it",
+                    language.name(),
+                    language.fence_tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn java_reaches_the_code_surface_classified() {
+        // The report was "java ho visto che non c'è": detected, named, and
+        // painted like a .txt file.
+        let source = "public class Main { int n = 42; } // note";
+        let spans = code_spans(Language::Java, source);
+        let painted = |needle: &str, kind: bezel::theme::HighlightKind| {
+            let at = source.find(needle).expect("needle is in the fixture");
+            spans
+                .iter()
+                .any(|span| span.range == (at..at + needle.len()) && span.kind == kind)
+        };
+        assert!(painted("public", bezel::theme::HighlightKind::Keyword), "{spans:?}");
+        assert!(painted("42", bezel::theme::HighlightKind::Number), "{spans:?}");
+        assert!(painted("// note", bezel::theme::HighlightKind::Comment), "{spans:?}");
     }
 
     #[test]

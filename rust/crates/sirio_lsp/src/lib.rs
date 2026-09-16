@@ -52,6 +52,15 @@ pub use uri::{path_for_uri, uri_for_path};
 pub enum LspError {
     /// The child could not be launched, or its stdio could not be taken.
     Launch(String),
+    /// The command names a program that is not on `PATH`.
+    ///
+    /// Told apart from [`LspError::Launch`] because it is not a fault, in
+    /// the same sense [`LspError::NotReady`] is not one. The shipped table
+    /// offers a server for every language Sirio can open, and nobody has
+    /// all of them installed; a Java file on a machine with no `jdtls` is
+    /// an ordinary Tuesday, not something to interrupt the reader about.
+    /// A command that *is* installed and then fails still reports.
+    NotInstalled { command: String },
     /// The stream ended, or carried something that is not a framed message.
     Transport(String),
     /// The server answered with a JSON-RPC error object.
@@ -69,6 +78,9 @@ impl std::fmt::Display for LspError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Launch(detail) => write!(f, "could not launch the language server: {detail}"),
+            Self::NotInstalled { command } => {
+                write!(f, "`{command}` is not installed")
+            }
             Self::Transport(detail) => write!(f, "language server transport failed: {detail}"),
             Self::Server { code, message } => {
                 write!(f, "language server returned error {code}: {message}")

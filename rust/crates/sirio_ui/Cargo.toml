@@ -12,6 +12,8 @@ bezel = { workspace = true }
 bezel-markdown.workspace = true
 bezel-editor.workspace = true
 bezel-syntax.workspace = true
+# The grammars bezel-syntax does not carry: Java, C, C++, Swift, Ruby, …
+sirio_syntax.workspace = true
 anyhow.workspace = true
 sirio_theme.workspace = true
 sirio_git.workspace = true
