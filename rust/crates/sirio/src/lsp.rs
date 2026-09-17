@@ -238,6 +238,35 @@ impl LspSupervisor {
         self.loader.table().for_path(file).cloned()
     }
 
+    /// The entry whose `name` is this language, from the table as already
+    /// loaded. `known_entry_for` answers by path; the install action knows
+    /// only the language, because that is what the card's button carries.
+    pub fn known_entry_for_language(&self, language: &str) -> Option<LanguageEntry> {
+        self.loader
+            .table()
+            .entries()
+            .iter()
+            .find(|entry| entry.name == language)
+            .cloned()
+    }
+
+    /// The binary Sirio installed for this entry, if it installed one and
+    /// the file is still there. Consulted only after a spawn by name has
+    /// answered `NotInstalled`, which is what makes PATH win.
+    ///
+    /// A manifest outliving its executable is not an offer — that is a
+    /// half-deleted install, and handing back a path that is not there
+    /// would fail with a message about a path nobody recognises.
+    pub fn installed_binary_for(
+        &self,
+        entry: &LanguageEntry,
+        store: &sirio_registry::InstallStore,
+    ) -> Option<PathBuf> {
+        let id = entry.install.as_ref()?.store_id()?;
+        let installed = store.manifest(id)?;
+        installed.executable.exists().then_some(installed.executable)
+    }
+
     /// Whether the server already holds exactly this text.
     ///
     /// Read-only and cheap on purpose: the observer that watches a file view
@@ -717,6 +746,95 @@ mod tests {
             Some(Dead::Manual { needs, .. }) => assert!(needs.contains("JVM")),
             other => panic!("expected the toolchain explanation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_path_wins_over_what_sirio_installed() {
+        // Zed's rule, and its reason: worktree 1 may pin its own gopls while
+        // worktree 3 falls back to ours. Spawning by name *is* the PATH
+        // lookup, so the store is consulted only after NotInstalled — which is
+        // what makes this ordering free.
+        let store = sirio_registry::InstallStore::new(std::env::temp_dir().join(
+            format!("sirio-lsp-store-{}", std::process::id()),
+        ));
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        // A command every machine has, standing in for one the reader installed.
+        let entry = sirio_lsp::LanguageEntry {
+            name: "probe".into(),
+            extensions: vec!["probe".into()],
+            command: "sh".into(),
+            args: Vec::new(),
+            roots: Vec::new(),
+            install: Some(sirio_lsp::Recipe::Npm {
+                package: "never-used",
+                version: "1.0.0",
+                bin: "never-used",
+            }),
+        };
+        assert!(
+            supervisor.installed_binary_for(&entry, &store).is_none(),
+            "nothing is installed, so step 2 has nothing to offer"
+        );
+    }
+
+    #[test]
+    fn an_installed_server_is_offered_by_absolute_path() {
+        // The other half of step 2, and the shape of it: what the store
+        // gives back is one file's path, never a directory to put on the
+        // child's PATH — which is what keeps two installed servers from
+        // seeing each other, and from displacing the reader's own choice.
+        let root = std::env::temp_dir().join(format!(
+            "sirio-lsp-store-installed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = sirio_registry::InstallStore::new(&root);
+        let entry = sirio_lsp::LanguageEntry {
+            name: "probe".into(),
+            extensions: vec!["probe".into()],
+            // Not on PATH: everything below is what step 2 answers *after*
+            // that name was tried and missed.
+            command: "sirio-no-such-language-server".into(),
+            args: Vec::new(),
+            roots: Vec::new(),
+            install: Some(sirio_lsp::Recipe::Npm {
+                package: "shared-package",
+                version: "1.0.0",
+                bin: "never-used",
+            }),
+        };
+        let executable = root
+            .join("shared-package")
+            .join("1.0.0")
+            .join("never-used");
+        std::fs::create_dir_all(executable.parent().expect("a store version directory"))
+            .expect("create the store layout");
+        std::fs::write(&executable, "#!/bin/sh\n").expect("write the installed binary");
+        store
+            .write(&sirio_registry::InstalledAgent {
+                id: "shared-package".into(),
+                version: "1.0.0".into(),
+                executable: executable.clone(),
+                args: Vec::new(),
+                integrity: sirio_registry::Integrity::None,
+            })
+            .expect("record the install");
+
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        assert_eq!(
+            supervisor.installed_binary_for(&entry, &store),
+            Some(executable.clone()),
+            "a manifest whose executable is there is what step 2 offers"
+        );
+
+        std::fs::remove_file(&executable).expect("remove the installed binary");
+        assert_eq!(
+            supervisor.installed_binary_for(&entry, &store),
+            None,
+            "a manifest outliving its binary is not an offer"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

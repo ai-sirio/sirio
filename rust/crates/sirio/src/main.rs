@@ -2938,6 +2938,29 @@ impl AgentLaunchState {
 #[cfg(test)]
 static TEST_AGENTS_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 
+/// Where installed language servers live for this process. The sibling of
+/// [`AgentLaunchState::for_startup`]'s store, resolved the same way and for
+/// the same reason: `store_root` reads the environment, so it is read once
+/// here rather than at each install.
+fn lsp_store_root_for_startup() -> PathBuf {
+    let environment: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    // Test-only redirect, following `TEST_AGENTS_ROOT`: a fixture that seeds
+    // a manifest must point at a scratch root, never at what this machine
+    // happens to have installed.
+    #[cfg(test)]
+    let override_root = TEST_LSP_STORE_ROOT
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone());
+    #[cfg(not(test))]
+    let override_root: Option<PathBuf> = None;
+    override_root.unwrap_or_else(|| crate::lsp_install::store_root(&environment))
+}
+
+/// Test-only redirect for [`lsp_store_root_for_startup`].
+#[cfg(test)]
+static TEST_LSP_STORE_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
 /// One pass over the catalog answering each adapter's launch source from
 /// existence facts: is the CLI on PATH, is there a manifest whose
 /// executable still exists, and what does the cached registry document
@@ -4176,6 +4199,10 @@ struct SirioWorkspace {
     worktree_label: String,
     launch_snapshot: RestoredSession,
     launch: AgentLaunchState,
+    /// Where installed language servers live. Resolved once at startup, for
+    /// the same reason `launch.store` is: `store_root` reads the
+    /// environment, and the environment is read before threads exist.
+    lsp_store_root: PathBuf,
     center_split: CenterSplit,
     tab_strip_first_visible: usize,
     overflow_menu_open: bool,
@@ -4981,6 +5008,9 @@ impl SirioWorkspace {
         // Task 8: how every agent launches is resolved state, held here and
         // refreshed off the UI thread.
         let launch = AgentLaunchState::for_startup();
+        // Servers go beside the agents rather than among them, and this is
+        // resolved in the same breath — `store_root` is an environment read.
+        let lsp_store_root = lsp_store_root_for_startup();
         let persisted_secondary_pane_open = session.secondary_pane_open_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
@@ -5035,6 +5065,7 @@ impl SirioWorkspace {
             worktree_label,
             launch_snapshot,
             launch,
+            lsp_store_root,
             center_split,
             tab_strip_first_visible: 0,
             overflow_menu_open: false,
@@ -10694,15 +10725,55 @@ impl SirioWorkspace {
         let args = entry.args.clone();
         let install = entry.install.clone();
         let root = key.0.clone();
+        // Step 2 of the ladder, read here and used only once step 1 has
+        // answered `NotInstalled`. Consulting the store before the spawn
+        // would be wrong; reading it here is not, because an answer that is
+        // never used changes nothing — the name is still tried first, and
+        // the PATH lookup *is* the spawn.
+        let installed = self.lsp.installed_binary_for(
+            &entry,
+            &sirio_registry::InstallStore::new(self.lsp_store_root.clone()),
+        );
         let view = view.clone();
         let path_for_facts = path.to_path_buf();
         cx.spawn(async move |this, cx| {
+            // Kept for step 2: the launch below consumes its own copies, and
+            // the fallback launches the same arguments behind a different
+            // binary.
+            let installed_args = args.clone();
+            let installed_root = root.clone();
             let launched = cx
                 .background_executor()
                 // The owned String/Vec/PathBuf move in and deref to the
                 // &str/&[String]/&Path the signature wants — no helper needed.
                 .spawn(async move { sirio_lsp::Server::launch(&command, &args, &root).await })
                 .await;
+            // Step 2. A spawn by name *is* the PATH lookup, so its
+            // `NotInstalled` is step 1's answer and this is where step 2
+            // begins: an installed binary is launched by absolute path,
+            // never by putting its directory on the child's PATH, so two
+            // installed servers cannot see each other and an installed one
+            // cannot displace the reader's own choice.
+            let launched = match launched {
+                Err(sirio_lsp::LspError::NotInstalled { command }) => match installed {
+                    Some(binary) => {
+                        let binary = binary.to_string_lossy().into_owned();
+                        cx.background_executor()
+                            .spawn(async move {
+                                sirio_lsp::Server::launch(&binary, &installed_args, &installed_root)
+                                    .await
+                            })
+                            .await
+                    }
+                    // Nothing in the store, so nothing more to try: the key
+                    // dies below, with the arm the recipe dictates.
+                    None => Err(sirio_lsp::LspError::NotInstalled { command }),
+                },
+                // Including the fallback's own failures: a binary that is
+                // there and will not start is not a missing one, and
+                // `Failed` is the arm that says so.
+                other => other,
+            };
 
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
@@ -10765,6 +10836,108 @@ impl SirioWorkspace {
                     // user's languages.toml, and naming it turns a mystery
                     // into a line they can edit.
                     view.update(cx, |view, cx| view.set_message(error.to_string(), cx));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Every open tab of one language gets its server, without a restart.
+    /// This is **the one caller of [`crate::lsp::LspSupervisor::revive`]**:
+    /// an install that succeeded. Not a timer, not another tab opening, not
+    /// a refresh — nothing else lifts a key out of `dead`.
+    ///
+    /// Walked over the open views rather than over the one key whose card
+    /// was clicked, because two tabs of one language are not necessarily
+    /// one key: two Rust projects in one worktree are two servers, and the
+    /// card that offered the install carries only the language.
+    fn revive_language(&mut self, language: &str, cx: &mut Context<Self>) {
+        // Collected first: everything below needs `&mut self`.
+        let views = Self::open_file_views(&self.tabs, cx);
+        let mut launched: Vec<(PathBuf, String)> = Vec::new();
+        for (path, view) in views {
+            let Some(entry) = self.lsp.known_entry_for(&path) else {
+                continue;
+            };
+            if entry.name != language {
+                continue;
+            }
+            let Some(worktree_root) = self.worktree_root_for(&path) else {
+                continue;
+            };
+            let key = self.lsp.key_for(&path, &worktree_root, &entry);
+            // Two files in one project root share a key, and one launch
+            // serves both. Starting it twice over would leave two servers
+            // installed under one key and orphan the first one's process.
+            if !launched.contains(&key) {
+                self.lsp.revive(&key);
+                self.start_language_server_for(&path, &view, cx);
+                launched.push(key);
+            }
+            // The tab computed these before the install existed, and the
+            // redirect it is showing is now out of date.
+            let facts = self.file_context_facts(&path);
+            view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        }
+    }
+
+    /// Fetches the server this language needs and starts it. Both doorways
+    /// of the ladder land here — the card's button and the menu's redirect
+    /// — and both carry the language rather than a path, because a language
+    /// is what the reader asked about.
+    ///
+    /// A successful install is the only thing that revives a dead key; the
+    /// row shows the installer's own error text when one fails, and the
+    /// offer stands.
+    //
+    // The card and the settings row are Task 8; until they are wired this is
+    // reachable from tests only.
+    #[allow(dead_code)]
+    fn install_language_server(&mut self, language: &str, cx: &mut Context<Self>) {
+        // An entry with no recipe is the reader's own. `agent_for` answers
+        // `None` for a `Manual` recipe and for a platform the project
+        // publishes nothing for, so a `None` here is an answer rather than
+        // a failure to handle — and the offer is never made under the
+        // reader's own server.
+        let Some(entry) = self.lsp.known_entry_for_language(language) else {
+            return;
+        };
+        let Some(recipe) = entry.install.clone() else {
+            return;
+        };
+        let platform = sirio_registry::current_platform_key();
+        let Some(agent) = crate::lsp_install::agent_for(&recipe, platform) else {
+            return;
+        };
+        let store = sirio_registry::InstallStore::new(self.lsp_store_root.clone());
+
+        // Visible immediately: the row stops being clickable while the
+        // installer holds its per-package lock.
+        self.settings.update(cx, |settings, cx| {
+            settings.set_install_state(language, Some(InstallState::InFlight));
+            cx.notify();
+        });
+        let language = language.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(
+                    async move { sirio_registry::Installer::new(store).install(&agent, platform) },
+                )
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.settings.update(cx, |settings, cx| {
+                    settings.set_install_state(
+                        &language,
+                        result
+                            .as_ref()
+                            .err()
+                            .map(|error| InstallState::Failed(error.to_string())),
+                    );
+                    cx.notify();
+                });
+                if result.is_ok() {
+                    workspace.revive_language(&language, cx);
                 }
             });
         })
@@ -19824,6 +19997,163 @@ done
                 Some("sirio-no-such-language-server is not on PATH".to_owned()),
             ],
             "both navigation entries name the missing program"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The transition an install makes, at the scale it has to make it:
+    /// every open tab of that language gets a server, not just the one whose
+    /// card was clicked.
+    ///
+    /// Two Rust files in one project root share a key, so a second file
+    /// there would say nothing about this. Two *roots* in one worktree — two
+    /// Cargo.tomls — are the shape in which "every open tab" is more than
+    /// one key, and it is what a revive wired to a single key leaves dead.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_install_reaches_every_open_tab_of_that_language(cx: &mut TestAppContext) {
+        let tag = "revive-language";
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-{tag}-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        let log = scratch.join("wire.log");
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            format!(
+                "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"/bin/sh\"\nargs = [\"-c\", {}]\nroots = [\"Cargo.toml\"]\n",
+                toml_string_literal(&recording_server_script(&log))
+            ),
+        )
+        .expect("write the recording language table");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the outer root marker");
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).expect("create the nested project");
+        std::fs::write(nested.join("Cargo.toml"), "[package]\nname = \"nested\"\n")
+            .expect("write the nested root marker");
+        let first = repo.join("first.rs");
+        let second = nested.join("second.rs");
+        let third = repo.join("third.rs");
+        std::fs::write(&first, "fn first() {}\n").expect("write the first file");
+        std::fs::write(&second, "fn second() {}\n").expect("write the second file");
+        // The same key as `first.rs`: one project root, one server, whatever
+        // the number of tabs open on it.
+        std::fs::write(&third, "fn third() {}\n").expect("write the third file");
+
+        // A scratch store, so a fixture never consults what this machine has
+        // installed under the reader's own data directory.
+        let store_root = scratch.join("language-servers");
+        *TEST_LSP_STORE_ROOT.write().unwrap() = Some(store_root.clone());
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_store_root.clone()),
+            store_root,
+            "the fixture's store is the scratch one, never the reader's"
+        );
+
+        let first_key = (repo.clone(), "rust".to_owned());
+        let second_key = (nested.clone(), "rust".to_owned());
+
+        // The recipe the card would have carried. The fixture's table
+        // shadows the shipped `rust` entry — which is the point, since the
+        // fixture needs a command that starts — so the arm is read from the
+        // defaults the offer would have been made for.
+        let recipe = sirio_lsp::LanguageTable::defaults()
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "rust")
+            .and_then(|entry| entry.install.clone())
+            .expect("the shipped table offers rust a recipe");
+
+        // Both keys marked dead *before* the tabs open: that is the state an
+        // install offer leaves behind, and marking it there is what makes
+        // the launch below the one the revive performed rather than a second
+        // one racing it.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.lsp.mark_dead(
+                first_key.clone(),
+                crate::lsp::Dead::Installable {
+                    recipe: recipe.clone(),
+                },
+            );
+            workspace
+                .lsp
+                .mark_dead(second_key.clone(), crate::lsp::Dead::Installable { recipe });
+            workspace.add_file_tab(first.clone(), cx);
+            workspace.add_file_tab(second.clone(), cx);
+            workspace.add_file_tab(third.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.lsp.is_dead(&first_key) && workspace.lsp.is_dead(&second_key)
+            }),
+            "the fixture starts with both keys dead"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| workspace.revive_language("rust", cx));
+
+        let mut started: usize = 0;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            started = workspace.read_with(&cx.cx, |workspace, _| {
+                [&first_key, &second_key]
+                    .into_iter()
+                    .filter(|key| workspace.lsp.is_running(*key))
+                    .count()
+            });
+            if started == 2 {
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        assert_eq!(
+            started, 2,
+            "one install starts the server for every open tab of that language, \
+             not just the first: {started} of 2 keys had one"
+        );
+        // The third tab shares the first one's key, so it must have been
+        // served by the same server rather than starting a second one over
+        // it — an install is one launch per key.
+        let launches = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches("\"method\":\"initialize\"")
+            .count();
+        assert_eq!(
+            launches, 2,
+            "two keys, two servers, three tabs: the shared root is launched once"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
