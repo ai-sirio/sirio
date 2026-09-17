@@ -20190,12 +20190,16 @@ done
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A fixed number of turns rather than a condition, because the
-    /// assertion is about something that must *not* happen a second time,
-    /// and there is no event to wait for.
-    async fn settle(cx: &mut VisualTestContext) {
+    /// Waits for the first offer by condition: each turn drains everything
+    /// parked and only then sleeps, returning as soon as the count moves.
+    /// Bounded at the file's standard 200 turns so a missing offer fails
+    /// instead of hanging.
+    async fn wait_for_first_offer(cx: &mut VisualTestContext, workspace: &Entity<SirioWorkspace>) {
         for _ in 0..200 {
             cx.run_until_parked();
+            if workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made()) >= 1 {
+                return;
+            }
             cx.cx
                 .executor()
                 .timer(std::time::Duration::from_millis(25))
@@ -20317,13 +20321,30 @@ done
         workspace.update(&mut cx, |workspace, cx| {
             workspace.add_file_tab(files[0].clone(), cx)
         });
-        settle(&mut cx).await;
+        // The first offer IS an event, so it is waited for by condition:
+        // the common case costs the pipeline's actual length, not the whole
+        // budget.
+        wait_for_first_offer(&mut cx, &workspace).await;
         let first = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
 
         workspace.update(&mut cx, |workspace, cx| {
             workspace.add_file_tab(files[1].clone(), cx)
         });
-        settle(&mut cx).await;
+        // Nothing to wait for here by design — a correct dedup produces no
+        // second event — so this is a fixed window giving a wrongful second
+        // offer the chance to appear. Forty fully-parked turns: a genuine
+        // second offer would ride the same launch-failure pipeline the first
+        // wait measures, which fails fast (NotFound on an empty PATH, no
+        // network, no store hit) and resolves in a couple of turns. Forty is
+        // an order of magnitude more parked work than that pipeline needs,
+        // so holding at one offer for the whole window is the assertion.
+        for _ in 0..40 {
+            cx.run_until_parked();
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
         let second = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
 
         unsafe {
@@ -20355,7 +20376,7 @@ done
         workspace.update(&mut cx, |workspace, cx| {
             workspace.add_file_tab(files[0].clone(), cx)
         });
-        settle(&mut cx).await;
+        wait_for_first_offer(&mut cx, &workspace).await;
 
         let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
         let (text, labels) = view.read_with(&cx.cx, |view, _| {
