@@ -60,6 +60,11 @@ pub enum InstallError {
 pub enum UnpackKind {
     Zip,
     TarGz,
+    /// One gzipped file, no tar inside. rust-analyzer and taplo ship this.
+    /// Split from `BareExecutable` because the bytes must be inflated
+    /// before they are a program, and from `TarGz` because there is no
+    /// archive to walk.
+    Gz,
     /// Not an archive: `sigit` publishes bare executables.
     BareExecutable,
     /// `.tar.bz2` (goose). Named rather than silently skipped.
@@ -80,6 +85,8 @@ pub fn unpack_kind(url: &str) -> UnpackKind {
         UnpackKind::Zip
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         UnpackKind::TarGz
+    } else if name.ends_with(".gz") {
+        UnpackKind::Gz
     } else if name.ends_with(".tar.bz2") || name.ends_with(".tar.xz") {
         UnpackKind::Unsupported
     } else {
@@ -203,12 +210,12 @@ impl Installer {
             return self.install_binary(agent, artifact);
         }
         // Same fallback `resolve` uses: npx works wherever Node does.
-        if let Some(Distribution::Npx { package, args }) = agent
+        if let Some(Distribution::Npx { package, args, bin }) = agent
             .distributions
             .iter()
             .find(|distribution| matches!(distribution, Distribution::Npx { .. }))
         {
-            return self.install_npx(agent, package, args);
+            return self.install_npx(agent, package, args, bin.as_deref());
         }
         Err(InstallError::UnsupportedDistribution {
             agent: agent.id.clone(),
@@ -221,6 +228,7 @@ impl Installer {
         agent: &RegistryAgent,
         package: &str,
         args: &[String],
+        named_bin: Option<&str>,
     ) -> Result<InstalledAgent, InstallError> {
         let staging = staging_dir(self.store.root(), &agent.id, &agent.version);
         let _guard = InstallGuard::acquire(self.store.root(), &agent.id)?;
@@ -284,7 +292,7 @@ impl Installer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(fail(error.to_string())),
         };
-        let bin = resolve_bin_name(&entries, package)
+        let bin = chosen_bin(&entries, package, named_bin)
             .ok_or_else(|| fail("the installed package exposes no executable".to_string()))?;
 
         let final_dir = self.store.root().join(&agent.id).join(&agent.version);
@@ -346,6 +354,12 @@ impl Installer {
                 std::fs::write(staging.join(name), &bytes)
                     .map_err(|error| fail(error.to_string()))?;
             }
+            UnpackKind::Gz => unpack_gz(
+                &agent.id,
+                &bytes,
+                &staging,
+                artifact.cmd.trim_start_matches("./"),
+            )?,
             UnpackKind::Unsupported => unreachable!("rejected above"),
         }
 
@@ -462,6 +476,46 @@ fn windows_shim_stem(entry: &str) -> &str {
         .find_map(|extension| entry.strip_suffix(extension))
         .filter(|stem| !stem.is_empty())
         .unwrap_or(entry)
+}
+
+/// The executable to install: the one the caller named, if the package has
+/// it, or the package-name guess that served before anyone could name one.
+///
+/// `named` is the bare entry name inside `node_modules/.bin`, not a path
+/// ending in it — the `.cmd` shim is this function's business on Windows,
+/// not the caller's.
+///
+/// A named bin the package does not expose is `None` rather than a
+/// fallback. Guessing there would install a different program under the
+/// name the caller asked for, which is worse than failing.
+pub(crate) fn chosen_bin(entries: &[String], package: &str, named: Option<&str>) -> Option<String> {
+    match named {
+        Some(name) => chosen_bin_on(entries, name, cfg!(windows)),
+        None => resolve_bin_name(entries, package),
+    }
+}
+
+/// [`chosen_bin`]'s named half with the host made explicit, the same way
+/// [`resolve_bin_name_on`] does it and for the same reason: npm writes every
+/// bin three times on Windows, so a caller naming `tool` must be answered
+/// with `tool.cmd` there — the bare entry is a POSIX shell script that
+/// `CreateProcess` rejects with os error 193. Without this every named npm
+/// recipe fails on Windows, which no test on this machine would notice.
+///
+/// No package name is consulted: the caller named the executable, so the
+/// only question left is whether the package has it.
+fn chosen_bin_on(entries: &[String], name: &str, windows: bool) -> Option<String> {
+    if !windows {
+        return entries.iter().find(|entry| entry.as_str() == name).cloned();
+    }
+    if !entries.iter().any(|entry| windows_shim_stem(entry) == name) {
+        return None;
+    }
+    let shim = format!("{name}.cmd");
+    if entries.contains(&shim) {
+        return Some(shim);
+    }
+    Some(name.to_string())
 }
 
 /// The platform-independent selection rule described on
@@ -693,6 +747,25 @@ fn unpack_tar_gz(agent: &str, bytes: &[u8], destination: &Path) -> Result<(), In
     unpack_tar_gz_capped(agent, bytes, destination, MAX_UNPACKED_BYTES)
 }
 
+/// One gzip member, written under the name the artifact's `cmd` gives it.
+/// There is no archive to walk, so there are no entry paths to validate —
+/// the single output path is ours, which is why this needs none of
+/// [`unpack_tar_gz`]'s traversal guards.
+fn unpack_gz(agent: &str, bytes: &[u8], staging: &Path, name: &str) -> Result<(), InstallError> {
+    use std::io::Read as _;
+    let mut inflated = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_end(&mut inflated)
+        .map_err(|error| InstallError::Failed {
+            agent: agent.to_string(),
+            message: format!("could not inflate the downloaded gzip: {error}"),
+        })?;
+    std::fs::write(staging.join(name), &inflated).map_err(|error| InstallError::Failed {
+        agent: agent.to_string(),
+        message: error.to_string(),
+    })
+}
+
 /// Same actual-bytes accounting as [`unpack_zip_capped`] — for tar the
 /// header size usually tells the truth, but one code path for both keeps
 /// them behaving identically.
@@ -830,6 +903,53 @@ mod tests {
             unpack_kind("https://x/sigit-win-amd64.exe"),
             UnpackKind::BareExecutable
         );
+    }
+
+    #[test]
+    fn a_single_member_gzip_is_not_a_bare_executable() {
+        // rust-analyzer and taplo both publish one gzipped binary, no tar.
+        // Classified as BareExecutable it installs the compressed bytes and
+        // marks them executable: the failure arrives at exec, with nothing
+        // to read.
+        assert_eq!(
+            unpack_kind(
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-08/rust-analyzer-x86_64-unknown-linux-gnu.gz"
+            ),
+            UnpackKind::Gz
+        );
+        assert_eq!(
+            unpack_kind("https://x/taplo-linux-x86_64.gz"),
+            UnpackKind::Gz
+        );
+        // And the distinction that makes it necessary:
+        assert_eq!(
+            unpack_kind("https://x/agent-linux.tar.gz"),
+            UnpackKind::TarGz
+        );
+        assert_eq!(unpack_kind("https://x/agent-linux.tgz"), UnpackKind::TarGz);
+    }
+
+    #[test]
+    fn a_gzipped_binary_is_inflated_before_it_is_installed() {
+        use std::io::Write as _;
+        let staging = std::env::temp_dir().join(format!("sirio-gz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).expect("staging");
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(b"#!/bin/sh\necho hello\n")
+            .expect("compress");
+        let gzipped = encoder.finish().expect("finish");
+
+        unpack_gz("probe", &gzipped, &staging, "rust-analyzer").expect("inflate");
+
+        assert_eq!(
+            std::fs::read(staging.join("rust-analyzer")).expect("the written file"),
+            b"#!/bin/sh\necho hello\n",
+            "the installed bytes are the program, not the gzip container"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
     }
 
     #[test]
@@ -1257,6 +1377,100 @@ mod tests {
         );
     }
 
+    // ---- Task 5b: the caller may name the executable it wants.
+
+    #[test]
+    fn a_named_bin_beats_the_package_name() {
+        // pyright ships two executables and the one named after the package is
+        // the wrong one: the language server is `pyright-langserver`.
+        let entries = vec!["pyright".to_string(), "pyright-langserver".to_string()];
+        assert_eq!(
+            chosen_bin(&entries, "pyright", Some("pyright-langserver")),
+            Some("pyright-langserver".to_string())
+        );
+    }
+
+    #[test]
+    fn a_package_whose_bins_share_no_name_with_it_still_resolves_when_named() {
+        // vscode-langservers-extracted exposes five bins and none of them is a
+        // substring of the package name, so resolve_bin_name answers None and
+        // the install fails. json, html and css all come from this package.
+        let entries = vec![
+            "vscode-css-language-server".to_string(),
+            "vscode-eslint-language-server".to_string(),
+            "vscode-html-language-server".to_string(),
+            "vscode-json-language-server".to_string(),
+            "vscode-markdown-language-server".to_string(),
+        ];
+        assert_eq!(
+            resolve_bin_name(&entries, "vscode-langservers-extracted"),
+            None
+        );
+        assert_eq!(
+            chosen_bin(
+                &entries,
+                "vscode-langservers-extracted",
+                Some("vscode-json-language-server")
+            ),
+            Some("vscode-json-language-server".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unnamed_bin_still_falls_back_to_the_package_name() {
+        // Every ACP agent in the registry today names no bin, and must keep
+        // resolving exactly as it did.
+        let entries = vec!["kilo".to_string()];
+        assert_eq!(chosen_bin(&entries, "kilo", None), Some("kilo".to_string()));
+    }
+
+    #[test]
+    fn a_named_bin_the_package_does_not_have_is_refused_rather_than_guessed() {
+        let entries = vec!["intelephense".to_string()];
+        assert_eq!(chosen_bin(&entries, "intelephense", Some("nope")), None);
+    }
+
+    #[test]
+    fn on_windows_a_named_bin_is_matched_through_its_shim_spellings() {
+        // npm wrote the bin three times; the caller names it once. Without
+        // the stem mapping every named npm recipe fails on Windows.
+        assert_eq!(
+            chosen_bin_on(&windows_bin_listing(), "claude-agent-acp", true),
+            Some("claude-agent-acp.cmd".to_string())
+        );
+    }
+
+    #[test]
+    fn on_windows_a_named_bin_without_a_cmd_shim_keeps_its_bare_name() {
+        let entries = ["tool".to_string()];
+        assert_eq!(
+            chosen_bin_on(&entries, "tool", true),
+            Some("tool".to_string())
+        );
+    }
+
+    #[test]
+    fn a_named_bin_the_package_does_not_have_is_refused_on_windows_too() {
+        assert_eq!(
+            chosen_bin_on(&windows_bin_listing(), "nope", true),
+            None
+        );
+    }
+
+    #[test]
+    fn off_windows_a_named_bin_is_matched_verbatim() {
+        // No shims there: the bare name is the candidate, `.cmd` is just
+        // another name, and naming one the package lacks is still refused.
+        assert_eq!(
+            chosen_bin_on(&windows_bin_listing(), "claude-agent-acp", false),
+            Some("claude-agent-acp".to_string())
+        );
+        assert_eq!(
+            chosen_bin_on(&windows_bin_listing(), "claude-agent-acp.cmd", false),
+            Some("claude-agent-acp.cmd".to_string())
+        );
+    }
+
     #[test]
     fn the_npm_install_deadline_is_coherent_with_the_other_ceilings() {
         // Same ceiling family as Task 5's download: nothing stays in
@@ -1404,7 +1618,21 @@ mod tests {
             distributions: vec![Distribution::Npx {
                 package: format!("{id}-pkg"),
                 args: Vec::new(),
+                bin: None,
             }],
+        }
+    }
+
+    /// `npx_agent` with the package spelled as a recipe spells it and the
+    /// executable named, which is what `sirio`'s npm rows do.
+    fn npx_agent_naming(id: &str, package: &str, bin: &str) -> RegistryAgent {
+        RegistryAgent {
+            distributions: vec![Distribution::Npx {
+                package: package.to_string(),
+                args: Vec::new(),
+                bin: Some(bin.to_string()),
+            }],
+            ..npx_agent(id)
         }
     }
 
@@ -1455,6 +1683,35 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("no executable"), "got: {error}");
+    }
+
+    #[test]
+    fn the_named_bin_is_the_one_installed_out_of_the_packages_bins() {
+        // The whole point of the field, through the real entry listing: the
+        // pyright shape, where the package-name rule picks `pyright` and the
+        // language server is `pyright-langserver`. It also covers the one
+        // line that threads `bin` from `Distribution::Npx` into the chooser.
+        let store = InstallStore::new(staging_for("npx-named"));
+        let agent = npx_agent_naming("npx-named-agent", "pyright@1.1.414", "pyright-langserver");
+        #[cfg(windows)]
+        let script = "mkdir \"node_modules\\.bin\" & type nul > \"node_modules\\.bin\\pyright\" \
+                      & type nul > \"node_modules\\.bin\\pyright-langserver\" & exit 0";
+        #[cfg(not(windows))]
+        let script = "mkdir -p node_modules/.bin && touch node_modules/.bin/pyright \
+                      node_modules/.bin/pyright-langserver";
+
+        let installed = Installer::new(store)
+            .with_npm(fake_npm_argv(script))
+            .install(&agent, "linux-x86_64")
+            .expect("the named executable is in the package's bins");
+
+        assert!(
+            installed
+                .executable
+                .ends_with("node_modules/.bin/pyright-langserver"),
+            "installed {}",
+            installed.executable.display()
+        );
     }
 
     /// A command that exits immediately (`succeed`) or hangs for a long

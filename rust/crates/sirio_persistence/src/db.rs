@@ -963,6 +963,17 @@ impl AppDatabase {
         {
             defaults.summarizer_agent = value;
         }
+        if let Some(value) = self.setting_value(settings_keys::LSP_SILENCED_LANGUAGES)? {
+            // `[]` for anything that is not a JSON array of strings: one
+            // language asked about again is a smaller failure than a value
+            // nobody can read poisoning the whole settings load.
+            defaults.lsp_silenced_languages = if serde_json::from_str::<Vec<String>>(&value).is_ok()
+            {
+                value
+            } else {
+                "[]".to_owned()
+            };
+        }
         if let Some(value) = self.setting_value(settings_keys::CLAUDE_SHOW_IN_BAR)? {
             defaults.claude_show_in_bar = parse_bool_setting(&value, true);
         }
@@ -1101,6 +1112,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::SUMMARIZER_AGENT,
             &settings.summarizer_agent,
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::LSP_SILENCED_LANGUAGES,
+            &settings.lsp_silenced_languages,
         )?;
         set_setting(
             &transaction,

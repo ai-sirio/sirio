@@ -93,9 +93,9 @@ sirio_control    (-> sirio_acp, sirio_persistence)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_git, sirio_markdown,
-                      sirio_persistence, sirio_project, sirio_registry, sirio_syntax,
-                      sirio_theme, sirio_usage)
+sirio_ui         (-> sirio_acp, sirio_agents, sirio_git, sirio_lsp,
+                      sirio_markdown, sirio_persistence, sirio_project,
+                      sirio_registry, sirio_syntax, sirio_theme, sirio_usage)
     ^
 sirio            (the app: main.rs — the only crate that depends on everything above,
                     including sirio_terminal, sirio_control, and sirio_activity, which
@@ -182,8 +182,14 @@ project's life:
   the graph are two unrelated `Language` types with one name.
 - **Navigation** needs a program on `PATH`. `sirio_lsp::LanguageTable::defaults`
   names one server per language; naming it is not shipping it, and a command
-  that is not installed resolves to `LspError::NotInstalled`, which the shell
-  says nothing about.
+  that is not installed resolves to `LspError::NotInstalled`. Nothing is
+  *volunteered* about that — no card, ever, or there would be one on almost
+  every file. The context menu is the exception, because it is asked: it
+  names the missing program (`jdtls is not on PATH`) rather than describing
+  Sirio. The name reaches it through `lsp::Dead::NotInstalled` and
+  `FileContextFacts::missing_language_server`, and the failure path pushes the
+  facts a second time because the tab computed its own before anyone had
+  looked.
 
 The failure mode both halves share is silence: an unlisted language is detected,
 named in the status line, and then rendered as plain text with no action in its

@@ -44,7 +44,7 @@ use sirio_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
-    file_context_menu::FileContextFacts,
+    file_context_menu::{FileContextFacts, MissingServer},
     file_view::{FileView, FileViewEvent},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
@@ -232,6 +232,7 @@ mod display_backend;
 #[cfg(not(windows))]
 mod login_path;
 mod lsp;
+mod lsp_install;
 #[cfg(feature = "perf-native")]
 mod native_perf;
 mod panel_layout;
@@ -2937,6 +2938,29 @@ impl AgentLaunchState {
 #[cfg(test)]
 static TEST_AGENTS_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 
+/// Where installed language servers live for this process. The sibling of
+/// [`AgentLaunchState::for_startup`]'s store, resolved the same way and for
+/// the same reason: `store_root` reads the environment, so it is read once
+/// here rather than at each install.
+fn lsp_store_root_for_startup() -> PathBuf {
+    let environment: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    // Test-only redirect, following `TEST_AGENTS_ROOT`: a fixture that seeds
+    // a manifest must point at a scratch root, never at what this machine
+    // happens to have installed.
+    #[cfg(test)]
+    let override_root = TEST_LSP_STORE_ROOT
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone());
+    #[cfg(not(test))]
+    let override_root: Option<PathBuf> = None;
+    override_root.unwrap_or_else(|| crate::lsp_install::store_root(&environment))
+}
+
+/// Test-only redirect for [`lsp_store_root_for_startup`].
+#[cfg(test)]
+static TEST_LSP_STORE_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
 /// One pass over the catalog answering each adapter's launch source from
 /// existence facts: is the CLI on PATH, is there a manifest whose
 /// executable still exists, and what does the cached registry document
@@ -4175,6 +4199,10 @@ struct SirioWorkspace {
     worktree_label: String,
     launch_snapshot: RestoredSession,
     launch: AgentLaunchState,
+    /// Where installed language servers live. Resolved once at startup, for
+    /// the same reason `launch.store` is: `store_root` reads the
+    /// environment, and the environment is read before threads exist.
+    lsp_store_root: PathBuf,
     center_split: CenterSplit,
     tab_strip_first_visible: usize,
     overflow_menu_open: bool,
@@ -4400,6 +4428,15 @@ struct SirioWorkspace {
     /// Language servers, started lazily when a file that wants one is
     /// opened and stopped on app quit. See `crate::lsp`.
     lsp: crate::lsp::LspSupervisor,
+    /// Languages already offered this session, keyed by language name.
+    /// Checked before raising the install card and never cleared: ten
+    /// .java files are one card, not ten, which is what separates this
+    /// offer from the one 0.18.0 banned.
+    offered: HashSet<String>,
+    /// Cards actually raised this session. Test-only: `offered` also holds
+    /// silenced languages, so its length is not the offer count.
+    #[cfg(test)]
+    offer_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4980,6 +5017,15 @@ impl SirioWorkspace {
         // Task 8: how every agent launches is resolved state, held here and
         // refreshed off the UI thread.
         let launch = AgentLaunchState::for_startup();
+        // Servers go beside the agents rather than among them, and this is
+        // resolved in the same breath — `store_root` is an environment read.
+        let lsp_store_root = lsp_store_root_for_startup();
+        // Settings › Language Servers reads that same store to say which
+        // servers are Sirio's own, so it is told once here rather than
+        // resolving the environment a second time.
+        settings.update(cx, |settings, _| {
+            settings.set_lsp_store_root(lsp_store_root.clone())
+        });
         let persisted_secondary_pane_open = session.secondary_pane_open_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
@@ -5034,6 +5080,7 @@ impl SirioWorkspace {
             worktree_label,
             launch_snapshot,
             launch,
+            lsp_store_root,
             center_split,
             tab_strip_first_visible: 0,
             overflow_menu_open: false,
@@ -5099,6 +5146,9 @@ impl SirioWorkspace {
                     &user_home_dir().unwrap_or_default(),
                 ),
             )),
+            offered: HashSet::new(),
+            #[cfg(test)]
+            offer_count: 0,
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -6130,6 +6180,19 @@ impl SirioWorkspace {
                 FileViewEvent::FindReferences { path, offset } => {
                     workspace.find_references(path.clone(), *offset, view.clone(), cx);
                 }
+                FileViewEvent::InstallLanguageServer { path } => {
+                    if let Some(entry) = workspace.lsp.known_entry_for(path) {
+                        let language = entry.name.clone();
+                        workspace.install_language_server(&language, cx);
+                    }
+                }
+                FileViewEvent::SilenceLanguageServer { path } => {
+                    if let Some(entry) = workspace.lsp.known_entry_for(path) {
+                        let language = entry.name.clone();
+                        workspace.silence_language_server_offer(&language, cx);
+                        view.update(cx, |view, cx| view.dismiss_message(cx));
+                    }
+                }
             },
         )
         .detach();
@@ -6154,6 +6217,57 @@ impl SirioWorkspace {
             references_available: worktree
                 .as_deref()
                 .is_some_and(|root| self.lsp.references_available(path, root)),
+            // Only ever `Some` after a launch has been attempted and found
+            // nothing to launch, which is why the failure path below pushes
+            // these facts again: at the moment the tab opened, nobody had
+            // yet looked for the program.
+            //
+            // The ladder decides what the menu can say: the recipe to
+            // install for one Sirio can fetch, the thing that has to come
+            // first for a `Manual` one, or — for an entry of the reader's
+            // own, which carries no recipe — the name they wrote.
+            // `Dead::Failed` carries nothing, having already been reported
+            // at the moment it broke.
+            missing_language_server: worktree.as_deref().and_then(|root| {
+                let dead = self.lsp.dead_reason_for(path, root)?;
+                let command = self.lsp.known_entry_for(path)?.command.clone();
+                match dead {
+                    crate::lsp::Dead::Installable { recipe } => match recipe {
+                        sirio_lsp::Recipe::Manual { needs, .. } => Some(MissingServer::Manual {
+                            command,
+                            needs: (*needs).to_owned(),
+                        }),
+                        sirio_lsp::Recipe::Npm { .. } => Some(MissingServer::Installable {
+                            command,
+                            // An npm package states no size before the
+                            // click; the note omits it rather than lying.
+                            bytes: 0,
+                        }),
+                        sirio_lsp::Recipe::Release { assets, .. } => {
+                            Some(MissingServer::Installable {
+                                command,
+                                bytes: assets
+                                    .iter()
+                                    .find(|(key, _)| *key == sirio_registry::current_platform_key())
+                                    .map(|(_, asset)| asset.bytes)
+                                    .unwrap_or(0),
+                            })
+                        }
+                    },
+                    crate::lsp::Dead::Manual { needs, .. } => Some(MissingServer::Manual {
+                        command,
+                        needs: (*needs).to_owned(),
+                    }),
+                    // The name actually attempted, from the failure itself
+                    // rather than today's table.
+                    crate::lsp::Dead::NotInstalled { command } => {
+                        Some(MissingServer::NotInstalled {
+                            command: command.clone(),
+                        })
+                    }
+                    crate::lsp::Dead::Failed => None,
+                }
+            }),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -6269,6 +6383,9 @@ impl SirioWorkspace {
                 }
                 sirio_ui::settings::SettingsEvent::RefreshAgentSources => {
                     workspace.refresh_launch_sources_from_registry(cx);
+                }
+                sirio_ui::settings::SettingsEvent::InstallLanguageServer(language) => {
+                    workspace.install_language_server(language, cx);
                 }
                 sirio_ui::settings::SettingsEvent::StartAccountLogin(request) => {
                     account_login::start(&workspace.settings, request, cx);
@@ -10664,16 +10781,58 @@ impl SirioWorkspace {
 
         let command = entry.command.clone();
         let args = entry.args.clone();
+        let install = entry.install.clone();
+        let language = entry.name.clone();
         let root = key.0.clone();
+        // Step 2 of the ladder, read here and used only once step 1 has
+        // answered `NotInstalled`. Consulting the store before the spawn
+        // would be wrong; reading it here is not, because an answer that is
+        // never used changes nothing — the name is still tried first, and
+        // the PATH lookup *is* the spawn.
+        let installed = self.lsp.installed_binary_for(
+            &entry,
+            &sirio_registry::InstallStore::new(self.lsp_store_root.clone()),
+        );
         let view = view.clone();
         let path_for_facts = path.to_path_buf();
         cx.spawn(async move |this, cx| {
+            // Kept for step 2: the launch below consumes its own copies, and
+            // the fallback launches the same arguments behind a different
+            // binary.
+            let installed_args = args.clone();
+            let installed_root = root.clone();
             let launched = cx
                 .background_executor()
                 // The owned String/Vec/PathBuf move in and deref to the
                 // &str/&[String]/&Path the signature wants — no helper needed.
                 .spawn(async move { sirio_lsp::Server::launch(&command, &args, &root).await })
                 .await;
+            // Step 2. A spawn by name *is* the PATH lookup, so its
+            // `NotInstalled` is step 1's answer and this is where step 2
+            // begins: an installed binary is launched by absolute path,
+            // never by putting its directory on the child's PATH, so two
+            // installed servers cannot see each other and an installed one
+            // cannot displace the reader's own choice.
+            let launched = match launched {
+                Err(sirio_lsp::LspError::NotInstalled { command }) => match installed {
+                    Some(binary) => {
+                        let binary = binary.to_string_lossy().into_owned();
+                        cx.background_executor()
+                            .spawn(async move {
+                                sirio_lsp::Server::launch(&binary, &installed_args, &installed_root)
+                                    .await
+                            })
+                            .await
+                    }
+                    // Nothing in the store, so nothing more to try: the key
+                    // dies below, with the arm the recipe dictates.
+                    None => Err(sirio_lsp::LspError::NotInstalled { command }),
+                },
+                // Including the fallback's own failures: a binary that is
+                // there and will not start is not a missing one, and
+                // `Failed` is the arm that says so.
+                other => other,
+            };
 
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
@@ -10694,17 +10853,57 @@ impl SirioWorkspace {
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     workspace.sync_document_with_server(&path_for_facts, &view, cx);
                 }
-                Err(sirio_lsp::LspError::NotInstalled { .. }) => {
+                Err(sirio_lsp::LspError::NotInstalled { command }) => {
                     // The shipped table offers a server for every language
                     // Sirio can open, so "not installed" is the answer for
                     // most of it on any given machine. Saying so on every
                     // .yaml file would make the message worthless for the
                     // case that matters — a server that *is* there and
-                    // broke. Marked dead, so it is tried once and not again.
-                    workspace.lsp.mark_dead(key);
+                    // broke. So: no card, ever.
+                    //
+                    // The context menu is the other half of that bargain,
+                    // and it is not silence. A reader who right-clicks has
+                    // asked a direct question, and answering it with "no
+                    // language server offers definitions here" describes
+                    // Sirio rather than their machine. The ladder is what
+                    // the menu gives back — the recipe to install, or the
+                    // thing that has to come first — and the facts are
+                    // pushed again because the tab computed them before
+                    // anyone had looked. Marked dead, so it is tried once
+                    // and not again.
+                    let reason = match install {
+                        Some(sirio_lsp::Recipe::Manual { needs, url }) => {
+                            crate::lsp::Dead::Manual { needs, url }
+                        }
+                        Some(recipe) => crate::lsp::Dead::Installable { recipe },
+                        // An entry of the reader's own carries no recipe on
+                        // purpose: Sirio must not offer a second copy of a
+                        // server they already chose. There is nothing to
+                        // fetch and nothing to explain, so what is left is
+                        // the name they wrote, which is what the menu gives
+                        // back — and the key still dies here, so it is tried
+                        // once and not again.
+                        None => crate::lsp::Dead::NotInstalled {
+                            command: command.clone(),
+                        },
+                    };
+                    workspace.lsp.mark_dead(key, reason.clone());
+                    let facts = workspace.file_context_facts(&path_for_facts);
+                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                    // The offer, once per language: a silenced language
+                    // costs no card at all, and Failed / the reader's own
+                    // entry offer nothing.
+                    workspace.maybe_offer_language_server(
+                        &language,
+                        &command,
+                        &reason,
+                        &view,
+                        &path_for_facts,
+                        cx,
+                    );
                 }
                 Err(error) => {
-                    workspace.lsp.mark_dead(key);
+                    workspace.lsp.mark_dead(key, crate::lsp::Dead::Failed);
                     // Naming the command is the point: it came from the
                     // user's languages.toml, and naming it turns a mystery
                     // into a line they can edit.
@@ -10713,6 +10912,241 @@ impl SirioWorkspace {
             });
         })
         .detach();
+    }
+
+    /// Every open tab of one language gets its server, without a restart.
+    /// This is **the one caller of [`crate::lsp::LspSupervisor::revive`]**:
+    /// an install that succeeded. Not a timer, not another tab opening, not
+    /// a refresh — nothing else lifts a key out of `dead`.
+    ///
+    /// Walked over the open views rather than over the one key whose card
+    /// was clicked, because two tabs of one language are not necessarily
+    /// one key: two Rust projects in one worktree are two servers, and the
+    /// card that offered the install carries only the language.
+    fn revive_language(&mut self, language: &str, cx: &mut Context<Self>) {
+        // Collected first: everything below needs `&mut self`.
+        let views = Self::open_file_views(&self.tabs, cx);
+        let mut launched: Vec<(PathBuf, String)> = Vec::new();
+        for (path, view) in views {
+            let Some(entry) = self.lsp.known_entry_for(&path) else {
+                continue;
+            };
+            if entry.name != language {
+                continue;
+            }
+            let Some(worktree_root) = self.worktree_root_for(&path) else {
+                continue;
+            };
+            let key = self.lsp.key_for(&path, &worktree_root, &entry);
+            // Two files in one project root share a key, and one launch
+            // serves both. Starting it twice over would leave two servers
+            // installed under one key and orphan the first one's process.
+            if !launched.contains(&key) {
+                self.lsp.revive(&key);
+                self.start_language_server_for(&path, &view, cx);
+                launched.push(key);
+            }
+            // The tab computed these before the install existed, and the
+            // redirect it is showing is now out of date.
+            let facts = self.file_context_facts(&path);
+            view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        }
+    }
+
+    /// Fetches the server this language needs and starts it. Both doorways
+    /// of the ladder land here — the card's button and the menu's redirect
+    /// — and both carry the language rather than a path, because a language
+    /// is what the reader asked about.
+    ///
+    /// A successful install is the only thing that revives a dead key; the
+    /// row shows the installer's own error text when one fails, and the
+    /// offer stands.
+    fn install_language_server(&mut self, language: &str, cx: &mut Context<Self>) {
+        // An entry with no recipe is the reader's own. `agent_for` answers
+        // `None` for a `Manual` recipe and for a platform the project
+        // publishes nothing for, so a `None` here is an answer rather than
+        // a failure to handle — and the offer is never made under the
+        // reader's own server.
+        let Some(entry) = self.lsp.known_entry_for_language(language) else {
+            return;
+        };
+        let Some(recipe) = entry.install.clone() else {
+            return;
+        };
+        let platform = sirio_registry::current_platform_key();
+        let Some(agent) = crate::lsp_install::agent_for(&recipe, platform) else {
+            return;
+        };
+        let store = sirio_registry::InstallStore::new(self.lsp_store_root.clone());
+
+        // Visible immediately: the row stops being clickable while the
+        // installer holds its per-package lock.
+        self.settings.update(cx, |settings, cx| {
+            settings.set_install_state(language, Some(InstallState::InFlight));
+            cx.notify();
+        });
+        let language = language.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(
+                    async move { sirio_registry::Installer::new(store).install(&agent, platform) },
+                )
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.settings.update(cx, |settings, cx| {
+                    settings.set_install_state(
+                        &language,
+                        result
+                            .as_ref()
+                            .err()
+                            .map(|error| InstallState::Failed(error.to_string())),
+                    );
+                    // The store changed, so the row's state has to be
+                    // re-read: "installed by Sirio v…" is a fact about a
+                    // directory, and the page's list of them is a snapshot of
+                    // the last read.
+                    settings.refresh_language_servers();
+                    cx.notify();
+                });
+                if result.is_ok() {
+                    workspace.revive_language(&language, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether `language` is in `lsp.silencedLanguages`. A corrupt value
+    /// reads back as empty, so the cost of being wrong is one more offer.
+    fn is_language_silenced(&self, language: &str) -> bool {
+        let stored = self.session.load_settings();
+        serde_json::from_str::<Vec<String>>(&stored.lsp_silenced_languages)
+            .map(|list| list.iter().any(|name| name == language))
+            .unwrap_or(false)
+    }
+
+    /// "Don't ask again": never offer this language again, this session or
+    /// any later one. The session set stops a second card before the next
+    /// frame; the persisted list stops one after a restart.
+    fn silence_language_server_offer(&mut self, language: &str, _cx: &mut Context<Self>) {
+        self.offered.insert(language.to_owned());
+        let mut stored = self.session.load_settings();
+        let mut list: Vec<String> =
+            serde_json::from_str(&stored.lsp_silenced_languages).unwrap_or_default();
+        if !list.iter().any(|name| name == language) {
+            list.push(language.to_owned());
+            stored.lsp_silenced_languages =
+                serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+            self.session.save_settings(&stored);
+        }
+    }
+
+    /// Cards raised this session. Test-only counter: `offered` also holds
+    /// silenced languages, so its length is not the offer count.
+    #[cfg(test)]
+    fn lsp_offers_made(&self) -> usize {
+        self.offer_count
+    }
+
+    /// Whether an npm recipe can be installed here. `install_npx` shells
+    /// out to npm, so with no npm on PATH an offer cannot be kept — and an
+    /// offer that cannot be kept is not made.
+    fn has_npm_for_offer() -> bool {
+        sirio_agents::find_executable_on_path("npm").is_some()
+    }
+
+    /// Raises the install card for `language`, once per language per
+    /// session. A silenced language costs no card at all — not one raised
+    /// and suppressed, but none. `Failed` and the reader's own entry
+    /// (`NotInstalled`, no recipe) offer nothing.
+    fn maybe_offer_language_server(
+        &mut self,
+        language: &str,
+        command: &str,
+        reason: &crate::lsp::Dead,
+        view: &Entity<FileView>,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        if self.offered.contains(language) || self.is_language_silenced(language) {
+            self.offered.insert(language.to_owned());
+            return;
+        }
+        enum OfferKind {
+            Install { label: String },
+            Manual { text: String },
+        }
+        let kind = match reason {
+            crate::lsp::Dead::Installable { recipe } => match recipe {
+                sirio_lsp::Recipe::Npm { .. } if !Self::has_npm_for_offer() => OfferKind::Manual {
+                    text: format!("{command} needs Node."),
+                },
+                sirio_lsp::Recipe::Npm { .. } => OfferKind::Install {
+                    label: "Install".to_owned(),
+                },
+                sirio_lsp::Recipe::Release { assets, .. } => {
+                    let bytes = assets
+                        .iter()
+                        .find(|(key, _)| *key == sirio_registry::current_platform_key())
+                        .map(|(_, asset)| asset.bytes)
+                        .unwrap_or(0);
+                    OfferKind::Install {
+                        label: if bytes > 0 {
+                            format!("Install — {} MB", bytes / 1_000_000)
+                        } else {
+                            "Install".to_owned()
+                        },
+                    }
+                }
+                sirio_lsp::Recipe::Manual { needs, .. } => OfferKind::Manual {
+                    text: format!("{command} needs {needs}."),
+                },
+            },
+            crate::lsp::Dead::Manual { needs, .. } => OfferKind::Manual {
+                text: format!("{command} needs {needs}."),
+            },
+            crate::lsp::Dead::NotInstalled { .. } | crate::lsp::Dead::Failed => return,
+        };
+        self.offered.insert(language.to_owned());
+        #[cfg(test)]
+        {
+            self.offer_count += 1;
+        }
+        let path = path.to_path_buf();
+        let silence_path = path.clone();
+        match kind {
+            OfferKind::Install { label } => {
+                view.update(cx, |view, cx| {
+                    view.offer(
+                        format!("{command} is not on PATH."),
+                        vec![
+                            sirio_ui::file_view::MessageAction {
+                                label,
+                                event: FileViewEvent::InstallLanguageServer { path },
+                            },
+                            sirio_ui::file_view::MessageAction {
+                                label: "Don't ask again".to_owned(),
+                                event: FileViewEvent::SilenceLanguageServer { path: silence_path },
+                            },
+                        ],
+                        cx,
+                    );
+                });
+            }
+            OfferKind::Manual { text } => {
+                view.update(cx, |view, cx| {
+                    view.offer(
+                        text,
+                        vec![sirio_ui::file_view::MessageAction {
+                            label: "Don't ask again".to_owned(),
+                            event: FileViewEvent::SilenceLanguageServer { path: silence_path },
+                        }],
+                        cx,
+                    );
+                });
+            }
+        }
     }
 
     /// One task per server, on the **foreground** executor because it
@@ -10896,7 +11330,7 @@ impl SirioWorkspace {
                 .spawn(async move { sirio_lsp::hover(&client, &path, position).await })
                 .await;
             if let Ok(text) = answer {
-                let _ = view.update(cx, |view, cx| view.set_hover(seq, text, cx));
+                view.update(cx, |view, cx| view.set_hover(seq, text, cx));
             }
         })
         .detach();
@@ -11996,10 +12430,24 @@ impl SirioWorkspace {
     }
 
     fn open_settings(&mut self, section: Option<SettingsCategory>, cx: &mut Context<Self>) {
-        if let Some(section) = section {
-            self.settings
-                .update(cx, |settings, cx| settings.select_category(section, cx));
-        }
+        // The install offer's own "Don't ask again" writes `lsp.silencedLanguages`
+        // straight to the session store, so the surface is re-synced from the
+        // store every time it opens rather than holding a copy that can go
+        // stale while the file view is the thing on screen. A corrupt value
+        // reads back as nothing declined, the same way the offer treats it.
+        let silenced: Vec<String> =
+            serde_json::from_str(&self.session.load_settings().lsp_silenced_languages)
+                .unwrap_or_default();
+        self.settings.update(cx, |settings, cx| {
+            settings.set_lsp_silenced_languages(silenced);
+            if let Some(section) = section {
+                settings.select_category(section, cx);
+            }
+            // The set above is the surface's copy of a store the offer card
+            // also writes, so the frame is redrawn even when no category
+            // changed.
+            cx.notify();
+        });
         self.show_settings = true;
         // F-SET-02: the Escape handler lives on this workspace's root, which
         // GPUI only reaches through the focused element's dispatch path. The
@@ -15163,6 +15611,8 @@ impl SirioWorkspace {
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
                 settings.center_split_ratio = center_split;
+                settings.lsp_silenced_languages =
+                    this.session.load_settings().lsp_silenced_languages;
                 this.session.save_settings(&settings);
             });
         }));
@@ -18085,6 +18535,12 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         refresh_interval: settings.refresh_interval_min.clamp(1, 60) as i32,
         opencode_workspace_id_override: settings.opencode_workspace_id_override,
         translucency: settings.translucency,
+        // The declined-install list is a JSON array in one string key. A
+        // value that will not parse reads back as "nothing was ever
+        // declined", which costs one more offer — the same trade the offer
+        // itself makes.
+        lsp_silenced_languages: serde_json::from_str(&settings.lsp_silenced_languages)
+            .unwrap_or_default(),
     }
 }
 
@@ -18112,15 +18568,38 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
         translucency: snapshot.translucency,
+        // The snapshot carries the declined-install set, so this is the one
+        // field the settings surface can now own outright. A list that will
+        // not serialize is an empty list, never a panic on the save path.
+        lsp_silenced_languages: serde_json::to_string(&snapshot.lsp_silenced_languages)
+            .unwrap_or_else(|_| AppSettings::default().lsp_silenced_languages),
         // Not in the Settings UI snapshot: the widths and the centre split
         // belong to the drag. Callers must re-apply the live values — see
-        // the `on_change` handler below. Filling these from `Default` here
-        // would reset a dragged panel every time any unrelated setting
-        // changed.
+        // the divider save below. Filling these from `Default` here would
+        // reset a dragged panel every time any unrelated setting changed.
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
     }
+}
+
+/// What the settings screen's own save writes, given the snapshot a control
+/// emitted and the row that is already stored.
+///
+/// The snapshot carries every value the surface owns, so the declined-install
+/// list comes from it — the screen is that list's only editor. Two things do
+/// not ride in the snapshot and are re-applied from the store instead: the
+/// update opt-out (its callback owns it) and the widths and centre split (the
+/// divider owns them, see `schedule_panel_width_save`). Re-applying a value
+/// the snapshot *does* carry would silently throw away the edit that produced
+/// it, which is what this function exists to be a single place against.
+fn app_settings_for_settings_save(snapshot: SettingsSnapshot, stored: &AppSettings) -> AppSettings {
+    let mut settings = app_settings_from_snapshot(snapshot);
+    settings.updates_enabled = stored.updates_enabled;
+    settings.sidebar_width = stored.sidebar_width;
+    settings.right_panel_width = stored.right_panel_width;
+    settings.center_split_ratio = stored.center_split_ratio;
+    settings
 }
 
 fn format_update_check_age(now: SystemTime, checked_at: SystemTime) -> String {
@@ -18827,14 +19306,7 @@ fn main() {
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
                             let stored = session_store_for_settings.load_settings();
-                            let mut settings = app_settings_from_snapshot(snapshot);
-                            // Update opt-out is owned by the update callback,
-                            // not SettingsSnapshot; preserve it when another
-                            // setting is saved.
-                            settings.updates_enabled = stored.updates_enabled;
-                            settings.sidebar_width = stored.sidebar_width;
-                            settings.right_panel_width = stored.right_panel_width;
-                            settings.center_split_ratio = stored.center_split_ratio;
+                            let settings = app_settings_for_settings_save(snapshot, &stored);
                             session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
@@ -19410,16 +19882,12 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.add_file_tab(file.clone(), cx);
         });
-        let opened = wait_for_wire(&mut cx, &log, |wire| {
-            wire.contains("textDocument/didOpen")
-        })
-        .await;
+        let opened =
+            wait_for_wire(&mut cx, &log, |wire| wire.contains("textDocument/didOpen")).await;
         assert!(opened, "the open must land before the edit is meaningful");
 
         // Edit through the view the way the shell's own edit path does.
-        let view = workspace.update(&mut cx, |workspace, cx| {
-            first_open_file_view(workspace, cx)
-        });
+        let view = workspace.update(&mut cx, |workspace, cx| first_open_file_view(workspace, cx));
         view.update(&mut cx, |view, cx| {
             view.editor_mut()
                 .expect("the editor is loaded by now")
@@ -19588,12 +20056,13 @@ done
         // ever looks at the content, and the notice fills the view. Nothing
         // in the app calls `clear_notice`, so the file stayed gone until the
         // tab was closed.
-        let (mut cx, workspace, scratch, files) =
-            workspace_with_defining_server(cx, "nodef", |_| "null".to_owned(), &[(
-                "only.rs",
-                "fn only() -> u32 {\n    7\n}\n",
-            )])
-            .await;
+        let (mut cx, workspace, scratch, files) = workspace_with_defining_server(
+            cx,
+            "nodef",
+            |_| "null".to_owned(),
+            &[("only.rs", "fn only() -> u32 {\n    7\n}\n")],
+        )
+        .await;
         let source = files[0].clone();
 
         let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
@@ -19639,14 +20108,23 @@ done
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// The shipped table went from four language servers to nineteen, so
+    /// The shipped table went from four language servers to twenty-one, so
     /// "that command is not on this machine" stopped being a mistake and
     /// became the ordinary answer for most of it. A card for every one of
     /// them would be a card on almost every file opened — and would drown
     /// the case the card is *for*, a server that is installed and broke.
+    ///
+    /// The half that was missing: silence was applied to the *menu* too,
+    /// where nothing is volunteered and the reader has asked outright. A
+    /// Java file on a machine with no `jdtls` read "No language server
+    /// offers definitions here" — a sentence about Sirio, arriving in the
+    /// release that gave Java a server. Unprompted, nothing; asked, the
+    /// name of the program to install.
     #[cfg(unix)]
     #[gpui::test]
-    async fn a_language_server_that_is_not_installed_says_nothing(cx: &mut TestAppContext) {
+    async fn a_language_server_that_is_not_installed_says_nothing_until_asked(
+        cx: &mut TestAppContext,
+    ) {
         let tag = "uninstalled";
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{}-{}-{}",
@@ -19723,6 +20201,413 @@ done
             cx.debug_bounds("file-text-scroll").is_some(),
             "and the file itself is on screen"
         );
+
+        // The menu is the other half of the bargain. Nothing is volunteered,
+        // but a right-click is a direct question, and the answer names the
+        // program rather than describing Sirio.
+        //
+        // Asked of the *view*, not of the workspace: the facts reach it by a
+        // push, the tab computed its own before anyone had looked for the
+        // program, and only the failure path can correct them. A test that
+        // asked the workspace what it would say would pass with that push
+        // missing, which is how this shipped.
+        use sirio_ui::file_context_menu::{FileContextAction, ItemState};
+        let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
+        let states: Vec<ItemState> = view.read_with(&cx.cx, |view, _| {
+            view.context_menu_items()
+                .into_iter()
+                .filter(|item| {
+                    matches!(
+                        item.action,
+                        FileContextAction::GoToDefinition | FileContextAction::FindReferences
+                    )
+                })
+                .map(|item| item.state)
+                .collect()
+        });
+        assert_eq!(
+            states,
+            vec![
+                ItemState::Unavailable("sirio-no-such-language-server is not on PATH".to_owned()),
+                ItemState::Unavailable("sirio-no-such-language-server is not on PATH".to_owned()),
+            ],
+            "both navigation entries name the missing program"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Waits for the first offer by condition: each turn drains everything
+    /// parked and only then sleeps, returning as soon as the count moves.
+    /// Bounded at the file's standard 200 turns so a missing offer fails
+    /// instead of hanging.
+    async fn wait_for_first_offer(cx: &mut VisualTestContext, workspace: &Entity<SirioWorkspace>) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made()) >= 1 {
+                return;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+    }
+
+    /// A workspace on the shipped defaults — no `languages.toml`, so every
+    /// recipe is the compiled-in one — with `files` written under one repo
+    /// and a scratch language-server store. Relative paths may name
+    /// subdirectories; parents are created.
+    ///
+    /// Deliberately not a `languages.toml` naming a command nobody has: a
+    /// user entry carries no recipe on purpose (`#[serde(skip)]`), so it
+    /// could never offer anything and no offer could be observed here. The
+    /// caller empties `PATH` once the repo exists, which makes the shipped
+    /// command missing hermetically — and, for the npm test, makes npm
+    /// missing too.
+    fn workspace_with_uninstalled_server(
+        cx: &mut TestAppContext,
+        tag: &str,
+        files: &[(&str, &str)],
+    ) -> (
+        VisualTestContext,
+        Entity<SirioWorkspace>,
+        PathBuf,
+        Vec<PathBuf>,
+    ) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-{tag}-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create empty config dir");
+        // No languages.toml: the loader falls back to the shipped defaults,
+        // recipes included. Pointing SIRIO_CONFIG_DIR at an empty directory
+        // still isolates the test from the reader's real table.
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        // A scratch store, so a fixture never consults what this machine
+        // has installed under the reader's own data directory: a manifest
+        // left by a real install would launch and there would be no offer.
+        *TEST_LSP_STORE_ROOT.write().unwrap() = Some(scratch.join("language-servers"));
+
+        let repo = test_repo(tag);
+        let mut written = Vec::new();
+        for (name, content) in files {
+            let path = repo.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create the fixture's parent");
+            }
+            std::fs::write(&path, content).expect("write the fixture file");
+            written.push(path);
+        }
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        (cx, workspace, scratch, written)
+    }
+
+    #[gpui::test]
+    async fn opening_a_second_file_of_the_same_language_does_not_offer_twice(
+        cx: &mut TestAppContext,
+    ) {
+        // The rule that separates this card from the one 0.18.0 banned. Ten
+        // .java files must not be ten cards.
+        //
+        // Two *roots*, not two files: two files in one project root share
+        // one dead key, so the second returns before any offer logic runs
+        // and a test there would pass with the dedup missing. Two keys of
+        // one language is the shape that needs the per-language set.
+        let (mut cx, workspace, scratch, files) = workspace_with_uninstalled_server(
+            cx,
+            "offeronce",
+            &[
+                ("one.rs", "fn one() {}\n"),
+                ("nested/two.rs", "fn two() {}\n"),
+            ],
+        );
+        let repo = files[0]
+            .parent()
+            .expect("one.rs has a parent")
+            .to_path_buf();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the outer root marker");
+        std::fs::write(
+            repo.join("nested/Cargo.toml"),
+            "[package]\nname = \"nested\"\n",
+        )
+        .expect("write the nested root marker");
+
+        // Emptied for the duration, which is safe because nextest runs
+        // each test in its own process. The repo already exists, so nothing
+        // below still needs git — and the emptied PATH is what makes the
+        // shipped command missing hermetically.
+        let saved_path = std::env::var_os("PATH");
+        let empty_bin = scratch.join("empty-bin");
+        std::fs::create_dir_all(&empty_bin).expect("create the empty PATH dir");
+        unsafe { std::env::set_var("PATH", &empty_bin) };
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(files[0].clone(), cx)
+        });
+        // The first offer IS an event, so it is waited for by condition:
+        // the common case costs the pipeline's actual length, not the whole
+        // budget.
+        wait_for_first_offer(&mut cx, &workspace).await;
+        let first = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(files[1].clone(), cx)
+        });
+        // Nothing to wait for here by design — a correct dedup produces no
+        // second event — so this is a fixed window giving a wrongful second
+        // offer the chance to appear. Forty fully-parked turns: a genuine
+        // second offer would ride the same launch-failure pipeline the first
+        // wait measures, which fails fast (NotFound on an empty PATH, no
+        // network, no store hit) and resolves in a couple of turns. Forty is
+        // an order of magnitude more parked work than that pipeline needs,
+        // so holding at one offer for the whole window is the assertion.
+        for _ in 0..40 {
+            cx.run_until_parked();
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        let second = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
+
+        unsafe {
+            match saved_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        };
+
+        assert_eq!(first, 1, "the first file of a language offers");
+        assert_eq!(second, 1, "the second does not offer again");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[gpui::test]
+    async fn an_npm_recipe_offers_nothing_when_node_is_absent(cx: &mut TestAppContext) {
+        // An offer that cannot be kept is not made: install_npx shells out
+        // to npm, and failing after the click is the worst moment to find
+        // out. PATH is emptied for the duration, which is safe because
+        // nextest runs each test in its own process.
+        let (mut cx, workspace, scratch, files) =
+            workspace_with_uninstalled_server(cx, "offer-node", &[("main.ts", "const x = 1;\n")]);
+
+        let saved_path = std::env::var_os("PATH");
+        let empty_bin = scratch.join("empty-bin");
+        std::fs::create_dir_all(&empty_bin).expect("create the empty PATH dir");
+        unsafe { std::env::set_var("PATH", &empty_bin) };
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(files[0].clone(), cx)
+        });
+        wait_for_first_offer(&mut cx, &workspace).await;
+
+        let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
+        let (text, labels) = view.read_with(&cx.cx, |view, _| {
+            (view.message_text(), view.message_action_labels())
+        });
+        let offers = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
+
+        unsafe {
+            match saved_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        };
+
+        assert_eq!(offers, 1, "the missing server still offers once");
+        assert_eq!(
+            text.as_deref(),
+            Some("typescript-language-server needs Node."),
+            "an npm recipe with no npm says what the Manual arm says"
+        );
+        assert_eq!(
+            labels,
+            vec!["Don't ask again".to_owned()],
+            "and it carries no Install button"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The transition an install makes, at the scale it has to make it:
+    /// every open tab of that language gets a server, not just the one whose
+    /// card was clicked.
+    ///
+    /// Two Rust files in one project root share a key, so a second file
+    /// there would say nothing about this. Two *roots* in one worktree — two
+    /// Cargo.tomls — are the shape in which "every open tab" is more than
+    /// one key, and it is what a revive wired to a single key leaves dead.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_install_reaches_every_open_tab_of_that_language(cx: &mut TestAppContext) {
+        let tag = "revive-language";
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-{tag}-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create fake config dir");
+        let log = scratch.join("wire.log");
+        std::fs::write(
+            config_dir.join("languages.toml"),
+            format!(
+                "[[language]]\nname = \"rust\"\nextensions = [\"rs\"]\ncommand = \"/bin/sh\"\nargs = [\"-c\", {}]\nroots = [\"Cargo.toml\"]\n",
+                toml_string_literal(&recording_server_script(&log))
+            ),
+        )
+        .expect("write the recording language table");
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the outer root marker");
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).expect("create the nested project");
+        std::fs::write(nested.join("Cargo.toml"), "[package]\nname = \"nested\"\n")
+            .expect("write the nested root marker");
+        let first = repo.join("first.rs");
+        let second = nested.join("second.rs");
+        let third = repo.join("third.rs");
+        std::fs::write(&first, "fn first() {}\n").expect("write the first file");
+        std::fs::write(&second, "fn second() {}\n").expect("write the second file");
+        // The same key as `first.rs`: one project root, one server, whatever
+        // the number of tabs open on it.
+        std::fs::write(&third, "fn third() {}\n").expect("write the third file");
+
+        // A scratch store, so a fixture never consults what this machine has
+        // installed under the reader's own data directory.
+        let store_root = scratch.join("language-servers");
+        *TEST_LSP_STORE_ROOT.write().unwrap() = Some(store_root.clone());
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_store_root.clone()),
+            store_root,
+            "the fixture's store is the scratch one, never the reader's"
+        );
+
+        let first_key = (repo.clone(), "rust".to_owned());
+        let second_key = (nested.clone(), "rust".to_owned());
+
+        // The recipe the card would have carried. The fixture's table
+        // shadows the shipped `rust` entry — which is the point, since the
+        // fixture needs a command that starts — so the arm is read from the
+        // defaults the offer would have been made for.
+        let recipe = sirio_lsp::LanguageTable::defaults()
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "rust")
+            .and_then(|entry| entry.install.clone())
+            .expect("the shipped table offers rust a recipe");
+
+        // Both keys marked dead *before* the tabs open: that is the state an
+        // install offer leaves behind, and marking it there is what makes
+        // the launch below the one the revive performed rather than a second
+        // one racing it.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.lsp.mark_dead(
+                first_key.clone(),
+                crate::lsp::Dead::Installable {
+                    recipe: recipe.clone(),
+                },
+            );
+            workspace
+                .lsp
+                .mark_dead(second_key.clone(), crate::lsp::Dead::Installable { recipe });
+            workspace.add_file_tab(first.clone(), cx);
+            workspace.add_file_tab(second.clone(), cx);
+            workspace.add_file_tab(third.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.lsp.is_dead(&first_key) && workspace.lsp.is_dead(&second_key)
+            }),
+            "the fixture starts with both keys dead"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.revive_language("rust", cx)
+        });
+
+        let mut started: usize = 0;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            started = workspace.read_with(&cx.cx, |workspace, _| {
+                [&first_key, &second_key]
+                    .into_iter()
+                    .filter(|key| workspace.lsp.is_running(*key))
+                    .count()
+            });
+            if started == 2 {
+                break;
+            }
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        assert_eq!(
+            started, 2,
+            "one install starts the server for every open tab of that language, \
+             not just the first: {started} of 2 keys had one"
+        );
+        // The third tab shares the first one's key, so it must have been
+        // served by the same server rather than starting a second one over
+        // it — an install is one launch per key.
+        let launches = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches("\"method\":\"initialize\"")
+            .count();
+        assert_eq!(
+            launches, 2,
+            "two keys, two servers, three tabs: the shared root is launched once"
+        );
+
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
@@ -20237,6 +21122,7 @@ done
             distributions: vec![sirio_registry::Distribution::Npx {
                 package: "@agentclientprotocol/codex-acp@1.6.2".into(),
                 args: vec![],
+                bin: None,
             }],
         };
         assert!(agent_command_for(&sirio_registry::LaunchSource::Installable { agent }).is_none());
@@ -20270,6 +21156,7 @@ done
                     distributions: vec![sirio_registry::Distribution::Npx {
                         package: format!("{id}@1.0.0"),
                         args: Vec::new(),
+                        bin: None,
                     }],
                 }],
             };
@@ -28826,6 +29713,7 @@ done
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 610,
+            lsp_silenced_languages: "[]".to_string(),
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -28897,6 +29785,76 @@ done
         );
     }
 
+    /// The declined-install list is a JSON array in one string key. The
+    /// snapshot carries it as plain names, and this pair of conversions is
+    /// what makes Settings › Language Servers' one edit reach SQLite: before
+    /// it, `app_settings_from_snapshot` filled the field from `Default` and
+    /// the saving path re-applied the stored value over it, so the page's
+    /// change was thrown away before the write.
+    #[test]
+    fn the_declined_install_list_round_trips_through_the_snapshot() {
+        let persisted = AppSettings {
+            lsp_silenced_languages: r#"["java","kotlin"]"#.to_owned(),
+            ..AppSettings::default()
+        };
+
+        let snapshot = settings_snapshot_from_app_settings(persisted.clone());
+        assert_eq!(
+            snapshot.lsp_silenced_languages,
+            vec!["java".to_owned(), "kotlin".to_owned()]
+        );
+        assert_eq!(
+            app_settings_from_snapshot(snapshot).lsp_silenced_languages,
+            persisted.lsp_silenced_languages,
+            "an empty edit has to write `[]`, not the default"
+        );
+
+        // A value that will not parse costs one more offer, which is the
+        // same trade the offer itself makes; it must never panic the boot.
+        let corrupt = AppSettings {
+            lsp_silenced_languages: "not json".to_owned(),
+            ..persisted
+        };
+        assert!(
+            settings_snapshot_from_app_settings(corrupt)
+                .lsp_silenced_languages
+                .is_empty()
+        );
+    }
+
+    /// Defect the Language Servers screen would otherwise ship with: the
+    /// settings save composed the snapshot with the *stored* row, and it used
+    /// to re-apply the stored declined-install list over the snapshot's. The
+    /// screen's only edit is that list, so the re-apply made the screen's one
+    /// button write nothing. The snapshot owns what it carries; the store
+    /// keeps only what the snapshot cannot carry.
+    #[test]
+    fn a_settings_save_keeps_the_snapshots_declined_list_over_the_stored_one() {
+        let stored = AppSettings {
+            lsp_silenced_languages: r#"["java"]"#.to_owned(),
+            sidebar_width: 325,
+            right_panel_width: 405,
+            center_split_ratio: 610,
+            updates_enabled: false,
+            ..AppSettings::default()
+        };
+        let snapshot = SettingsSnapshot {
+            // What the page's "Offer again" produced: java is out.
+            lsp_silenced_languages: vec!["kotlin".to_owned()],
+            ..SettingsSnapshot::default()
+        };
+
+        let saved = app_settings_for_settings_save(snapshot, &stored);
+        assert_eq!(
+            saved.lsp_silenced_languages, r#"["kotlin"]"#,
+            "the edit the screen made survives the save"
+        );
+        assert_eq!(saved.sidebar_width, 325, "the divider's value is kept");
+        assert_eq!(saved.right_panel_width, 405);
+        assert_eq!(saved.center_split_ratio, 610);
+        assert!(!saved.updates_enabled, "the update opt-out is kept too");
+    }
+
     #[test]
     fn changing_only_the_theme_does_not_erase_other_persisted_settings() {
         let root = std::env::temp_dir().join(format!(
@@ -28931,6 +29889,7 @@ done
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 610,
+            lsp_silenced_languages: "[]".to_string(),
         };
         store.save_settings(&persisted);
 
@@ -32112,6 +33071,45 @@ done
             session.load_settings().right_panel_width,
             460,
             "the last width wins, and only it is written"
+        );
+    }
+
+    /// The debounced width save rebuilds `AppSettings` from the settings
+    /// snapshot, which is not the live owner of every key: the declined
+    /// install list belongs to the install offer, whose "Don't ask again"
+    /// writes the store directly. `c415200a` fixed a drag writing `[]` over
+    /// that list; the Language Servers work moved the list into the snapshot
+    /// and must not have undone it here.
+    #[gpui::test]
+    async fn a_divider_drag_does_not_wipe_the_declined_install_list(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
+        let mut declined = session.load_settings();
+        declined.lsp_silenced_languages = r#"["java"]"#.to_owned();
+        session.save_settings(&declined);
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.right_panel_width = 420.0;
+            workspace.schedule_panel_width_save(cx);
+        });
+        cx.background_executor
+            .advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
+        cx.run_until_parked();
+
+        let stored = session.load_settings();
+        assert_eq!(stored.right_panel_width, 420, "the drag itself was saved");
+        assert_eq!(
+            stored.lsp_silenced_languages, r#"["java"]"#,
+            "and it left the install offer's key alone"
         );
     }
 

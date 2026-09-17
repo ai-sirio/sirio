@@ -51,7 +51,7 @@ sirio_acp        (-> sirio_persistence)
 sirio_terminal    (-> sirio_project, sirio_theme)
 sirio_control    (-> sirio_acp, sirio_persistence)
     ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_git, sirio_markdown,
+sirio_ui         (-> sirio_acp, sirio_agents, sirio_git, sirio_lsp, sirio_markdown,
                       sirio_persistence, sirio_project, sirio_registry, sirio_theme,
                       sirio_usage)
     ^

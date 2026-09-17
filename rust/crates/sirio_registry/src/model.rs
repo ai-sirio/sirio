@@ -44,6 +44,12 @@ pub enum Distribution {
     Npx {
         package: String,
         args: Vec<String>,
+        /// Which executable inside the package, when the caller knows and
+        /// the package name cannot say. `None` keeps the original
+        /// behaviour, which every ACP agent in the registry relies on.
+        /// Decoded by [`PackageWire`], whose field is optional: no
+        /// published document carries this key.
+        bin: Option<String>,
     },
     Binary(BTreeMap<String, BinaryArtifact>),
     Uvx {
@@ -91,6 +97,12 @@ struct PackageWire {
     package: String,
     #[serde(default)]
     args: Vec<String>,
+    /// Absent from every published document: this is Sirio's own vocabulary
+    /// for the rows `sirio_lsp` names an executable for, and the ACP
+    /// registry carries no such key. Written out the way
+    /// [`AgentWire`]'s optional fields are.
+    #[serde(default)]
+    bin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -170,6 +182,7 @@ fn decode_distribution(
                     out.push(Distribution::Npx {
                         package: package.package,
                         args: package.args,
+                        bin: package.bin,
                     });
                 }
             }
@@ -367,5 +380,43 @@ mod tests {
                 "{id} second kind is npx"
             );
         }
+    }
+
+    #[test]
+    fn a_document_without_a_bin_key_still_decodes_every_acp_agent() {
+        // `#[serde(default)]`, verified rather than reasoned about: no
+        // published document carries this key, and every ACP agent's npx
+        // row decodes through this path.
+        let registry =
+            AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json")).unwrap();
+        let claude = registry.agent("claude-acp").expect("claude-acp row");
+        let Distribution::Npx { bin, .. } = &claude.distributions[0] else {
+            panic!("claude-acp is an npx row");
+        };
+        assert!(
+            bin.is_none(),
+            "naming no executable is the absence of the key, not an error"
+        );
+    }
+
+    #[test]
+    fn a_document_that_names_a_bin_decodes_it() {
+        // The reverse: when a document does name one it must reach the
+        // distribution, or the field would decode as None forever.
+        let registry = AcpRegistry::from_json(
+            r#"{"version":"1.0.0","agents":[{"id":"pyright","name":"pyright",
+                "version":"1.1.414","distribution":{"npx":{"package":"pyright@1.1.414",
+                "args":["--stdio"],"bin":"pyright-langserver"}}}]}"#,
+        )
+        .expect("decodes");
+        let agent = registry.agent("pyright").expect("row");
+        assert_eq!(
+            agent.distributions,
+            vec![Distribution::Npx {
+                package: "pyright@1.1.414".to_string(),
+                args: vec!["--stdio".to_string()],
+                bin: Some("pyright-langserver".to_string()),
+            }]
+        );
     }
 }

@@ -41,7 +41,7 @@ use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
 };
-use crate::file_context_menu::{self, FileContextAction, FileContextFacts};
+use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
 use crate::loading;
 
 /// The rendered-markdown column: the frozen 720px content column (waku
@@ -67,6 +67,18 @@ pub enum MarkdownMode {
     Preview,
 }
 
+/// One thing an offer's card can do, and what clicking it says.
+///
+/// The event is the currency the context menu's `FileContextRoute::App`
+/// rows already pay in: a card action reaches the workspace through
+/// `FileViewEvent`, the one path that is wired, rather than a second one
+/// built beside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageAction {
+    pub label: String,
+    pub event: FileViewEvent,
+}
+
 /// A message the shell raises about an open file: a definition that does
 /// not exist, a save that failed, a language table that would not parse.
 ///
@@ -85,6 +97,11 @@ struct TransientMessage {
     /// server that would not launch — which settle into the view's corner
     /// instead of appearing at a stale coordinate.
     at: Option<Point<Pixels>>,
+    /// The buttons drawn under the sentence. Empty for a message, which is
+    /// news and has nothing to offer; filled by `offer`, where each entry
+    /// carries the event its click emits. An empty vector draws nothing,
+    /// which is what keeps `set_message`'s callers exactly as they were.
+    actions: Vec<MessageAction>,
 }
 
 /// A tab showing one path. The entity remains owned by the workspace while
@@ -229,6 +246,14 @@ pub enum FileViewEvent {
     Hover { path: PathBuf, offset: usize, seq: u64 },
     GoToDefinition { path: PathBuf, offset: usize },
     FindReferences { path: PathBuf, offset: usize },
+    /// A redirected menu row was clicked: fetch the server this file's
+    /// language names rather than navigating anywhere.
+    InstallLanguageServer { path: PathBuf },
+    /// The offer card's second button: never offer this language's server
+    /// again. Carries the path so the workspace can resolve the language
+    /// the same way the install button does; silencing itself lives in the
+    /// workspace and the settings, never in the view.
+    SilenceLanguageServer { path: PathBuf },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -363,11 +388,32 @@ impl FileView {
 
     /// Raises a message about this file that nothing pointed at — a save
     /// that failed, a server that would not launch. It settles in the
-    /// view's corner, over the content rather than in place of it.
+    /// view's corner, over the content rather than in place of it, and
+    /// carries no buttons: a message is news, and news is dismissed.
     pub fn set_message(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.message = Some(TransientMessage {
             text: text.into(),
             at: None,
+            actions: Vec::new(),
+        });
+        cx.notify();
+    }
+
+    /// Raises an offer about this file: a sentence and the buttons that end
+    /// it. Like `set_message` it settles in the corner over the content,
+    /// and a click on the body dismisses it — but a click on an action runs
+    /// it instead of dismissing, so a failed install finds its button where
+    /// it left it. See `message_card`.
+    pub fn offer(
+        &mut self,
+        text: impl Into<String>,
+        actions: Vec<MessageAction>,
+        cx: &mut Context<Self>,
+    ) {
+        self.message = Some(TransientMessage {
+            text: text.into(),
+            at: None,
+            actions,
         });
         cx.notify();
     }
@@ -379,6 +425,7 @@ impl FileView {
         self.message = Some(TransientMessage {
             text: text.into(),
             at: self.definition_gesture.take(),
+            actions: Vec::new(),
         });
         cx.notify();
     }
@@ -387,6 +434,28 @@ impl FileView {
         if self.message.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// The card's sentence, if one is up. Test seam for the install-offer
+    /// tests in `sirio`, which assert what the card says rather than only
+    /// that something is drawn.
+    pub fn message_text(&self) -> Option<String> {
+        self.message.as_ref().map(|message| message.text.clone())
+    }
+
+    /// The card's button labels in draw order. Empty when no card is up or
+    /// the card is a plain message.
+    pub fn message_action_labels(&self) -> Vec<String> {
+        self.message
+            .as_ref()
+            .map(|message| {
+                message
+                    .actions
+                    .iter()
+                    .map(|action| action.label.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Called by the workspace when the tab is opened and whenever the facts
@@ -531,6 +600,17 @@ impl FileView {
         }
     }
 
+    /// The menu exactly as it would be drawn right now.
+    ///
+    /// Public for the workspace's own tests, and used by `render` below so
+    /// the two cannot drift. The facts reach this view by a push, and a
+    /// test that asks the workspace what it *would* say cannot tell a push
+    /// that happened from one that did not — which is the failure this
+    /// accessor exists to make visible.
+    pub fn context_menu_items(&self) -> Vec<file_context_menu::FileContextItem> {
+        file_context_menu::items(&self.menu_facts())
+    }
+
     /// The shell's facts plus the two this view answers itself.
     fn menu_facts(&self) -> FileContextFacts {
         let has_selection = self
@@ -540,7 +620,7 @@ impl FileView {
         FileContextFacts {
             has_selection,
             is_markdown: self.is_markdown(),
-            ..self.shell_facts
+            ..self.shell_facts.clone()
         }
     }
 
@@ -619,6 +699,11 @@ impl FileView {
                 cx.emit(FileViewEvent::FindReferences {
                     path: self.path.clone(),
                     offset: self.caret,
+                });
+            }
+            FileContextAction::InstallLanguageServer => {
+                cx.emit(FileViewEvent::InstallLanguageServer {
+                    path: self.path.clone(),
                 });
             }
         }
@@ -1307,7 +1392,7 @@ impl Render for FileView {
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
-            let items = file_context_menu::items(&self.menu_facts());
+            let items = self.context_menu_items();
             let mut previous_group = None;
             for (index, item) in items.iter().enumerate() {
                 if previous_group.is_some_and(|group| group != item.group) {
@@ -1315,12 +1400,22 @@ impl Render for FileView {
                 }
                 previous_group = Some(item.group);
 
-                let action = item.action;
                 let item_entity = entity.clone();
                 let selector = format!("file-context-item-{index}");
                 let debug_selector = selector.clone();
-                let disabled_reason = item.disabled_reason.clone();
-                let is_disabled = disabled_reason.is_some();
+                let state = item.state.clone();
+                let is_disabled = matches!(state, ItemState::Unavailable(_));
+                // A redirected row acts on what is missing, not on what it
+                // is labelled with; an unavailable row acts on nothing.
+                let effect = match &state {
+                    ItemState::Ready | ItemState::Unavailable(_) => item.action,
+                    ItemState::Redirected { to, .. } => *to,
+                };
+                let note = match &state {
+                    ItemState::Ready => None,
+                    ItemState::Unavailable(reason) => Some(reason.clone()),
+                    ItemState::Redirected { note, .. } => Some(note.clone()),
+                };
                 menu = menu.child(
                     div()
                         .id(selector)
@@ -1342,12 +1437,12 @@ impl Render for FileView {
                                 .hover(|style| style.bg(theme.element_hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |view, cx| {
-                                        view.handle_context_action(action, window, cx);
+                                        view.handle_context_action(effect, window, cx);
                                     });
                                 })
                         })
                         .child(item.label)
-                        .when_some(disabled_reason, |this, reason| {
+                        .when_some(note, |this, reason| {
                             this.child(
                                 div()
                                     .debug_selector(move || {
@@ -1383,7 +1478,7 @@ impl Render for FileView {
         // Either way it sits *over* the file — priority 2 so it stays above
         // the menu that may have raised it.
         let message = self.message.as_ref().map(|message| {
-            let card = message_card(&message.text, theme, entity.clone());
+            let card = message_card(&message.text, &message.actions, theme, entity.clone());
             match message.at {
                 Some(at) => deferred(
                     anchored()
@@ -2365,13 +2460,28 @@ fn hover_card(text: &str, theme: Theme) -> AnyElement {
 /// context menu uses it: something an interaction puts up to be read must
 /// stay opaque when the window blurs. A click anywhere on it dismisses it,
 /// which is the dismissal the old full-surface notice never had.
-fn message_card(text: &str, theme: Theme, entity: gpui::Entity<FileView>) -> AnyElement {
-    div()
+///
+/// An offer adds a row of actions under the sentence. A click on one emits
+/// that action's own `FileViewEvent` — the same currency the context menu's
+/// `FileContextRoute::App` rows pay in — and **does not dismiss**: an
+/// install that failed puts the same button back in front of the reader,
+/// and a card that vanished on the click would take the retry with it. The
+/// body keeps the dismissal for both kinds.
+fn message_card(
+    text: &str,
+    actions: &[MessageAction],
+    theme: Theme,
+    entity: gpui::Entity<FileView>,
+) -> AnyElement {
+    let mut card = div()
         .id("file-view-message")
         .debug_selector(|| "file-view-message".into())
         .max_w(px(420.0))
         .px(px(12.0))
         .py(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
         .bg(theme.menu_surface())
         .border_1()
         .border_color(theme.border)
@@ -2379,14 +2489,42 @@ fn message_card(text: &str, theme: Theme, entity: gpui::Entity<FileView>) -> Any
         .font_family(theme.typography.ui_family)
         .text_size(theme.typography.base_size)
         .text_color(theme.text)
-        .child(text.to_owned())
-        .on_mouse_down(
-            MouseButton::Left,
-            move |_, _, cx| {
-                entity.update(cx, |view, cx| view.dismiss_message(cx));
-            },
-        )
-        .into_any_element()
+        .child(text.to_owned());
+    if !actions.is_empty() {
+        let mut row = div().flex().items_center().gap(px(6.0));
+        for (index, action) in actions.iter().enumerate() {
+            let selector = format!("file-view-message-action-{index}");
+            let debug_selector = selector.clone();
+            let event = action.event.clone();
+            let action_entity = entity.clone();
+            row = row.child(
+                div()
+                    .id(selector)
+                    .debug_selector(move || debug_selector.clone())
+                    .px(px(10.0))
+                    .py(px(3.0))
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
+                    // The card below reads a mouse-down on itself as a
+                    // click on the body and dismisses on it. The button has
+                    // to stop that event before it reaches the card:
+                    // stopping the click instead would be a phase too late,
+                    // the dismissal having already run.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| {
+                        action_entity.update(cx, |_view, cx| cx.emit(event.clone()));
+                    })
+                    .child(action.label.clone()),
+            );
+        }
+        card = card.child(row);
+    }
+    card.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+        entity.update(cx, |view, cx| view.dismiss_message(cx));
+    })
+    .into_any_element()
 }
 
 fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
@@ -3012,6 +3150,10 @@ mod tests {
             cx.debug_bounds("file-text-scroll").is_some(),
             "and the file is still drawn underneath it, not replaced by it"
         );
+        assert!(
+            cx.debug_bounds("file-view-message-action-0").is_none(),
+            "and it carries no buttons: `set_message` is not an offer"
+        );
 
         cx.update(|window, cx| {
             let view = window.root::<FileView>().flatten().expect("root");
@@ -3025,6 +3167,121 @@ mod tests {
         assert!(
             cx.debug_bounds("file-view-message").is_none(),
             "dismissing the message removes it from the drawn frame"
+        );
+    }
+
+    #[gpui::test]
+    async fn an_offer_draws_its_actions_and_the_file_underneath(cx: &mut gpui::TestAppContext) {
+        // The card that 0.18.0 banned was an *error* arriving uninvited on
+        // almost every file. This is an offer, once, carrying its own way to
+        // end — and, like every card since 0.17.2, it sits over the file
+        // rather than in place of it.
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let probe = file.path().to_path_buf();
+        view.update(&mut cx.cx, |view, cx| {
+            view.offer(
+                "clangd is not on PATH.",
+                vec![
+                    MessageAction {
+                        label: "Install — 114 MB".to_owned(),
+                        event: FileViewEvent::InstallLanguageServer {
+                            path: probe.clone(),
+                        },
+                    },
+                    // The design's second action, "Don't ask again": the
+                    // card's contract is only that each click emits the event
+                    // its own action was built with, and which event a caller
+                    // puts there is the caller's business.
+                    MessageAction {
+                        label: "Don't ask again".to_owned(),
+                        event: FileViewEvent::ViewFileHistory(probe.clone()),
+                    },
+                ],
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-view-message").is_some(),
+            "the offer is drawn"
+        );
+        assert!(
+            cx.debug_bounds("file-view-message-action-0").is_some(),
+            "and so is its first action"
+        );
+        assert!(
+            cx.debug_bounds("file-view-message-action-1").is_some(),
+            "and its second"
+        );
+        assert!(
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "over the file, not instead of it"
+        );
+
+        // An action click runs the action and leaves the card up. An install
+        // that failed offers the same button again, and a card that vanished
+        // on the click would have taken the only retry with it.
+        let first = cx
+            .debug_bounds("file-view-message-action-0")
+            .expect("the first action is drawn");
+        cx.simulate_click(first.center(), Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[FileViewEvent::InstallLanguageServer { path: probe.clone() }],
+            "the first button emits the event it was built with"
+        );
+        let second = cx
+            .debug_bounds("file-view-message-action-1")
+            .expect("the second action is drawn");
+        cx.simulate_click(second.center(), Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[
+                FileViewEvent::InstallLanguageServer { path: probe.clone() },
+                FileViewEvent::ViewFileHistory(probe.clone()),
+            ],
+            "and the second emits its own, not the first's again"
+        );
+        assert!(
+            cx.debug_bounds("file-view-message").is_some(),
+            "an action is not also a dismissal"
+        );
+
+        // The body keeps the dismissal, for both kinds of card: a click that
+        // is not on an action.
+        let card = cx.debug_bounds("file-view-message").expect("drawn");
+        let body = card.origin + point(px(2.0), px(2.0));
+        for action in ["file-view-message-action-0", "file-view-message-action-1"] {
+            let bounds = cx.debug_bounds(action).expect("the action is drawn");
+            assert!(
+                !bounds.contains(&body),
+                "the click has to land on the body, not on {action}"
+            );
+        }
+        cx.simulate_click(body, Modifiers::none());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-view-message").is_none(),
+            "a click on the body still dismisses it"
         );
     }
 

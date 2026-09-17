@@ -145,10 +145,11 @@ pub struct LspSupervisor {
     /// The version each open document is at, per the protocol's requirement
     /// that it only ever rise.
     versions: sirio_lsp::DocumentVersions,
-    /// Keys whose server died. Kept so a crashed server is not restarted in
-    /// a loop: one that crashes on a file crashes again on restart, and on
-    /// rust-analyzer that means re-indexing the repository forever.
-    dead: Vec<(PathBuf, String)>,
+    /// Keys with no server, and why. Kept so a crashed server is not
+    /// restarted in a loop: one that crashes on a file crashes again on
+    /// restart, and on rust-analyzer that means re-indexing the repository
+    /// forever.
+    dead: HashMap<(PathBuf, String), Dead>,
     /// The text each open document was last *sent* with.
     ///
     /// The server's copy of a file is only ever as good as this, so this is
@@ -158,6 +159,28 @@ pub struct LspSupervisor {
     /// `Editor`'s eleven buffer-write sites, and a `String` comparison
     /// checks length before it reads a byte.
     synced: HashMap<PathBuf, String>,
+}
+
+/// Why a key has no server and will not be tried again — and, for the arms
+/// that offer one, what the reader can do about it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Dead {
+    /// The command is not on `PATH` and Sirio can fetch it.
+    Installable { recipe: sirio_lsp::Recipe },
+    /// The command is not on `PATH` and something has to come first.
+    Manual {
+        needs: &'static str,
+        url: &'static str,
+    },
+    /// The command names a program that is not there and Sirio has no
+    /// recipe for it: an entry of the reader's own, which carries no recipe
+    /// on purpose — Sirio must not offer a second copy of a server they
+    /// already chose. The name they wrote is all there is to give back.
+    NotInstalled { command: String },
+    /// It launched and then failed. Already shown on a card at the moment
+    /// it happened; nothing further is owed, and reinstalling is not the
+    /// cure.
+    Failed,
 }
 
 /// What a document needs told to a server, if anything.
@@ -175,7 +198,7 @@ impl LspSupervisor {
             loader,
             servers: HashMap::new(),
             versions: sirio_lsp::DocumentVersions::default(),
-            dead: Vec::new(),
+            dead: HashMap::new(),
             synced: HashMap::new(),
         }
     }
@@ -213,6 +236,35 @@ impl LspSupervisor {
     /// keeping a server in step does not need to.
     pub fn known_entry_for(&self, file: &Path) -> Option<LanguageEntry> {
         self.loader.table().for_path(file).cloned()
+    }
+
+    /// The entry whose `name` is this language, from the table as already
+    /// loaded. `known_entry_for` answers by path; the install action knows
+    /// only the language, because that is what the card's button carries.
+    pub fn known_entry_for_language(&self, language: &str) -> Option<LanguageEntry> {
+        self.loader
+            .table()
+            .entries()
+            .iter()
+            .find(|entry| entry.name == language)
+            .cloned()
+    }
+
+    /// The binary Sirio installed for this entry, if it installed one and
+    /// the file is still there. Consulted only after a spawn by name has
+    /// answered `NotInstalled`, which is what makes PATH win.
+    ///
+    /// A manifest outliving its executable is not an offer — that is a
+    /// half-deleted install, and handing back a path that is not there
+    /// would fail with a message about a path nobody recognises.
+    pub fn installed_binary_for(
+        &self,
+        entry: &LanguageEntry,
+        store: &sirio_registry::InstallStore,
+    ) -> Option<PathBuf> {
+        let id = entry.install.as_ref()?.store_id()?;
+        let installed = store.manifest(id)?;
+        installed.executable.exists().then_some(installed.executable)
     }
 
     /// Whether the server already holds exactly this text.
@@ -265,14 +317,35 @@ impl LspSupervisor {
     }
 
     pub fn is_dead(&self, key: &(PathBuf, String)) -> bool {
-        self.dead.contains(key)
+        self.dead.contains_key(key)
     }
 
-    pub fn mark_dead(&mut self, key: (PathBuf, String)) {
+    pub fn mark_dead(&mut self, key: (PathBuf, String), reason: Dead) {
         self.servers.remove(&key);
-        if !self.dead.contains(&key) {
-            self.dead.push(key);
+        self.dead.entry(key).or_insert(reason);
+    }
+
+    /// Lets a key be launched again. **One caller only:** an install that
+    /// succeeded. Not a timer, not another tab opening, not a refresh —
+    /// and never for `Failed`, which is what keeps a crashing server from
+    /// being restarted in a loop.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn revive(&mut self, key: &(PathBuf, String)) {
+        if matches!(self.dead.get(key), Some(Dead::Failed)) {
+            return;
         }
+        self.dead.remove(key);
+    }
+
+    /// Why this file's language has no server, when there is a reason worth
+    /// giving. Replaces `missing_command_for`, which could only say a name.
+    ///
+    /// `None` covers three different situations that need no reason: no
+    /// entry claims the extension, a server is running, or one is on its
+    /// way. The reason `Failed` gives is the one the reader already had.
+    pub fn dead_reason_for(&self, file: &Path, worktree_root: &Path) -> Option<&Dead> {
+        let key = key_for_file(self.table(), file, worktree_root)?;
+        self.dead.get(&key)
     }
 
     pub fn insert(&mut self, key: (PathBuf, String), handle: ServerHandle) {
@@ -637,5 +710,192 @@ mod tests {
         assert!(supervisor.capability_for(file, root).is_none());
         assert!(!supervisor.definition_available(file, root));
         assert!(!supervisor.references_available(file, root));
+    }
+
+    #[test]
+    fn a_command_that_is_missing_and_installable_offers_its_recipe() {
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/main.rs");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("rust is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        supervisor.mark_dead(
+            key,
+            Dead::Installable {
+                recipe: entry.install.clone().expect("rust has a recipe"),
+            },
+        );
+        assert!(matches!(
+            supervisor.dead_reason_for(file, root),
+            Some(Dead::Installable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_language_whose_server_needs_a_toolchain_says_so_instead() {
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/Main.java");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("java is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        let Some(sirio_lsp::Recipe::Manual { needs, url }) = entry.install.clone() else {
+            panic!("java is a Manual recipe");
+        };
+        supervisor.mark_dead(key, Dead::Manual { needs, url });
+        match supervisor.dead_reason_for(file, root) {
+            Some(Dead::Manual { needs, .. }) => assert!(needs.contains("JVM")),
+            other => panic!("expected the toolchain explanation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_path_wins_over_what_sirio_installed() {
+        // Zed's rule, and its reason: worktree 1 may pin its own gopls while
+        // worktree 3 falls back to ours. Spawning by name *is* the PATH
+        // lookup, so the store is consulted only after NotInstalled — which is
+        // what makes this ordering free.
+        let store = sirio_registry::InstallStore::new(std::env::temp_dir().join(
+            format!("sirio-lsp-store-{}", std::process::id()),
+        ));
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        // A command every machine has, standing in for one the reader installed.
+        let entry = sirio_lsp::LanguageEntry {
+            name: "probe".into(),
+            extensions: vec!["probe".into()],
+            command: "sh".into(),
+            args: Vec::new(),
+            roots: Vec::new(),
+            install: Some(sirio_lsp::Recipe::Npm {
+                package: "never-used",
+                version: "1.0.0",
+                bin: "never-used",
+            }),
+        };
+        assert!(
+            supervisor.installed_binary_for(&entry, &store).is_none(),
+            "nothing is installed, so step 2 has nothing to offer"
+        );
+    }
+
+    #[test]
+    fn an_installed_server_is_offered_by_absolute_path() {
+        // The other half of step 2, and the shape of it: what the store
+        // gives back is one file's path, never a directory to put on the
+        // child's PATH — which is what keeps two installed servers from
+        // seeing each other, and from displacing the reader's own choice.
+        let root = std::env::temp_dir().join(format!(
+            "sirio-lsp-store-installed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = sirio_registry::InstallStore::new(&root);
+        let entry = sirio_lsp::LanguageEntry {
+            name: "probe".into(),
+            extensions: vec!["probe".into()],
+            // Not on PATH: everything below is what step 2 answers *after*
+            // that name was tried and missed.
+            command: "sirio-no-such-language-server".into(),
+            args: Vec::new(),
+            roots: Vec::new(),
+            install: Some(sirio_lsp::Recipe::Npm {
+                package: "shared-package",
+                version: "1.0.0",
+                bin: "never-used",
+            }),
+        };
+        let executable = root
+            .join("shared-package")
+            .join("1.0.0")
+            .join("never-used");
+        std::fs::create_dir_all(executable.parent().expect("a store version directory"))
+            .expect("create the store layout");
+        std::fs::write(&executable, "#!/bin/sh\n").expect("write the installed binary");
+        store
+            .write(&sirio_registry::InstalledAgent {
+                id: "shared-package".into(),
+                version: "1.0.0".into(),
+                executable: executable.clone(),
+                args: Vec::new(),
+                integrity: sirio_registry::Integrity::None,
+            })
+            .expect("record the install");
+
+        let supervisor = LspSupervisor::new(loader_with_defaults());
+        assert_eq!(
+            supervisor.installed_binary_for(&entry, &store),
+            Some(executable.clone()),
+            "a manifest whose executable is there is what step 2 offers"
+        );
+
+        std::fs::remove_file(&executable).expect("remove the installed binary");
+        assert_eq!(
+            supervisor.installed_binary_for(&entry, &store),
+            None,
+            "a manifest outliving its binary is not an offer"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_successful_install_revives_a_dead_key() {
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/main.rs");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("rust is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        supervisor.mark_dead(
+            key.clone(),
+            Dead::Installable {
+                recipe: entry.install.clone().unwrap(),
+            },
+        );
+        assert!(supervisor.is_dead(&key));
+
+        supervisor.revive(&key);
+
+        assert!(
+            !supervisor.is_dead(&key),
+            "an install that worked lets the launch be tried again"
+        );
+    }
+
+    #[test]
+    fn installing_does_not_revive_a_server_that_crashed() {
+        // Reinstalling is not the cure for a crash. A server that dies on a
+        // file dies again on restart, and on rust-analyzer that means
+        // re-indexing the repository forever.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/main.rs");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("rust is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        supervisor.mark_dead(key.clone(), Dead::Failed);
+
+        supervisor.revive(&key);
+
+        assert!(supervisor.is_dead(&key), "Failed is final");
+    }
+
+    #[test]
+    fn a_file_no_entry_claims_has_no_dead_reason() {
+        // Something *is* dead here, so `None` below is the answer to a
+        // question rather than the emptiness of the map. A `.txt` has no
+        // entry and so no key, and the reason a Java file gives must not
+        // leak onto a file no server was ever named for.
+        let mut supervisor = LspSupervisor::new(loader_with_defaults());
+        let file = std::path::Path::new("/repo/src/Main.java");
+        let root = std::path::Path::new("/repo");
+        let entry = supervisor.entry_for(file).expect("java is in the defaults");
+        let key = supervisor.key_for(file, root, &entry);
+        supervisor.mark_dead(key, Dead::Failed);
+        assert!(
+            supervisor
+                .dead_reason_for(
+                    std::path::Path::new("/repo/NOTES.txt"),
+                    std::path::Path::new("/repo")
+                )
+                .is_none()
+        );
     }
 }

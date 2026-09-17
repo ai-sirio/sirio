@@ -2466,6 +2466,10 @@ mod tests {
             sidebar_width: 300,
             right_panel_width: 500,
             center_split_ratio: 610,
+            // Neither default nor in the Settings UI snapshot, like the
+            // widths: this round trip is what proves the SessionStore layer
+            // carries a silenced-language list through to its SQLite row.
+            lsp_silenced_languages: r#"["java"]"#.into(),
         };
 
         {
@@ -2498,6 +2502,7 @@ mod tests {
                 ("controlSocket.enabled".into(), "false".into()),
                 ("general.autoNaming".into(), "true".into()),
                 ("general.summarizerAgent".into(), "codex".into()),
+                ("lsp.silencedLanguages".into(), r#"["java"]"#.into()),
                 ("session.resumeAgentSessions".into(), "false".into()),
                 ("updates.enabled".into(), "true".into()),
                 ("usage.claudeVisible".into(), "false".into()),

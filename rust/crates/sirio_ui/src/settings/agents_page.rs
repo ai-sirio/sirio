@@ -1023,6 +1023,7 @@ mod tests {
                 move |_entity, event: &SettingsEvent, _| match event {
                     SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
                     SettingsEvent::InstallAgent(_)
+                    | SettingsEvent::InstallLanguageServer(_)
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage => {}
@@ -1074,6 +1075,7 @@ mod tests {
                 move |_entity, event: &SettingsEvent, _| match event {
                     SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
                     SettingsEvent::InstallAgent(_)
+                    | SettingsEvent::InstallLanguageServer(_)
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage => {}
@@ -1337,6 +1339,7 @@ mod tests {
                 move |_entity, event: &SettingsEvent, _| match event {
                     SettingsEvent::InstallAgent(id) => recorder.borrow_mut().push(id.clone()),
                     SettingsEvent::UpdateAgent(_)
+                    | SettingsEvent::InstallLanguageServer(_)
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage => {}

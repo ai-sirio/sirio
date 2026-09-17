@@ -357,6 +357,7 @@ mod tests {
                 Distribution::Npx {
                     package: "@example/mixed-acp".into(),
                     args: Vec::new(),
+                    bin: None,
                 },
             ],
         );
@@ -440,6 +441,7 @@ mod tests {
                 Distribution::Npx {
                     package: "@example/kilo-acp".into(),
                     args: Vec::new(),
+                    bin: None,
                 },
             ],
         );

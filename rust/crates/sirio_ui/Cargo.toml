@@ -22,6 +22,11 @@ sirio_markdown.workspace = true
 sirio_project.workspace = true
 sirio_agents.workspace = true
 sirio_registry = { workspace = true }
+# The shipped language table. Settings → Language Servers is the page that
+# lists what it names, so the crate that draws the page needs the crate that
+# owns the list — the same reason `sirio_agents` is here for the Agents page.
+# A path dependency, like `sirio`'s own: the crate is unpublished.
+sirio_lsp = { path = "../sirio_lsp" }
 sirio_persistence.workspace = true
 sirio_usage = { path = "../sirio_usage" }
 base64 = "0.22.1"
