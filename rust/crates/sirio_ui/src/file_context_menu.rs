@@ -28,6 +28,9 @@ pub enum FileContextAction {
     ViewFileHistory,
     GoToDefinition,
     FindReferences,
+    /// Never drawn — absent from `ITEMS` — only dispatched to: a `Redirected`
+    /// row's click lands here instead of on the action it is labelled with.
+    InstallLanguageServer,
 }
 
 /// `View` is served by `FileView` itself; `App` leaves as a `FileViewEvent`
@@ -43,19 +46,53 @@ pub struct FileContextItem {
     pub label: &'static str,
     pub action: FileContextAction,
     pub route: FileContextRoute,
-    /// `Some(reason)` when this entry cannot currently be actuated. The render
-    /// site must show the reason — not merely grey the row — and must attach
-    /// no click handler, the contract the terminal menu already follows.
-    pub disabled_reason: Option<String>,
+    /// What the row is beyond its label. The render site shows the note for
+    /// both `Unavailable` and `Redirected`, and attaches a click handler for
+    /// everything but `Unavailable` — dispatching `to` rather than `action`
+    /// for a `Redirected` row.
+    pub state: ItemState,
     /// A separator is drawn wherever this changes between adjacent entries.
     pub group: u8,
 }
 
+/// What a row is, beyond its label. `disabled_reason: Option<String>`
+/// carried two facts in one — *why*, and *clickable or not* — and could not
+/// express a row that shows its reason and is still clickable, on a
+/// different action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ItemState {
+    Ready,
+    /// Present with its reason, no click handler. The original contract,
+    /// unchanged where it was right.
+    Unavailable(String),
+    /// Present with a note, and the click does something *else*: installing
+    /// what is missing rather than the action it is labelled with.
+    Redirected {
+        note: String,
+        to: FileContextAction,
+    },
+}
+
+/// What the workspace found out about this file's language server.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MissingServer {
+    /// Sirio can fetch it: the command to name, and the download size for
+    /// the note. `bytes` is 0 when no size is known before the click — an
+    /// npm package — and the note then omits it rather than inventing one.
+    Installable { command: String, bytes: u64 },
+    /// Something has to come first: the command to name, and what it needs.
+    Manual { command: String, needs: String },
+    /// An entry of the reader's own, which carries no recipe on purpose —
+    /// Sirio must not offer a second copy of a server they already chose.
+    /// The name they wrote is all there is to give back.
+    NotInstalled { command: String },
+}
+
 /// Everything the table needs to decide what to hide and what to disable.
 ///
-/// Not `Copy`, for one field. `missing_language_server` carries a command
-/// name read from the user's `languages.toml`, and a name that cannot be
-/// shown is the whole failure this field exists to end.
+/// Not `Copy`, for one field. `missing_language_server` carries owned strings
+/// read from the workspace's answer, and a name that cannot be shown is the
+/// whole failure this field exists to end.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FileContextFacts {
     pub has_selection: bool,
@@ -65,10 +102,10 @@ pub struct FileContextFacts {
     pub has_agent_chat: bool,
     pub definition_available: bool,
     pub references_available: bool,
-    /// The program this file's language names and the machine does not
-    /// have. `Some` only in that case: a server that is running, or that
-    /// ran and broke, leaves it `None`.
-    pub missing_language_server: Option<String>,
+    /// What the workspace found out about this file's language server.
+    /// `Some` only when a launch was attempted and found nothing to launch:
+    /// a server that is running, or that ran and broke, leaves it `None`.
+    pub missing_language_server: Option<MissingServer>,
 }
 
 const ITEMS: [FileContextItem; 12] = [
@@ -76,84 +113,84 @@ const ITEMS: [FileContextItem; 12] = [
         label: "Add to Agent Thread",
         action: FileContextAction::SendToAgent,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 0,
     },
     FileContextItem {
         label: "Cut",
         action: FileContextAction::Cut,
         route: FileContextRoute::View,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 1,
     },
     FileContextItem {
         label: "Copy",
         action: FileContextAction::Copy,
         route: FileContextRoute::View,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 1,
     },
     FileContextItem {
         label: "Copy and Trim",
         action: FileContextAction::CopyAndTrim,
         route: FileContextRoute::View,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 1,
     },
     FileContextItem {
         label: "Paste",
         action: FileContextAction::Paste,
         route: FileContextRoute::View,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 1,
     },
     FileContextItem {
         label: "Reveal in File Manager",
         action: FileContextAction::RevealInFileManager,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 2,
     },
     FileContextItem {
         label: "Open in Terminal",
         action: FileContextAction::OpenInTerminal,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 2,
     },
     FileContextItem {
         label: "Open Markdown Preview",
         action: FileContextAction::OpenMarkdownPreview,
         route: FileContextRoute::View,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 2,
     },
     FileContextItem {
         label: "Copy Permalink to Line",
         action: FileContextAction::CopyPermalink,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 3,
     },
     FileContextItem {
         label: "View File History",
         action: FileContextAction::ViewFileHistory,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 3,
     },
     FileContextItem {
         label: "Go to Definition",
         action: FileContextAction::GoToDefinition,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 3,
     },
     FileContextItem {
         label: "Find References",
         action: FileContextAction::FindReferences,
         route: FileContextRoute::App,
-        disabled_reason: None,
+        state: ItemState::Ready,
         group: 3,
     },
 ];
@@ -168,70 +205,108 @@ pub fn items(facts: &FileContextFacts) -> Vec<FileContextItem> {
             item.action != FileContextAction::OpenMarkdownPreview || facts.is_markdown
         })
         .map(|mut item| {
-            item.disabled_reason = disabled_reason(item.action, facts);
+            item.state = state_for(item.action, facts);
             item
         })
         .collect()
 }
 
-fn disabled_reason(action: FileContextAction, facts: &FileContextFacts) -> Option<String> {
+fn state_for(action: FileContextAction, facts: &FileContextFacts) -> ItemState {
+    let unavailable = |reason: &str| ItemState::Unavailable(reason.to_owned());
     match action {
         FileContextAction::SendToAgent => {
             if !facts.has_selection {
-                Some(NO_SELECTION.to_owned())
+                unavailable(NO_SELECTION)
             } else if !facts.has_agent_chat {
-                Some(NO_AGENT_CHAT.to_owned())
+                unavailable(NO_AGENT_CHAT)
             } else {
-                None
+                ItemState::Ready
             }
         }
         FileContextAction::Cut | FileContextAction::Copy | FileContextAction::CopyAndTrim => {
-            (!facts.has_selection).then(|| NO_SELECTION.to_owned())
+            if facts.has_selection {
+                ItemState::Ready
+            } else {
+                unavailable(NO_SELECTION)
+            }
         }
         FileContextAction::CopyPermalink => {
             if !facts.in_git_repo {
-                Some(NOT_IN_GIT.to_owned())
+                unavailable(NOT_IN_GIT)
             } else if !facts.has_github_remote {
-                Some(NO_GITHUB_REMOTE.to_owned())
+                unavailable(NO_GITHUB_REMOTE)
             } else {
-                None
+                ItemState::Ready
             }
         }
         FileContextAction::ViewFileHistory => {
-            (!facts.in_git_repo).then(|| NOT_IN_GIT.to_owned())
+            if facts.in_git_repo {
+                ItemState::Ready
+            } else {
+                unavailable(NOT_IN_GIT)
+            }
         }
-        FileContextAction::GoToDefinition => (!facts.definition_available)
-            .then(|| not_on_path(facts).unwrap_or_else(|| NO_DEFINITION.to_owned())),
-        FileContextAction::FindReferences => (!facts.references_available)
-            .then(|| not_on_path(facts).unwrap_or_else(|| NO_REFERENCES.to_owned())),
+        FileContextAction::GoToDefinition => {
+            if facts.definition_available {
+                ItemState::Ready
+            } else {
+                navigation_state(NO_DEFINITION, facts)
+            }
+        }
+        FileContextAction::FindReferences => {
+            if facts.references_available {
+                ItemState::Ready
+            } else {
+                navigation_state(NO_REFERENCES, facts)
+            }
+        }
         FileContextAction::Paste
         | FileContextAction::RevealInFileManager
         | FileContextAction::OpenInTerminal
-        | FileContextAction::OpenMarkdownPreview => None,
+        | FileContextAction::OpenMarkdownPreview => ItemState::Ready,
+        // Never drawn, so never anything to disable: a stray row would act.
+        FileContextAction::InstallLanguageServer => ItemState::Ready,
     }
 }
 
-/// Why the navigation entries are off, when the reason is a program the
-/// reader can go and find.
-///
-/// The generic sentence they fall back to is a statement about Sirio, and
-/// reads as "this build cannot do Java". That is the opposite of true: the
-/// table names a server for every language the editor opens, and the only
-/// thing missing is on the reader's own machine. Naming it turns a dead end
-/// into an errand.
+/// What the navigation entries become when no server answers here. A server
+/// Sirio can fetch redirects the row at installing it; anything else is
+/// merely unavailable — the old contract, unchanged where it was right.
+fn navigation_state(fallback: &str, facts: &FileContextFacts) -> ItemState {
+    match &facts.missing_language_server {
+        Some(MissingServer::Installable { command, bytes }) => ItemState::Redirected {
+            note: install_note(command, *bytes),
+            to: FileContextAction::InstallLanguageServer,
+        },
+        Some(MissingServer::Manual { command, needs }) => {
+            ItemState::Unavailable(format!("{command} needs {needs}"))
+        }
+        Some(MissingServer::NotInstalled { command }) => {
+            ItemState::Unavailable(format!("{command} is not on PATH"))
+        }
+        None => ItemState::Unavailable(fallback.to_owned()),
+    }
+}
+
+/// "clangd is not on PATH — install it (114 MB)". The size rides along
+/// because an install button that does not state it is a dishonest one; when
+/// no size is known before the click — an npm package — the note omits it
+/// rather than inventing one.
 ///
 /// **"not on PATH", not "not installed."** The spawn failed with
-/// `NotFound`, which is a fact about `PATH` and not about the machine. The
-/// difference is routine: a server installed by mason, asdf, mise or a
-/// language's own package manager is on disk and invisible here, and
-/// "lua-language-server is not installed" would send its owner to reinstall
-/// something they already have. Naming `PATH` points at the actual fix in
-/// both cases.
-fn not_on_path(facts: &FileContextFacts) -> Option<String> {
-    facts
-        .missing_language_server
-        .as_ref()
-        .map(|command| format!("{command} is not on PATH"))
+/// `NotFound`, which is a fact about `PATH` and not about the machine. A
+/// server installed by mason, asdf, mise or a language's own package manager
+/// is on disk and invisible here, and "not installed" would send its owner
+/// to reinstall something they already have.
+fn install_note(command: &str, bytes: u64) -> String {
+    if bytes > 0 {
+        format!(
+            "{command} is not on PATH — install it ({} MB)",
+            bytes / 1_000_000
+        )
+    } else {
+        format!("{command} is not on PATH — install it")
+    }
 }
 
 /// Drops the indentation every non-blank line shares, so a snippet copied out
@@ -370,7 +445,7 @@ mod tests {
                 "Find References",
             ]
         );
-        assert!(items(&all_true()).iter().all(|item| item.disabled_reason.is_none()));
+        assert!(items(&all_true()).iter().all(|item| item.state == ItemState::Ready));
     }
 
     #[test]
@@ -393,10 +468,13 @@ mod tests {
             FileContextAction::SendToAgent,
         ] {
             let item = items.iter().find(|item| item.action == action).expect("entry present");
-            assert_eq!(item.disabled_reason.as_deref(), Some("Select some text first"));
+            assert_eq!(
+                item.state,
+                ItemState::Unavailable("Select some text first".to_owned())
+            );
         }
         let paste = items.iter().find(|item| item.action == FileContextAction::Paste).unwrap();
-        assert!(paste.disabled_reason.is_none(), "Paste does not need a selection");
+        assert_eq!(paste.state, ItemState::Ready, "Paste does not need a selection");
     }
 
     #[test]
@@ -405,10 +483,13 @@ mod tests {
         let items = items(&facts);
         let agent = items.iter().find(|item| item.action == FileContextAction::SendToAgent).unwrap();
         assert_eq!(
-            agent.disabled_reason.as_deref(),
-            Some("No agent chat open in this worktree")
+            agent.state,
+            ItemState::Unavailable("No agent chat open in this worktree".to_owned())
         );
-        assert_eq!(items.iter().filter(|item| item.disabled_reason.is_some()).count(), 1);
+        assert_eq!(
+            items.iter().filter(|item| !matches!(item.state, ItemState::Ready)).count(),
+            1
+        );
     }
 
     #[test]
@@ -417,11 +498,11 @@ mod tests {
         let items = items(&facts);
         let permalink = items.iter().find(|i| i.action == FileContextAction::CopyPermalink).unwrap();
         assert_eq!(
-            permalink.disabled_reason.as_deref(),
-            Some("This repository has no GitHub remote")
+            permalink.state,
+            ItemState::Unavailable("This repository has no GitHub remote".to_owned())
         );
         let history = items.iter().find(|i| i.action == FileContextAction::ViewFileHistory).unwrap();
-        assert!(history.disabled_reason.is_none());
+        assert_eq!(history.state, ItemState::Ready);
     }
 
     #[test]
@@ -435,8 +516,8 @@ mod tests {
         for action in [FileContextAction::CopyPermalink, FileContextAction::ViewFileHistory] {
             let item = items.iter().find(|item| item.action == action).unwrap();
             assert_eq!(
-                item.disabled_reason.as_deref(),
-                Some("This file is not in a git repository")
+                item.state,
+                ItemState::Unavailable("This file is not in a git repository".to_owned())
             );
         }
     }
@@ -482,7 +563,7 @@ let entry = items(&facts)
 .expect("the entry is present even when it cannot run");
 assert_eq!(entry.label, "Find References");
 assert_eq!(entry.route, FileContextRoute::App);
-assert_eq!(entry.disabled_reason.as_deref(), Some(NO_REFERENCES));
+assert_eq!(entry.state, ItemState::Unavailable(NO_REFERENCES.to_owned()));
 }
 
 #[test]
@@ -495,7 +576,7 @@ let entry = items(&facts)
 .into_iter()
 .find(|item| item.action == FileContextAction::FindReferences)
 .expect("the entry is present");
-assert_eq!(entry.disabled_reason, None);
+assert_eq!(entry.state, ItemState::Ready);
 }
 
 #[test]
@@ -599,10 +680,12 @@ fn a_path_with_a_space_is_escaped() {
         let facts = FileContextFacts {
             definition_available: false,
             references_available: false,
-            missing_language_server: Some("jdtls".to_owned()),
+            missing_language_server: Some(MissingServer::NotInstalled {
+                command: "jdtls".to_owned(),
+            }),
             ..FileContextFacts::default()
         };
-        let reasons: Vec<Option<String>> = items(&facts)
+        let states: Vec<ItemState> = items(&facts)
             .into_iter()
             .filter(|item| {
                 matches!(
@@ -610,13 +693,13 @@ fn a_path_with_a_space_is_escaped() {
                     FileContextAction::GoToDefinition | FileContextAction::FindReferences
                 )
             })
-            .map(|item| item.disabled_reason)
+            .map(|item| item.state)
             .collect();
         assert_eq!(
-            reasons,
+            states,
             vec![
-                Some("jdtls is not on PATH".to_owned()),
-                Some("jdtls is not on PATH".to_owned()),
+                ItemState::Unavailable("jdtls is not on PATH".to_owned()),
+                ItemState::Unavailable("jdtls is not on PATH".to_owned()),
             ]
         );
     }
@@ -635,6 +718,78 @@ fn a_path_with_a_space_is_escaped() {
             .into_iter()
             .find(|item| item.action == FileContextAction::GoToDefinition)
             .expect("the entry is present even when it cannot run");
-        assert_eq!(entry.disabled_reason.as_deref(), Some(NO_DEFINITION));
+        assert_eq!(
+            entry.state,
+            ItemState::Unavailable(NO_DEFINITION.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_missing_server_redirects_the_navigation_entries_to_installing_it() {
+        let facts = FileContextFacts {
+            definition_available: false,
+            references_available: false,
+            missing_language_server: Some(MissingServer::Installable {
+                command: "clangd".into(),
+                bytes: 114_790_601,
+            }),
+            ..FileContextFacts::default()
+        };
+        let states: Vec<ItemState> = items(&facts)
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item.action,
+                    FileContextAction::GoToDefinition | FileContextAction::FindReferences
+                )
+            })
+            .map(|item| item.state)
+            .collect();
+        for state in &states {
+            match state {
+                ItemState::Redirected { note, to } => {
+                    assert_eq!(note, "clangd is not on PATH — install it (114 MB)");
+                    assert_eq!(*to, FileContextAction::InstallLanguageServer);
+                }
+                other => panic!("expected a redirect to installing, got {other:?}"),
+            }
+        }
+        assert_eq!(states.len(), 2);
+    }
+
+    #[test]
+    fn a_server_that_needs_a_toolchain_first_is_merely_unavailable() {
+        // Nothing to click: Sirio cannot install a JVM, and a button that
+        // pretends otherwise is worse than a greyed row.
+        let facts = FileContextFacts {
+            missing_language_server: Some(MissingServer::Manual {
+                command: "jdtls".into(),
+                needs: "a JVM (Java 21 or newer)".into(),
+            }),
+            ..FileContextFacts::default()
+        };
+        let entry = items(&facts)
+            .into_iter()
+            .find(|item| item.action == FileContextAction::GoToDefinition)
+            .expect("the entry is present");
+        assert_eq!(
+            entry.state,
+            ItemState::Unavailable("jdtls needs a JVM (Java 21 or newer)".into())
+        );
+    }
+
+    #[test]
+    fn copy_permalink_outside_a_repo_is_still_merely_unavailable() {
+        // The old contract survived where it was right, rather than being
+        // weakened for everything.
+        let facts = FileContextFacts {
+            in_git_repo: false,
+            ..FileContextFacts::default()
+        };
+        let entry = items(&facts)
+            .into_iter()
+            .find(|item| item.action == FileContextAction::CopyPermalink)
+            .expect("the entry is present");
+        assert_eq!(entry.state, ItemState::Unavailable(NOT_IN_GIT.to_owned()));
     }
 }

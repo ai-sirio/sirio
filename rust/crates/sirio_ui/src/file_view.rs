@@ -41,7 +41,7 @@ use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
 };
-use crate::file_context_menu::{self, FileContextAction, FileContextFacts};
+use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
 use crate::loading;
 
 /// The rendered-markdown column: the frozen 720px content column (waku
@@ -229,6 +229,9 @@ pub enum FileViewEvent {
     Hover { path: PathBuf, offset: usize, seq: u64 },
     GoToDefinition { path: PathBuf, offset: usize },
     FindReferences { path: PathBuf, offset: usize },
+    /// A redirected menu row was clicked: fetch the server this file's
+    /// language names rather than navigating anywhere.
+    InstallLanguageServer { path: PathBuf },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -630,6 +633,11 @@ impl FileView {
                 cx.emit(FileViewEvent::FindReferences {
                     path: self.path.clone(),
                     offset: self.caret,
+                });
+            }
+            FileContextAction::InstallLanguageServer => {
+                cx.emit(FileViewEvent::InstallLanguageServer {
+                    path: self.path.clone(),
                 });
             }
         }
@@ -1326,12 +1334,22 @@ impl Render for FileView {
                 }
                 previous_group = Some(item.group);
 
-                let action = item.action;
                 let item_entity = entity.clone();
                 let selector = format!("file-context-item-{index}");
                 let debug_selector = selector.clone();
-                let disabled_reason = item.disabled_reason.clone();
-                let is_disabled = disabled_reason.is_some();
+                let state = item.state.clone();
+                let is_disabled = matches!(state, ItemState::Unavailable(_));
+                // A redirected row acts on what is missing, not on what it
+                // is labelled with; an unavailable row acts on nothing.
+                let effect = match &state {
+                    ItemState::Ready | ItemState::Unavailable(_) => item.action,
+                    ItemState::Redirected { to, .. } => *to,
+                };
+                let note = match &state {
+                    ItemState::Ready => None,
+                    ItemState::Unavailable(reason) => Some(reason.clone()),
+                    ItemState::Redirected { note, .. } => Some(note.clone()),
+                };
                 menu = menu.child(
                     div()
                         .id(selector)
@@ -1353,12 +1371,12 @@ impl Render for FileView {
                                 .hover(|style| style.bg(theme.element_hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |view, cx| {
-                                        view.handle_context_action(action, window, cx);
+                                        view.handle_context_action(effect, window, cx);
                                     });
                                 })
                         })
                         .child(item.label)
-                        .when_some(disabled_reason, |this, reason| {
+                        .when_some(note, |this, reason| {
                             this.child(
                                 div()
                                     .debug_selector(move || {

@@ -44,7 +44,7 @@ use sirio_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
-    file_context_menu::FileContextFacts,
+    file_context_menu::{FileContextFacts, MissingServer},
     file_view::{FileView, FileViewEvent},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
@@ -6162,6 +6162,12 @@ impl SirioWorkspace {
                 FileViewEvent::FindReferences { path, offset } => {
                     workspace.find_references(path.clone(), *offset, view.clone(), cx);
                 }
+                FileViewEvent::InstallLanguageServer { path } => {
+                    if let Some(entry) = workspace.lsp.known_entry_for(path) {
+                        let language = entry.name.clone();
+                        workspace.install_language_server(&language, cx);
+                    }
+                }
             },
         )
         .detach();
@@ -6191,28 +6197,52 @@ impl SirioWorkspace {
             // these facts again: at the moment the tab opened, nobody had
             // yet looked for the program.
             //
-            // The ladder decides what the sentence names: what Sirio would
-            // install for a recipe it can fetch, the thing that has to come
+            // The ladder decides what the menu can say: the recipe to
+            // install for one Sirio can fetch, the thing that has to come
             // first for a `Manual` one, or — for an entry of the reader's
             // own, which carries no recipe — the name they wrote.
-            // `Dead::Failed` names nothing, having already been reported at
-            // the moment it broke.
-            //
-            // The ladder's arms flattened into one string is a shape this
-            // field will not survive — the card that offers the install
-            // needs the recipe, not its name — and reshaping it is the
-            // install surfaces' job rather than this one's.
-            missing_language_server: worktree
-                .as_deref()
-                .and_then(|root| self.lsp.dead_reason_for(path, root))
-                .and_then(|dead| match dead {
-                    crate::lsp::Dead::Installable { recipe } => {
-                        recipe.store_id().map(|id| id.to_owned())
+            // `Dead::Failed` carries nothing, having already been reported
+            // at the moment it broke.
+            missing_language_server: worktree.as_deref().and_then(|root| {
+                let dead = self.lsp.dead_reason_for(path, root)?;
+                let command = self.lsp.known_entry_for(path)?.command.clone();
+                match dead {
+                    crate::lsp::Dead::Installable { recipe } => match recipe {
+                        sirio_lsp::Recipe::Manual { needs, .. } => Some(MissingServer::Manual {
+                            command,
+                            needs: (*needs).to_owned(),
+                        }),
+                        sirio_lsp::Recipe::Npm { .. } => Some(MissingServer::Installable {
+                            command,
+                            // An npm package states no size before the
+                            // click; the note omits it rather than lying.
+                            bytes: 0,
+                        }),
+                        sirio_lsp::Recipe::Release { assets, .. } => {
+                            Some(MissingServer::Installable {
+                                command,
+                                bytes: assets
+                                    .iter()
+                                    .find(|(key, _)| *key == sirio_registry::current_platform_key())
+                                    .map(|(_, asset)| asset.bytes)
+                                    .unwrap_or(0),
+                            })
+                        }
+                    },
+                    crate::lsp::Dead::Manual { needs, .. } => Some(MissingServer::Manual {
+                        command,
+                        needs: (*needs).to_owned(),
+                    }),
+                    // The name actually attempted, from the failure itself
+                    // rather than today's table.
+                    crate::lsp::Dead::NotInstalled { command } => {
+                        Some(MissingServer::NotInstalled {
+                            command: command.clone(),
+                        })
                     }
-                    crate::lsp::Dead::Manual { needs, .. } => Some((*needs).to_owned()),
-                    crate::lsp::Dead::NotInstalled { command } => Some(command.clone()),
                     crate::lsp::Dead::Failed => None,
-                }),
+                }
+            }),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -10889,10 +10919,6 @@ impl SirioWorkspace {
     /// A successful install is the only thing that revives a dead key; the
     /// row shows the installer's own error text when one fails, and the
     /// offer stands.
-    //
-    // The card and the settings row are Task 8; until they are wired this is
-    // reachable from tests only.
-    #[allow(dead_code)]
     fn install_language_server(&mut self, language: &str, cx: &mut Context<Self>) {
         // An entry with no recipe is the reader's own. `agent_for` answers
         // `None` for a `Manual` recipe and for a platform the project
@@ -19976,9 +20002,9 @@ done
         // program, and only the failure path can correct them. A test that
         // asked the workspace what it would say would pass with that push
         // missing, which is how this shipped.
-        use sirio_ui::file_context_menu::FileContextAction;
+        use sirio_ui::file_context_menu::{FileContextAction, ItemState};
         let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
-        let reasons: Vec<Option<String>> = view.read_with(&cx.cx, |view, _| {
+        let states: Vec<ItemState> = view.read_with(&cx.cx, |view, _| {
             view.context_menu_items()
                 .into_iter()
                 .filter(|item| {
@@ -19987,14 +20013,14 @@ done
                         FileContextAction::GoToDefinition | FileContextAction::FindReferences
                     )
                 })
-                .map(|item| item.disabled_reason)
+                .map(|item| item.state)
                 .collect()
         });
         assert_eq!(
-            reasons,
+            states,
             vec![
-                Some("sirio-no-such-language-server is not on PATH".to_owned()),
-                Some("sirio-no-such-language-server is not on PATH".to_owned()),
+                ItemState::Unavailable("sirio-no-such-language-server is not on PATH".to_owned()),
+                ItemState::Unavailable("sirio-no-such-language-server is not on PATH".to_owned()),
             ],
             "both navigation entries name the missing program"
         );
