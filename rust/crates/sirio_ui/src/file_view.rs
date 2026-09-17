@@ -249,6 +249,11 @@ pub enum FileViewEvent {
     /// A redirected menu row was clicked: fetch the server this file's
     /// language names rather than navigating anywhere.
     InstallLanguageServer { path: PathBuf },
+    /// The offer card's second button: never offer this language's server
+    /// again. Carries the path so the workspace can resolve the language
+    /// the same way the install button does; silencing itself lives in the
+    /// workspace and the settings, never in the view.
+    SilenceLanguageServer { path: PathBuf },
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -429,6 +434,28 @@ impl FileView {
         if self.message.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// The card's sentence, if one is up. Test seam for the install-offer
+    /// tests in `sirio`, which assert what the card says rather than only
+    /// that something is drawn.
+    pub fn message_text(&self) -> Option<String> {
+        self.message.as_ref().map(|message| message.text.clone())
+    }
+
+    /// The card's button labels in draw order. Empty when no card is up or
+    /// the card is a plain message.
+    pub fn message_action_labels(&self) -> Vec<String> {
+        self.message
+            .as_ref()
+            .map(|message| {
+                message
+                    .actions
+                    .iter()
+                    .map(|action| action.label.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Called by the workspace when the tab is opened and whenever the facts

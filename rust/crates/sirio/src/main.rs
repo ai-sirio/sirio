@@ -4428,6 +4428,15 @@ struct SirioWorkspace {
     /// Language servers, started lazily when a file that wants one is
     /// opened and stopped on app quit. See `crate::lsp`.
     lsp: crate::lsp::LspSupervisor,
+    /// Languages already offered this session, keyed by language name.
+    /// Checked before raising the install card and never cleared: ten
+    /// .java files are one card, not ten, which is what separates this
+    /// offer from the one 0.18.0 banned.
+    offered: HashSet<String>,
+    /// Cards actually raised this session. Test-only: `offered` also holds
+    /// silenced languages, so its length is not the offer count.
+    #[cfg(test)]
+    offer_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5131,6 +5140,9 @@ impl SirioWorkspace {
                     &user_home_dir().unwrap_or_default(),
                 ),
             )),
+            offered: HashSet::new(),
+            #[cfg(test)]
+            offer_count: 0,
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -6166,6 +6178,13 @@ impl SirioWorkspace {
                     if let Some(entry) = workspace.lsp.known_entry_for(path) {
                         let language = entry.name.clone();
                         workspace.install_language_server(&language, cx);
+                    }
+                }
+                FileViewEvent::SilenceLanguageServer { path } => {
+                    if let Some(entry) = workspace.lsp.known_entry_for(path) {
+                        let language = entry.name.clone();
+                        workspace.silence_language_server_offer(&language, cx);
+                        view.update(cx, |view, cx| view.dismiss_message(cx));
                     }
                 }
             },
@@ -10754,6 +10773,7 @@ impl SirioWorkspace {
         let command = entry.command.clone();
         let args = entry.args.clone();
         let install = entry.install.clone();
+        let language = entry.name.clone();
         let root = key.0.clone();
         // Step 2 of the ladder, read here and used only once step 1 has
         // answered `NotInstalled`. Consulting the store before the spawn
@@ -10854,11 +10874,24 @@ impl SirioWorkspace {
                         // the name they wrote, which is what the menu gives
                         // back — and the key still dies here, so it is tried
                         // once and not again.
-                        None => crate::lsp::Dead::NotInstalled { command },
+                        None => crate::lsp::Dead::NotInstalled {
+                            command: command.clone(),
+                        },
                     };
-                    workspace.lsp.mark_dead(key, reason);
+                    workspace.lsp.mark_dead(key, reason.clone());
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                    // The offer, once per language: a silenced language
+                    // costs no card at all, and Failed / the reader's own
+                    // entry offer nothing.
+                    workspace.maybe_offer_language_server(
+                        &language,
+                        &command,
+                        &reason,
+                        &view,
+                        &path_for_facts,
+                        cx,
+                    );
                 }
                 Err(error) => {
                     workspace.lsp.mark_dead(key, crate::lsp::Dead::Failed);
@@ -10968,6 +11001,138 @@ impl SirioWorkspace {
             });
         })
         .detach();
+    }
+
+    /// Whether `language` is in `lsp.silencedLanguages`. A corrupt value
+    /// reads back as empty, so the cost of being wrong is one more offer.
+    fn is_language_silenced(&self, language: &str) -> bool {
+        let stored = self.session.load_settings();
+        serde_json::from_str::<Vec<String>>(&stored.lsp_silenced_languages)
+            .map(|list| list.iter().any(|name| name == language))
+            .unwrap_or(false)
+    }
+
+    /// "Don't ask again": never offer this language again, this session or
+    /// any later one. The session set stops a second card before the next
+    /// frame; the persisted list stops one after a restart.
+    fn silence_language_server_offer(&mut self, language: &str, _cx: &mut Context<Self>) {
+        self.offered.insert(language.to_owned());
+        let mut stored = self.session.load_settings();
+        let mut list: Vec<String> =
+            serde_json::from_str(&stored.lsp_silenced_languages).unwrap_or_default();
+        if !list.iter().any(|name| name == language) {
+            list.push(language.to_owned());
+            stored.lsp_silenced_languages =
+                serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+            self.session.save_settings(&stored);
+        }
+    }
+
+    /// Cards raised this session. Test-only counter: `offered` also holds
+    /// silenced languages, so its length is not the offer count.
+    #[cfg(test)]
+    fn lsp_offers_made(&self) -> usize {
+        self.offer_count
+    }
+
+    /// Whether an npm recipe can be installed here. `install_npx` shells
+    /// out to npm, so with no npm on PATH an offer cannot be kept — and an
+    /// offer that cannot be kept is not made.
+    fn has_npm_for_offer() -> bool {
+        sirio_agents::find_executable_on_path("npm").is_some()
+    }
+
+    /// Raises the install card for `language`, once per language per
+    /// session. A silenced language costs no card at all — not one raised
+    /// and suppressed, but none. `Failed` and the reader's own entry
+    /// (`NotInstalled`, no recipe) offer nothing.
+    fn maybe_offer_language_server(
+        &mut self,
+        language: &str,
+        command: &str,
+        reason: &crate::lsp::Dead,
+        view: &Entity<FileView>,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        if self.offered.contains(language) || self.is_language_silenced(language) {
+            self.offered.insert(language.to_owned());
+            return;
+        }
+        enum OfferKind {
+            Install { label: String },
+            Manual { text: String },
+        }
+        let kind = match reason {
+            crate::lsp::Dead::Installable { recipe } => match recipe {
+                sirio_lsp::Recipe::Npm { .. } if !Self::has_npm_for_offer() => OfferKind::Manual {
+                    text: format!("{command} needs Node."),
+                },
+                sirio_lsp::Recipe::Npm { .. } => OfferKind::Install {
+                    label: "Install".to_owned(),
+                },
+                sirio_lsp::Recipe::Release { assets, .. } => {
+                    let bytes = assets
+                        .iter()
+                        .find(|(key, _)| *key == sirio_registry::current_platform_key())
+                        .map(|(_, asset)| asset.bytes)
+                        .unwrap_or(0);
+                    OfferKind::Install {
+                        label: if bytes > 0 {
+                            format!("Install — {} MB", bytes / 1_000_000)
+                        } else {
+                            "Install".to_owned()
+                        },
+                    }
+                }
+                sirio_lsp::Recipe::Manual { needs, .. } => OfferKind::Manual {
+                    text: format!("{command} needs {needs}."),
+                },
+            },
+            crate::lsp::Dead::Manual { needs, .. } => OfferKind::Manual {
+                text: format!("{command} needs {needs}."),
+            },
+            crate::lsp::Dead::NotInstalled { .. } | crate::lsp::Dead::Failed => return,
+        };
+        self.offered.insert(language.to_owned());
+        #[cfg(test)]
+        {
+            self.offer_count += 1;
+        }
+        let path = path.to_path_buf();
+        let silence_path = path.clone();
+        match kind {
+            OfferKind::Install { label } => {
+                view.update(cx, |view, cx| {
+                    view.offer(
+                        format!("{command} is not on PATH."),
+                        vec![
+                            sirio_ui::file_view::MessageAction {
+                                label,
+                                event: FileViewEvent::InstallLanguageServer { path },
+                            },
+                            sirio_ui::file_view::MessageAction {
+                                label: "Don't ask again".to_owned(),
+                                event: FileViewEvent::SilenceLanguageServer { path: silence_path },
+                            },
+                        ],
+                        cx,
+                    );
+                });
+            }
+            OfferKind::Manual { text } => {
+                view.update(cx, |view, cx| {
+                    view.offer(
+                        text,
+                        vec![sirio_ui::file_view::MessageAction {
+                            label: "Don't ask again".to_owned(),
+                            event: FileViewEvent::SilenceLanguageServer { path: silence_path },
+                        }],
+                        cx,
+                    );
+                });
+            }
+        }
     }
 
     /// One task per server, on the **foreground** executor because it
@@ -19670,16 +19835,12 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.add_file_tab(file.clone(), cx);
         });
-        let opened = wait_for_wire(&mut cx, &log, |wire| {
-            wire.contains("textDocument/didOpen")
-        })
-        .await;
+        let opened =
+            wait_for_wire(&mut cx, &log, |wire| wire.contains("textDocument/didOpen")).await;
         assert!(opened, "the open must land before the edit is meaningful");
 
         // Edit through the view the way the shell's own edit path does.
-        let view = workspace.update(&mut cx, |workspace, cx| {
-            first_open_file_view(workspace, cx)
-        });
+        let view = workspace.update(&mut cx, |workspace, cx| first_open_file_view(workspace, cx));
         view.update(&mut cx, |view, cx| {
             view.editor_mut()
                 .expect("the editor is loaded by now")
@@ -19848,12 +20009,13 @@ done
         // ever looks at the content, and the notice fills the view. Nothing
         // in the app calls `clear_notice`, so the file stayed gone until the
         // tab was closed.
-        let (mut cx, workspace, scratch, files) =
-            workspace_with_defining_server(cx, "nodef", |_| "null".to_owned(), &[(
-                "only.rs",
-                "fn only() -> u32 {\n    7\n}\n",
-            )])
-            .await;
+        let (mut cx, workspace, scratch, files) = workspace_with_defining_server(
+            cx,
+            "nodef",
+            |_| "null".to_owned(),
+            &[("only.rs", "fn only() -> u32 {\n    7\n}\n")],
+        )
+        .await;
         let source = files[0].clone();
 
         let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
@@ -20028,6 +20190,200 @@ done
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// A fixed number of turns rather than a condition, because the
+    /// assertion is about something that must *not* happen a second time,
+    /// and there is no event to wait for.
+    async fn settle(cx: &mut VisualTestContext) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            cx.cx
+                .executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+    }
+
+    /// A workspace on the shipped defaults — no `languages.toml`, so every
+    /// recipe is the compiled-in one — with `files` written under one repo
+    /// and a scratch language-server store. Relative paths may name
+    /// subdirectories; parents are created.
+    ///
+    /// Deliberately not a `languages.toml` naming a command nobody has: a
+    /// user entry carries no recipe on purpose (`#[serde(skip)]`), so it
+    /// could never offer anything and no offer could be observed here. The
+    /// caller empties `PATH` once the repo exists, which makes the shipped
+    /// command missing hermetically — and, for the npm test, makes npm
+    /// missing too.
+    fn workspace_with_uninstalled_server(
+        cx: &mut TestAppContext,
+        tag: &str,
+        files: &[(&str, &str)],
+    ) -> (
+        VisualTestContext,
+        Entity<SirioWorkspace>,
+        PathBuf,
+        Vec<PathBuf>,
+    ) {
+        let scratch = std::env::temp_dir().join(format!(
+            "sirio-lsp-{tag}-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create empty config dir");
+        // No languages.toml: the loader falls back to the shipped defaults,
+        // recipes included. Pointing SIRIO_CONFIG_DIR at an empty directory
+        // still isolates the test from the reader's real table.
+        unsafe { std::env::set_var("SIRIO_CONFIG_DIR", &config_dir) };
+
+        // A scratch store, so a fixture never consults what this machine
+        // has installed under the reader's own data directory: a manifest
+        // left by a real install would launch and there would be no offer.
+        *TEST_LSP_STORE_ROOT.write().unwrap() = Some(scratch.join("language-servers"));
+
+        let repo = test_repo(tag);
+        let mut written = Vec::new();
+        for (name, content) in files {
+            let path = repo.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create the fixture's parent");
+            }
+            std::fs::write(&path, content).expect("write the fixture file");
+            written.push(path);
+        }
+
+        let window = cx.add_window(|_, cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.cx.executor().allow_parking();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        (cx, workspace, scratch, written)
+    }
+
+    #[gpui::test]
+    async fn opening_a_second_file_of_the_same_language_does_not_offer_twice(
+        cx: &mut TestAppContext,
+    ) {
+        // The rule that separates this card from the one 0.18.0 banned. Ten
+        // .java files must not be ten cards.
+        //
+        // Two *roots*, not two files: two files in one project root share
+        // one dead key, so the second returns before any offer logic runs
+        // and a test there would pass with the dedup missing. Two keys of
+        // one language is the shape that needs the per-language set.
+        let (mut cx, workspace, scratch, files) = workspace_with_uninstalled_server(
+            cx,
+            "offeronce",
+            &[
+                ("one.rs", "fn one() {}\n"),
+                ("nested/two.rs", "fn two() {}\n"),
+            ],
+        );
+        let repo = files[0]
+            .parent()
+            .expect("one.rs has a parent")
+            .to_path_buf();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fixture\"\n")
+            .expect("write the outer root marker");
+        std::fs::write(
+            repo.join("nested/Cargo.toml"),
+            "[package]\nname = \"nested\"\n",
+        )
+        .expect("write the nested root marker");
+
+        // Emptied for the duration, which is safe because nextest runs
+        // each test in its own process. The repo already exists, so nothing
+        // below still needs git — and the emptied PATH is what makes the
+        // shipped command missing hermetically.
+        let saved_path = std::env::var_os("PATH");
+        let empty_bin = scratch.join("empty-bin");
+        std::fs::create_dir_all(&empty_bin).expect("create the empty PATH dir");
+        unsafe { std::env::set_var("PATH", &empty_bin) };
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(files[0].clone(), cx)
+        });
+        settle(&mut cx).await;
+        let first = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(files[1].clone(), cx)
+        });
+        settle(&mut cx).await;
+        let second = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
+
+        unsafe {
+            match saved_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        };
+
+        assert_eq!(first, 1, "the first file of a language offers");
+        assert_eq!(second, 1, "the second does not offer again");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[gpui::test]
+    async fn an_npm_recipe_offers_nothing_when_node_is_absent(cx: &mut TestAppContext) {
+        // An offer that cannot be kept is not made: install_npx shells out
+        // to npm, and failing after the click is the worst moment to find
+        // out. PATH is emptied for the duration, which is safe because
+        // nextest runs each test in its own process.
+        let (mut cx, workspace, scratch, files) =
+            workspace_with_uninstalled_server(cx, "offer-node", &[("main.ts", "const x = 1;\n")]);
+
+        let saved_path = std::env::var_os("PATH");
+        let empty_bin = scratch.join("empty-bin");
+        std::fs::create_dir_all(&empty_bin).expect("create the empty PATH dir");
+        unsafe { std::env::set_var("PATH", &empty_bin) };
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_file_tab(files[0].clone(), cx)
+        });
+        settle(&mut cx).await;
+
+        let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
+        let (text, labels) = view.read_with(&cx.cx, |view, _| {
+            (view.message_text(), view.message_action_labels())
+        });
+        let offers = workspace.read_with(&cx.cx, |workspace, _| workspace.lsp_offers_made());
+
+        unsafe {
+            match saved_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        };
+
+        assert_eq!(offers, 1, "the missing server still offers once");
+        assert_eq!(
+            text.as_deref(),
+            Some("typescript-language-server needs Node."),
+            "an npm recipe with no npm says what the Manual arm says"
+        );
+        assert_eq!(
+            labels,
+            vec!["Don't ask again".to_owned()],
+            "and it carries no Install button"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// The transition an install makes, at the scale it has to make it:
     /// every open tab of that language gets a server, not just the one whose
     /// card was clicked.
@@ -20146,7 +20502,9 @@ done
             "the fixture starts with both keys dead"
         );
 
-        workspace.update(&mut cx, |workspace, cx| workspace.revive_language("rust", cx));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.revive_language("rust", cx)
+        });
 
         let mut started: usize = 0;
         for _ in 0..200 {
