@@ -34,6 +34,9 @@ const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
 actions!(settings_summarizer, [CloseSummarizerPicker]);
 
 mod agents_page;
+mod language_servers_page;
+
+use language_servers_page::ServerStates;
 
 /// The settings content column — the frozen 720px content column of
 /// `docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` (waku
@@ -88,6 +91,7 @@ fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl 
 pub enum SettingsCategory {
     AiProviders,
     Agents,
+    LanguageServers,
     General,
     Permissions,
     Appearance,
@@ -98,9 +102,10 @@ impl SettingsCategory {
     ///
     /// Permissions contains the platform-specific privacy controls and the
     /// in-app browser's durable origin grants.
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::AiProviders,
         Self::Agents,
+        Self::LanguageServers,
         Self::General,
         Self::Permissions,
         Self::Appearance,
@@ -115,6 +120,7 @@ impl SettingsCategory {
         match self {
             Self::AiProviders => "AI Providers",
             Self::Agents => "Agents",
+            Self::LanguageServers => "Language Servers",
             Self::General => "General",
             Self::Permissions => "Permissions",
             Self::Appearance => "Appearance",
@@ -134,6 +140,9 @@ impl SettingsCategory {
         match normalized.as_str() {
             "ai-providers" | "aiproviders" | "providers" => Some(Self::AiProviders),
             "agents" => Some(Self::Agents),
+            // The socket's `settings_category_id` writes the title back in
+            // this same normalized form, so the label has to parse here.
+            "language-servers" | "languageservers" | "language" => Some(Self::LanguageServers),
             "general" => Some(Self::General),
             "permissions" => Some(Self::Permissions),
             "appearance" => Some(Self::Appearance),
@@ -145,6 +154,7 @@ impl SettingsCategory {
         match self {
             Self::AiProviders => Icon::Sparkles,
             Self::Agents => Icon::SquareTerminal,
+            Self::LanguageServers => Icon::File,
             Self::General => Icon::Settings,
             Self::Permissions => Icon::Shield,
             Self::Appearance => Icon::SunMoon,
@@ -329,6 +339,12 @@ pub struct SettingsSnapshot {
     pub opencode_workspace_id_override: String,
     /// The Appearance screen's Translucency toggle (F-SET-20).
     pub translucency: bool,
+    /// The languages whose install offer the reader declined ("Don't ask
+    /// again"), as plain names. Persisted as a JSON array in one string key
+    /// (`lsp.silencedLanguages`); the host owns that spelling, this crate
+    /// owns the set. Settings › Language Servers is the one place an entry
+    /// comes back out.
+    pub lsp_silenced_languages: Vec<String>,
 }
 
 impl Default for SettingsSnapshot {
@@ -354,6 +370,7 @@ impl Default for SettingsSnapshot {
             refresh_interval: 5,
             opencode_workspace_id_override: String::new(),
             translucency: false,
+            lsp_silenced_languages: Vec::new(),
         }
     }
 }
@@ -704,6 +721,10 @@ pub enum SettingsEvent {
     StartAccountLogin(AccountLoginRequest),
     /// Credentials changed: refresh the usage bar without waiting for its timer.
     RefreshUsage,
+    /// Run the installer for a language's server. Emitted only — `sirio`
+    /// owns the installer and the store, and returns its result through
+    /// [`Settings::set_install_state`].
+    InstallLanguageServer(String),
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -841,6 +862,14 @@ pub struct Settings {
     /// hides the row's action; `Failed` shows the installer's own message
     /// and offers the action again; success removes the entry.
     install_states: BTreeMap<String, InstallState>,
+    /// Settings › Language Servers: the shipped table, what this machine has
+    /// for each entry, and the declined offers. Plain data, so the page's row
+    /// model can be built from it in a pure function.
+    lsp_servers: ServerStates,
+    /// Where Sirio installs language servers, supplied by the host — the
+    /// crate never resolves the environment itself, and `None` until a host
+    /// says so means nothing has been probed.
+    lsp_store_root: Option<PathBuf>,
     /// Optional account-management override for embedders.
     on_manage_account: Option<Rc<dyn Fn(&'static str)>>,
     account_action_error: Option<(ProviderKind, String)>,
@@ -1021,6 +1050,11 @@ impl Settings {
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
             install_states: BTreeMap::new(),
+            lsp_servers: ServerStates {
+                silenced: initial.lsp_silenced_languages.iter().cloned().collect(),
+                ..ServerStates::default()
+            },
+            lsp_store_root: None,
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
@@ -1372,7 +1406,9 @@ impl Settings {
     }
 
     /// Sets (or clears, on `None`) one row's live install state. Callers
-    /// notify afterwards.
+    /// notify afterwards. Keyed by adapter id for the Agents screen and by
+    /// language for the Language Servers screen — the two share the map
+    /// because the two id spaces cannot collide.
     pub fn set_install_state(&mut self, id: &str, state: Option<InstallState>) {
         match state {
             Some(state) => {
@@ -1382,6 +1418,47 @@ impl Settings {
                 self.install_states.remove(id);
             }
         }
+    }
+
+    /// Tells the page where Sirio installs language servers and probes the
+    /// machine against it. The host owns the path — it resolves the
+    /// environment once at startup — and this is the crate's only read of it.
+    pub fn set_lsp_store_root(&mut self, root: PathBuf) {
+        self.lsp_store_root = Some(root);
+        self.refresh_language_servers();
+    }
+
+    /// Re-reads what this machine has for every language the shipped table
+    /// names: the reader's `PATH` first, then Sirio's store. The declined
+    /// set is the reader's, not the machine's, so it survives the refresh.
+    pub fn refresh_language_servers(&mut self) {
+        let silenced = std::mem::take(&mut self.lsp_servers.silenced);
+        self.lsp_servers = match &self.lsp_store_root {
+            Some(root) => {
+                ServerStates::discover(root, &std::env::var_os("PATH").unwrap_or_default())
+            }
+            None => ServerStates::default(),
+        };
+        self.lsp_servers.silenced = silenced;
+    }
+
+    /// Syncs the declined-offer set from the host's stored value. This is the
+    /// surface opening, not an edit: nothing is persisted back, and the
+    /// install offer's own "Don't ask again" writes the store directly.
+    pub fn set_lsp_silenced_languages(&mut self, languages: impl IntoIterator<Item = String>) {
+        self.lsp_servers.silenced = languages.into_iter().collect();
+    }
+
+    /// Declines or takes back one language's install offer. The page's only
+    /// edit, and it goes through `on_change` like every other control.
+    pub fn set_language_silenced(&mut self, language: &str, silenced: bool, cx: &mut Context<Self>) {
+        if silenced {
+            self.lsp_servers.silenced.insert(language.to_owned());
+        } else {
+            self.lsp_servers.silenced.remove(language);
+        }
+        self.changed();
+        cx.notify();
     }
 
     /// Overrides account management for embedders. By default the host
@@ -1469,6 +1546,7 @@ impl Settings {
             refresh_interval: self.refresh_interval,
             opencode_workspace_id_override: self.opencode_workspace_id_override.clone(),
             translucency: self.translucency,
+            lsp_silenced_languages: self.lsp_servers.silenced.iter().cloned().collect(),
         }
     }
 
@@ -1508,9 +1586,17 @@ impl Settings {
         // sources (registry fetch respecting its cache + recompute).
         let entering_agents =
             category == SettingsCategory::Agents && self.category != SettingsCategory::Agents;
+        // Entering the Language Servers screen re-reads this machine: an
+        // install that finished while the reader was elsewhere has to show
+        // up without a restart.
+        let entering_language_servers = category == SettingsCategory::LanguageServers
+            && self.category != SettingsCategory::LanguageServers;
         self.category = category;
         if entering_agents {
             cx.emit(SettingsEvent::RefreshAgentSources);
+        }
+        if entering_language_servers {
+            self.refresh_language_servers();
         }
         cx.notify();
     }
@@ -3913,6 +3999,9 @@ impl Render for Settings {
                 self.render_ai_providers(theme, entity.clone(), window)
             }
             SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window, cx),
+            SettingsCategory::LanguageServers => {
+                self.render_language_servers(theme, entity.clone())
+            }
             SettingsCategory::General => self.render_general(theme, entity.clone()),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
             SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
@@ -4396,6 +4485,28 @@ mod tests {
         assert!(
             offered.contains(&SettingsCategory::Permissions),
             "every platform offers the browser-origin permissions screen"
+        );
+    }
+
+    /// The control socket's `settings.section` parses a category by the
+    /// label it is written with: `settings_category_id` lower-cases the
+    /// title and hyphenates it, and `from_title` has to parse that same
+    /// spelling back. A category that does not round-trip through its own
+    /// label is reachable from the sidebar and from nowhere else.
+    #[test]
+    fn the_language_servers_category_round_trips_through_its_socket_label() {
+        assert!(
+            SettingsCategory::all().contains(&SettingsCategory::LanguageServers),
+            "every platform offers the language-server screen"
+        );
+        assert_eq!(
+            SettingsCategory::from_title("language-servers"),
+            Some(SettingsCategory::LanguageServers)
+        );
+        assert_eq!(
+            SettingsCategory::from_title(SettingsCategory::LanguageServers.title()),
+            Some(SettingsCategory::LanguageServers),
+            "the title has to parse back under the spelling the report writes"
         );
     }
 

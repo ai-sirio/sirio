@@ -5020,6 +5020,12 @@ impl SirioWorkspace {
         // Servers go beside the agents rather than among them, and this is
         // resolved in the same breath — `store_root` is an environment read.
         let lsp_store_root = lsp_store_root_for_startup();
+        // Settings › Language Servers reads that same store to say which
+        // servers are Sirio's own, so it is told once here rather than
+        // resolving the environment a second time.
+        settings.update(cx, |settings, _| {
+            settings.set_lsp_store_root(lsp_store_root.clone())
+        });
         let persisted_secondary_pane_open = session.secondary_pane_open_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
@@ -6377,6 +6383,9 @@ impl SirioWorkspace {
                 }
                 sirio_ui::settings::SettingsEvent::RefreshAgentSources => {
                     workspace.refresh_launch_sources_from_registry(cx);
+                }
+                sirio_ui::settings::SettingsEvent::InstallLanguageServer(language) => {
+                    workspace.install_language_server(language, cx);
                 }
                 sirio_ui::settings::SettingsEvent::StartAccountLogin(request) => {
                     account_login::start(&workspace.settings, request, cx);
@@ -10993,6 +11002,11 @@ impl SirioWorkspace {
                             .err()
                             .map(|error| InstallState::Failed(error.to_string())),
                     );
+                    // The store changed, so the row's state has to be
+                    // re-read: "installed by Sirio v…" is a fact about a
+                    // directory, and the page's list of them is a snapshot of
+                    // the last read.
+                    settings.refresh_language_servers();
                     cx.notify();
                 });
                 if result.is_ok() {
@@ -12416,10 +12430,24 @@ impl SirioWorkspace {
     }
 
     fn open_settings(&mut self, section: Option<SettingsCategory>, cx: &mut Context<Self>) {
-        if let Some(section) = section {
-            self.settings
-                .update(cx, |settings, cx| settings.select_category(section, cx));
-        }
+        // The install offer's own "Don't ask again" writes `lsp.silencedLanguages`
+        // straight to the session store, so the surface is re-synced from the
+        // store every time it opens rather than holding a copy that can go
+        // stale while the file view is the thing on screen. A corrupt value
+        // reads back as nothing declined, the same way the offer treats it.
+        let silenced: Vec<String> =
+            serde_json::from_str(&self.session.load_settings().lsp_silenced_languages)
+                .unwrap_or_default();
+        self.settings.update(cx, |settings, cx| {
+            settings.set_lsp_silenced_languages(silenced);
+            if let Some(section) = section {
+                settings.select_category(section, cx);
+            }
+            // The set above is the surface's copy of a store the offer card
+            // also writes, so the frame is redrawn even when no category
+            // changed.
+            cx.notify();
+        });
         self.show_settings = true;
         // F-SET-02: the Escape handler lives on this workspace's root, which
         // GPUI only reaches through the focused element's dispatch path. The
@@ -18507,6 +18535,12 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         refresh_interval: settings.refresh_interval_min.clamp(1, 60) as i32,
         opencode_workspace_id_override: settings.opencode_workspace_id_override,
         translucency: settings.translucency,
+        // The declined-install list is a JSON array in one string key. A
+        // value that will not parse reads back as "nothing was ever
+        // declined", which costs one more offer — the same trade the offer
+        // itself makes.
+        lsp_silenced_languages: serde_json::from_str(&settings.lsp_silenced_languages)
+            .unwrap_or_default(),
     }
 }
 
@@ -18534,17 +18568,38 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
         translucency: snapshot.translucency,
+        // The snapshot carries the declined-install set, so this is the one
+        // field the settings surface can now own outright. A list that will
+        // not serialize is an empty list, never a panic on the save path.
+        lsp_silenced_languages: serde_json::to_string(&snapshot.lsp_silenced_languages)
+            .unwrap_or_else(|_| AppSettings::default().lsp_silenced_languages),
         // Not in the Settings UI snapshot: the widths and the centre split
-        // belong to the drag, and the silenced-language list to the LSP
-        // install offer. Callers must re-apply the live values — see the
-        // `on_change` handler below. Filling these from `Default` here would
-        // reset a dragged panel, or un-silence a language, every time any
-        // unrelated setting changed.
+        // belong to the drag. Callers must re-apply the live values — see
+        // the divider save below. Filling these from `Default` here would
+        // reset a dragged panel every time any unrelated setting changed.
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
-        lsp_silenced_languages: AppSettings::default().lsp_silenced_languages,
     }
+}
+
+/// What the settings screen's own save writes, given the snapshot a control
+/// emitted and the row that is already stored.
+///
+/// The snapshot carries every value the surface owns, so the declined-install
+/// list comes from it — the screen is that list's only editor. Two things do
+/// not ride in the snapshot and are re-applied from the store instead: the
+/// update opt-out (its callback owns it) and the widths and centre split (the
+/// divider owns them, see `schedule_panel_width_save`). Re-applying a value
+/// the snapshot *does* carry would silently throw away the edit that produced
+/// it, which is what this function exists to be a single place against.
+fn app_settings_for_settings_save(snapshot: SettingsSnapshot, stored: &AppSettings) -> AppSettings {
+    let mut settings = app_settings_from_snapshot(snapshot);
+    settings.updates_enabled = stored.updates_enabled;
+    settings.sidebar_width = stored.sidebar_width;
+    settings.right_panel_width = stored.right_panel_width;
+    settings.center_split_ratio = stored.center_split_ratio;
+    settings
 }
 
 fn format_update_check_age(now: SystemTime, checked_at: SystemTime) -> String {
@@ -19251,15 +19306,7 @@ fn main() {
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
                             let stored = session_store_for_settings.load_settings();
-                            let mut settings = app_settings_from_snapshot(snapshot);
-                            // Update opt-out is owned by the update callback,
-                            // not SettingsSnapshot; preserve it when another
-                            // setting is saved.
-                            settings.updates_enabled = stored.updates_enabled;
-                            settings.sidebar_width = stored.sidebar_width;
-                            settings.right_panel_width = stored.right_panel_width;
-                            settings.center_split_ratio = stored.center_split_ratio;
-                            settings.lsp_silenced_languages = stored.lsp_silenced_languages;
+                            let settings = app_settings_for_settings_save(snapshot, &stored);
                             session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
@@ -29738,6 +29785,76 @@ done
         );
     }
 
+    /// The declined-install list is a JSON array in one string key. The
+    /// snapshot carries it as plain names, and this pair of conversions is
+    /// what makes Settings › Language Servers' one edit reach SQLite: before
+    /// it, `app_settings_from_snapshot` filled the field from `Default` and
+    /// the saving path re-applied the stored value over it, so the page's
+    /// change was thrown away before the write.
+    #[test]
+    fn the_declined_install_list_round_trips_through_the_snapshot() {
+        let persisted = AppSettings {
+            lsp_silenced_languages: r#"["java","kotlin"]"#.to_owned(),
+            ..AppSettings::default()
+        };
+
+        let snapshot = settings_snapshot_from_app_settings(persisted.clone());
+        assert_eq!(
+            snapshot.lsp_silenced_languages,
+            vec!["java".to_owned(), "kotlin".to_owned()]
+        );
+        assert_eq!(
+            app_settings_from_snapshot(snapshot).lsp_silenced_languages,
+            persisted.lsp_silenced_languages,
+            "an empty edit has to write `[]`, not the default"
+        );
+
+        // A value that will not parse costs one more offer, which is the
+        // same trade the offer itself makes; it must never panic the boot.
+        let corrupt = AppSettings {
+            lsp_silenced_languages: "not json".to_owned(),
+            ..persisted
+        };
+        assert!(
+            settings_snapshot_from_app_settings(corrupt)
+                .lsp_silenced_languages
+                .is_empty()
+        );
+    }
+
+    /// Defect the Language Servers screen would otherwise ship with: the
+    /// settings save composed the snapshot with the *stored* row, and it used
+    /// to re-apply the stored declined-install list over the snapshot's. The
+    /// screen's only edit is that list, so the re-apply made the screen's one
+    /// button write nothing. The snapshot owns what it carries; the store
+    /// keeps only what the snapshot cannot carry.
+    #[test]
+    fn a_settings_save_keeps_the_snapshots_declined_list_over_the_stored_one() {
+        let stored = AppSettings {
+            lsp_silenced_languages: r#"["java"]"#.to_owned(),
+            sidebar_width: 325,
+            right_panel_width: 405,
+            center_split_ratio: 610,
+            updates_enabled: false,
+            ..AppSettings::default()
+        };
+        let snapshot = SettingsSnapshot {
+            // What the page's "Offer again" produced: java is out.
+            lsp_silenced_languages: vec!["kotlin".to_owned()],
+            ..SettingsSnapshot::default()
+        };
+
+        let saved = app_settings_for_settings_save(snapshot, &stored);
+        assert_eq!(
+            saved.lsp_silenced_languages, r#"["kotlin"]"#,
+            "the edit the screen made survives the save"
+        );
+        assert_eq!(saved.sidebar_width, 325, "the divider's value is kept");
+        assert_eq!(saved.right_panel_width, 405);
+        assert_eq!(saved.center_split_ratio, 610);
+        assert!(!saved.updates_enabled, "the update opt-out is kept too");
+    }
+
     #[test]
     fn changing_only_the_theme_does_not_erase_other_persisted_settings() {
         let root = std::env::temp_dir().join(format!(
@@ -32954,6 +33071,45 @@ done
             session.load_settings().right_panel_width,
             460,
             "the last width wins, and only it is written"
+        );
+    }
+
+    /// The debounced width save rebuilds `AppSettings` from the settings
+    /// snapshot, which is not the live owner of every key: the declined
+    /// install list belongs to the install offer, whose "Don't ask again"
+    /// writes the store directly. `c415200a` fixed a drag writing `[]` over
+    /// that list; the Language Servers work moved the list into the snapshot
+    /// and must not have undone it here.
+    #[gpui::test]
+    async fn a_divider_drag_does_not_wipe_the_declined_install_list(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
+        let mut declined = session.load_settings();
+        declined.lsp_silenced_languages = r#"["java"]"#.to_owned();
+        session.save_settings(&declined);
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.right_panel_width = 420.0;
+            workspace.schedule_panel_width_save(cx);
+        });
+        cx.background_executor
+            .advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
+        cx.run_until_parked();
+
+        let stored = session.load_settings();
+        assert_eq!(stored.right_panel_width, 420, "the drag itself was saved");
+        assert_eq!(
+            stored.lsp_silenced_languages, r#"["java"]"#,
+            "and it left the install offer's key alone"
         );
     }
 

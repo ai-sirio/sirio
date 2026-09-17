@@ -7433,6 +7433,7 @@ dependencies = [
  "sirio_acp",
  "sirio_agents",
  "sirio_git",
+ "sirio_lsp",
  "sirio_markdown",
  "sirio_perf",
  "sirio_persistence",
