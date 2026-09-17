@@ -6159,9 +6159,29 @@ impl SirioWorkspace {
             // nothing to launch, which is why the failure path below pushes
             // these facts again: at the moment the tab opened, nobody had
             // yet looked for the program.
+            //
+            // The ladder decides what the sentence names: what Sirio would
+            // install for a recipe it can fetch, the thing that has to come
+            // first for a `Manual` one, or — for an entry of the reader's
+            // own, which carries no recipe — the name they wrote.
+            // `Dead::Failed` names nothing, having already been reported at
+            // the moment it broke.
+            //
+            // The ladder's arms flattened into one string is a shape this
+            // field will not survive — the card that offers the install
+            // needs the recipe, not its name — and reshaping it is the
+            // install surfaces' job rather than this one's.
             missing_language_server: worktree
                 .as_deref()
-                .and_then(|root| self.lsp.missing_command_for(path, root)),
+                .and_then(|root| self.lsp.dead_reason_for(path, root))
+                .and_then(|dead| match dead {
+                    crate::lsp::Dead::Installable { recipe } => {
+                        recipe.store_id().map(|id| id.to_owned())
+                    }
+                    crate::lsp::Dead::Manual { needs, .. } => Some((*needs).to_owned()),
+                    crate::lsp::Dead::NotInstalled { command } => Some(command.clone()),
+                    crate::lsp::Dead::Failed => None,
+                }),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
@@ -10672,6 +10692,7 @@ impl SirioWorkspace {
 
         let command = entry.command.clone();
         let args = entry.args.clone();
+        let install = entry.install.clone();
         let root = key.0.clone();
         let view = view.clone();
         let path_for_facts = path.to_path_buf();
@@ -10714,13 +10735,27 @@ impl SirioWorkspace {
                     // and it is not silence. A reader who right-clicks has
                     // asked a direct question, and answering it with "no
                     // language server offers definitions here" describes
-                    // Sirio rather than their machine. The name is kept for
-                    // the menu to give back, and the facts are pushed again
-                    // because the tab computed them before anyone had
-                    // looked. Marked dead, so it is tried once and not again.
-                    workspace
-                        .lsp
-                        .mark_dead(key, crate::lsp::Dead::NotInstalled { command });
+                    // Sirio rather than their machine. The ladder is what
+                    // the menu gives back — the recipe to install, or the
+                    // thing that has to come first — and the facts are
+                    // pushed again because the tab computed them before
+                    // anyone had looked. Marked dead, so it is tried once
+                    // and not again.
+                    let reason = match install {
+                        Some(sirio_lsp::Recipe::Manual { needs, url }) => {
+                            crate::lsp::Dead::Manual { needs, url }
+                        }
+                        Some(recipe) => crate::lsp::Dead::Installable { recipe },
+                        // An entry of the reader's own carries no recipe on
+                        // purpose: Sirio must not offer a second copy of a
+                        // server they already chose. There is nothing to
+                        // fetch and nothing to explain, so what is left is
+                        // the name they wrote, which is what the menu gives
+                        // back — and the key still dies here, so it is tried
+                        // once and not again.
+                        None => crate::lsp::Dead::NotInstalled { command },
+                    };
+                    workspace.lsp.mark_dead(key, reason);
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                 }
