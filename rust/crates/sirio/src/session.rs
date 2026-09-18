@@ -393,6 +393,11 @@ pub struct SessionTab {
     /// [`AgentRef::adapter_id`]; a value that does not resolve restores as
     /// unresolvable, the same path as `None`.
     pub agent_id: Option<AgentRef>,
+    /// The agent-side session a native chat continues across restarts.
+    /// Stamped by the chat's own hook write when the agent identifies its
+    /// session, and carried by the layout save from the live chat; `None`
+    /// for every other tab, and for a chat whose agent never named one.
+    pub agent_session_id: Option<String>,
     /// Whether this tab is the active one.
     pub active: bool,
 }
@@ -423,6 +428,7 @@ impl SessionLayout {
                     title: "Chat".into(),
                     kind: "chat".into(),
                     agent_id: None,
+                    agent_session_id: None,
                     active: false,
                 },
                 SessionTab {
@@ -430,6 +436,7 @@ impl SessionLayout {
                     title: "Terminal".into(),
                     kind: "terminal".into(),
                     agent_id: None,
+                    agent_session_id: None,
                     active: true,
                 },
             ],
@@ -1017,10 +1024,10 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
             title: tab.title.clone(),
             kind: tab.kind.clone(),
             agent_id: tab.agent_id.clone(),
-            // A layout-derived snapshot records no live session: the id is
-            // stamped when a chat with a resumable session saves, never
-            // reconstructed from the tab strip.
-            agent_session_id: None,
+            // Carried from the live tab strip: the layout save must not
+            // clear an id the chat's own hook write stamped, or every
+            // flush after the first turn would un-resume the session.
+            agent_session_id: tab.agent_session_id.clone(),
             order_idx: index as i64,
             is_active: tab.active,
         })
@@ -1461,6 +1468,7 @@ fn tabs_for_worktree(
             title: record.title,
             kind: record.kind,
             agent_id: record.agent_id,
+            agent_session_id: record.agent_session_id,
             active: record.is_active,
         });
         let last_tab = tabs.last().expect("just pushed");
@@ -1939,6 +1947,40 @@ impl SessionStore {
         }
     }
 
+    /// Stamps the agent-side session a chat tab continues onto its tab row
+    /// at once — a hook write, like [`Self::save_session_ref`], never
+    /// batched with the tab-strip save. `None` clears a stale id the CLI
+    /// refused, so the next restart does not retry a session that is gone.
+    pub fn save_tab_agent_session(
+        &self,
+        tab_id: &str,
+        worktree_id: &str,
+        session_id: Option<&str>,
+    ) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        let mut tabs = match db.tabs_of_worktree(worktree_id) {
+            Ok(tabs) => tabs,
+            Err(error) => {
+                eprintln!("[session] failed to read tabs for session save: {error}");
+                return;
+            }
+        };
+        let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        tab.agent_session_id = session_id.map(str::to_string);
+        if let Err(error) = db.save_tabs(worktree_id, &tabs) {
+            eprintln!("[session] failed to persist agent session: {error}");
+        }
+    }
+
     /// Loads browser-origin grants for new browser surfaces.
     pub fn load_browser_origin_grants(&self) -> Vec<String> {
         let db = self
@@ -2177,6 +2219,7 @@ mod tests {
                 title: "Chat".into(),
                 kind: "chat".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: false,
             },
             SessionTab {
@@ -2184,6 +2227,7 @@ mod tests {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: false,
             },
             SessionTab {
@@ -2191,6 +2235,7 @@ mod tests {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             },
         ]
@@ -2208,6 +2253,7 @@ mod tests {
             kind: "chat".into(),
             active: true,
             agent_id: Some(AgentRef::adapter("codex")),
+            agent_session_id: None,
         }];
 
         let store = SessionStore::open(&db_path);
@@ -2307,6 +2353,7 @@ mod tests {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![state.clone()],
@@ -2354,6 +2401,7 @@ mod tests {
                 title: "Browser".into(),
                 kind: "browser".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![state.clone()],
@@ -2395,6 +2443,7 @@ mod tests {
                 title: "Changes".into(),
                 kind: "diff".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: false,
             },
         );
@@ -2421,6 +2470,7 @@ mod tests {
                 title: "Browser".into(),
                 kind: "browser".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: false,
             },
         );
@@ -2735,6 +2785,7 @@ mod tests {
             title: "Chat".into(),
             kind: "chat".into(),
             agent_id: None,
+            agent_session_id: None,
             active: true,
         }];
         let store = SessionStore::open(&dir.db_path("stable-ids"));
@@ -3183,6 +3234,7 @@ mod tests {
                 title: "Linked terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
         ));
@@ -3245,6 +3297,7 @@ mod tests {
                 title: "Linked terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             "the linked worktree must restore its own tabs after its Git index shifts"
@@ -3317,6 +3370,7 @@ mod tests {
                 title: "Linked terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
         ));

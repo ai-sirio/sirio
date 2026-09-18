@@ -63,12 +63,12 @@ def initialize_payload():
     }
 
 
-def init_line():
+def init_line(version="2.1.273"):
     send({
         "type": "system",
         "subtype": "init",
         "session_id": SESSION_ID,
-        "claude_code_version": "2.1.273",
+        "claude_code_version": version,
         "cwd": os.getcwd(),
         "model": "claude-fable-5-1",
         "permissionMode": "default",
@@ -192,6 +192,17 @@ def finish_permission(cli_request_id, answer_message):
 
 
 def main():
+    if MODE == "refuse_resume" and "--resume" in sys.argv:
+        # The session file is gone: refuse the resume the way the real CLI
+        # does, so the worker must come back without the id.
+        sys.stderr.write("fixture: unknown session\n")
+        sys.stderr.flush()
+        os._exit(1)
+    if MODE == "echo_argv":
+        # The real CLI prints its init line unprompted at startup, before
+        # answering the handshake; the argv it reports is what the test
+        # reads back through the client's version cell.
+        init_line(" ".join(sys.argv))
     if MODE == "silent":
         # Answers nothing, ever: the startup-timeout case.
         time.sleep(600)
