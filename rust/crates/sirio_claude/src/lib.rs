@@ -13,7 +13,7 @@
 pub mod message;
 pub mod tools;
 
-pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe};
+pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
 
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,

@@ -276,6 +276,115 @@ fn number(input: &serde_json::Value, key: &str) -> Option<u64> {
     input.get(key).and_then(serde_json::Value::as_u64)
 }
 
+/// The tools whose result carries a file diff.
+const DIFF_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+
+/// Rebuilds the after-text of an edit from the tool's own structured
+/// output, so the transcript shows what the file became rather than what
+/// the call proposed.
+///
+/// `None` means "nothing better than the call's own diff is available" —
+/// an unrecognised tool, a missing or empty patch, or a patch whose hunks
+/// do not line up with the original it names. Refusing is deliberate: a
+/// diff assembled from mismatched halves would be a change nobody made.
+#[must_use]
+pub fn diff_from_result(
+    tool_name: &str,
+    tool_use_result: &serde_json::Value,
+) -> Option<ToolContent> {
+    if !DIFF_TOOLS.contains(&tool_name) {
+        return None;
+    }
+    let path = tool_use_result.get("filePath")?.as_str()?.to_string();
+    let hunks = tool_use_result.get("structuredPatch")?.as_array()?;
+    if hunks.is_empty() {
+        return None;
+    }
+    let original = tool_use_result
+        .get("originalFile")
+        .and_then(|file| file.as_str());
+    let old_lines: Vec<&str> = original.map(split_keeping_trailing).unwrap_or_default();
+
+    // Walk the original once, splicing each hunk's replacement in at the
+    // line it names. Hunks arrive in order, so a single cursor suffices.
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    for hunk in hunks {
+        let old_start = hunk.get("oldStart")?.as_u64()? as usize;
+        // A hunk is 1-based; `oldStart` 0 means "before the first line",
+        // which is how a brand-new file's single hunk is expressed.
+        // The header names the changed range, but `lines` carries the
+        // surrounding context with it: step back over the leading context
+        // lines to where the hunk's first line actually aligns, so the
+        // context is verified against the original instead of duplicating
+        // what was already copied and running past the end of the file.
+        let hunk_lines = hunk.get("lines")?.as_array()?;
+        let leading_context = hunk_lines
+            .iter()
+            .take_while(|line| line.as_str().is_some_and(|text| text.starts_with(' ')))
+            .count();
+        let start = old_start.saturating_sub(1).saturating_sub(leading_context);
+        if start > old_lines.len() {
+            return None;
+        }
+        new_lines.extend(
+            old_lines[cursor..start]
+                .iter()
+                .map(|line| (*line).to_string()),
+        );
+        cursor = start;
+        for line in hunk_lines {
+            let line = line.as_str()?;
+            let (marker, text) =
+                line.split_at(line.char_indices().next().map_or(0, |(_, c)| c.len_utf8()));
+            match marker {
+                " " => {
+                    // Context: it must be there in the original too.
+                    if cursor >= old_lines.len() {
+                        return None;
+                    }
+                    new_lines.push(old_lines[cursor].to_string());
+                    cursor += 1;
+                }
+                "-" => {
+                    if cursor >= old_lines.len() {
+                        return None;
+                    }
+                    cursor += 1;
+                }
+                "+" => new_lines.push(text.to_string()),
+                // `\ No newline at end of file` and anything else the
+                // differ emits: not a line of the file.
+                _ => {}
+            }
+        }
+    }
+    new_lines.extend(old_lines[cursor..].iter().map(|line| (*line).to_string()));
+
+    let mut new_text = new_lines.join("\n");
+    // A file that ended with a newline still does; one that did not, does
+    // not. `split_keeping_trailing` drops the final empty element, so the
+    // terminator is restored here rather than carried as a phantom line.
+    if original.is_none_or(|original| original.ends_with('\n')) && !new_text.is_empty() {
+        new_text.push('\n');
+    }
+    Some(ToolContent::Diff {
+        path,
+        old_text: original.map(str::to_string),
+        new_text,
+    })
+}
+
+/// Splits a file into lines without inventing a trailing empty one for a
+/// file that ends in a newline.
+fn split_keeping_trailing(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +561,104 @@ mod tests {
         assert_eq!(ToolKind::Move.as_str(), "Move");
         assert_eq!(ToolKind::SwitchMode.as_str(), "SwitchMode");
         assert_eq!(ToolKind::Other.as_str(), "Other");
+    }
+
+    #[test]
+    fn an_edit_result_rebuilds_the_file_from_its_hunks() {
+        // `structuredPatch` is a unified diff already parsed: each hunk
+        // names where it starts in the new file and carries its lines with
+        // the leading ' ', '-' or '+' still attached.
+        let result = json!({
+            "filePath": "/repo/a.rs",
+            "originalFile": "one\ntwo\nthree\n",
+            "structuredPatch": [{
+                "oldStart": 2, "oldLines": 1, "newStart": 2, "newLines": 1,
+                "lines": [" one", "-two", "+TWO", " three"]
+            }]
+        });
+        let diff = diff_from_result("Edit", &result).expect("a diff");
+        assert_eq!(
+            diff,
+            ToolContent::Diff {
+                path: "/repo/a.rs".into(),
+                old_text: Some("one\ntwo\nthree\n".into()),
+                new_text: "one\nTWO\nthree\n".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_write_result_over_an_existing_file_shows_what_it_replaced() {
+        let result = json!({
+            "filePath": "/repo/a.rs",
+            "originalFile": "old\n",
+            "structuredPatch": [{
+                "oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1,
+                "lines": ["-old", "+new"]
+            }]
+        });
+        let diff = diff_from_result("Write", &result).expect("a diff");
+        assert_eq!(
+            diff,
+            ToolContent::Diff {
+                path: "/repo/a.rs".into(),
+                old_text: Some("old\n".into()),
+                new_text: "new\n".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_file_has_no_original_to_show() {
+        let result = json!({
+            "filePath": "/repo/new.rs",
+            "originalFile": null,
+            "structuredPatch": [{
+                "oldStart": 0, "oldLines": 0, "newStart": 1, "newLines": 1,
+                "lines": ["+fn main() {}"]
+            }]
+        });
+        let diff = diff_from_result("Write", &result).expect("a diff");
+        assert_eq!(
+            diff,
+            ToolContent::Diff {
+                path: "/repo/new.rs".into(),
+                old_text: None,
+                new_text: "fn main() {}\n".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_result_with_nothing_to_rebuild_from_keeps_the_calls_own_diff() {
+        // The SDK documents this lane: a Write whose previous content was
+        // too large to diff arrives with an empty patch and a null original.
+        // Returning None here is what makes the start-frame diff survive.
+        let empty = json!({"filePath": "/repo/a.rs", "originalFile": null, "structuredPatch": []});
+        assert_eq!(diff_from_result("Write", &empty), None);
+        // Not an edit tool at all.
+        assert_eq!(diff_from_result("Bash", &json!({"stdout": "ok"})), None);
+        // Shape the CLI changed under us.
+        assert_eq!(
+            diff_from_result("Edit", &json!({"filePath": "/repo/a.rs"})),
+            None
+        );
+        assert_eq!(diff_from_result("Edit", &json!(null)), None);
+    }
+
+    #[test]
+    fn a_hunk_that_does_not_fit_the_original_is_refused_rather_than_guessed() {
+        // A patch that starts past the end of the file it claims to patch
+        // means the two came from different states. Showing a diff built
+        // from that would be inventing a change nobody made.
+        let mismatched = json!({
+            "filePath": "/repo/a.rs",
+            "originalFile": "one\n",
+            "structuredPatch": [{
+                "oldStart": 9, "oldLines": 1, "newStart": 9, "newLines": 1,
+                "lines": ["-nine", "+NINE"]
+            }]
+        });
+        assert_eq!(diff_from_result("Edit", &mismatched), None);
     }
 }
