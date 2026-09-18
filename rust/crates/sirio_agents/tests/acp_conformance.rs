@@ -211,3 +211,97 @@ fn oh_my_pi_is_only_claimed_once_it_answers() {
         "the adapter's claim and the binary's behaviour must match"
     );
 }
+
+/// The native claim's counterpart to `opencode_answers_the_acp_handshake_it_claims`.
+///
+/// `ClaudeCodeAdapter::native_chat()` says the `claude` on this machine
+/// answers a stdio control handshake at or above a named version. That is a
+/// claim about an undocumented protocol on a CLI that self-updates, which
+/// makes it exactly the kind of claim that rots silently. This is the test
+/// that says so on the day it does.
+#[test]
+fn claude_answers_the_native_handshake_it_claims() {
+    use sirio_agents::ClaudeCodeAdapter;
+
+    let claim = ClaudeCodeAdapter
+        .native_chat()
+        .expect("Claude Code claims a native chat transport");
+    let Some(program) = ClaudeCodeAdapter.availability().executable else {
+        eprintln!("SKIP: claude is not on PATH");
+        return;
+    };
+    let program = program.to_string_lossy().into_owned();
+
+    // The floor first: a machine with an older claude is a machine whose
+    // chats fall back, and the handshake below is not owed there.
+    let version_output = std::process::Command::new(&program)
+        .arg("--version")
+        .output()
+        .expect("claude --version runs");
+    let version_text = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .to_string();
+    let version = sirio_claude::ClaudeVersion::parse(&version_text)
+        .unwrap_or_else(|| panic!("claude reported an unreadable version: {version_text:?}"));
+    if !version.meets_floor() {
+        eprintln!(
+            "SKIP: claude {version} is below the claimed floor {}",
+            claim.min_version
+        );
+        return;
+    }
+
+    // `--setting-sources ""` and `--no-session-persistence` keep this inert:
+    // it starts no MCP server, runs no hook, and writes no session file on
+    // the machine running the suite.
+    let line = sirio_claude::LaunchLine::usage_probe();
+    let mut args: Vec<&str> = line.args.iter().map(String::as_str).collect();
+    args.push("--permission-prompt-tool");
+    args.push("stdio");
+    let handshake = sirio_claude::ControlRequest::initialize("conformance-1").to_string();
+
+    let response = match answers_stdio_handshake(&program, &args, &handshake) {
+        Handshake::Answered(response) => response,
+        Handshake::Silent => panic!("claude answered nothing on stdout"),
+        Handshake::NotLaunched => panic!("claude could not be launched"),
+        Handshake::TimedOut { output } => {
+            panic!("claude's handshake timed out; stdout before timeout: {output:?}")
+        }
+    };
+    assert!(
+        response.contains("\"control_response\""),
+        "expected a control response, got: {response}"
+    );
+    assert!(
+        response.contains("\"request_id\":\"conformance-1\""),
+        "the response must answer the request it was sent: {response}"
+    );
+}
+
+/// [`answers_initialize_within`] for the stdio control protocol: same
+/// reader, same timeout, a different first line.
+fn answers_stdio_handshake(program: &str, args: &[&str], handshake: &str) -> Handshake {
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Handshake::NotLaunched;
+    };
+    let wrote = child
+        .stdin
+        .as_mut()
+        .is_some_and(|stdin| stdin.write_all(format!("{handshake}\n").as_bytes()).is_ok());
+    let result = if wrote {
+        child.stdout.take().map_or(Handshake::Silent, |stdout| {
+            read_handshake(stdout, ACP_HANDSHAKE_TIMEOUT)
+        })
+    } else {
+        Handshake::Silent
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}

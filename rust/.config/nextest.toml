@@ -36,14 +36,20 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # profile retries nothing; a release must not die of one.
 retries = 2
 
-# `sirio_agents`'s two conformance tests cross-check an adapter's
-# `builtin_acp()` claim against the CLI actually installed on the machine.
+# `sirio_agents`'s three conformance tests cross-check an adapter's
+# capability claim -- `builtin_acp()` or `native_chat()` -- against the CLI
+# actually installed on the machine.
 # That is exactly right as a development check -- it is how those claims get
 # settled at all, and the reason they are trustworthy -- and exactly wrong in
 # a gate that decides whether a release exists, where it would let a `brew
 # install` on one Mac stop one. The other two tests in that file are hermetic
 # and still run here.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers)'
+#
+# `claude_answers_the_native_handshake_it_claims` joins them for the same
+# reason and one more: it drives whatever `claude` the machine happens to
+# carry, and that binary self-updates. A release must not be decided by a
+# version that landed on a runner overnight.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims)'
 
 [profile.pr]
 # .github/workflows/pr.yml selects this profile, by way of Scripts/ci.sh mapping
@@ -52,8 +58,8 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # It differs from `default` in exactly one way and from `ci` in exactly one
 # other, and both differences are the point.
 #
-# Like `ci`, it skips the two `sirio_agents` conformance tests, for the same
-# reason spelled out above: they cross-check an adapter's `builtin_acp()` claim
+# Like `ci`, it skips the three `sirio_agents` conformance tests, for the same
+# reason spelled out above: they cross-check an adapter's capability claim
 # against the CLI actually installed on the machine, and a hosted runner has
 # none of them installed. That is not a hypothetical here --
 # `oh_my_pi_is_only_claimed_once_it_answers` is the test that went red on this
@@ -61,12 +67,17 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # on every run after it. A pull request must no more be stopped by which
 # binaries a runner happens to carry than a release must.
 #
+# `claude_answers_the_native_handshake_it_claims` joins them for the same
+# reason and one more: it drives whatever `claude` the machine happens to
+# carry, and that binary self-updates. Which version landed on a runner
+# overnight must not decide a gate.
+#
 # Unlike `ci`, it retries nothing. Those two retries exist so a *release* does
 # not die of one timing flake on a machine compiling two thousand tests at
 # once. A pull request is the last run where the developer who caused a flake
 # can still see it, so hiding it here would cost exactly what the retries
 # elsewhere are worth.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers)'
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims)'
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 3 }
 
