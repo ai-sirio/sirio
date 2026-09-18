@@ -10,10 +10,14 @@
 //! published API. Everything here is therefore written to degrade rather
 //! than reject: see [`message`]'s module docs for the rule.
 
+pub mod launch;
 pub mod message;
+pub mod version;
 
+pub use launch::LaunchLine;
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
     ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
     UserPayload,
 };
+pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};
