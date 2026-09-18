@@ -522,3 +522,37 @@ fn approving_a_plan_moves_the_session_out_of_plan_mode() {
     );
     client.shutdown().expect("clean shutdown");
 }
+
+#[test]
+fn a_dry_run_rewind_reports_its_preview_and_a_real_one_reports_its_result() {
+    let (mut client, _events) = launch("rewind");
+    let preview = client
+        .rewind_files("uuid-1", true)
+        .expect("the dry run answers");
+    assert!(preview.can_rewind);
+    assert_eq!(preview.files_changed, vec!["/repo/a.rs".to_string()]);
+    let applied = client
+        .rewind_files("uuid-1", false)
+        .expect("the rewind answers");
+    assert!(applied.can_rewind);
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_cli_that_does_not_know_the_verb_degrades_that_feature_only() {
+    // An older-but-above-floor claude, or a newer one that dropped it: the
+    // affordance stops working and the session does not notice.
+    let (mut client, events) = launch("no_rewind");
+    let error = client
+        .rewind_files("uuid-1", true)
+        .expect_err("an unknown verb is an error, not a fake success");
+    assert!(format!("{error:#}").contains("rewind"));
+    // The session is still alive and still streaming.
+    client.prompt("hello").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, AcpEvent::AgentMessageChunk(_)))
+    );
+    client.shutdown().expect("clean shutdown");
+}

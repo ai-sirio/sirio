@@ -15,7 +15,9 @@ use async_process::{Command as AsyncCommand, Stdio};
 use futures::StreamExt as _;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use sirio_claude::{Catalog, CliMessage, ControlEnvelope, ControlRequest, LaunchLine};
+use sirio_claude::{
+    Catalog, CliMessage, ControlEnvelope, ControlRequest, LaunchLine, RewindOutcome,
+};
 
 use super::ClaudeLaunch;
 use super::events::Fold;
@@ -47,6 +49,12 @@ pub(super) enum Command {
     RespondPermission {
         request_id: u64,
         choice: PermissionChoice,
+    },
+    /// Ask the CLI to restore tracked files to a turn's checkpoint.
+    RewindFiles {
+        user_message_id: String,
+        dry_run: bool,
+        reply: mpsc::SyncSender<Result<RewindOutcome, String>>,
     },
 }
 
@@ -292,6 +300,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let next_request_id = || format!("sirio-{}", request_ids.fetch_add(1, Ordering::Relaxed));
     let mut turn_in_flight = false;
     let mut pending_model: HashMap<String, String> = HashMap::new();
+    let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
+        HashMap::new();
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
@@ -383,7 +393,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             && let Some(envelope) = ControlEnvelope::parse(value)
                         {
                             if let Some(model) = pending_model.remove(&envelope.request_id) {
-                                match envelope.error {
+                                match &envelope.error {
                                     // The wire confirms by echoing; a refusal
                                     // leaves the catalogue where it was rather
                                     // than showing a model the session is not on.
@@ -401,6 +411,32 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                                 "model selection failed: {error}"
                                             )))
                                             .await;
+                                    }
+                                }
+                            }
+                            if let Some(reply) = pending_rewinds.remove(&envelope.request_id) {
+                                // A success carries the outcome; a refusal
+                                // carries only the CLI's own sentence, which
+                                // is what the surface shows.
+                                match (envelope.payload, envelope.error) {
+                                    (Some(payload), _) => match RewindOutcome::parse(&payload) {
+                                        Some(outcome) => {
+                                            let _ = reply.send(Ok(outcome));
+                                        }
+                                        None => {
+                                            let _ = reply
+                                                .send(Err("the rewind answer could not be read"
+                                                    .to_string()));
+                                        }
+                                    },
+                                    (None, Some(error)) => {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                    (None, None) => {
+                                        let _ =
+                                            reply
+                                                .send(Err("the agent refused the rewind request"
+                                                    .to_string()));
                                     }
                                 }
                             }
@@ -599,6 +635,26 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     ": could not apply the approved mode".into(),
                                 );
                             }
+                        }
+                    }
+                    Ok(Command::RewindFiles {
+                        user_message_id,
+                        dry_run,
+                        reply,
+                    }) => {
+                        let id = next_request_id();
+                        pending_rewinds.insert(id.clone(), reply);
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::rewind_files(&id, &user_message_id, dry_run),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            pending_rewinds.remove(&id);
+                            return SessionOutcome::Died(
+                                ": could not write the rewind request".into(),
+                            );
                         }
                     }
                     Ok(Command::Shutdown(ack)) => {
