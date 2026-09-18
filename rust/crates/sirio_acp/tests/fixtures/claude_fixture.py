@@ -304,11 +304,13 @@ def main():
                 return
             if MODE == "chatty_slow_turn":
                 init_line()
-                # Six reports across a window the test sets to 400 ms: the
-                # turn outlives the window without ever being silent for one.
-                for index in range(6):
+                # Sixteen reports at 250 ms — 4 s — across a window the test
+                # sets to 2 s: the turn outlives the window twice over without
+                # ever being silent for an eighth of one, so a loaded machine
+                # cannot turn this into a measurement of its own scheduler.
+                for index in range(16):
                     text(f"step {index} ")
-                    time.sleep(0.15)
+                    time.sleep(0.25)
                 result()
                 return
             if MODE in ("context_usage", "no_context_usage"):

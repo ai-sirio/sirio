@@ -28,12 +28,17 @@ fn fixture_launch(mode: &str) -> ClaudeLaunch {
 
 fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
     let receive = events.recv();
-    let timer = async_io::Timer::after(Duration::from_secs(5));
+    // A guard against a hang, not a budget: the only thing it must be is
+    // longer than this suite's worst scheduling delay. Five seconds was not
+    // — a fixture subprocess loses the CPU for longer than that when the
+    // whole workspace's tests run at once, and the turn it was driving is
+    // fine by the time anyone looks.
+    let timer = async_io::Timer::after(Duration::from_secs(60));
     futures::executor::block_on(async move {
         futures::pin_mut!(receive, timer);
         match futures::future::select(receive, timer).await {
             Either::Left((event, _)) => event.expect("event stream should remain open"),
-            Either::Right((_, _)) => panic!("fixture did not emit an event within five seconds"),
+            Either::Right((_, _)) => panic!("fixture did not emit an event within sixty seconds"),
         }
     })
 }
@@ -297,7 +302,10 @@ fn cancelling_a_turn_produces_a_terminal_outcome() {
         }),
         "a cancelled turn must say so, or the footer reads as an ordinary end"
     );
-    client.shutdown().expect("clean shutdown");
+    // No shutdown assertion: `slow_turn` ends its own process the moment it
+    // has answered the interrupt, so whether a worker is still there to take
+    // a shutdown is a race with nothing to do with what a cancelled turn
+    // reports. `shutdown_reaps_the_process` is where that belongs.
 }
 
 #[test]
@@ -334,11 +342,20 @@ fn a_turn_that_keeps_reporting_is_never_reaped_for_taking_long() {
     // The watchdog measures silence, not duration: an agent that works for
     // longer than the window while still reporting must survive. Killing it
     // loses the whole session, not just the turn.
+    //
+    // Two margins, and they pull apart rather than together. The premise
+    // needs the turn to outlive the window: sixteen reports at 250 ms is 4 s
+    // against a 2 s window, so it does, twice over. The assertion needs each
+    // gap to stay well inside the window: 250 ms into 2 s is an eighth, so a
+    // gap has to stretch eightfold before this measures the scheduler instead
+    // of the watchdog. The tight version — 150 ms into 400 ms, barely two
+    // window-lengths and a gap over a third of one — went red whenever the
+    // whole workspace's suites ran at once.
     let (mut client, events) = ClaudeClient::launch_with_timeouts(
         fixture_launch("chatty_slow_turn"),
         std::env::temp_dir(),
         Duration::from_secs(10),
-        Duration::from_millis(400),
+        Duration::from_secs(2),
         Duration::from_secs(60),
     )
     .expect("handshake succeeds");
@@ -350,7 +367,11 @@ fn a_turn_that_keeps_reporting_is_never_reaped_for_taking_long() {
             .any(|event| matches!(event, AcpEvent::Timeout { .. })),
         "a reporting agent must not be reaped: {seen:?}"
     );
-    client.shutdown().expect("clean shutdown");
+    // No shutdown assertion here: `chatty_slow_turn` ends its own process
+    // once the turn is done, so whether the worker is still there to take a
+    // shutdown is a race with nothing to do with the watchdog. Both clients
+    // report a gone worker as an error — `a_dead_agent_names_its_exit_...`
+    // is where that belongs.
 }
 
 #[test]
