@@ -60,6 +60,7 @@ use sirio_ui::{
         SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef,
         SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
+        project_settings::{ProjectSettingsEvent, ProjectSettingsSeed, ProjectSettingsView},
     },
     status_bar::{
         StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
@@ -3818,6 +3819,7 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
         TabKind::Editor => Icon::File,
         TabKind::Browser => Icon::Globe,
         TabKind::Diff => Icon::File,
+        TabKind::ProjectSettings => Icon::Settings,
     }
 }
 
@@ -3886,6 +3888,7 @@ fn tab_kind_from_persisted(kind: &str) -> TabKind {
         "diff" => TabKind::Diff,
         "browser" => TabKind::Browser,
         "file" => TabKind::Editor,
+        "settings" => TabKind::ProjectSettings,
         _ => TabKind::Terminal,
     }
 }
@@ -5603,10 +5606,15 @@ impl SirioWorkspace {
             .tabs
             .iter()
             .filter(|tab| {
-                paths_name_the_same_document(
-                    &self.tab_worktree_path(tab.id),
-                    &self.working_directory,
-                )
+                // Project-settings tabs are ephemeral scratch: their edits
+                // persist live to the catalog on every keystroke, so there
+                // is nothing to restore, and the restore path rejects
+                // unknown kinds outright.
+                tab.kind != TabKind::ProjectSettings
+                    && paths_name_the_same_document(
+                        &self.tab_worktree_path(tab.id),
+                        &self.working_directory,
+                    )
             })
             .collect();
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -5624,6 +5632,10 @@ impl SirioWorkspace {
                         TabKind::Terminal => "terminal",
                         TabKind::Browser => "browser",
                         TabKind::Diff => "diff",
+                        // Unreachable while `layout` filters settings tabs
+                        // out of `owned_tabs` above; kept so a future
+                        // persistence change fails at restore, not here.
+                        TabKind::ProjectSettings => "settings",
                     }
                     .to_string(),
                     // The live tab holds the bare adapter id it was opened
@@ -5679,7 +5691,7 @@ impl SirioWorkspace {
                                 state.editor_path =
                                     view.read(cx).path().to_string_lossy().into_owned();
                             }
-                            TabContent::Changes(_) => {}
+                            TabContent::Changes(_) | TabContent::ProjectSettings(_) => {}
                         }
                     });
                     state
@@ -5758,6 +5770,11 @@ impl SirioWorkspace {
             sidebar.set_projects(projects, cx);
             seed_sidebar_identity_and_worktree_defaults(sidebar, catalog, cx);
         });
+        // An open project-settings tab snapshots the same row facts its
+        // seed came from; re-seed them here so a refresh (e.g. Initialize
+        // Git flipping a folder into a repo) cannot leave a stale tab
+        // behind. Drafts are untouched.
+        self.refresh_project_settings_tabs(cx);
         // `set_projects` rebuilds every row from the catalog, which drops the
         // tab rows, the per-row agent facts and the urgency order with them.
         // Re-apply all three here so a refresh (a project added, a worktree
@@ -7247,11 +7264,7 @@ impl SirioWorkspace {
             }
             SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
             SidebarEvent::OpenProjectSettings(id) => {
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
-            }
-            SidebarEvent::ProjectSettingsChanged(update) => {
-                self.update_project_settings(update, cx)
+                self.add_project_settings_tab(id, cx);
             }
             SidebarEvent::Reorder {
                 drag,
@@ -7338,6 +7351,25 @@ impl SirioWorkspace {
             self.session.schedule_catalog(&self.project_catalog);
             self.sync_control_state();
             self.refresh_sidebar(cx);
+            // A settings tab of a removed project has no project left to show.
+            let doomed: Vec<usize> = self
+                .tabs
+                .iter()
+                .filter_map(|tab| {
+                    let mut hosted = false;
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::ProjectSettings(view) = content
+                            && view.read(cx).project_id() == id
+                        {
+                            hosted = true;
+                        }
+                    });
+                    hosted.then_some(tab.id)
+                })
+                .collect();
+            for tab_id in doomed {
+                self.close_tab_by_id(tab_id, None, cx);
+            }
         }
     }
 
@@ -7534,8 +7566,7 @@ impl SirioWorkspace {
     ) {
         match (target, action) {
             (SidebarContextTarget::Project { id, .. }, SidebarContextAction::ProjectSettings) => {
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
+                self.add_project_settings_tab(id, cx);
             }
             (SidebarContextTarget::Project { id, .. }, SidebarContextAction::RefreshProject) => {
                 self.refresh_catalog_project(id, None, cx);
@@ -7670,7 +7701,10 @@ impl SirioWorkspace {
             TabContent::Terminal { view } => terminal_shell_evidence
                 .get(&view.entity_id().as_u64())
                 .and_then(TerminalShellEvidence::status),
-            TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
+            TabContent::File { .. }
+            | TabContent::Changes(_)
+            | TabContent::Browser(_)
+            | TabContent::ProjectSettings(_) => None,
         }
     }
 
@@ -7737,7 +7771,10 @@ impl SirioWorkspace {
         let mut status: Option<ActivityStatus> = None;
         tab.panes.for_each(&mut |pane_id, content| {
             let candidate = match content {
-                TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => return,
+                TabContent::File { .. }
+                | TabContent::Changes(_)
+                | TabContent::Browser(_)
+                | TabContent::ProjectSettings(_) => return,
                 _ => self.pane_status(tab, pane_id),
             };
             if status.is_none_or(|current| activity_rank(candidate) < activity_rank(current)) {
@@ -7805,9 +7842,10 @@ impl SirioWorkspace {
                 return;
             }
             found = match content {
-                TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
-                    ActivityStatus::Idle
-                }
+                TabContent::File { .. }
+                | TabContent::Changes(_)
+                | TabContent::Browser(_)
+                | TabContent::ProjectSettings(_) => ActivityStatus::Idle,
                 _ => self.pane_status(tab, pane_id),
             };
         });
@@ -8468,7 +8506,10 @@ impl SirioWorkspace {
                         });
                         (tab.title.clone(), agent, state, scrollback_source)
                     }
-                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => (
+                    TabContent::File { .. }
+                    | TabContent::Changes(_)
+                    | TabContent::Browser(_)
+                    | TabContent::ProjectSettings(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
@@ -9716,7 +9757,9 @@ impl SirioWorkspace {
 
     fn tab_width(kind: TabKind) -> f32 {
         match kind {
-            TabKind::AgentChat | TabKind::Editor | TabKind::Diff => CHAT_TAB_MIN_WIDTH,
+            TabKind::AgentChat | TabKind::Editor | TabKind::Diff | TabKind::ProjectSettings => {
+                CHAT_TAB_MIN_WIDTH
+            }
             TabKind::Terminal => TERMINAL_TAB_MIN_WIDTH,
             TabKind::Browser => CHAT_TAB_MIN_WIDTH,
         }
@@ -11710,6 +11753,146 @@ impl SirioWorkspace {
             .detach();
     }
 
+    /// Opens a project's settings as a tab in the Secondary pane, reusing
+    /// the existing tab for that project when there is one (and opening
+    /// the pane when it was hidden), like every other Secondary surface.
+    fn add_project_settings_tab(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            let mut matches_project = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::ProjectSettings(view) = content {
+                    matches_project |= view.read(cx).project_id() == project_id;
+                }
+            });
+            matches_project
+        }) {
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
+            self.schedule_save(cx);
+            self.mark_activity_dirty();
+            cx.notify();
+            return;
+        }
+        let Some(seed) = self.sidebar.read(cx).project_settings_seed(project_id) else {
+            return;
+        };
+        let title = format!(
+            "Project Settings · {}",
+            ProjectSettingsView::title_name(&seed)
+        );
+        let seed_title = title.clone();
+        let view = cx.new(|cx| ProjectSettingsView::new(seed, cx));
+        Self::subscribe_project_settings_tab(&view, cx);
+        let tab_id = self.next_tab_id;
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            title: seed_title,
+            kind: TabKind::ProjectSettings,
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(self.next_pane_id),
+            panes: PaneNode::leaf(self.next_pane_id, TabContent::ProjectSettings(view)),
+            focused_pane: self.next_pane_id,
+            title_is_auto_named: true,
+        });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.open_secondary_pane();
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    fn subscribe_project_settings_tab(tab: &Entity<ProjectSettingsView>, cx: &mut Context<Self>) {
+        cx.subscribe(
+            tab,
+            |workspace, emitter, event: &ProjectSettingsEvent, cx| match event {
+                ProjectSettingsEvent::Changed(update) => {
+                    workspace.update_project_settings(update, cx);
+                    let title = format!("Project Settings · {}", emitter.read(cx).heading_name());
+                    let hosted: Vec<usize> = workspace
+                        .tabs
+                        .iter()
+                        .filter_map(|tab| {
+                            let mut hosted = false;
+                            tab.panes.for_each(&mut |_, content| {
+                                if let TabContent::ProjectSettings(view) = content
+                                    && view.entity_id() == emitter.entity_id()
+                                {
+                                    hosted = true;
+                                }
+                            });
+                            hosted.then_some(tab.id)
+                        })
+                        .collect();
+                    for tab_id in hosted {
+                        if let Some(tab) = workspace.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                            tab.title = title.clone();
+                        }
+                    }
+                    cx.notify();
+                }
+                ProjectSettingsEvent::ContextAction { target, action } => {
+                    workspace.handle_sidebar_context_action(target, *action, cx);
+                }
+                ProjectSettingsEvent::RemoveProject(id) => {
+                    workspace.remove_project(id, cx);
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Re-seeds the row facts (git-ness, path, primary branch) of every
+    /// open project-settings tab after a catalog refresh rebuilt the
+    /// sidebar rows. Drafts are never touched — see
+    /// `ProjectSettingsView::refresh_row_facts`.
+    fn refresh_project_settings_tabs(&mut self, cx: &mut Context<Self>) {
+        let hosted: Vec<(usize, String)> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let mut project_id = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::ProjectSettings(view) = content {
+                        project_id = Some(view.read(cx).project_id().to_string());
+                    }
+                });
+                project_id.map(|id| (tab.id, id))
+            })
+            .collect();
+        for (tab_id, project_id) in hosted {
+            let Some(seed): Option<ProjectSettingsSeed> =
+                self.sidebar.read(cx).project_settings_seed(&project_id)
+            else {
+                continue;
+            };
+            let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+                continue;
+            };
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::ProjectSettings(view) = content {
+                    view.update(cx, |view, cx| {
+                        view.refresh_row_facts(
+                            seed.is_git,
+                            seed.path.clone(),
+                            seed.primary_branch.clone(),
+                            cx,
+                        );
+                    });
+                }
+            });
+        }
+    }
+
     fn add_file_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let open_paths = self
             .tabs
@@ -12913,7 +13096,8 @@ impl SirioWorkspace {
                         TabContent::Terminal { view } => Some(view.focus_handle(cx)),
                         TabContent::File { .. }
                         | TabContent::Changes(_)
-                        | TabContent::Browser(_) => None,
+                        | TabContent::Browser(_)
+                        | TabContent::ProjectSettings(_) => None,
                     };
                 }
             });
@@ -13169,7 +13353,8 @@ impl SirioWorkspace {
                             TabContent::Terminal { view } => Some(view.focus_handle(cx)),
                             TabContent::File { .. }
                             | TabContent::Changes(_)
-                            | TabContent::Browser(_) => None,
+                            | TabContent::Browser(_)
+                            | TabContent::ProjectSettings(_) => None,
                         };
                     }
                 });
@@ -13195,9 +13380,10 @@ impl SirioWorkspace {
                 handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
-                        None
-                    }
+                    TabContent::File { .. }
+                    | TabContent::Changes(_)
+                    | TabContent::Browser(_)
+                    | TabContent::ProjectSettings(_) => None,
                 };
             }
         });
@@ -13232,9 +13418,10 @@ impl SirioWorkspace {
                 handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
-                        None
-                    }
+                    TabContent::File { .. }
+                    | TabContent::Changes(_)
+                    | TabContent::Browser(_)
+                    | TabContent::ProjectSettings(_) => None,
                 };
             }
         });
@@ -13330,6 +13517,10 @@ impl SirioWorkspace {
                         .child(self.child_view(view.clone()))
                         .into_any_element(),
                     TabContent::Changes(view) => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    TabContent::ProjectSettings(view) => div()
                         .size_full()
                         .child(self.child_view(view.clone()))
                         .into_any_element(),
@@ -14203,7 +14394,9 @@ impl SirioWorkspace {
                     .unwrap_or_default()
                     .is_live(),
                 TabContent::Chat(chat) => chat.read(cx).is_streaming(),
-                TabContent::Changes(_) | TabContent::Browser(_) => false,
+                TabContent::Changes(_)
+                | TabContent::Browser(_)
+                | TabContent::ProjectSettings(_) => false,
             };
         });
         dirty
@@ -14759,9 +14952,10 @@ impl SirioWorkspace {
                 focus_handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
-                        None
-                    }
+                    TabContent::File { .. }
+                    | TabContent::Changes(_)
+                    | TabContent::Browser(_)
+                    | TabContent::ProjectSettings(_) => None,
                 };
             }
         });
@@ -34750,6 +34944,7 @@ done
                     TabContent::File { .. } => {}
                     TabContent::Changes(_) => {}
                     TabContent::Browser(_) => {}
+                    TabContent::ProjectSettings(_) => {}
                 });
             }
             (failed, live)
@@ -34987,6 +35182,72 @@ done
             right_panel::PanelView::History,
             "viewing a file's history must switch the right panel to History"
         );
+    }
+
+    #[gpui::test]
+    fn opening_project_settings_opens_one_secondary_tab_per_project(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let repo = test_repo("project-settings-tab");
+            let mut workspace = test_workspace_for_repo(cx, repo, false);
+            let first_count = workspace.tabs.len();
+
+            workspace.add_project_settings_tab("palette-project", cx);
+            assert_eq!(
+                workspace.tabs.len(),
+                first_count + 1,
+                "opening settings adds exactly one tab"
+            );
+            let index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::ProjectSettings)
+                .expect("the settings tab is present");
+            assert_eq!(
+                workspace.tabs[index].title, "Project Settings · Palette Project",
+                "the tab names the project like the sheet heading did"
+            );
+            assert_eq!(
+                workspace.tabs[index].kind.pane_role(),
+                PaneRole::Secondary,
+                "settings live in the Secondary half"
+            );
+            assert!(
+                workspace.secondary_pane_visible(),
+                "opening settings reveals the Secondary pane"
+            );
+
+            workspace.add_project_settings_tab("palette-project", cx);
+            assert_eq!(
+                workspace.tabs.len(),
+                first_count + 1,
+                "reopening the same project reuses its tab"
+            );
+            assert_eq!(
+                workspace.active_tab, index,
+                "reopening reveals the existing tab"
+            );
+
+            workspace.add_project_settings_tab("unknown-project", cx);
+            assert_eq!(
+                workspace.tabs.len(),
+                first_count + 1,
+                "an unknown project opens nothing"
+            );
+            workspace
+        });
+
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.kind == TabKind::ProjectSettings)
+                    .count(),
+                1,
+                "exactly one settings tab survives the frame"
+            );
+        });
     }
 
     #[gpui::test]

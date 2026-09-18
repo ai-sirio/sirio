@@ -12,34 +12,33 @@
 //! `SIRIO_SIDEBAR_REPO`; projects without a repository path are not offered
 //! a New Worktree row, exactly like non-git projects.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use bezel::motion::{Fade, Painter};
 use bezel::ui::popover::{self, Popup};
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba, ScrollHandle,
-    Pixels, StyleRefinement, Window, div, img, prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
+    ScrollHandle, StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{
     UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
     remove_worktree_and_remote_branch, resolve_parent_directory, upstream_of,
 };
-use sirio_project::{TabKind, display_absolute_path, display_path};
+use sirio_project::{TabKind, display_absolute_path};
 use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
 use crate::loading;
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
-use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconPicker, ProjectIconValue};
+use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
 
 #[path = "../icons.rs"]
 pub mod icons;
+pub mod project_settings;
 
 use self::icons::{Icon, IconElement, IconSize};
 use crate::right_panel::ActivityStatus;
@@ -413,30 +412,6 @@ struct OpenWorktreeCloseMenu {
 }
 
 #[derive(Clone)]
-struct ProjectSettingsCard {
-    id: String,
-    name: String,
-    display_name: Rc<RefCell<String>>,
-    display_name_focus: FocusHandle,
-    path: PathBuf,
-    is_git: bool,
-    icon: Rc<RefCell<ProjectIcon>>,
-    icon_picker: gpui::Entity<ProjectIconPicker>,
-    /// F-PRJ-17: the pinned base branch draft; empty means "follow the
-    /// primary worktree" (`primary_branch`), matching the Swift
-    /// `WorktreeBaseSection`'s `effectiveBase` fallback chain.
-    default_worktree_base: Rc<RefCell<String>>,
-    worktree_base_focus: FocusHandle,
-    /// The primary worktree's branch, snapshotted when the sheet opens —
-    /// display-only, used for the "Following primary (…)" subtitle.
-    primary_branch: Option<String>,
-    /// F-PRJ-18: the checkout-location override draft; empty means "the
-    /// project's sibling directory" (`card.path`'s parent).
-    worktree_location_override: Rc<RefCell<String>>,
-    worktree_location_focus: FocusHandle,
-}
-
-#[derive(Clone)]
 enum ProjectFormSurface {
     Clone(gpui::Entity<CloneForm>),
     Create(gpui::Entity<CreateForm>),
@@ -477,10 +452,9 @@ pub enum SidebarEvent {
     },
     /// Close the open tab with this id.
     CloseTab(usize),
-    /// Open the project settings sheet for a catalog project.
+    /// Open the project settings tab for a catalog project. The host owns
+    /// the tab; the sidebar only reports the click.
     OpenProjectSettings(String),
-    /// A project-settings edit has changed the durable project identity.
-    ProjectSettingsChanged(ProjectSettingsUpdate),
     /// A typed project/worktree context-menu transition for the shell.
     ContextAction {
         target: SidebarContextTarget,
@@ -608,7 +582,6 @@ pub struct Sidebar {
     context_menu_focus: FocusHandle,
     /// The hover-x's closure menu; shares `context_menu_focus` for Escape.
     worktree_close_menu: Popup<OpenWorktreeCloseMenu>,
-    project_settings: Option<ProjectSettingsCard>,
     add_project_menu: Popup<()>,
     project_form: Option<ProjectFormSurface>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
@@ -763,7 +736,6 @@ impl Sidebar {
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
-            project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
             pending_reorder: None,
@@ -849,7 +821,6 @@ impl Sidebar {
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
-            project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
             pending_reorder: None,
@@ -898,29 +869,6 @@ impl Sidebar {
         self.project_worktree_defaults = replacement.project_worktree_defaults;
         self.filter = filter;
         self.pending_reorder = None;
-        // F-PRJ-12: an already-open Project Settings card snapshots
-        // is_git/path once, when it's opened (open_project_settings). If
-        // the rebuilt rows above changed that same project -- e.g.
-        // "Initialize Git" flipped it from a folder to a repo -- patch the
-        // live card in place so the open sheet doesn't keep showing the
-        // stale repo type/path underneath the (still correct) display-name
-        // field.
-        if let Some(card) = self.project_settings.as_ref() {
-            let fresh = self
-                .project_ids
-                .iter()
-                .find_map(|(row_id, id)| (id == &card.id).then_some(*row_id))
-                .and_then(|row_id| self.rows.iter().find(|row| row.id == row_id))
-                .map(|row| (row.is_git, row.path.clone()));
-            if let Some((is_git, path)) = fresh
-                && let Some(card) = self.project_settings.as_mut()
-            {
-                card.is_git = is_git;
-                if let Some(path) = path {
-                    card.path = path;
-                }
-            }
-        }
         cx.notify();
     }
 
@@ -1212,7 +1160,6 @@ impl Sidebar {
                 },
             });
             self.worktree_close_menu.close();
-            self.project_settings = None;
             self.context_menu_focus.focus(window, cx);
             cx.notify();
             if let Some(path) = worktree_path {
@@ -1303,171 +1250,6 @@ impl Sidebar {
         );
         cx.notify();
     }
-
-    fn project_settings_update(card: &ProjectSettingsCard) -> ProjectSettingsUpdate {
-        ProjectSettingsUpdate {
-            id: card.id.clone(),
-            display_name: {
-                let value = card.display_name.borrow().trim().to_string();
-                (!value.is_empty()).then_some(value)
-            },
-            is_git: card.is_git,
-            icon: card.icon.borrow().clone(),
-            default_worktree_base: {
-                let value = card.default_worktree_base.borrow().trim().to_string();
-                (!value.is_empty()).then_some(value)
-            },
-            worktree_location_override: {
-                let value = card.worktree_location_override.borrow().trim().to_string();
-                (!value.is_empty()).then_some(value)
-            },
-        }
-    }
-
-    fn emit_project_settings_changed(&self, cx: &mut Context<Self>) {
-        if let Some(card) = &self.project_settings {
-            cx.emit(SidebarEvent::ProjectSettingsChanged(
-                Self::project_settings_update(card),
-            ));
-        }
-    }
-
-    fn apply_icon_change(&mut self, project_id: String, icon: ProjectIcon, cx: &mut Context<Self>) {
-        let Some(card) = self
-            .project_settings
-            .as_ref()
-            .filter(|card| card.id == project_id)
-        else {
-            return;
-        };
-        *card.icon.borrow_mut() = icon.clone();
-        self.project_identities.insert(project_id, icon);
-        self.emit_project_settings_changed(cx);
-        cx.notify();
-    }
-
-    fn on_display_name_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.field_blink.wake();
-        let Some(card) = &self.project_settings else {
-            return;
-        };
-        let mut draft = card.display_name.borrow_mut();
-        match event.keystroke.key.as_str() {
-            "backspace" | "delete" => {
-                draft.pop();
-            }
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                    && character != "\n"
-                {
-                    draft.push_str(character);
-                }
-            }
-        }
-        drop(draft);
-        let update = Self::project_settings_update(card);
-        self.set_project_identity(
-            &update.id,
-            update.display_name.clone(),
-            update.icon.clone(),
-            cx,
-        );
-        cx.emit(SidebarEvent::ProjectSettingsChanged(update));
-        cx.notify();
-    }
-
-    /// F-PRJ-17: keystrokes typed into the "Default Worktree Base" field.
-    fn on_worktree_base_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.field_blink.wake();
-        let Some(card) = &self.project_settings else {
-            return;
-        };
-        let mut draft = card.default_worktree_base.borrow_mut();
-        match event.keystroke.key.as_str() {
-            "backspace" | "delete" => {
-                draft.pop();
-            }
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                    && character != "\n"
-                {
-                    draft.push_str(character);
-                }
-            }
-        }
-        drop(draft);
-        self.emit_project_settings_changed(cx);
-        cx.notify();
-    }
-
-    /// F-PRJ-17: "Use Primary" clears the pin, restoring the "follow the
-    /// primary worktree" fallback — mirrors the Swift `Button("Use Primary")`
-    /// in `WorktreeBaseSection`, which calls
-    /// `setProjectWorktreeBase(project, branch: nil)`.
-    fn use_primary_worktree_base(&mut self, cx: &mut Context<Self>) {
-        let Some(card) = &self.project_settings else {
-            return;
-        };
-        card.default_worktree_base.borrow_mut().clear();
-        self.emit_project_settings_changed(cx);
-        cx.notify();
-    }
-
-    /// F-PRJ-18: keystrokes typed into the "Worktree Location" field.
-    fn on_worktree_location_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.field_blink.wake();
-        let Some(card) = &self.project_settings else {
-            return;
-        };
-        let mut draft = card.worktree_location_override.borrow_mut();
-        match event.keystroke.key.as_str() {
-            "backspace" | "delete" => {
-                draft.pop();
-            }
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                    && character != "\n"
-                {
-                    draft.push_str(character);
-                }
-            }
-        }
-        drop(draft);
-        self.emit_project_settings_changed(cx);
-        cx.notify();
-    }
-
-    /// F-PRJ-18: "Restore Default" clears the override, restoring the
-    /// project's sibling directory as the parent for new worktrees.
-    fn restore_default_worktree_location(&mut self, cx: &mut Context<Self>) {
-        let Some(card) = &self.project_settings else {
-            return;
-        };
-        card.worktree_location_override.borrow_mut().clear();
-        self.emit_project_settings_changed(cx);
-        cx.notify();
-    }
 }
 
 /// What a platform path prompt came back with, reduced to the three cases the
@@ -1520,83 +1302,30 @@ impl PickedPath {
 }
 
 impl Sidebar {
-    /// F-PRJ-18: "Choose…" opens the same platform folder picker
-    /// `start_open_project` uses (the XDG portal on Linux, the system
-    /// open-panel on macOS) and writes the chosen path into the draft.
-    fn choose_worktree_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(card_id) = self.project_settings.as_ref().map(|card| card.id.clone()) else {
-            return;
-        };
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose a folder for new worktrees".into()),
-        });
-        cx.spawn_in(window, async move |sidebar, cx| {
-            let path = match PickedPath::from_prompt(receiver.await) {
-                PickedPath::Chosen(path) => path,
-                PickedPath::Nothing => return,
-                PickedPath::Unavailable(reason) => {
-                    let _ = sidebar.update(cx, |sidebar, cx| {
-                        sidebar.notice =
-                            Some(format!("could not open the folder picker: {reason}"));
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            let _ = sidebar.update(cx, |sidebar, cx| {
-                let Some(card) = sidebar.project_settings.as_ref() else {
-                    return;
-                };
-                if card.id != card_id {
-                    // The sheet was closed/reopened on a different project
-                    // while the portal dialog was up.
-                    return;
-                }
-                *card.worktree_location_override.borrow_mut() = Self::worktree_location_text(&path);
-                sidebar.emit_project_settings_changed(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Host entry point for the gear affordance.
-    pub fn open_project_settings(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        let Some(row_id) = self
+    /// Snapshots everything a [`project_settings::ProjectSettingsView`]
+    /// needs to open as a Secondary-pane tab: the row facts (path,
+    /// git-ness, primary branch) plus the seeded drafts (display name,
+    /// icon, worktree defaults). Returns `None` for an unknown project.
+    /// The gear affordance and context menu keep emitting
+    /// [`SidebarEvent::OpenProjectSettings`]; the host turns the seed into
+    /// a tab.
+    pub fn project_settings_seed(
+        &self,
+        project_id: &str,
+    ) -> Option<project_settings::ProjectSettingsSeed> {
+        let row_id = self
             .project_ids
             .iter()
-            .find_map(|(row_id, id)| (id == project_id).then_some(*row_id))
-        else {
-            return;
-        };
-        let Some(row) = self.rows.iter().find(|row| row.id == row_id) else {
-            return;
-        };
-        let Some(path) = row.path.clone() else {
-            return;
-        };
+            .find_map(|(row_id, id)| (id == project_id).then_some(*row_id))?;
+        let row = self.rows.iter().find(|row| row.id == row_id)?;
+        let path = row.path.clone()?;
         let row_title = row.title.clone();
         let row_is_git = row.is_git;
-        self.close_context_menu(cx);
-        let icon = Rc::new(RefCell::new(
-            self.project_identities
-                .get(project_id)
-                .cloned()
-                .unwrap_or_default(),
-        ));
-        let sidebar_entity = cx.entity();
-        let picker_project_id = project_id.to_string();
-        let icon_picker = cx.new(|cx| {
-            ProjectIconPicker::with_value_and_repo(icon.borrow().clone(), &path, cx)
-                .on_change_with_context(move |value, cx| {
-                    sidebar_entity.update(cx, |sidebar, cx| {
-                        sidebar.apply_icon_change(picker_project_id.clone(), value, cx)
-                    });
-                })
-        });
+        let icon = self
+            .project_identities
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default();
         let base_name = self
             .project_names
             .get(project_id)
@@ -1627,39 +1356,30 @@ impl Sidebar {
             .get(project_id)
             .cloned()
             .unwrap_or_default();
-        self.project_form = None;
-        self.project_settings = Some(ProjectSettingsCard {
+        Some(project_settings::ProjectSettingsSeed {
             id: project_id.to_string(),
-            name: base_name,
-            display_name: Rc::new(RefCell::new(display_name)),
-            display_name_focus: cx.focus_handle(),
+            base_name,
+            display_name,
             path,
             is_git: row_is_git,
             icon,
-            icon_picker,
-            default_worktree_base: Rc::new(RefCell::new(default_worktree_base.unwrap_or_default())),
-            worktree_base_focus: cx.focus_handle(),
             primary_branch,
-            worktree_location_override: Rc::new(RefCell::new(
-                worktree_location_override.unwrap_or_default(),
-            )),
-            worktree_location_focus: cx.focus_handle(),
-        });
-        cx.notify();
+            default_worktree_base,
+            worktree_location_override,
+        })
     }
 
-    /// Whether one of the mutually-exclusive project-entry surfaces is open.
-    /// The shell uses this for Escape handling even when keyboard focus still
-    /// belongs to a terminal outside the sidebar.
+    /// Whether the project-entry form (clone/create) is open. The shell
+    /// uses this for Escape handling even when keyboard focus still
+    /// belongs to a terminal outside the sidebar. (Project settings now
+    /// live in a Secondary-pane tab, dismissed by closing the tab.)
     pub fn has_open_project_surface(&self) -> bool {
-        self.project_settings.is_some() || self.project_form.is_some()
+        self.project_form.is_some()
     }
 
-    /// Dismisses whichever project-entry surface is open.
+    /// Dismisses the open project-entry form, if any.
     pub fn close_project_surface(&mut self, cx: &mut Context<Self>) {
-        let closed_settings = self.project_settings.take().is_some();
-        let closed_form = self.project_form.take().is_some();
-        if closed_settings || closed_form {
+        if self.project_form.take().is_some() {
             cx.notify();
         }
     }
@@ -1865,7 +1585,6 @@ impl Sidebar {
 
     fn start_clone_project(&mut self, cx: &mut Context<Self>) {
         self.add_project_menu.close();
-        self.project_settings = None;
         let form = cx.new(|cx| CloneForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
@@ -1889,7 +1608,6 @@ impl Sidebar {
 
     fn start_create_project(&mut self, cx: &mut Context<Self>) {
         self.add_project_menu.close();
-        self.project_settings = None;
         let form = cx.new(|cx| CreateForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
@@ -2271,7 +1989,10 @@ impl Sidebar {
                 icon: tab.agent.map_or_else(
                     || match tab.kind {
                         TabKind::Terminal => Icon::SquareTerminal,
-                        TabKind::Editor | TabKind::Diff | TabKind::Browser => Icon::File,
+                        TabKind::Editor
+                        | TabKind::Diff
+                        | TabKind::Browser
+                        | TabKind::ProjectSettings => Icon::File,
                         TabKind::AgentChat => Icon::MessageSquare,
                     },
                     |agent| agent.icon,
@@ -2569,7 +2290,6 @@ impl Sidebar {
             remote_tracking: RemoteTracking::Resolving,
         });
         self.context_menu.close();
-        self.project_settings = None;
         self.context_menu_focus.focus(window, cx);
         cx.notify();
         self.resolve_remote_tracking(row_id, cx, move |sidebar, tracking, cx| {
@@ -3385,511 +3105,6 @@ impl Sidebar {
                     ),
             )
     }
-
-    fn render_project_settings(
-        card: ProjectSettingsCard,
-        entity: gpui::Entity<Self>,
-        theme: Theme,
-        focused_fields: [bool; 3],
-        caret_visible: bool,
-    ) -> impl IntoElement {
-        let [name_focused, base_focused, location_focused] = focused_fields;
-        let display_name = card.display_name.borrow().clone();
-        let heading_name = if display_name.trim().is_empty() {
-            card.name.clone()
-        } else {
-            display_name.clone()
-        };
-        let close_entity = entity.clone();
-        let backdrop_close_entity = entity.clone();
-        let name_entity = entity.clone();
-        let focus_entity = entity.clone();
-        let display_name_focus = card.display_name_focus.clone();
-        let initialize_entity = entity.clone();
-        let remove_entity = entity.clone();
-        let remove_project_id = card.id.clone();
-        let project_target = SidebarContextTarget::Project {
-            id: card.id.clone(),
-            path: card.path.clone(),
-            is_git: card.is_git,
-        };
-        div()
-            .id("project-settings-sheet")
-            .debug_selector(|| "project-settings-sheet".to_owned())
-            .absolute()
-            .left(px(0.0))
-            .right(px(0.0))
-            .top(px(0.0))
-            .bottom(px(0.0))
-            .on_mouse_down_out(move |_, _, cx| {
-                backdrop_close_entity.update(cx, |sidebar, cx| {
-                    sidebar.close_project_surface(cx);
-                });
-            })
-            // F-PRJ-13: without this, GPUI's hit test (`Frame::hit_test`)
-            // walks every hitbox under the pointer back-to-front and only
-            // stops at one with `HitboxBehavior::BlockMouse` -- absent that,
-            // a click here ALSO reaches whatever `sidebar-tree` row this
-            // opaque full-sheet overlay happens to be painted over, firing
-            // that row's own `on_click` (`SidebarEvent::SelectWorktree`) in
-            // the same gesture. `occlude()` installs that blocking hitbox,
-            // so every control in this sheet -- Reset included -- is
-            // finally the only thing a click on it can reach.
-            .occlude()
-            .p(px(16.0))
-            .bg(theme.surface)
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .text_size(theme.typography.headline)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(format!("Project Settings · {heading_name}")),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(display_path(&card.path)),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
-                    .child(if card.is_git {
-                        "Repository: Git"
-                    } else {
-                        "Repository: Folder"
-                    }),
-            )
-            .child({
-                let name_is_empty = display_name.trim().is_empty();
-                div()
-                    .id("project-display-name-field")
-                    .debug_selector(|| "project-display-name-field".to_owned())
-                    .track_focus(&display_name_focus)
-                    .w_full()
-                    .h(px(32.0))
-                    .px(px(9.0))
-                    .flex()
-                    .items_center()
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(theme.typography.footnote)
-                    .text_color(if display_name.trim().is_empty() {
-                        theme.text_faint
-                    } else {
-                        theme.text
-                    })
-                    .cursor(gpui::CursorStyle::IBeam)
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        focus_entity.update(cx, |sidebar, cx| {
-                            if let Some(card) = &sidebar.project_settings {
-                                card.display_name_focus.focus(window, cx);
-                            }
-                        });
-                    })
-                    .on_key_down(move |event, window, cx| {
-                        name_entity.update(cx, |sidebar, cx| {
-                            sidebar.on_display_name_key(event, window, cx);
-                        });
-                    })
-                    // #212: clip inside the field; must not grow, or the caret leaves the text.
-                    .overflow_hidden()
-                    .child(
-                        if name_is_empty {
-                            // Empty and focused: the bar at the hint's start,
-                            // bezel's `TextField` convention.
-                            caret::field_placeholder(
-                                "Display name".to_owned(),
-                                name_focused
-                                    .then(|| caret::bar(px(14.0), theme.text, caret_visible)),
-                            )
-                        } else {
-                            caret::field_value(display_name)
-                        }
-                        .id("sidebar-display-name-text")
-                        .debug_selector(|| "sidebar-display-name-text".to_owned()),
-                    )
-                    .when(name_focused && !name_is_empty, |this| {
-                        this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                    })
-            })
-            .when(!card.is_git, |this| {
-                let target = project_target.clone();
-                this.child(
-                    div()
-                        .id("project-settings-initialize-git")
-                        .debug_selector(|| "project-settings-initialize-git".to_owned())
-                        .h(px(30.0))
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(theme.radii.control)
-                        .bg(theme.surface_raised)
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.text)
-                        .on_click(move |_, _, cx| {
-                            initialize_entity.update(cx, |_, cx| {
-                                cx.emit(SidebarEvent::ContextAction {
-                                    target: target.clone(),
-                                    action: SidebarContextAction::InitializeGit,
-                                });
-                            });
-                        })
-                        .child("Initialize Git"),
-                )
-            })
-            .child(
-                div()
-                    .id("project-icon-picker")
-                    .debug_selector(|| "project-icon-picker".to_owned())
-                    .w_full()
-                    .p(px(8.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.surface)
-                    .child(card.icon_picker.clone()),
-            )
-            .when(card.is_git, |this| {
-                this.child(Self::render_worktree_base_section(
-                    &card,
-                    &entity,
-                    &theme,
-                    base_focused,
-                    caret_visible,
-                ))
-                .child(Self::render_worktree_location_section(
-                    &card,
-                    &entity,
-                    &theme,
-                    location_focused,
-                    caret_visible,
-                ))
-            })
-            .child(
-                div()
-                    .id("project-settings-remove")
-                    .debug_selector(|| "project-settings-remove".to_owned())
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .mt(px(4.0))
-                    .w_full()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(theme.radii.control)
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_del)
-                    .hover(|style| style.bg(theme.element_hover))
-                    .on_click(move |_, window, cx| {
-                        remove_entity.update(cx, |sidebar, cx| {
-                            sidebar.request_remove_project(remove_project_id.clone(), window, cx);
-                        });
-                    })
-                    .child(
-                        IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.diff_del),
-                    )
-                    .child("Remove Project"),
-            )
-            .child(
-                div()
-                    .id("close-project-settings")
-                    .debug_selector(|| "close-project-settings".to_owned())
-                    .mt(px(4.0))
-                    .w(px(80.0))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(theme.radii.control)
-                    .text_color(theme.text)
-                    .hover(|style| style.bg(theme.element_hover))
-                    .on_click(move |_, _, cx| {
-                        close_entity.update(cx, |sidebar, cx| {
-                            sidebar.project_settings = None;
-                            cx.notify();
-                        });
-                    })
-                    .child("Close"),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.scaled(11.0))
-                    .text_color(theme.text_faint)
-                    .child(card.id),
-            )
-    }
-
-    /// F-PRJ-17: "Default Worktree Base" — mirrors the Swift
-    /// `WorktreeBaseSection`'s effective-value/subtitle pair. Typing a
-    /// branch name pins it; "Use Primary" clears the pin.
-    fn render_worktree_base_section(
-        card: &ProjectSettingsCard,
-        entity: &gpui::Entity<Self>,
-        theme: &Theme,
-        focused: bool,
-        caret_visible: bool,
-    ) -> impl IntoElement {
-        let draft = card.default_worktree_base.borrow().clone();
-        let effective_base = if !draft.trim().is_empty() {
-            draft.clone()
-        } else {
-            card.primary_branch
-                .clone()
-                .unwrap_or_else(|| "—".to_string())
-        };
-        let subtitle = if !draft.trim().is_empty() {
-            "Pinned".to_string()
-        } else if let Some(branch) = &card.primary_branch {
-            format!("Following primary branch ({branch})")
-        } else {
-            "No primary worktree set".to_string()
-        };
-        let base_focus = card.worktree_base_focus.clone();
-        let focus_entity = entity.clone();
-        let key_entity = entity.clone();
-        let primary_entity = entity.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .text_size(theme.typography.footnote)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child("Default Worktree Base"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(theme.typography.footnote)
-                                    .text_color(theme.text)
-                                    .child(effective_base),
-                            )
-                            .child(
-                                div()
-                                    .text_size(theme.typography.scaled(11.0))
-                                    .text_color(theme.text_faint)
-                                    .child(subtitle),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("project-worktree-base-use-primary")
-                            .debug_selector(|| "project-worktree-base-use-primary".to_owned())
-                            .cursor(gpui::CursorStyle::PointingHand)
-                            .text_size(theme.typography.footnote)
-                            .text_color(theme.text_faint)
-                            .hover(|style| style.text_color(theme.text))
-                            .on_click(move |_, _, cx| {
-                                primary_entity.update(cx, |sidebar, cx| {
-                                    sidebar.use_primary_worktree_base(cx);
-                                });
-                            })
-                            .child("Use Primary"),
-                    ),
-            )
-            .child({
-                let draft_is_empty = draft.trim().is_empty();
-                div()
-                    .id("project-worktree-base-field")
-                    .debug_selector(|| "project-worktree-base-field".to_owned())
-                    .track_focus(&base_focus)
-                    .w_full()
-                    .h(px(28.0))
-                    .px(px(9.0))
-                    .flex()
-                    .items_center()
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(theme.typography.footnote)
-                    .text_color(if draft.trim().is_empty() {
-                        theme.text_faint
-                    } else {
-                        theme.text
-                    })
-                    .cursor(gpui::CursorStyle::IBeam)
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        focus_entity.update(cx, |sidebar, cx| {
-                            if let Some(card) = &sidebar.project_settings {
-                                card.worktree_base_focus.focus(window, cx);
-                            }
-                        });
-                    })
-                    .on_key_down(move |event, window, cx| {
-                        key_entity.update(cx, |sidebar, cx| {
-                            sidebar.on_worktree_base_key(event, window, cx);
-                        });
-                    })
-                    // #212: see the field above.
-                    .overflow_hidden()
-                    .child(
-                        if draft_is_empty {
-                            // Empty and focused: the bar at the hint's start,
-                            // bezel's `TextField` convention.
-                            caret::field_placeholder(
-                                "Search branches by name…".to_owned(),
-                                focused.then(|| caret::bar(px(14.0), theme.text, caret_visible)),
-                            )
-                        } else {
-                            caret::field_value(draft)
-                        }
-                        .id("sidebar-branch-search-text")
-                        .debug_selector(|| "sidebar-branch-search-text".to_owned()),
-                    )
-                    .when(focused && !draft_is_empty, |this| {
-                        this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                    })
-            })
-    }
-
-    /// F-PRJ-18: "Worktree Location" — mirrors the Swift
-    /// `WorktreeLocationSection`. Typing a path or using "Choose…" sets an
-    /// override; "Restore Default" clears it back to the project's sibling
-    /// directory.
-    fn render_worktree_location_section(
-        card: &ProjectSettingsCard,
-        entity: &gpui::Entity<Self>,
-        theme: &Theme,
-        focused: bool,
-        caret_visible: bool,
-    ) -> impl IntoElement {
-        let draft = card.worktree_location_override.borrow().clone();
-        let default_location = card
-            .path
-            .parent()
-            .map(Self::worktree_location_text)
-            .unwrap_or_else(|| Self::worktree_location_text(&card.path));
-        let location_focus = card.worktree_location_focus.clone();
-        let focus_entity = entity.clone();
-        let key_entity = entity.clone();
-        let choose_entity = entity.clone();
-        let restore_entity = entity.clone();
-        let has_override = !draft.trim().is_empty();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .text_size(theme.typography.footnote)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child("Worktree Location"),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.scaled(11.0))
-                    .text_color(theme.text_faint)
-                    .child(format!(
-                        "Parent folder for new worktrees. Empty uses the default: {default_location}"
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .id("project-worktree-location-field")
-                            .debug_selector(|| "project-worktree-location-field".to_owned())
-                            .track_focus(&location_focus)
-                            .flex_1()
-                            .h(px(28.0))
-                            .px(px(9.0))
-                            .flex()
-                            .items_center()
-                            .rounded(theme.radii.control)
-                            .bg(theme.input_bg)
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(theme.typography.footnote)
-                            .text_color(if has_override { theme.text } else { theme.text_faint })
-                            .cursor(gpui::CursorStyle::IBeam)
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                focus_entity.update(cx, |sidebar, cx| {
-                                    if let Some(card) = &sidebar.project_settings {
-                                        card.worktree_location_focus.focus(window, cx);
-                                    }
-                                });
-                            })
-                            .on_key_down(move |event, window, cx| {
-                                key_entity.update(cx, |sidebar, cx| {
-                                    sidebar.on_worktree_location_key(event, window, cx);
-                                });
-                            })
-                            // #212: this one renders a filesystem path, so it is the likeliest to overflow.
-                            .overflow_hidden()
-                            .child(
-                                caret::field_value(if has_override {
-                                    draft
-                                } else {
-                                    default_location.clone()
-                                })
-                                .id("sidebar-location-override-text")
-                                .debug_selector(|| "sidebar-location-override-text".to_owned()),
-                            )
-                            .when(focused, |this| {
-                                this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("project-worktree-location-choose")
-                            .debug_selector(|| "project-worktree-location-choose".to_owned())
-                            .cursor(gpui::CursorStyle::PointingHand)
-                            .px(px(8.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
-                            .text_size(theme.typography.footnote)
-                            .text_color(theme.text)
-                            .on_click(move |_, window, cx| {
-                                choose_entity.update(cx, |sidebar, cx| {
-                                    sidebar.choose_worktree_location(window, cx);
-                                });
-                            })
-                            .child("Choose…"),
-                    ),
-            )
-            .when(has_override, |this| {
-                this.child(
-                    div()
-                        .id("project-worktree-location-restore")
-                        .debug_selector(|| "project-worktree-location-restore".to_owned())
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .text_size(theme.typography.scaled(11.0))
-                        .text_color(theme.text_faint)
-                        .hover(|style| style.text_color(theme.text))
-                        .on_click(move |_, _, cx| {
-                            restore_entity.update(cx, |sidebar, cx| {
-                                sidebar.restore_default_worktree_location(cx);
-                            });
-                        })
-                        .child("Restore Default"),
-                )
-            })
-    }
 }
 
 impl Focusable for Sidebar {
@@ -3929,30 +3144,13 @@ impl Render for Sidebar {
         let filter_focus = self.filter_focus.clone();
         let tree_focus = self.tree_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
-        // Sidebar text fields (filter, project-settings card, worktree
-        // prompt) share one blink: window focus is unique, so at most one
-        // caret is ever visible.
-        let settings_name_focused = self
-            .project_settings
-            .as_ref()
-            .is_some_and(|card| card.display_name_focus.is_focused(window));
-        let settings_base_focused = self
-            .project_settings
-            .as_ref()
-            .is_some_and(|card| card.worktree_base_focus.is_focused(window));
-        let settings_location_focused = self
-            .project_settings
-            .as_ref()
-            .is_some_and(|card| card.worktree_location_focus.is_focused(window));
+        // Sidebar text fields (filter, worktree prompt) share one blink:
+        // window focus is unique, so at most one caret is ever visible.
         let prompt_focus_focused = self
             .prompt
             .as_ref()
             .is_some_and(|prompt| prompt.focus.is_focused(window));
-        let field_focused = filter_is_focused
-            || settings_name_focused
-            || settings_base_focused
-            || settings_location_focused
-            || prompt_focus_focused;
+        let field_focused = filter_is_focused || prompt_focus_focused;
         caret::schedule(
             &mut self.field_blink,
             field_focused,
@@ -3977,7 +3175,6 @@ impl Render for Sidebar {
             )
             .into_any_element()
         });
-        let project_settings = self.project_settings.clone();
         let add_project_menu = self.add_project_menu.get().map(|_| {
             Self::render_add_project_menu(
                 &self.add_project_menu,
@@ -4482,19 +3679,6 @@ impl Render for Sidebar {
             })
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(worktree_close_menu, |this, menu| this.child(menu))
-            .when_some(project_settings, |this, card| {
-                this.child(Self::render_project_settings(
-                    card,
-                    entity.clone(),
-                    theme,
-                    [
-                        settings_name_focused,
-                        settings_base_focused,
-                        settings_location_focused,
-                    ],
-                    field_caret_visible,
-                ))
-            })
             .when_some(project_form, |this, form| {
                 this.child(Self::render_project_form(form, entity.clone(), theme))
             })
@@ -4504,6 +3688,8 @@ impl Render for Sidebar {
 #[cfg(test)]
 pub(super) mod tests_support {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     pub(super) fn sidebar_with_one_project(cx: &mut Context<Sidebar>) -> Sidebar {
         let mut sidebar = Sidebar::from_projects(
@@ -4587,7 +3773,30 @@ pub(super) mod tests_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_identity::ProjectGlyph;
+
+    /// The settings-tab seed carries the row facts plus the seeded drafts,
+    /// and answers `None` for an unknown project.
+    #[gpui::test]
+    async fn project_settings_seed_snapshots_rows_and_drafts(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        // tests_support's fixture uses id "sirio" with a primary worktree.
+        let seed = sidebar
+            .read_with(&cx, |sidebar, _| sidebar.project_settings_seed("sirio"))
+            .expect("the fixture project seeds");
+        assert_eq!(seed.id, "sirio");
+        assert!(!seed.path.as_os_str().is_empty());
+        assert!(
+            sidebar
+                .read_with(&cx, |sidebar, _| sidebar.project_settings_seed("unknown"))
+                .is_none(),
+            "an unknown project seeds nothing"
+        );
+    }
 
     /// Opens the New Worktree prompt the way a user does. The section
     /// header's `+` is hover-revealed (`group_hover`), and gpui lays an
@@ -4643,8 +3852,7 @@ mod tests {
             Box::leak(format!("sidebar-row-title-fade-{row_id}").into_boxed_str());
         let subline_fade: &'static str =
             Box::leak(format!("sidebar-row-subline-fade-{row_id}").into_boxed_str());
-        let title: &'static str =
-            Box::leak(format!("sidebar-row-title-{row_id}").into_boxed_str());
+        let title: &'static str = Box::leak(format!("sidebar-row-title-{row_id}").into_boxed_str());
 
         assert!(
             cx.debug_bounds(title).is_some(),
@@ -7024,7 +6232,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let events = Rc::new(RefCell::new(Vec::<SidebarEvent>::new()));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::<SidebarEvent>::new()));
         let collected = events.clone();
         let entity =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
@@ -7629,7 +6837,10 @@ mod tests {
     #[test]
     fn the_status_table_is_one_bloom_travelling_or_stopped() {
         let theme = Theme::light();
-        assert_eq!(RowStatusGlyph::for_status(None, theme), RowStatusGlyph::None);
+        assert_eq!(
+            RowStatusGlyph::for_status(None, theme),
+            RowStatusGlyph::None
+        );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Idle), theme),
             RowStatusGlyph::None,
@@ -8049,46 +7260,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn escape_closes_project_settings_card(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "Project".into(),
-                    is_git: false,
-                    root_path: PathBuf::from("/tmp/project"),
-                    worktrees: Vec::new(),
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let field = cx
-            .debug_bounds("project-display-name-field")
-            .expect("project settings field is drawn");
-        cx.simulate_click(field.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("project-settings-sheet").is_none(),
-            "Escape closes the Project Settings card"
-        );
-    }
-
-    #[gpui::test]
     async fn escape_closes_clone_repository_card(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
@@ -8141,47 +7312,6 @@ mod tests {
         assert!(
             cx.debug_bounds("project-form-overlay").is_none(),
             "Escape closes the Create Project card"
-        );
-    }
-
-    #[gpui::test]
-    async fn backdrop_click_closes_project_settings_card(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "Project".into(),
-                    is_git: false,
-                    root_path: PathBuf::from("/tmp/project"),
-                    worktrees: Vec::new(),
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let sheet = cx
-            .debug_bounds("project-settings-sheet")
-            .expect("project settings card is drawn");
-        cx.simulate_click(
-            point(sheet.right() + px(40.0), sheet.center().y),
-            Modifiers::none(),
-        );
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("project-settings-sheet").is_none(),
-            "clicking outside Project Settings closes the card"
         );
     }
 
@@ -8243,654 +7373,6 @@ mod tests {
             cx.debug_bounds("project-form-overlay").is_none(),
             "clicking outside Create Project closes the card"
         );
-    }
-
-    #[gpui::test]
-    async fn opening_project_cards_replaces_the_existing_card(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "Project".into(),
-                    is_git: false,
-                    root_path: PathBuf::from("/tmp/project"),
-                    worktrees: Vec::new(),
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("project-settings-sheet").is_some());
-
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.start_clone_project(cx));
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-form-overlay").is_some()
-                && cx.debug_bounds("clone-url-field").is_some(),
-            "Clone Repository replaces Project Settings instead of stacking"
-        );
-
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-settings-sheet").is_some()
-                && cx.debug_bounds("project-form-overlay").is_none(),
-            "Project Settings replaces Clone Repository instead of stacking"
-        );
-
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.start_create_project(cx));
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-settings-sheet").is_none()
-                && cx.debug_bounds("create-name-field").is_some(),
-            "Create Project replaces Project Settings instead of stacking"
-        );
-    }
-
-    #[gpui::test]
-    async fn project_settings_mounts_the_icon_picker(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "Project".into(),
-                    is_git: false,
-                    root_path: PathBuf::from("/tmp/project"),
-                    worktrees: Vec::new(),
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-icon-picker").is_some(),
-            "project settings mounts the icon picker"
-        );
-        assert!(
-            cx.debug_bounds("project-icon-glyph-folder").is_some(),
-            "the mounted picker renders its glyph choices"
-        );
-    }
-
-    /// F-PRJ-13: wave F live-drove Reset and found it appeared to fail --
-    /// the sidebar's active worktree silently jumped to a different,
-    /// not-visible-in-sheet project the instant Reset was clicked. Root
-    /// cause: `render_project_settings`'s full-sheet overlay div is a plain
-    /// `.absolute()` sibling of `sidebar-tree`, never `.occlude()`d, so
-    /// GPUI's hit test (`Frame::hit_test`, which walks hitboxes back-to-
-    /// front and only stops at a `HitboxBehavior::BlockMouse` hitbox)
-    /// collects every interactive hitbox under the click, sheet AND row
-    /// both -- both `on_click` handlers fire for one physical click. This
-    /// builds two projects sized so a real worktree row of the *second*
-    /// renders directly under the Reset button of the *first*'s open sheet
-    /// (confirmed, not assumed: the test fails outright if no row's bounds
-    /// intersect Reset's before asserting anything about the click), then
-    /// clicks Reset and asserts no `SelectWorktree` reached the host --
-    /// only the icon-reset update should.
-    #[gpui::test]
-    async fn reset_button_click_does_not_leak_through_to_the_row_underneath(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        // Many single-line worktree rows on the decoy project push its rows
-        // down the sidebar until one lands under the settings sheet's fixed
-        // Reset position -- the sheet is a full-height overlay starting at
-        // the very top, so Reset's own y is constant regardless of which
-        // project opened it.
-        //
-        // #151 shortened these rows: a worktree with no Primary pill and no
-        // comment has no sub-line, so it is 32px rather than 51px. Twelve of
-        // them no longer reach Reset, so the count is raised until they do.
-        // The invariant assertion below is what actually guards this — it
-        // fails loudly rather than letting the test quietly stop exercising
-        // the occlusion it exists to prove.
-        let decoy_worktrees: Vec<SidebarWorktree> = (0..24)
-            .map(|i| SidebarWorktree {
-                branch: format!("decoy-{i}"),
-                path: PathBuf::from(format!("/tmp/prj13-decoy/wt-{i}")),
-                is_primary: i == 0,
-                comment: None,
-            })
-            .collect();
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![
-                    SidebarProject {
-                        id: "settings-project".into(),
-                        name: "settings-project".into(),
-                        is_git: true,
-                        root_path: PathBuf::from("/tmp/prj13-settings"),
-                        worktrees: Vec::new(),
-                    },
-                    SidebarProject {
-                        id: "decoy-project".into(),
-                        name: "decoy-project".into(),
-                        is_git: true,
-                        root_path: PathBuf::from("/tmp/prj13-decoy"),
-                        worktrees: decoy_worktrees,
-                    },
-                ],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let captured = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
-                captured.borrow_mut().push(event.clone());
-            })
-            .detach();
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("settings-project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let reset = cx
-            .debug_bounds("project-icon-reset")
-            .expect("the reset control is drawn");
-
-        // Confirm the overlap this fix depends on actually exists in this
-        // fixture, rather than assuming geometry: without it, a click at
-        // Reset's centre proves nothing about occlusion either way.
-        let overlapping_row = std::iter::once(0)
-            .chain(1000..1040)
-            .filter_map(|row_id| {
-                let selector: &'static str =
-                    Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
-                cx.debug_bounds(selector)
-            })
-            .find(|bounds| bounds.intersects(&reset));
-        assert!(
-            overlapping_row.is_some(),
-            "fixture invariant: a sidebar row must render under the Reset \
-             button for this test to exercise the click-through bug"
-        );
-
-        cx.simulate_click(reset.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            !events
-                .borrow()
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::SelectWorktree(_))),
-            "clicking Reset must not also select whichever decoy worktree \
-             row is rendered underneath it -- got {:?}",
-            events.borrow()
-        );
-    }
-
-    #[gpui::test]
-    async fn project_settings_changes_update_the_row_and_emit_a_durable_edit(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "Project".into(),
-                    is_git: true,
-                    root_path: PathBuf::from("/tmp/project"),
-                    worktrees: Vec::new(),
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let captured = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
-                captured.borrow_mut().push(event.clone());
-            })
-            .detach();
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let field = cx
-            .debug_bounds("project-display-name-field")
-            .expect("display-name field is drawn");
-        cx.simulate_click(field.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_input("Renamed");
-        cx.run_until_parked();
-
-        assert!(
-            events.borrow().iter().any(|event| matches!(
-                event,
-                SidebarEvent::ProjectSettingsChanged(update)
-                    if update.display_name.as_deref() == Some("Renamed")
-            )),
-            "typing a display name emits a durable project update"
-        );
-
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        let glyph = cx
-            .debug_bounds("project-icon-glyph-git-branch")
-            .expect("the glyph picker remains mounted");
-        cx.simulate_click(glyph.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            events.borrow().iter().any(|event| matches!(
-                event,
-                SidebarEvent::ProjectSettingsChanged(update)
-                    if update.icon.value == ProjectIconValue::Symbol(ProjectGlyph::GitBranch)
-            )),
-            "choosing a glyph emits the selected project icon"
-        );
-        let row_title = cx.update(|window, cx| {
-            window
-                .root::<Sidebar>()
-                .flatten()
-                .expect("sidebar root")
-                .read(cx)
-                .rows
-                .first()
-                .expect("project row")
-                .title
-                .clone()
-        });
-        assert_eq!(row_title, "Renamed", "the sidebar reflects the edited name");
-    }
-
-    /// F-PRJ-17/F-PRJ-18: wave F found `grep -rn "worktree_base|default_worktree_base|
-    /// WorktreeBase" rust/crates/sirio_ui/src/*.rs` returned zero hits, and a
-    /// live top-to-bottom read of the Project Settings sheet found no
-    /// default-base or worktree-location control anywhere in it. This test
-    /// fails to compile on the unfixed tree (no such ids are ever drawn, no
-    /// such fields exist on `ProjectSettingsUpdate`) and passes once the
-    /// controls exist and are gated on `card.is_git` the same way the New
-    /// Worktree row itself is (a project with no worktrees has no base or
-    /// location to set).
-    #[gpui::test]
-    async fn worktree_base_and_location_fields_are_drawn_only_for_git_projects(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![
-                    SidebarProject {
-                        id: "git-project".into(),
-                        name: "git-project".into(),
-                        is_git: true,
-                        root_path: PathBuf::from("/tmp/prj1718-git"),
-                        worktrees: vec![SidebarWorktree {
-                            branch: "main".into(),
-                            path: PathBuf::from("/tmp/prj1718-git-main"),
-                            is_primary: true,
-                            comment: None,
-                        }],
-                    },
-                    SidebarProject {
-                        id: "folder-project".into(),
-                        name: "folder-project".into(),
-                        is_git: false,
-                        root_path: PathBuf::from("/tmp/prj1718-folder"),
-                        worktrees: Vec::new(),
-                    },
-                ],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("git-project", cx)
-            });
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-worktree-base-field").is_some(),
-            "a git project's settings sheet draws the Default Worktree Base field"
-        );
-        assert!(
-            cx.debug_bounds("project-worktree-location-field").is_some(),
-            "a git project's settings sheet draws the Worktree Location field"
-        );
-
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("folder-project", cx)
-            });
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-worktree-base-field").is_none(),
-            "a non-git project has no worktrees, so it offers no base/location controls"
-        );
-    }
-
-    /// F-PRJ-17/F-PRJ-18: typing into either field, and the two clearing
-    /// controls ("Use Primary", "Restore Default"), each emit a durable
-    /// `ProjectSettingsChanged` carrying the new value.
-    #[gpui::test]
-    async fn typing_worktree_base_and_location_emits_a_durable_update(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "project".into(),
-                    is_git: true,
-                    root_path: PathBuf::from("/tmp/prj1718"),
-                    worktrees: vec![SidebarWorktree {
-                        branch: "main".into(),
-                        path: PathBuf::from("/tmp/prj1718-main"),
-                        is_primary: true,
-                        comment: None,
-                    }],
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let captured = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
-                captured.borrow_mut().push(event.clone());
-            })
-            .detach();
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let base_field = cx
-            .debug_bounds("project-worktree-base-field")
-            .expect("worktree-base field is drawn");
-        cx.simulate_click(base_field.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_input("develop");
-        cx.run_until_parked();
-
-        assert!(
-            events.borrow().iter().any(|event| matches!(
-                event,
-                SidebarEvent::ProjectSettingsChanged(update)
-                    if update.default_worktree_base.as_deref() == Some("develop")
-            )),
-            "typing a base branch emits it on the durable update"
-        );
-
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        let location_field = cx
-            .debug_bounds("project-worktree-location-field")
-            .expect("worktree-location field is drawn");
-        cx.simulate_click(location_field.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_input("/srv/worktrees");
-        cx.run_until_parked();
-
-        assert!(
-            events.borrow().iter().any(|event| matches!(
-                event,
-                SidebarEvent::ProjectSettingsChanged(update)
-                    if update.worktree_location_override.as_deref() == Some("/srv/worktrees")
-            )),
-            "typing a location override emits it on the durable update"
-        );
-
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        let use_primary = cx
-            .debug_bounds("project-worktree-base-use-primary")
-            .expect("Use Primary is drawn");
-        cx.simulate_click(use_primary.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            events.borrow().iter().any(|event| matches!(
-                event,
-                SidebarEvent::ProjectSettingsChanged(update)
-                    if update.default_worktree_base.is_none()
-            )),
-            "Use Primary clears the pinned base"
-        );
-
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        let restore = cx
-            .debug_bounds("project-worktree-location-restore")
-            .expect("Restore Default is drawn once an override is set");
-        cx.simulate_click(restore.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            events.borrow().iter().any(|event| matches!(
-                event,
-                SidebarEvent::ProjectSettingsChanged(update)
-                    if update.worktree_location_override.is_none()
-            )),
-            "Restore Default clears the location override"
-        );
-    }
-
-    /// F-PRJ-17/F-PRJ-18's VERIFY clause, verbatim: "reopen the sheet, and
-    /// confirm the selected option persists." A real host applies
-    /// `set_project_worktree_defaults` after every `ProjectSettingsChanged`
-    /// (the same loop `refresh_sidebar` already drives for icons through
-    /// `set_project_identity`) -- this test drives exactly that host round
-    /// trip without a live `sirio` process, closes the sheet, reopens it,
-    /// and reads the freshly-built card's own drafts.
-    #[gpui::test]
-    async fn worktree_base_and_location_persist_across_reopen(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            Sidebar::from_projects(
-                vec![SidebarProject {
-                    id: "project".into(),
-                    name: "project".into(),
-                    is_git: true,
-                    root_path: PathBuf::from("/tmp/prj1718-persist"),
-                    worktrees: vec![SidebarWorktree {
-                        branch: "main".into(),
-                        path: PathBuf::from("/tmp/prj1718-persist-main"),
-                        is_primary: true,
-                        comment: None,
-                    }],
-                }],
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-
-        let saved = Rc::new(RefCell::new(None));
-        let captured = saved.clone();
-        let host_sidebar = sidebar.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, cx| {
-                if let SidebarEvent::ProjectSettingsChanged(update) = event {
-                    *captured.borrow_mut() = Some((
-                        update.default_worktree_base.clone(),
-                        update.worktree_location_override.clone(),
-                    ));
-                    host_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.set_project_worktree_defaults(
-                            &update.id,
-                            update.default_worktree_base.clone(),
-                            update.worktree_location_override.clone(),
-                            cx,
-                        );
-                    });
-                }
-            })
-            .detach();
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let base_field = cx
-            .debug_bounds("project-worktree-base-field")
-            .expect("worktree-base field is drawn");
-        cx.simulate_click(base_field.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_input("release");
-        cx.run_until_parked();
-
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        let location_field = cx
-            .debug_bounds("project-worktree-location-field")
-            .expect("worktree-location field is drawn");
-        cx.simulate_click(location_field.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_input("/srv/worktrees");
-        cx.run_until_parked();
-
-        assert_eq!(
-            saved.borrow().clone(),
-            Some((
-                Some("release".to_string()),
-                Some("/srv/worktrees".to_string())
-            )),
-            "both edits reached the host round trip"
-        );
-
-        // Close, then reopen: a fresh card is built from
-        // `project_worktree_defaults`, which now holds what the host saved.
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.project_settings = None;
-                cx.notify();
-            });
-        });
-        cx.run_until_parked();
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let reopened = cx.update(|_, cx| {
-            sidebar.read(cx).project_settings.as_ref().map(|card| {
-                (
-                    card.default_worktree_base.borrow().clone(),
-                    card.worktree_location_override.borrow().clone(),
-                )
-            })
-        });
-        assert_eq!(
-            reopened,
-            Some(("release".to_string(), "/srv/worktrees".to_string())),
-            "reopening the sheet shows the persisted base and location -- \
-             the clause's exact requirement"
-        );
-    }
-
-    /// F-PRJ-12: open_project_settings snapshots is_git once; set_projects
-    /// (how the host reports "Initialize Git" completing) must patch an
-    /// already-open card in place rather than leaving it stale.
-    #[gpui::test]
-    async fn set_projects_refreshes_an_open_project_settings_card(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let make_project = |is_git: bool| SidebarProject {
-            id: "project".into(),
-            name: "Project".into(),
-            is_git,
-            root_path: PathBuf::from("/tmp/project"),
-            worktrees: Vec::new(),
-        };
-        let window =
-            cx.add_window(|_window, cx| Sidebar::from_projects(vec![make_project(false)], cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("project", cx)
-            });
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-settings-initialize-git").is_some(),
-            "a folder project's open sheet offers Initialize Git"
-        );
-
-        // The host reports the project is now a git repo the same way it
-        // reports any project-list change: a fresh set_projects call --
-        // the sheet is still open the whole time.
-        cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_projects(vec![make_project(true)], cx);
-            });
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("project-settings-initialize-git").is_none(),
-            "the open sheet must drop Initialize Git once the project is a repo, \
-             without being closed and reopened"
-        );
-        let is_git = cx.update(|_, cx| {
-            sidebar
-                .read(cx)
-                .project_settings
-                .as_ref()
-                .expect("sheet stays open across set_projects")
-                .is_git
-        });
-        assert!(is_git, "the open card's is_git field itself was patched");
     }
 
     /// The Filter field, focused and empty, keeps its placeholder and draws
@@ -9182,65 +7664,6 @@ mod tests {
         cx.simulate_click(item.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.has_pending_prompt(), "removal asks for confirmation");
-        cx.simulate_prompt_answer("Remove from Sirio");
-        cx.run_until_parked();
-        let emitted = events.borrow();
-        assert!(
-            emitted
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::RemoveProject(id) if id == "proj-1")),
-            "accepting the prompt emits RemoveProject with the project's id, got {emitted:?}"
-        );
-    }
-
-    /// F-PRJ-11: the removal logic (`request_remove_project`) was already
-    /// correct but only reachable from the context menu one level up --
-    /// Project Settings itself had no removal control at all. The sheet's
-    /// own Remove Project must ask for confirmation and emit the same
-    /// event the context-menu path does.
-    #[gpui::test]
-    async fn project_settings_remove_project_confirms_before_emitting(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let projects = vec![SidebarProject {
-            id: "proj-1".to_string(),
-            name: "scratch".to_string(),
-            is_git: true,
-            root_path: PathBuf::from("/tmp/proj-1"),
-            worktrees: vec![],
-        }];
-        let window = cx.add_window(|_window, cx| Sidebar::from_projects(projects, cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let sidebar_entity =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
-                collected.borrow_mut().push(event.clone());
-            })
-            .detach();
-            sidebar_entity.update(cx, |sidebar, cx| {
-                sidebar.open_project_settings("proj-1", cx)
-            });
-        });
-        cx.run_until_parked();
-
-        let remove = cx
-            .debug_bounds("project-settings-remove")
-            .expect("Project Settings draws a Remove Project control");
-        cx.simulate_click(remove.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
-        assert!(
-            events.borrow().is_empty(),
-            "nothing may be emitted before the user answers"
-        );
-
         cx.simulate_prompt_answer("Remove from Sirio");
         cx.run_until_parked();
         let emitted = events.borrow();

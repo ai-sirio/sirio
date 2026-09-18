@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::{App, Entity, KeyBinding, actions};
 use sirio_activity::{AgentActivityModel, Transition, detect_content_status};
 use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
+use sirio_ui::sidebar::project_settings::ProjectSettingsView;
 use sirio_ui::{browser::BrowserSurface, changes::ChangesTab, chat::Chat, file_view::FileView};
 
 /// Layer D refresh cadence. 500 ms is fast enough for the sidebar to notice
@@ -543,17 +544,28 @@ impl<T> PaneNode<T> {
 #[derive(Clone)]
 pub(crate) enum PaneContent {
     Chat(Entity<Chat>),
-    Terminal { view: Entity<TerminalView> },
-    File { view: Entity<FileView> },
+    Terminal {
+        view: Entity<TerminalView>,
+    },
+    File {
+        view: Entity<FileView>,
+    },
     Changes(Entity<ChangesTab>),
     Browser(Entity<BrowserSurface>),
+    /// A project's settings form: a Secondary look-at surface like the
+    /// file/changes/browser ones above.
+    ProjectSettings(Entity<ProjectSettingsView>),
 }
 
 impl PaneContent {
     pub(crate) fn terminal(&self) -> Option<Entity<TerminalView>> {
         match self {
             Self::Terminal { view } => Some(view.clone()),
-            Self::Chat(_) | Self::File { .. } | Self::Changes(_) | Self::Browser(_) => None,
+            Self::Chat(_)
+            | Self::File { .. }
+            | Self::Changes(_)
+            | Self::Browser(_)
+            | Self::ProjectSettings(_) => None,
         }
     }
 }

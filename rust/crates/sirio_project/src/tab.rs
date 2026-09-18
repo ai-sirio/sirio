@@ -18,6 +18,10 @@ pub enum TabKind {
     Editor,
     /// A diff view.
     Diff,
+    /// A project's settings form. Like the other Secondary surfaces it is
+    /// something the user looks at rather than talks to, so it lives in
+    /// the Secondary half of the center split.
+    ProjectSettings,
 }
 
 /// Which half of the [center split] a surface belongs to.
@@ -49,7 +53,9 @@ impl TabKind {
     pub fn pane_role(self) -> PaneRole {
         match self {
             Self::Terminal | Self::AgentChat => PaneRole::Primary,
-            Self::Browser | Self::Editor | Self::Diff => PaneRole::Secondary,
+            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings => {
+                PaneRole::Secondary
+            }
         }
     }
 
@@ -120,6 +126,7 @@ mod tests {
         assert_eq!(TabKind::Browser.pane_role(), PaneRole::Secondary);
         assert_eq!(TabKind::Editor.pane_role(), PaneRole::Secondary);
         assert_eq!(TabKind::Diff.pane_role(), PaneRole::Secondary);
+        assert_eq!(TabKind::ProjectSettings.pane_role(), PaneRole::Secondary);
     }
 
     /// The sidebar predicate is *derived* from the routing rule, not a
@@ -134,5 +141,6 @@ mod tests {
         assert!(!TabKind::Browser.appears_in_sidebar());
         assert!(!TabKind::Editor.appears_in_sidebar());
         assert!(!TabKind::Diff.appears_in_sidebar());
+        assert!(!TabKind::ProjectSettings.appears_in_sidebar());
     }
 }
