@@ -10,8 +10,14 @@
 //! published API. Everything here is therefore written to degrade rather
 //! than reject: see [`message`]'s module docs for the rule.
 
+pub mod catalog;
+pub mod control;
 pub mod message;
 
+pub use catalog::{
+    AccountInfo, Catalog, CommandInfo, Effort, EffortChoice, ModeInfo, ModelInfo, Modes,
+};
+pub use control::{CanUseTool, ControlEnvelope, ControlRequest, PermissionResult};
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
     ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
