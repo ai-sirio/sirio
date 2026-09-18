@@ -16,15 +16,17 @@ use futures::StreamExt as _;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use sirio_claude::{
-    Catalog, CliMessage, ControlEnvelope, ControlRequest, LaunchLine, RewindOutcome,
+    Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, LaunchLine,
+    RewindOutcome,
 };
 
 use super::ClaudeLaunch;
-use super::events::Fold;
+use super::events::{Fold, ResultSummary};
 use super::permission;
 use crate::{
-    AcpError, AcpEvent, AgentMode, ChildHandle, EffortChoice, EffortOption, ExitStatusSlot,
-    ModeCatalog, ModelCatalog, ModelOption, StderrTail, TimeoutOperation,
+    AcpError, AcpEvent, AgentMode, ChildHandle, ContextCost, ContextUsage, EffortChoice,
+    EffortOption, ExitStatusSlot, ModeCatalog, ModelCatalog, ModelOption, StderrTail,
+    TimeoutOperation,
 };
 
 /// What the client asks the worker to do.
@@ -58,12 +60,32 @@ pub(super) enum Command {
     },
 }
 
+/// How long a finished turn waits for the meter's answer before the result's
+/// own numbers stand in. The request is answered from local state, so this is
+/// a liveness bound rather than patience: a CLI that never answers must not
+/// hold the turn's end open behind a measurement.
+const CONTEXT_USAGE_GRACE: Duration = Duration::from_secs(2);
+
 /// A card the surface is showing, waiting on a human.
 struct PendingPermission {
     request: sirio_claude::CanUseTool,
     /// When it was asked, for the expiry sweep. A card is not a turn: it
     /// has its own deadline, and missing it is a refusal rather than a
     /// fault.
+    asked_at: std::time::Instant,
+}
+
+/// A finished turn waiting on the meter. The turn's own end is held in here:
+/// the transcript reads one ordering as "the turn is over", and a measurement
+/// that arrives after it is a measurement nobody looks at.
+struct PendingContextUsage {
+    /// The request id whose answer resolves this.
+    request_id: String,
+    /// What the turn's `result` reported, the fallback when no answer comes.
+    summary: ResultSummary,
+    /// The `TurnEnded` event, held back until the meter is emitted.
+    held: Option<AcpEvent>,
+    /// When the ask went out, for the grace.
     asked_at: std::time::Instant,
 }
 
@@ -193,13 +215,22 @@ pub(super) fn run(config: Config) {
             permission_timeout,
             retryable,
         }) {
-            AttemptOutcome::Finished => return,
+            AttemptOutcome::Finished => break,
             AttemptOutcome::RetryWithoutResume => {
                 resume = None;
                 shared
                     .resumed_session_refused
                     .store(true, Ordering::Release);
             }
+        }
+    }
+    // A tab can close in the same instant its agent exits. A `Shutdown`
+    // queued after the session loop was gone still has to be answered, or
+    // the close waits out the whole timeout for a process already reaped —
+    // and the queued command would keep its ack channel alive to the end.
+    while let Ok(command) = command_rx.try_recv() {
+        if let Command::Shutdown(ack) = command {
+            let _ = ack.send(());
         }
     }
 }
@@ -397,6 +428,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
     let mut open_permissions: usize = 0;
+    let mut pending_context_usage: Option<PendingContextUsage> = None;
 
     // The handshake. Its answer is the whole catalogue, so every picker is
     // populated before the user can type into the composer.
@@ -509,6 +541,17 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                 }
                             }
+                            // The envelope is consumed by the rewind branch
+                            // below, so the meter's answer is read first.
+                            let report = envelope
+                                .payload
+                                .as_ref()
+                                .and_then(ContextUsageReport::parse);
+                            if let Some(pending) = pending_context_usage
+                                .take_if(|pending| pending.request_id == envelope.request_id)
+                            {
+                                resolve_context_usage(&event_tx, pending, report).await;
+                            }
                             if let Some(reply) = pending_rewinds.remove(&envelope.request_id) {
                                 // A success carries the outcome; a refusal
                                 // carries only the CLI's own sentence, which
@@ -592,7 +635,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             );
                             continue;
                         }
-                        if matches!(message, CliMessage::Result(_)) {
+                        let is_result = matches!(message, CliMessage::Result(_));
+                        if is_result {
                             turn_in_flight = false;
                         }
                         if let CliMessage::System(system) = &message
@@ -600,7 +644,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         {
                             apply_current_mode(&shared, &mode);
                         }
-                        let events = fold.apply(message);
+                        let mut events = fold.apply(message);
                         shared.push_mcp_warnings(fold.take_mcp_warnings());
                         if let Some(id) = fold.session_id()
                             && let Ok(mut held) = shared.session_id.lock()
@@ -612,14 +656,47 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         {
                             *held = Some(version.to_string());
                         }
+                        if is_result {
+                            // Two results in a row cannot both be the end of
+                            // a turn; if one is still held, end it first
+                            // rather than swallow it.
+                            if let Some(pending) = pending_context_usage.take() {
+                                resolve_context_usage(&event_tx, pending, None).await;
+                            }
+                            let held = matches!(events.last(), Some(AcpEvent::TurnEnded { .. }))
+                                .then(|| events.pop())
+                                .flatten();
+                            let request_id = next_request_id();
+                            pending_context_usage = Some(PendingContextUsage {
+                                request_id: request_id.clone(),
+                                summary: fold.last_result().cloned().unwrap_or_default(),
+                                held,
+                                asked_at: std::time::Instant::now(),
+                            });
+                            if write_line(
+                                &mut stdin,
+                                &ControlRequest::get_context_usage(&request_id),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                return SessionOutcome::Died(
+                                    ": could not write the context usage request".into(),
+                                );
+                            }
+                        }
                         for event in events {
                             let _ = event_tx.send(event).await;
                         }
                     }
                     Some(Err(error)) => {
+                        end_held_turn(&event_tx, &mut pending_context_usage).await;
                         return SessionOutcome::Died(format!(": {error}"));
                     }
-                    None => return SessionOutcome::Died(String::new()),
+                    None => {
+                        end_held_turn(&event_tx, &mut pending_context_usage).await;
+                        return SessionOutcome::Died(String::new());
+                    }
                 }
             }
             futures::future::Either::Left((futures::future::Either::Right((command, _)), _)) => {
@@ -790,6 +867,13 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 return SessionOutcome::Died(": could not expire a permission".into());
             }
         }
+        // The meter has its own grace: the turn it belongs to has already
+        // finished, and a CLI that never answers must not hold its end open.
+        if let Some(pending) = pending_context_usage
+            .take_if(|pending| pending.asked_at.elapsed() >= CONTEXT_USAGE_GRACE)
+        {
+            resolve_context_usage(&event_tx, pending, None).await;
+        }
         if turn_in_flight && open_permissions == 0 && crate::idle_for(&activity) >= prompt_timeout {
             // An unanswered permission card is the client's silence, not
             // the agent's: the agent asked and is doing exactly what it
@@ -810,6 +894,65 @@ async fn session(context: SessionContext) -> SessionOutcome {
             crate::terminate_and_reap_blocking(&child);
             return SessionOutcome::NeverStarted;
         }
+    }
+}
+
+/// The meter's event for one turn: the agent's own count when it answered,
+/// the result's own numbers when it did not, and nothing when neither exists.
+/// A meter with no measurement says unknown rather than zero.
+fn context_usage_event(
+    report: Option<ContextUsageReport>,
+    summary: &ResultSummary,
+) -> Option<AcpEvent> {
+    let (used, size) = match report {
+        Some(report) => (report.total_tokens, report.raw_max_tokens),
+        None => {
+            // What this turn itself saw: the prompt it read (fresh, cached
+            // and newly cached alike) plus what it wrote back.
+            let size = summary.context_window?;
+            let used = summary.input_tokens
+                + summary.cached_read_tokens
+                + summary.cache_creation_tokens
+                + summary.output_tokens;
+            (used, size)
+        }
+    };
+    Some(AcpEvent::ContextUsage(ContextUsage {
+        used,
+        size,
+        cost: summary.total_cost_usd.map(|amount| ContextCost {
+            amount,
+            currency: "USD".into(),
+        }),
+        input_tokens: Some(summary.input_tokens),
+        output_tokens: Some(summary.output_tokens),
+        cached_read_tokens: Some(summary.cached_read_tokens),
+    }))
+}
+
+/// Ends a held turn: the meter first, then the turn's own end. A refusal or
+/// an unreadable answer is not an error — the result's numbers stand in.
+async fn resolve_context_usage(
+    event_tx: &async_channel::Sender<AcpEvent>,
+    pending: PendingContextUsage,
+    report: Option<ContextUsageReport>,
+) {
+    if let Some(event) = context_usage_event(report, &pending.summary) {
+        let _ = event_tx.send(event).await;
+    }
+    if let Some(held) = pending.held {
+        let _ = event_tx.send(held).await;
+    }
+}
+
+/// The same, for a held turn the reader will never get an answer for — the
+/// CLI went away with the request still in its stdin.
+async fn end_held_turn(
+    event_tx: &async_channel::Sender<AcpEvent>,
+    pending: &mut Option<PendingContextUsage>,
+) {
+    if let Some(pending) = pending.take() {
+        resolve_context_usage(event_tx, pending, None).await;
     }
 }
 
@@ -926,5 +1069,62 @@ async fn drain_stderr(stderr: async_process::ChildStderr, tail: StderrTail, shar
                 crate::push_stderr_tail(&tail, trimmed.to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary() -> ResultSummary {
+        ResultSummary {
+            stop_reason: "EndTurn".into(),
+            is_error: false,
+            error_text: None,
+            total_cost_usd: Some(0.5),
+            input_tokens: 1_000,
+            output_tokens: 200,
+            cached_read_tokens: 4_000,
+            cache_creation_tokens: 3_000,
+            context_window: Some(200_000),
+        }
+    }
+
+    fn context_usage(event: Option<AcpEvent>) -> ContextUsage {
+        let Some(AcpEvent::ContextUsage(usage)) = event else {
+            panic!("expected a context usage event, got {event:?}");
+        };
+        usage
+    }
+
+    #[test]
+    fn the_agents_own_count_wins_over_the_turns_numbers() {
+        let report = ContextUsageReport {
+            total_tokens: 48_000,
+            raw_max_tokens: 200_000,
+            model: Some("claude-fable-5-1".into()),
+        };
+        let usage = context_usage(context_usage_event(Some(report), &summary()));
+        assert_eq!(usage.used, 48_000);
+        assert_eq!(usage.size, 200_000);
+        assert_eq!(usage.cost.expect("the turn's cost").currency, "USD");
+    }
+
+    #[test]
+    fn the_fallback_counts_every_token_the_turn_put_in_the_window() {
+        // Tokens written to the cache are context too: leaving them out
+        // under-reports by exactly the part of the window the prompt cache
+        // just took.
+        let usage = context_usage(context_usage_event(None, &summary()));
+        assert_eq!(usage.used, 1_000 + 4_000 + 3_000 + 200);
+        assert_eq!(usage.size, 200_000);
+    }
+
+    #[test]
+    fn no_answer_and_no_window_is_unknown_rather_than_zero() {
+        // A meter that cannot be computed must not render as 0%.
+        let mut summary = summary();
+        summary.context_window = None;
+        assert_eq!(context_usage_event(None, &summary), None);
     }
 }

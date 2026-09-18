@@ -558,6 +558,42 @@ fn a_cli_that_does_not_know_the_verb_degrades_that_feature_only() {
 }
 
 #[test]
+fn the_meter_prefers_the_agents_own_count_and_falls_back_to_the_turns_usage() {
+    let (mut client, events) = launch("context_usage");
+    client.prompt("hello").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    let usage = seen
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            AcpEvent::ContextUsage(usage) => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("a context usage event");
+    assert_eq!(usage.used, 48_000);
+    assert_eq!(usage.size, 200_000);
+    assert_eq!(usage.cost.as_ref().expect("a cost").currency, "USD");
+    client.shutdown().expect("clean shutdown");
+
+    // A CLI that does not answer the request still gets a meter, from the
+    // per-model usage the result already carried.
+    let (mut client, events) = launch("no_context_usage");
+    client.prompt("hello").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    let usage = seen
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            AcpEvent::ContextUsage(usage) => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("a fallback context usage event");
+    assert_eq!(usage.size, 200_000, "from modelUsage.contextWindow");
+    assert!(usage.used > 0);
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
 fn a_resumed_launch_passes_the_session_id_to_the_cli() {
     let (mut client, _events) = ClaudeClient::launch(
         ClaudeLaunch::fixture(
