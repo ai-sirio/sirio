@@ -28,16 +28,19 @@ is copied in `rust/assets/icons/zed/LICENSES`.
 > OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 > CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-## Material Icon Theme (no longer bundled)
+## Material Icon Theme (file type icons)
 
-**These icons are not distributed with this project any more.** They lived in
-the macOS app's asset catalogue, which was removed with the Swift project on
-2026-08-20; the current app renders its generic file glyphs from the pinned
-Zed set above instead. This section is retained only because the artwork was
-distributed in past releases. The icons were from
-[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)
-by Material Extensions, obtained via [Iconify](https://iconify.design)
-(`material-icon-theme` set), and are used under the MIT License:
+The 55 polychrome file-type glyphs in `rust/assets/icons/file-types/` are
+from [Material Icon Theme](https://github.com/PKief/vscode-material-icon-theme)
+by Material Extensions, used unchanged under the MIT License. Provenance is
+recorded in `rust/assets/icons/file-types/SOURCE.md`: they reached this repo
+through the retired Swift app's `FileIcons` imagesets at commit `5430d7bf`,
+and were restored to the Rust app on 2026-08-21.
+
+This section said the opposite between 2026-08-20 and 2026-09-18 — that the
+artwork had left with the Swift project — which stopped being true the day
+the icons came back. They are bundled, so the notice below travels with
+them:
 
 > The MIT License (MIT)
 > Copyright (c) 2025 Material Extensions
