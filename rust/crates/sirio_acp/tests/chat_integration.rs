@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use sirio_acp::{AcpError, AgentCommand, ChatSession, ChatSessionConfig, ChatStatus};
+use sirio_acp::{AcpError, AgentCommand, ChatSession, ChatSessionConfig, ChatStatus, LaunchSpec};
 use sirio_persistence::{AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp_fixture.py");
@@ -78,7 +78,7 @@ fn chat_session_streams_tool_permission_stops_and_restores() {
     let mut session = ChatSession::launch(ChatSessionConfig::new(
         "chat-normal",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "normal"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "normal"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -147,7 +147,7 @@ fn chat_session_streams_tool_permission_stops_and_restores() {
     let mut cancellable = ChatSession::launch(ChatSessionConfig::new(
         "chat-cancel",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "cancel"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "cancel"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -180,7 +180,7 @@ fn chat_session_reports_launch_failures_without_a_fake_transcript() {
     let error = ChatSession::launch(ChatSessionConfig::new(
         "chat-failure",
         "worktree-1",
-        AgentCommand::new("definitely-not-an-agent"),
+        LaunchSpec::Acp(AgentCommand::new("definitely-not-an-agent")),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -204,7 +204,7 @@ fn chat_session_sends_queued_text_after_a_normal_turn() {
     let mut session = ChatSession::launch(ChatSessionConfig::new(
         "chat-queue",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "queue"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "queue"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -236,7 +236,7 @@ fn chat_session_folds_plan_approval_and_persists_it() {
     let mut session = ChatSession::launch(ChatSessionConfig::new(
         "chat-plan",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "plan"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "plan"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -334,7 +334,7 @@ fn chat_session_answers_a_question_with_text_and_can_cancel_one() {
     let mut session = ChatSession::launch(ChatSessionConfig::new(
         "chat-question",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "question"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "question"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -385,7 +385,7 @@ fn chat_session_answers_a_question_with_text_and_can_cancel_one() {
     let mut session = ChatSession::launch(ChatSessionConfig::new(
         "chat-cancel",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "cancel_permission_direct"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "cancel_permission_direct"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -441,7 +441,7 @@ fn chat_session_expires_a_permission_left_open_by_a_dead_transport() {
     let mut session = ChatSession::launch(ChatSessionConfig::new(
         "chat-death",
         "worktree-1",
-        AgentCommand::new("python3").args([FIXTURE, "question_death"]),
+        LaunchSpec::Acp(AgentCommand::new("python3").args([FIXTURE, "question_death"])),
         std::env::temp_dir(),
         &database_path,
     ))
@@ -471,4 +471,49 @@ fn chat_session_expires_a_permission_left_open_by_a_dead_transport() {
     }));
     assert_eq!(snapshot.status, ChatStatus::Error);
     session.shutdown().expect("shut down the dead session");
+}
+
+#[test]
+fn a_native_chat_session_streams_and_persists_like_an_acp_one() {
+    // The control socket's readback must not be able to tell which
+    // transport a tab uses.
+    const CLAUDE_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude_fixture.py"
+    );
+    let dir = TempDir::new();
+    seed_chat_tab(&dir.db_path(), "tab-native", "worktree-native");
+    let session = ChatSession::launch(ChatSessionConfig::new(
+        "tab-native",
+        "worktree-native",
+        sirio_acp::LaunchSpec::Claude(sirio_acp::ClaudeLaunch::fixture(
+            std::path::PathBuf::from("python3"),
+            vec![CLAUDE_FIXTURE.into(), "normal".into()],
+        )),
+        std::env::temp_dir(),
+        dir.db_path(),
+    ))
+    .expect("a native chat session launches");
+    session.send("hello").expect("send is accepted");
+    let snapshot = wait_for(&session, |snapshot| {
+        matches!(snapshot.status, ChatStatus::Completed)
+    });
+    assert_eq!(
+        snapshot.agent_session_id.as_deref(),
+        Some("fixture-session-1")
+    );
+    let text: String = snapshot
+        .transcript
+        .turns
+        .iter()
+        .flat_map(|turn| turn.entries.iter())
+        .filter_map(|entry| match entry {
+            sirio_persistence::ChatEntry::AssistantMessage { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("Hello there"),
+        "the reply is in the transcript: {text}"
+    );
 }

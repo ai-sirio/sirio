@@ -11,7 +11,7 @@ use gpui_platform::application;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use sirio_acp::AgentCommand;
+use sirio_acp::{AgentCommand, LaunchSpec};
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
     BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
@@ -2899,6 +2899,16 @@ fn agent_command_for(source: &sirio_registry::LaunchSource) -> Option<AgentComma
     }
 }
 
+/// The [`LaunchSpec`] a resolved adapter launches, or `None` when there is
+/// nothing honest to launch. It takes the whole launch state rather than
+/// one source because a later arm reads a second fact (the Claude
+/// resolution) that no `LaunchSource` carries. In this task it does exactly
+/// what `agent_command_for` did — resolve the source for that adapter — and
+/// wraps the result, so every chat tab launches over ACP as before.
+fn agent_launch_for(launch: &AgentLaunchState, adapter_id: &str) -> Option<LaunchSpec> {
+    agent_command_for(&launch_source_in(launch, adapter_id)).map(LaunchSpec::Acp)
+}
+
 /// Everything needed to answer "how does agent X launch". Refreshed when
 /// Settings -> Agents opens and when Refresh is pressed; never on the UI
 /// thread.
@@ -3016,7 +3026,7 @@ fn first_resolved_chat_adapter(
     AGENT_CATALOG
         .iter()
         .copied()
-        .find(|adapter| agent_command_for(&launch_source_in(launch, adapter.id())).is_some())
+        .find(|adapter| agent_launch_for(launch, adapter.id()).is_some())
 }
 
 /// Sirio's cached copy of the registry document lives beside the agents
@@ -3267,17 +3277,16 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
 fn restored_chat_spec(
     launch: &AgentLaunchState,
     agent_id: Option<&str>,
-) -> Option<(AgentCommand, Option<Icon>, Option<String>)> {
+) -> Option<(LaunchSpec, Option<Icon>, Option<String>)> {
     let adapter = agent_id.and_then(|id| {
         AGENT_CATALOG
             .iter()
             .find(|adapter| adapter.id() == id)
             .copied()
     })?;
-    let source = launch_source_in(launch, adapter.id());
-    let command = agent_command_for(&source)?;
+    let launch = agent_launch_for(launch, adapter.id())?;
     Some((
-        command,
+        launch,
         Icon::for_agent_id(adapter.id()),
         Some(adapter.id().to_string()),
     ))
@@ -10417,7 +10426,7 @@ impl SirioWorkspace {
         let chat = match adapter {
             Some(adapter) => {
                 let source = self.launch_source_for(adapter.id());
-                let Some(command) = agent_command_for(&source) else {
+                let Some(launch) = agent_launch_for(&self.launch, adapter.id()) else {
                     // The user acted explicitly; a silent refusal would read
                     // as a broken button. The toast is the smallest surface
                     // that already exists for exactly this.
@@ -10435,7 +10444,7 @@ impl SirioWorkspace {
                 let tab_id = persistence_id.clone();
                 cx.new(|cx| {
                     Chat::launch_with_command_and_persistence(
-                        command,
+                        launch,
                         cwd,
                         database_path,
                         tab_id,
@@ -10525,9 +10534,9 @@ impl SirioWorkspace {
         // agent no longer resolved: the user clicked, and no tab appeared and
         // nothing said why. The tab now opens disarmed and states the reason,
         // the same as session restore.
-        let (command, agent_icon, agent_id, unavailable) =
+        let (launch, agent_icon, agent_id, unavailable) =
             match restored_chat_spec(&self.launch, retained.agent_id.as_deref()) {
-                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+                Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
                 None => (
                     None,
                     retained.agent_id.as_deref().and_then(Icon::for_agent_id),
@@ -10557,7 +10566,7 @@ impl SirioWorkspace {
             Some(reason) => Chat::unavailable(reason, cwd, cx),
             None => {
                 let mut chat = Chat::launch_with_command(
-                    command.expect("a retained chat with no refusal reason carries its command"),
+                    launch.expect("a retained chat with no refusal reason carries its launch"),
                     cwd,
                     cx,
                 );
@@ -17662,14 +17671,14 @@ fn restore_tabs_with_terminal_cache(
         // helpers below key on the bare adapter id, so extract it once
         // (None for a `Registry` ref or a value that does not resolve).
         let stored_adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        let (command, agent_icon, agent_id, unavailable): (
-            Option<AgentCommand>,
+        let (launch, agent_icon, agent_id, unavailable): (
+            Option<LaunchSpec>,
             Option<Icon>,
             Option<String>,
             Option<String>,
         ) = if tab.kind == "chat" {
             match restored_chat_spec(&launch, stored_adapter_id) {
-                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+                Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
                 None => (
                     None,
                     stored_adapter_id.and_then(Icon::for_agent_id),
@@ -17709,7 +17718,7 @@ fn restore_tabs_with_terminal_cache(
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
                     }
                     let mut chat = Chat::launch_with_command_and_persistence(
-                        command.expect("a chat with no refusal reason carries its command"),
+                        launch.expect("a chat with no refusal reason carries its launch"),
                         working_directory.to_path_buf(),
                         database_path.clone(),
                         tab.id.clone(),
@@ -17981,14 +17990,14 @@ fn restore_tabs_in_workspace(
         // helpers below key on the bare adapter id, so extract it once
         // (None for a `Registry` ref or a value that does not resolve).
         let stored_adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        let (command, agent_icon, agent_id, unavailable): (
-            Option<AgentCommand>,
+        let (launch, agent_icon, agent_id, unavailable): (
+            Option<LaunchSpec>,
             Option<Icon>,
             Option<String>,
             Option<String>,
         ) = if tab.kind == "chat" {
             match restored_chat_spec(&launch, stored_adapter_id) {
-                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+                Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
                 None => (
                     None,
                     stored_adapter_id.and_then(Icon::for_agent_id),
@@ -18028,7 +18037,7 @@ fn restore_tabs_in_workspace(
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
                     }
                     let mut chat = Chat::launch_with_command_and_persistence(
-                        command.expect("a chat with no refusal reason carries its command"),
+                        launch.expect("a chat with no refusal reason carries its launch"),
                         working_directory.to_path_buf(),
                         database_path.clone(),
                         tab.id.clone(),
@@ -27284,7 +27293,7 @@ done
             // already uses) with its own registered pane id.
             let chat = cx.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                    LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                     working_directory.clone(),
                     cx,
                 )
@@ -27386,7 +27395,7 @@ done
             let mut workspace = palette_test_workspace(cx);
             let chat = cx.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                    LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                     std::env::temp_dir(),
                     cx,
                 )
@@ -28462,7 +28471,7 @@ done
         let chat = cx.update(|_, app| {
             app.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/bin/false"),
+                    LaunchSpec::Acp(AgentCommand::new("/bin/false")),
                     PathBuf::from("/tmp"),
                     cx,
                 )
@@ -30615,8 +30624,11 @@ done
         let executable = seed_codex_acp_manifest(&agents_root);
         launch.store = sirio_registry::InstallStore::new(agents_root);
         launch.sources = compute_launch_sources(None, &launch.store);
-        let (command, icon, agent_id) =
+        let (launch, icon, agent_id) =
             restored_chat_spec(&launch, Some("codex")).expect("installed source launches");
+        let LaunchSpec::Acp(command) = launch else {
+            panic!("an installed source launches over ACP");
+        };
         assert_eq!(command.program, executable);
         assert_eq!(icon, Some(Icon::Codex));
         assert_eq!(agent_id.as_deref(), Some("codex"));
@@ -35560,7 +35572,7 @@ done
             let mut workspace = palette_test_workspace(cx);
             let chat = cx.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                    LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                     std::env::temp_dir(),
                     cx,
                 )

@@ -1017,6 +1017,10 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
             title: tab.title.clone(),
             kind: tab.kind.clone(),
             agent_id: tab.agent_id.clone(),
+            // A layout-derived snapshot records no live session: the id is
+            // stamped when a chat with a resumable session saves, never
+            // reconstructed from the tab strip.
+            agent_session_id: None,
             order_idx: index as i64,
             is_active: tab.active,
         })

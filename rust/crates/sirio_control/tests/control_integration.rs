@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sirio_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot};
+use sirio_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot, LaunchSpec};
 use sirio_control::protocol::rows;
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
@@ -2031,7 +2031,7 @@ impl ChatDoorHandler {
         ChatSession::launch(ChatSessionConfig::new(
             &self.tab_id,
             &self.worktree_id,
-            AgentCommand::new("python3").args([CHAT_FIXTURE, mode]),
+            LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, mode])),
             std::env::temp_dir(),
             &self.database_path,
         ))

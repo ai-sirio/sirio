@@ -182,6 +182,197 @@ impl AgentCommand {
     }
 }
 
+/// What a chat tab launches.
+///
+/// Two transports reach the same surface: an ACP agent, and Claude Code
+/// over its own protocol. Which one a tab uses is resolved at open time
+/// (see `sirio`'s `agent_launch_for`) and never persisted, so a machine
+/// that gains or loses a `claude` picks the right one on the next open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LaunchSpec {
+    /// An ACP agent: a program that speaks the Agent Client Protocol.
+    Acp(AgentCommand),
+    /// Claude Code, driven over its own stdio protocol.
+    Claude(ClaudeLaunch),
+}
+
+impl LaunchSpec {
+    /// A short, stable name for logs and the Settings row. Not a label to
+    /// show a user on its own.
+    #[must_use]
+    pub fn transport_name(&self) -> &'static str {
+        match self {
+            Self::Acp(_) => "acp",
+            Self::Claude(_) => "claude",
+        }
+    }
+
+    /// Whether this is the native Claude transport.
+    #[must_use]
+    pub fn is_native_claude(&self) -> bool {
+        matches!(self, Self::Claude(_))
+    }
+}
+
+/// A live chat connection, whichever transport backs it.
+///
+/// An enum rather than a trait object: there are exactly two transports,
+/// both known at compile time, and an exhaustive match is what makes a new
+/// one impossible to forget.
+#[derive(Debug)]
+pub enum ChatClient {
+    Acp(AcpClient),
+    Claude(ClaudeClient),
+}
+
+impl ChatClient {
+    /// Launches whichever transport the spec names.
+    pub fn launch(launch: LaunchSpec, cwd: impl AsRef<Path>) -> Result<(Self, EventStream)> {
+        match launch {
+            LaunchSpec::Acp(command) => {
+                let (client, events) = AcpClient::launch(command, cwd)?;
+                Ok((Self::Acp(client), events))
+            }
+            LaunchSpec::Claude(launch) => {
+                let (client, events) = ClaudeClient::launch(launch, cwd)?;
+                Ok((Self::Claude(client), events))
+            }
+        }
+    }
+
+    /// The agent's session id. `None` on the native transport until the
+    /// first turn opens one.
+    #[must_use]
+    pub fn session_id(&self) -> Option<String> {
+        match self {
+            Self::Acp(client) => Some(client.session_id().to_string()),
+            Self::Claude(client) => client.session_id(),
+        }
+    }
+
+    /// The model selector advertised during session creation, if any.
+    #[must_use]
+    pub fn model_catalog(&self) -> Option<ModelCatalog> {
+        match self {
+            Self::Acp(client) => client.model_catalog().cloned(),
+            Self::Claude(client) => client.model_catalog(),
+        }
+    }
+
+    /// The session-mode selector, re-read live like the ACP one.
+    #[must_use]
+    pub fn mode_catalog(&self) -> Option<ModeCatalog> {
+        match self {
+            Self::Acp(client) => client.mode_catalog(),
+            Self::Claude(client) => client.mode_catalog(),
+        }
+    }
+
+    /// MCP-configuration-flavored lines observed on the agent's stderr.
+    #[must_use]
+    pub fn mcp_warnings(&self) -> Vec<String> {
+        match self {
+            Self::Acp(client) => client.mcp_warnings(),
+            Self::Claude(client) => client.mcp_warnings(),
+        }
+    }
+
+    /// Send a user turn without blocking on its streamed response.
+    pub fn prompt(&self, text: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.prompt(text),
+            Self::Claude(client) => client.prompt(text),
+        }
+    }
+
+    /// Send a user turn composed of text, file mentions, and images.
+    pub fn prompt_content(
+        &self,
+        text: impl Into<String>,
+        mention_paths: Vec<String>,
+        images: Vec<ImageAttachment>,
+        cwd: impl AsRef<Path>,
+    ) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.prompt_content(text, mention_paths, images, cwd),
+            Self::Claude(client) => client.prompt_content(text, mention_paths, images, cwd),
+        }
+    }
+
+    /// Ask the agent to change the current session model.
+    pub fn set_model(&self, config_id: impl Into<String>, value: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.set_model(config_id, value),
+            Self::Claude(client) => client.set_model(config_id, value),
+        }
+    }
+
+    /// Ask the agent to change a non-model configuration option (effort).
+    pub fn set_config_option(
+        &self,
+        option_id: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.set_config_option(option_id, value),
+            Self::Claude(client) => client.set_config_option(option_id, value),
+        }
+    }
+
+    /// Ask the agent to switch to a different session mode.
+    pub fn set_mode(&self, mode_id: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.set_mode(mode_id),
+            Self::Claude(client) => client.set_mode(mode_id),
+        }
+    }
+
+    /// Cancel the current prompt turn.
+    pub fn cancel(&self) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.cancel(),
+            Self::Claude(client) => client.cancel(),
+        }
+    }
+
+    /// Answer a permission request surfaced in [`AcpEvent::PermissionRequest`].
+    pub fn respond_permission(&self, request_id: u64, option_id: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.respond_permission(request_id, option_id),
+            Self::Claude(client) => client.respond_permission(request_id, option_id),
+        }
+    }
+
+    /// Withdraw a permission request without selecting any option.
+    pub fn cancel_permission(&self, request_id: u64) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.cancel_permission(request_id),
+            Self::Claude(client) => client.cancel_permission(request_id),
+        }
+    }
+
+    /// Stop the agent and wait for the subprocess worker to finish.
+    pub fn shutdown(&mut self) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.shutdown(),
+            Self::Claude(client) => client.shutdown(),
+        }
+    }
+
+    /// Whether this transport can restore files to an earlier turn.
+    #[must_use]
+    pub fn supports_rewind(&self) -> bool {
+        matches!(self, Self::Claude(_))
+    }
+
+    /// [`Self::supports_rewind`] answered from the spec alone, for a
+    /// surface deciding whether to draw an affordance before it connects.
+    #[must_use]
+    pub fn supports_rewind_for(launch: &LaunchSpec) -> bool {
+        launch.is_native_claude()
+    }
+}
+
 /// A permission option exposed to the caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionOption {
@@ -980,9 +1171,10 @@ fn run_connection(
     let (stdin, stdout, stderr, child) = match agent.spawn_process() {
         Ok(process) => process,
         Err(error) => {
-            let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(
-                format!("could not launch `{}`: {error}", attempted_program.display()),
-            ))));
+            let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(format!(
+                "could not launch `{}`: {error}",
+                attempted_program.display()
+            )))));
             return;
         }
     };
@@ -1311,8 +1503,7 @@ fn run_connection(
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
                             let prompt_stderr_tail = Arc::clone(&stderr_tail_for_connection);
-                            let prompt_stderr_drained =
-                                Arc::clone(&stderr_drained_for_connection);
+                            let prompt_stderr_drained = Arc::clone(&stderr_drained_for_connection);
                             let prompt_death_reason = Arc::clone(&prompt_timeout_reason);
                             let prompt_child = Arc::clone(&child_for_prompt);
                             let prompt_exit_status = Arc::clone(&exit_status_for_connection);
@@ -1713,7 +1904,11 @@ pub(crate) fn stderr_tail_report(tail: &StderrTail) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    format!("\nagent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
+    format!(
+        "\nagent stderr (last {} lines):\n{}",
+        lines.len(),
+        lines.join("\n")
+    )
 }
 
 /// The bound on [`AcpClient::mcp_warnings`] — a long session's stderr
@@ -1895,7 +2090,9 @@ fn permission_option(option: &ProtocolPermissionOption) -> PermissionOption {
 /// question card needs. Only the first question is surfaced; multi-question
 /// payloads are rare and the extra ones would need a second card. A
 /// `_sirioTextInput` metadata object declares the free-text affordance.
-pub(crate) fn parse_permission_question(raw_input: &serde_json::Value) -> Option<PermissionQuestion> {
+pub(crate) fn parse_permission_question(
+    raw_input: &serde_json::Value,
+) -> Option<PermissionQuestion> {
     let input = raw_input.as_object()?;
     let questions = input.get("questions")?.as_array()?;
     let first = questions.first()?.as_object()?;
@@ -3388,8 +3585,10 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         // watchdog reaping it. The turn's own failure is what the user sees;
         // the connection-level `Timeout` never races ahead of it.
         assert!(
-            seen.iter()
-                .any(|event| matches!(event, AcpEvent::TransportError(_) | AcpEvent::Timeout { .. })),
+            seen.iter().any(|event| matches!(
+                event,
+                AcpEvent::TransportError(_) | AcpEvent::Timeout { .. }
+            )),
             "a silent agent was never reaped: {seen:?}"
         );
         assert!(
@@ -3507,5 +3706,28 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         );
 
         let _ = client.shutdown();
+    }
+
+    #[test]
+    fn a_launch_spec_names_its_transport_for_a_surface_that_asks() {
+        let acp = LaunchSpec::Acp(AgentCommand::new("/usr/bin/opencode").arg("acp"));
+        assert_eq!(acp.transport_name(), "acp");
+        assert!(!acp.is_native_claude());
+
+        let native = LaunchSpec::Claude(ClaudeLaunch::new("/usr/local/bin/claude"));
+        assert_eq!(native.transport_name(), "claude");
+        assert!(native.is_native_claude());
+    }
+
+    #[test]
+    fn only_the_native_transport_offers_a_rewind() {
+        // `supports_rewind` is what hides the affordance rather than
+        // offering a button that answers "unsupported" when pressed.
+        assert!(!ChatClient::supports_rewind_for(&LaunchSpec::Acp(
+            AgentCommand::new("x")
+        )));
+        assert!(ChatClient::supports_rewind_for(&LaunchSpec::Claude(
+            ClaudeLaunch::new("claude")
+        )));
     }
 }
