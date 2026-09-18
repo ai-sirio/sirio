@@ -1895,7 +1895,7 @@ fn permission_option(option: &ProtocolPermissionOption) -> PermissionOption {
 /// question card needs. Only the first question is surfaced; multi-question
 /// payloads are rare and the extra ones would need a second card. A
 /// `_sirioTextInput` metadata object declares the free-text affordance.
-fn parse_permission_question(raw_input: &serde_json::Value) -> Option<PermissionQuestion> {
+pub(crate) fn parse_permission_question(raw_input: &serde_json::Value) -> Option<PermissionQuestion> {
     let input = raw_input.as_object()?;
     let questions = input.get("questions")?.as_array()?;
     let first = questions.first()?.as_object()?;
