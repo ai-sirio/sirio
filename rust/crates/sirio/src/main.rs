@@ -35732,6 +35732,18 @@ done
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs.clear();
             workspace.rebuild_center_split();
+            cx.notify();
+        });
+        // `SirioWorkspace::new` already queued its own construction-time
+        // sweep-and-refresh: a background task that recomputes
+        // `launch.sources` wholesale once it lands, from whatever this
+        // machine's PATH and install store actually say. Parking here first
+        // drains that task before the override below is written, so the
+        // override is the last write and nothing still in flight can replace
+        // it later in the test.
+        cx.run_until_parked();
+
+        workspace.update(&mut cx, |workspace, cx| {
             // Deterministic picker: one resolvable agent regardless of what
             // this machine has on PATH.
             workspace.launch.sources.insert(
