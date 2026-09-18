@@ -680,6 +680,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             .await
                             .is_err()
                             {
+                                end_held_turn(&event_tx, &mut pending_context_usage).await;
                                 return SessionOutcome::Died(
                                     ": could not write the context usage request".into(),
                                 );
@@ -710,6 +711,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         crate::touch_activity(&activity);
                         turn_in_flight = true;
                         if write_line(&mut stdin, &line).await.is_err() {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(": could not write the turn".into());
                         }
                     }
@@ -720,6 +722,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             .await
                             .is_err()
                         {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the model change".into(),
                             );
@@ -731,6 +734,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             .await
                             .is_err()
                         {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the mode change".into(),
                             );
@@ -745,6 +749,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         .await
                         .is_err()
                         {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the effort change".into(),
                             );
@@ -756,6 +761,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             .await
                             .is_err()
                         {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(": could not write the interrupt".into());
                         }
                     }
@@ -786,6 +792,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             matches!(answer.result, sirio_claude::PermissionResult::Allow { .. });
                         let line = answer.result.into_response(&pending.request.request_id);
                         if write_line(&mut stdin, &line).await.is_err() {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(": could not answer a permission".into());
                         }
                         if allowed && let Some(tool_use_id) = pending.request.tool_use_id.as_deref()
@@ -803,6 +810,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             .await
                             .is_err()
                             {
+                                end_held_turn(&event_tx, &mut pending_context_usage).await;
                                 return SessionOutcome::Died(
                                     ": could not apply the approved mode".into(),
                                 );
@@ -824,6 +832,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         .is_err()
                         {
                             pending_rewinds.remove(&id);
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the rewind request".into(),
                             );
@@ -832,9 +841,13 @@ async fn session(context: SessionContext) -> SessionOutcome {
                     Ok(Command::Shutdown(ack)) => {
                         // Closing stdin is how a stream-json session ends.
                         drop(stdin);
+                        end_held_turn(&event_tx, &mut pending_context_usage).await;
                         return SessionOutcome::CleanShutdown(ack);
                     }
-                    Err(_) => return SessionOutcome::Died(String::new()),
+                    Err(_) => {
+                        end_held_turn(&event_tx, &mut pending_context_usage).await;
+                        return SessionOutcome::Died(String::new());
+                    }
                 }
             }
             // The idle timer: nothing to serve, fall through to the
@@ -864,6 +877,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
             let line = sirio_claude::PermissionResult::deny(permission::REFUSED)
                 .into_response(&pending.request.request_id);
             if write_line(&mut stdin, &line).await.is_err() {
+                end_held_turn(&event_tx, &mut pending_context_usage).await;
                 return SessionOutcome::Died(": could not expire a permission".into());
             }
         }
@@ -892,6 +906,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 })
                 .await;
             crate::terminate_and_reap_blocking(&child);
+            end_held_turn(&event_tx, &mut pending_context_usage).await;
             return SessionOutcome::NeverStarted;
         }
     }
