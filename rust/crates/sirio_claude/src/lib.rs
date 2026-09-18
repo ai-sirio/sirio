@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod control;
 pub mod launch;
 pub mod message;
+pub mod usage;
 pub mod version;
 
 pub use catalog::{
@@ -26,4 +27,5 @@ pub use message::{
     ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
     UserPayload,
 };
+pub use usage::{PlanUsage, RateLimitWindow};
 pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};

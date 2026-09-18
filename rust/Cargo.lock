@@ -7483,6 +7483,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "serde_json",
+ "sirio_claude",
 ]
 
 [[package]]
