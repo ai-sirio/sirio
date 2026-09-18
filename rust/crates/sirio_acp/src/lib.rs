@@ -31,6 +31,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 mod chat;
+mod claude;
 mod mcp_config;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
