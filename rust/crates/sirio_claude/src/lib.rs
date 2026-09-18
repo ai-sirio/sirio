@@ -11,6 +11,9 @@
 //! than reject: see [`message`]'s module docs for the rule.
 
 pub mod message;
+pub mod tools;
+
+pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe};
 
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
