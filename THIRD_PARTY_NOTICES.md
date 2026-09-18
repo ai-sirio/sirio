@@ -60,32 +60,61 @@ by Material Extensions, obtained via [Iconify](https://iconify.design)
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-## Codicons (agent marks)
+## LobeHub lobe-icons (agent marks)
 
-The Claude and OpenAI marks in `rust/assets/icons/codicons/` are from
+The agent brand marks in `rust/assets/icons/lobehub/` — Claude, Codex,
+Gemini, Grok, OpenCode and Pi — are from LobeHub's
+[lobe-icons](https://github.com/lobehub/lobe-icons), npm package
+`@lobehub/icons-static-svg` 1.95.0, fetched byte-for-byte from unpkg on
+2026-09-18. Per-file provenance is recorded in
+`rust/assets/icons/lobehub/ATTRIBUTION.md`; the license is copied in
+`rust/assets/icons/lobehub/LICENSE` and reproduced here:
+
+> MIT License
+>
+> Copyright (c) 2023 LobeHub
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
+That license covers the geometry only; see the trademark notice below.
+
+## Codicons and Simple Icons (no longer bundled)
+
+**These icons are not distributed with this project any more.** From
+2026-09-05 to 2026-09-18 the Claude and OpenAI marks came from
 [Codicons](https://github.com/microsoft/vscode-codicons) by Microsoft
-Corporation, obtained via [Iconify](https://iconify.design) (`codicon` set),
-and are used under the Creative Commons Attribution 4.0 International
-license. Provenance is recorded in `rust/assets/icons/codicons/ATTRIBUTION.md`;
-the full license text is copied in `rust/assets/icons/codicons/LICENSE`.
-
-## Simple Icons (agent marks)
-
-The OpenCode and Pi marks in `rust/assets/icons/simple-icons/` are from
-[Simple Icons](https://github.com/simple-icons/simple-icons) 16.29.0,
-obtained via [Iconify](https://iconify.design) (`simple-icons` set), and are
-released under CC0 1.0 Universal (`rust/assets/icons/simple-icons/LICENSE.md`).
-Provenance, and the one deliberate `viewBox` change, are recorded in
-`rust/assets/icons/simple-icons/ATTRIBUTION.md`.
+Corporation (CC BY 4.0) and the OpenCode and Pi marks from
+[Simple Icons](https://github.com/simple-icons/simple-icons) 16.29.0
+(CC0 1.0 Universal), both obtained via [Iconify](https://iconify.design).
+They were replaced by the single LobeHub set above, which carries every
+mark on one grid. This section is retained only because the artwork was
+distributed in past releases.
 
 ## Agent marks
 
 The Oh-My-Pi mark in `rust/assets/icons/agent-omp.svg` is a project-owned
 SVG translation of the vector coordinates formerly stored in
-`App/AgentIcon.swift`, readable at commit `5430d7bf`. The Claude, OpenAI,
-OpenCode and Pi marks come from the Codicons and Simple Icons sets above;
-until 2026-09-05 Claude, OpenAI and OpenCode were the Zed catalog's
-`ai_*.svg` assets and Pi a project-owned monogram, both since removed.
+`App/AgentIcon.swift`, readable at commit `5430d7bf`; no icon library
+carries an Oh My Pi mark. Every other mark comes from the LobeHub set
+above. Before it, from 2026-09-05, they came from Codicons and Simple
+Icons; before that Claude, OpenAI and OpenCode were the Zed catalog's
+`ai_*.svg` assets and Pi a project-owned monogram, all since removed.
 
 ## JetBrainsMono Nerd Font Mono (terminal font)
 
@@ -119,8 +148,10 @@ licences, as listed by the nerd-fonts project for this font:
 
 ## Trademark notice
 
-The agent marks (Anthropic, OpenAI, OpenCode, Pi, Oh-My-Pi) are third-party
-trademarks and are used nominatively in this application solely to identify
-the corresponding products, as the Swift application did. Nothing
-in this project grants a license to these marks; they remain the property
-of their respective owners.
+The agent marks (Anthropic, OpenAI, Google, xAI, OpenCode, Pi, Oh-My-Pi)
+are third-party trademarks and are used nominatively in this application
+solely to identify the corresponding products, as the Swift application
+did. Nothing in this project grants a license to these marks — the MIT
+license on the LobeHub geometry above covers the drawings, not the brands
+they depict, and no open-source license conveys trademark rights. They
+remain the property of their respective owners.

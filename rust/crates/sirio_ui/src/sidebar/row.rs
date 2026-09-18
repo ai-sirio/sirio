@@ -279,6 +279,8 @@ impl Sidebar {
             Icon::Codex => "openai-mark",
             Icon::OpenCode => "agent-opencode",
             Icon::Pi => "pi-mark",
+            Icon::Gemini => "gemini-mark",
+            Icon::Grok => "grok-mark",
             Icon::OhMyPi => "agent-omp",
             Icon::SidebarLeft => "sidebar-minimalistic-left",
             Icon::PanelRight => "sidebar-minimalistic",

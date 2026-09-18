@@ -11,9 +11,9 @@ for this icon directory. The icon geometry must remain unchanged; update the
 commit and provenance together when refreshing these files.
 
 The agent marks (`ai_claude.svg`, `ai_open_ai.svg`, `ai_open_code.svg`) that
-used to live here were replaced on 2026-09-05 by the Codicons and Simple
-Icons assets in `../codicons/` and `../simple-icons/`; this directory now
-holds generic UI glyphs only.
+used to live here were replaced on 2026-09-05, and since 2026-09-18 every
+mark comes from one set, `../lobehub/`; this directory now holds generic UI
+glyphs only.
 
 `folder_open.svg` was added on 2026-09-18, after the initial vendoring, from
 that same commit and by the same byte-for-byte rule: the file tree pairs it
