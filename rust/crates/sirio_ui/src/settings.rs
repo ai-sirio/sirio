@@ -391,6 +391,11 @@ pub struct ProviderRowModel {
     pub launch: Option<sirio_registry::LaunchSource>,
     /// The version this row would launch or install (Task 9).
     pub version: Option<String>,
+    /// Which transport a chat for this row opens on, when the machine has
+    /// more than one way to reach it (Task 11). Only Claude has two, so
+    /// only its row carries a sentence; every other row renders exactly as
+    /// it did before the field existed.
+    pub transport_note: Option<String>,
 }
 
 /// The honest status shown on one AI Provider card: what local credential
@@ -592,10 +597,12 @@ fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
 ///
 /// The description and status follow the availability data, never a fixed
 /// claim: an installed CLI reports the resolved executable, an absent one
-/// says so in a way the user can act on.
+/// says so in a way the user can act on. `transport_note` is the host's
+/// resolved-transport sentence for this adapter, when it has one.
 pub fn provider_row(
     availability: &AgentAvailability,
     source: Option<&sirio_registry::LaunchSource>,
+    transport_note: Option<String>,
 ) -> ProviderRowModel {
     let name = availability.display_name;
     let description = if availability.is_available() {
@@ -624,6 +631,7 @@ pub fn provider_row(
         status,
         launch,
         version,
+        transport_note,
     }
 }
 
@@ -858,6 +866,12 @@ pub struct Settings {
     /// installed version behind it offers an update; equal or absent means
     /// nothing to offer.
     registry_versions: BTreeMap<String, String>,
+    /// The host's resolved-transport sentence per adapter id (Task 11),
+    /// pushed beside `launch_sources` because the two resolve together.
+    /// An adapter with one transport has no entry here and its row renders
+    /// exactly as before; nothing in this screen offers a choice of
+    /// transport.
+    transport_notes: BTreeMap<String, String>,
     /// Live install state per adapter id (Task 9 fix round). `InFlight`
     /// hides the row's action; `Failed` shows the installer's own message
     /// and offers the action again; success removes the entry.
@@ -1049,6 +1063,7 @@ impl Settings {
             hooks_install_report: None,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
+            transport_notes: BTreeMap::new(),
             install_states: BTreeMap::new(),
             lsp_servers: ServerStates {
                 silenced: initial.lsp_silenced_languages.iter().cloned().collect(),
@@ -1403,6 +1418,21 @@ impl Settings {
     ) {
         self.launch_sources = sources;
         self.registry_versions = registry_versions;
+    }
+
+    /// Pins the resolved-transport sentence each Agents row shows, keyed by
+    /// adapter id. Only the host can resolve a transport — it owns the
+    /// filesystem and the process table — so this is pushed the same way
+    /// the launch sources are.
+    pub fn with_transport_notes(mut self, notes: Vec<(String, String)>) -> Self {
+        self.apply_transport_notes(notes);
+        self
+    }
+
+    /// [`Self::with_transport_notes`] for a live refresh. A row whose
+    /// adapter is absent here shows no sentence.
+    pub fn apply_transport_notes(&mut self, notes: Vec<(String, String)>) {
+        self.transport_notes = notes.into_iter().collect();
     }
 
     /// Sets (or clears, on `None`) one row's live install state. Callers
@@ -4446,7 +4476,7 @@ mod tests {
             executable: None,
         };
 
-        let row = provider_row(&available, None);
+        let row = provider_row(&available, None, None);
         assert_eq!(
             row.name, "A Different Name",
             "the name is discovery data, not a hard-coded display table"
@@ -4461,7 +4491,7 @@ mod tests {
             "an installed CLI keeps the on-PATH description"
         );
 
-        let row = provider_row(&absent, None);
+        let row = provider_row(&absent, None, None);
         assert_eq!(
             row.status,
             ProviderStatus::NotInstalled,
@@ -4474,6 +4504,32 @@ mod tests {
         assert!(
             !row.description.contains("Available"),
             "nothing may claim an absent binary is available"
+        );
+    }
+
+    /// Task 11: the resolved-transport sentence reaches the row it belongs
+    /// to verbatim — the Agents screen cannot read text back out of the
+    /// harness, so this is where the exact wording is pinned.
+    #[test]
+    fn a_provider_row_carries_the_transport_sentence_it_was_resolved_with() {
+        let availability = AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/opt/local/bin/claude")),
+        };
+        let row = provider_row(
+            &availability,
+            None,
+            Some("Native · claude 2.1.273".to_string()),
+        );
+        assert_eq!(
+            row.transport_note.as_deref(),
+            Some("Native · claude 2.1.273")
+        );
+        assert_eq!(
+            provider_row(&availability, None, None).transport_note,
+            None,
+            "an adapter with nothing resolved renders no sentence"
         );
     }
 
@@ -4751,7 +4807,7 @@ mod tests {
             },
         };
 
-        let row = provider_row(&availability, Some(&source));
+        let row = provider_row(&availability, Some(&source), None);
         assert_eq!(
             row.version.as_deref(),
             Some("0.70.0"),
@@ -4781,7 +4837,10 @@ mod tests {
             args: vec!["acp".into()],
         };
 
-        assert_eq!(provider_row(&availability, Some(&source)).version, None);
+        assert_eq!(
+            provider_row(&availability, Some(&source), None).version,
+            None
+        );
     }
 
     #[test]
@@ -7202,6 +7261,7 @@ mod tests {
                     display_name: "irrelevant",
                     executable: None,
                 },
+                None,
                 None,
             );
             assert_eq!(

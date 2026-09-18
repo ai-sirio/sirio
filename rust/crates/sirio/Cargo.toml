@@ -28,6 +28,9 @@ sirio_terminal.workspace = true
 sirio_agents.workspace = true
 sirio_registry = { workspace = true }
 sirio_acp.workspace = true
+# The version floor the Claude transport resolution reads
+# (`sirio_claude::MIN_CLAUDE_VERSION`); a leaf crate of serde types.
+sirio_claude = { path = "../sirio_claude" }
 sirio_project.workspace = true
 sirio_persistence.workspace = true
 sirio_activity.workspace = true

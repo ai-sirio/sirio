@@ -11,13 +11,13 @@ use gpui_platform::application;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use sirio_acp::{AgentCommand, LaunchSpec};
+use sirio_acp::{AgentCommand, ClaudeLaunch, LaunchSpec};
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
     BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
     WorktreeMountPolicy,
 };
-use sirio_agents::ALL as AGENT_CATALOG;
+use sirio_agents::{ALL as AGENT_CATALOG, AgentAdapter};
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, base64_encode,
@@ -222,6 +222,7 @@ where
 }
 
 mod account_login;
+mod claude_transport;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
 /// environment. Linux-only by construction: the variables it reads and writes
@@ -2900,12 +2901,16 @@ fn agent_command_for(source: &sirio_registry::LaunchSource) -> Option<AgentComma
 }
 
 /// The [`LaunchSpec`] a resolved adapter launches, or `None` when there is
-/// nothing honest to launch. It takes the whole launch state rather than
-/// one source because a later arm reads a second fact (the Claude
-/// resolution) that no `LaunchSource` carries. In this task it does exactly
-/// what `agent_command_for` did — resolve the source for that adapter — and
-/// wraps the result, so every chat tab launches over ACP as before.
+/// nothing honest to launch. Claude is the one adapter with two transports:
+/// when the resolution found a `claude` new enough for the protocol this
+/// build speaks, that binary launches directly; otherwise the registry
+/// wrapper does, exactly as before.
 fn agent_launch_for(launch: &AgentLaunchState, adapter_id: &str) -> Option<LaunchSpec> {
+    if adapter_id == sirio_agents::ClaudeCodeAdapter.id()
+        && let Some(program) = launch.claude.native_program()
+    {
+        return Some(LaunchSpec::Claude(ClaudeLaunch::new(program)));
+    }
     agent_command_for(&launch_source_in(launch, adapter_id)).map(LaunchSpec::Acp)
 }
 
@@ -2916,6 +2921,10 @@ struct AgentLaunchState {
     registry: Option<sirio_registry::AcpRegistry>,
     store: sirio_registry::InstallStore,
     sources: std::collections::BTreeMap<String, sirio_registry::LaunchSource>,
+    /// Which transport a Claude chat opens on, and why. Not persisted and
+    /// not derived from a `LaunchSource`: a machine that gains or loses a
+    /// `claude` picks the right transport on the next resolution.
+    claude: crate::claude_transport::Resolution,
 }
 
 impl AgentLaunchState {
@@ -2937,6 +2946,7 @@ impl AgentLaunchState {
                     .unwrap_or_else(|| sirio_registry::InstallStore::default_root(&environment)),
             ),
             sources: std::collections::BTreeMap::new(),
+            claude: compute_claude_resolution(&environment),
         };
         state.sources = compute_launch_sources(state.registry.as_ref(), &state.store);
         state
@@ -2970,6 +2980,35 @@ fn lsp_store_root_for_startup() -> PathBuf {
 /// Test-only redirect for [`lsp_store_root_for_startup`].
 #[cfg(test)]
 static TEST_LSP_STORE_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// The transport a Claude chat opens on, from this machine's facts: the
+/// adapter's static claim, whether the binary it names is on `PATH`, and
+/// what `claude --version` says. One environment variable overrides the
+/// answer for diagnosis (`SIRIO_CLAUDE_TRANSPORT=acp`), in the spirit of
+/// `SIRIO_ACP_PROGRAM` — it is not a setting and appears in no UI. The
+/// decision itself is [`crate::claude_transport::resolve`], which is pure.
+///
+/// Blocking by one bounded exec: every caller runs it beside
+/// [`compute_launch_sources`], which is where the launch state is refreshed.
+fn compute_claude_resolution(
+    environment: &BTreeMap<String, String>,
+) -> crate::claude_transport::Resolution {
+    let forced_acp = environment
+        .get("SIRIO_CLAUDE_TRANSPORT")
+        .map(String::as_str)
+        == Some("acp");
+    let executable = sirio_agents::ClaudeCodeAdapter
+        .native_chat()
+        .and_then(|claim| sirio_agents::find_executable_on_path(claim.program));
+    let version_output = executable
+        .as_deref()
+        .and_then(crate::claude_transport::probe_version);
+    crate::claude_transport::resolve(crate::claude_transport::Inputs {
+        executable,
+        version_output,
+        forced_acp,
+    })
+}
 
 /// One pass over the catalog answering each adapter's launch source from
 /// existence facts: is the CLI on PATH, is there a manifest whose
@@ -4496,6 +4535,12 @@ impl SirioWorkspace {
     fn recompute_launch_sources(&mut self, cx: &mut Context<Self>) {
         self.launch.sources =
             compute_launch_sources(self.launch.registry.as_ref(), &self.launch.store);
+        // Which transport a Claude chat opens on is resolved here too, not
+        // once at startup: this machine gains or loses our own `claude`
+        // between refreshes (Settings → Agents installs one), and the next
+        // resolution is what notices.
+        self.launch.claude =
+            compute_claude_resolution(&std::env::vars().collect::<BTreeMap<_, _>>());
         let sources: Vec<(String, sirio_registry::LaunchSource)> = self
             .launch
             .sources
@@ -4516,8 +4561,13 @@ impl SirioWorkspace {
         self.tab_bar.update(cx, |tab_bar, _| {
             tab_bar.apply_chat_launch_sources(sources.clone())
         });
+        let transport_notes = vec![(
+            sirio_agents::ClaudeCodeAdapter.id().to_string(),
+            self.launch.claude.note(),
+        )];
         self.settings.update(cx, |settings, _| {
-            settings.apply_launch_sources(sources, registry_versions)
+            settings.apply_launch_sources(sources, registry_versions);
+            settings.apply_transport_notes(transport_notes);
         });
     }
 
@@ -30664,6 +30714,40 @@ done
         );
     }
 
+    #[test]
+    fn a_native_claude_resolution_launches_the_binary_not_the_wrapper() {
+        let mut launch = test_launch_state();
+        launch.claude = crate::claude_transport::Resolution::Native {
+            program: "/usr/local/bin/claude".into(),
+            version: "2.1.273".into(),
+        };
+        let spec = agent_launch_for(&launch, "claude").expect("a native claude launches");
+        assert_eq!(
+            spec,
+            sirio_acp::LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("/usr/local/bin/claude"))
+        );
+    }
+
+    #[test]
+    fn a_wrapper_resolution_still_goes_through_the_registry() {
+        let mut launch = test_launch_state();
+        launch.claude = crate::claude_transport::Resolution::Wrapper {
+            reason: crate::claude_transport::WrapperReason::NotOnPath,
+        };
+        launch.sources.insert(
+            "claude".into(),
+            sirio_registry::LaunchSource::Installed(sirio_registry::InstalledAgent {
+                id: "claude-acp".into(),
+                version: "0.78.0".into(),
+                executable: "/data/claude-agent-acp".into(),
+                args: Vec::new(),
+                integrity: sirio_registry::Integrity::Sha256,
+            }),
+        );
+        let spec = agent_launch_for(&launch, "claude").expect("the wrapper launches");
+        assert!(matches!(spec, sirio_acp::LaunchSpec::Acp(_)));
+    }
+
     fn test_launch_state() -> AgentLaunchState {
         let mut launch = AgentLaunchState {
             registry: None,
@@ -30671,6 +30755,9 @@ done
                 std::env::temp_dir().join(format!("sirio-launch-test-{}", std::process::id())),
             ),
             sources: std::collections::BTreeMap::new(),
+            // The tests never probe this machine for a `claude`: a fixture
+            // that needs a native resolution sets the field itself.
+            claude: crate::claude_transport::Resolution::default(),
         };
         launch.sources = compute_launch_sources(None, &launch.store);
         launch
