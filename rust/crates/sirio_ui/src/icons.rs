@@ -26,7 +26,7 @@
 
 use gpui::{
     App, AssetSource, Bounds, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce, Rgba,
-    SharedString, StyleRefinement, Styled, Window, canvas, px, svg,
+    SharedString, StyleRefinement, Styled, SvgSize, Window, canvas, px, size, svg,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -539,17 +539,24 @@ impl IconElement {
 /// colours. The SVG is rasterized once per (icon, pixel size) and
 /// cached; the resulting `RenderImage` is painted into `bounds`.
 fn paint_agent_mark(icon: Icon, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-    // Render at 2x the point size, matching GPUI's own SVG renderer
+    // Rasterize at 2x the point size, matching GPUI's own SVG renderer
     // (`SMOOTH_SVG_SCALE_FACTOR`): pixel-perfect on retina displays.
-    let pixel = (f32::from(bounds.size.width) * 2.0).round().max(1.0);
+    //
+    // The size is asked for in device pixels, not as a scale factor, and
+    // that distinction is the whole correctness of this function. A scale
+    // factor multiplies the size the *file* declares, and every asset here
+    // declares `width="1em"` — which usvg resolves against its default 12pt
+    // font size, never against the 32- or 64-unit viewBox the artwork is
+    // drawn in. Scaling from that produced a 15px raster for a 30px box:
+    // stretched to fit by `paint_image`, so it never failed, it just went
+    // soft. `SvgSize::Size` asks for a width and keeps the aspect ratio.
+    let pixel = (f32::from(bounds.size.width) * 2.0).round().max(1.0) as i32;
     let key = (icon, pixel as u32);
     let image = agent_mark_cache().get_or_insert(key, || {
-        let view_box = view_box_size(icon);
-        // render_single_frame multiplies its scale argument by its own
-        // 2x factor, so divide it back out.
-        let scale = pixel / view_box / 2.0;
-        cx.svg_renderer()
-            .render_single_frame(icon.svg(), scale)
+        let renderer = cx.svg_renderer();
+        let parsed = renderer.parse_svg(icon.svg()).ok()?;
+        renderer
+            .render_parsed(&parsed, SvgSize::Size(size(pixel.into(), pixel.into())))
             .ok()
     });
     let Some(image) = image else {
@@ -623,25 +630,6 @@ impl AgentMarkCache {
     }
 }
 
-/// The largest viewBox dimension of an icon's SVG, in user units. Used to
-/// derive the raster scale for a target pixel size.
-fn view_box_size(icon: Icon) -> f32 {
-    let text = std::str::from_utf8(icon.svg()).unwrap_or_default();
-    let view_box = text
-        .split("viewBox=\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or("0 0 24 24");
-    let parts: Vec<f32> = view_box
-        .split_whitespace()
-        .filter_map(|part| part.parse().ok())
-        .collect();
-    match parts.as_slice() {
-        [_, _, w, h] => w.max(*h),
-        _ => 24.0,
-    }
-}
-
 /// The embedded asset source, for hosts that use GPUI's stock `svg()`
 /// element (`application().with_assets(SirioAssets)`). Every icon in the
 /// enum is served; `list` reports the icon directory.
@@ -707,7 +695,7 @@ pub const ALL_ICONS: [Icon; 35] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::px;
+    use gpui::{TestAppContext, px};
 
     /// The embedded payload must be the file its path names.
     ///
@@ -1030,16 +1018,45 @@ mod tests {
         assert_eq!(element.size, IconSize::Small);
     }
 
-    #[test]
-    fn view_box_size_parses_embedded_svgs() {
-        assert!(
-            (view_box_size(Icon::FolderFill) - 16.0).abs() < 1.0,
-            "zed's 16x16 home format"
-        );
-        assert!(
-            (view_box_size(Icon::Pi) - 28.0).abs() < 1.0,
-            "pi's padded Simple Icons viewBox"
-        );
+    /// Reading the asset cannot tell you whether the full-colour path
+    /// works, because both of its failures are silent: a mark that
+    /// rasterises smaller than the box it is painted into is stretched to
+    /// fit — soft edges, no error — and a mark whose colours are lost still
+    /// draws a shape. So drive GPUI's real renderer with
+    /// `paint_agent_mark`'s own arithmetic.
+    #[gpui::test]
+    async fn full_colour_marks_rasterise_in_colour_at_the_size_they_are_painted(
+        cx: &mut TestAppContext,
+    ) {
+        // `IconSize::Small` at the default type scale, on a retina display.
+        let pixel = 15 * 2;
+        for icon in [Icon::OhMyPi, Icon::file_type("rust")] {
+            let image = cx
+                .update(|cx| {
+                    let renderer = cx.svg_renderer();
+                    let parsed = renderer.parse_svg(icon.svg()).expect("the asset parses");
+                    renderer.render_parsed(&parsed, SvgSize::Size(size(pixel.into(), pixel.into())))
+                })
+                .unwrap_or_else(|error| panic!("{icon:?} must rasterise: {error}"));
+
+            let width = image.size(0).width.0;
+            assert!(
+                width >= pixel,
+                "{icon:?} rasterises {width}px wide for a {pixel}px box, so it is stretched"
+            );
+
+            let bytes = image.as_bytes(0).expect("the frame carries pixels");
+            let colours: std::collections::HashSet<[u8; 3]> = bytes
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] > 0)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect();
+            assert!(
+                colours.len() > 8,
+                "{icon:?} must paint its own colours, saw {} distinct",
+                colours.len()
+            );
+        }
     }
 
     #[test]
