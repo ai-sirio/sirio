@@ -7205,6 +7205,7 @@ dependencies = [
  "sirio_activity",
  "sirio_agents",
  "sirio_apply",
+ "sirio_claude",
  "sirio_control",
  "sirio_git",
  "sirio_lsp",
@@ -7232,6 +7233,7 @@ dependencies = [
  "futures",
  "libc",
  "serde_json",
+ "sirio_claude",
  "sirio_persistence",
 ]
 
@@ -7247,6 +7249,7 @@ name = "sirio_agents"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sirio_claude",
  "toml_edit 0.22.27",
 ]
 
@@ -7257,6 +7260,14 @@ dependencies = [
  "sirio_release",
  "sirio_update",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "sirio_claude"
+version = "0.19.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7475,6 +7486,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "serde_json",
+ "sirio_claude",
 ]
 
 [[package]]

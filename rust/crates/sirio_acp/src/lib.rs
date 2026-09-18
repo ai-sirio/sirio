@@ -31,9 +31,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 mod chat;
+mod claude;
 mod mcp_config;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
+pub use claude::{ClaudeClient, ClaudeLaunch};
 pub use mcp_config::discover_mcp_servers;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
@@ -45,12 +47,12 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// agentic turn that runs for an hour is normal as long as it keeps
 /// reporting, and killing a working agent loses the whole session, not just
 /// the turn. The clock restarts on every notification the agent sends.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub(crate) const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
-type ChildHandle = Arc<Mutex<Option<Child>>>;
+pub(crate) type ChildHandle = Arc<Mutex<Option<Child>>>;
 
 /// The operation that exceeded its bounded wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,6 +179,211 @@ impl AgentCommand {
     {
         self.args.extend(args.into_iter().map(Into::into));
         self
+    }
+}
+
+/// What a chat tab launches.
+///
+/// Two transports reach the same surface: an ACP agent, and Claude Code
+/// over its own protocol. Which one a tab uses is resolved at open time
+/// (see `sirio`'s `agent_launch_for`) and never persisted, so a machine
+/// that gains or loses a `claude` picks the right one on the next open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LaunchSpec {
+    /// An ACP agent: a program that speaks the Agent Client Protocol.
+    Acp(AgentCommand),
+    /// Claude Code, driven over its own stdio protocol.
+    Claude(ClaudeLaunch),
+}
+
+impl LaunchSpec {
+    /// A short, stable name for logs and the Settings row. Not a label to
+    /// show a user on its own.
+    #[must_use]
+    pub fn transport_name(&self) -> &'static str {
+        match self {
+            Self::Acp(_) => "acp",
+            Self::Claude(_) => "claude",
+        }
+    }
+
+    /// Whether this is the native Claude transport.
+    #[must_use]
+    pub fn is_native_claude(&self) -> bool {
+        matches!(self, Self::Claude(_))
+    }
+}
+
+/// A live chat connection, whichever transport backs it.
+///
+/// An enum rather than a trait object: there are exactly two transports,
+/// both known at compile time, and an exhaustive match is what makes a new
+/// one impossible to forget.
+#[derive(Debug)]
+pub enum ChatClient {
+    Acp(AcpClient),
+    Claude(ClaudeClient),
+}
+
+impl ChatClient {
+    /// Launches whichever transport the spec names.
+    pub fn launch(launch: LaunchSpec, cwd: impl AsRef<Path>) -> Result<(Self, EventStream)> {
+        match launch {
+            LaunchSpec::Acp(command) => {
+                let (client, events) = AcpClient::launch(command, cwd)?;
+                Ok((Self::Acp(client), events))
+            }
+            LaunchSpec::Claude(launch) => {
+                let (client, events) = ClaudeClient::launch(launch, cwd)?;
+                Ok((Self::Claude(client), events))
+            }
+        }
+    }
+
+    /// The agent's session id. `None` on the native transport until the
+    /// first turn opens one.
+    #[must_use]
+    pub fn session_id(&self) -> Option<String> {
+        match self {
+            Self::Acp(client) => Some(client.session_id().to_string()),
+            Self::Claude(client) => client.session_id(),
+        }
+    }
+
+    /// The model selector advertised during session creation, if any.
+    #[must_use]
+    pub fn model_catalog(&self) -> Option<ModelCatalog> {
+        match self {
+            Self::Acp(client) => client.model_catalog().cloned(),
+            Self::Claude(client) => client.model_catalog(),
+        }
+    }
+
+    /// The session-mode selector, re-read live like the ACP one.
+    #[must_use]
+    pub fn mode_catalog(&self) -> Option<ModeCatalog> {
+        match self {
+            Self::Acp(client) => client.mode_catalog(),
+            Self::Claude(client) => client.mode_catalog(),
+        }
+    }
+
+    /// MCP-configuration-flavored lines observed on the agent's stderr.
+    #[must_use]
+    pub fn mcp_warnings(&self) -> Vec<String> {
+        match self {
+            Self::Acp(client) => client.mcp_warnings(),
+            Self::Claude(client) => client.mcp_warnings(),
+        }
+    }
+
+    /// Send a user turn without blocking on its streamed response.
+    pub fn prompt(&self, text: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.prompt(text),
+            Self::Claude(client) => client.prompt(text),
+        }
+    }
+
+    /// Send a user turn composed of text, file mentions, and images.
+    pub fn prompt_content(
+        &self,
+        text: impl Into<String>,
+        mention_paths: Vec<String>,
+        images: Vec<ImageAttachment>,
+        cwd: impl AsRef<Path>,
+    ) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.prompt_content(text, mention_paths, images, cwd),
+            Self::Claude(client) => client.prompt_content(text, mention_paths, images, cwd),
+        }
+    }
+
+    /// Ask the agent to change the current session model.
+    pub fn set_model(&self, config_id: impl Into<String>, value: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.set_model(config_id, value),
+            Self::Claude(client) => client.set_model(config_id, value),
+        }
+    }
+
+    /// Ask the agent to change a non-model configuration option (effort).
+    pub fn set_config_option(
+        &self,
+        option_id: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.set_config_option(option_id, value),
+            Self::Claude(client) => client.set_config_option(option_id, value),
+        }
+    }
+
+    /// Ask the agent to switch to a different session mode.
+    pub fn set_mode(&self, mode_id: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.set_mode(mode_id),
+            Self::Claude(client) => client.set_mode(mode_id),
+        }
+    }
+
+    /// Cancel the current prompt turn.
+    pub fn cancel(&self) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.cancel(),
+            Self::Claude(client) => client.cancel(),
+        }
+    }
+
+    /// Answer a permission request surfaced in [`AcpEvent::PermissionRequest`].
+    pub fn respond_permission(&self, request_id: u64, option_id: impl Into<String>) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.respond_permission(request_id, option_id),
+            Self::Claude(client) => client.respond_permission(request_id, option_id),
+        }
+    }
+
+    /// Withdraw a permission request without selecting any option.
+    pub fn cancel_permission(&self, request_id: u64) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.cancel_permission(request_id),
+            Self::Claude(client) => client.cancel_permission(request_id),
+        }
+    }
+
+    /// Stop the agent and wait for the subprocess worker to finish.
+    pub fn shutdown(&mut self) -> Result<()> {
+        match self {
+            Self::Acp(client) => client.shutdown(),
+            Self::Claude(client) => client.shutdown(),
+        }
+    }
+
+    /// Whether this transport can restore files to an earlier turn.
+    #[must_use]
+    pub fn supports_rewind(&self) -> bool {
+        matches!(self, Self::Claude(_))
+    }
+
+    /// [`Self::supports_rewind`] answered from the spec alone, for a
+    /// surface deciding whether to draw an affordance before it connects.
+    #[must_use]
+    pub fn supports_rewind_for(launch: &LaunchSpec) -> bool {
+        launch.is_native_claude()
+    }
+
+    /// Asks the agent to restore tracked files to their state at a turn.
+    /// Only the native transport speaks this request; anything else is
+    /// refused rather than silently dropped.
+    pub fn rewind_files(
+        &self,
+        user_message_id: &str,
+        dry_run: bool,
+    ) -> Result<sirio_claude::RewindOutcome> {
+        match self {
+            Self::Claude(client) => client.rewind_files(user_message_id, dry_run),
+            Self::Acp(_) => Err(anyhow!("this agent cannot restore files")),
+        }
     }
 }
 
@@ -978,9 +1185,10 @@ fn run_connection(
     let (stdin, stdout, stderr, child) = match agent.spawn_process() {
         Ok(process) => process,
         Err(error) => {
-            let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(
-                format!("could not launch `{}`: {error}", attempted_program.display()),
-            ))));
+            let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(format!(
+                "could not launch `{}`: {error}",
+                attempted_program.display()
+            )))));
             return;
         }
     };
@@ -1309,8 +1517,7 @@ fn run_connection(
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
                             let prompt_stderr_tail = Arc::clone(&stderr_tail_for_connection);
-                            let prompt_stderr_drained =
-                                Arc::clone(&stderr_drained_for_connection);
+                            let prompt_stderr_drained = Arc::clone(&stderr_drained_for_connection);
                             let prompt_death_reason = Arc::clone(&prompt_timeout_reason);
                             let prompt_child = Arc::clone(&child_for_prompt);
                             let prompt_exit_status = Arc::clone(&exit_status_for_connection);
@@ -1658,28 +1865,28 @@ async fn drain_stderr(
     }
 }
 
-type ActivityClock = Arc<Mutex<std::time::Instant>>;
+pub(crate) type ActivityClock = Arc<Mutex<std::time::Instant>>;
 
-fn touch_activity(clock: &ActivityClock) {
+pub(crate) fn touch_activity(clock: &ActivityClock) {
     if let Ok(mut at) = clock.lock() {
         *at = std::time::Instant::now();
     }
 }
 
-fn idle_for(clock: &ActivityClock) -> Duration {
+pub(crate) fn idle_for(clock: &ActivityClock) -> Duration {
     clock
         .lock()
         .map(|at| at.elapsed())
         .unwrap_or(Duration::ZERO)
 }
 
-type StderrTail = Arc<Mutex<VecDeque<String>>>;
+pub(crate) type StderrTail = Arc<Mutex<VecDeque<String>>>;
 
 /// How much of the agent's stderr is kept for the death report. Enough for a
 /// stack trace's first frames, small enough to sit inside an error message.
 const MAX_STDERR_TAIL: usize = 20;
 
-fn push_stderr_tail(tail: &StderrTail, line: String) {
+pub(crate) fn push_stderr_tail(tail: &StderrTail, line: String) {
     if let Ok(mut tail) = tail.lock() {
         if tail.len() >= MAX_STDERR_TAIL {
             tail.pop_front();
@@ -1696,14 +1903,14 @@ fn push_stderr_tail(tail: &StderrTail, line: String) {
 /// says anything about why the agent went away.
 const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
-async fn wait_for_stderr_drain(drained: &Arc<AtomicBool>) {
+pub(crate) async fn wait_for_stderr_drain(drained: &Arc<AtomicBool>) {
     let deadline = std::time::Instant::now() + STDERR_DRAIN_GRACE;
     while !drained.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
         async_io::Timer::after(Duration::from_millis(5)).await;
     }
 }
 
-fn stderr_tail_report(tail: &StderrTail) -> String {
+pub(crate) fn stderr_tail_report(tail: &StderrTail) -> String {
     let lines = tail
         .lock()
         .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
@@ -1711,14 +1918,18 @@ fn stderr_tail_report(tail: &StderrTail) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    format!("\nagent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
+    format!(
+        "\nagent stderr (last {} lines):\n{}",
+        lines.len(),
+        lines.join("\n")
+    )
 }
 
 /// The bound on [`AcpClient::mcp_warnings`] — a long session's stderr
 /// should not grow this without limit.
-const MAX_MCP_WARNINGS: usize = 20;
+pub(crate) const MAX_MCP_WARNINGS: usize = 20;
 
-fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
+pub(crate) fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
     if let Ok(mut warnings) = cell.lock() {
         if warnings.len() >= MAX_MCP_WARNINGS {
             warnings.remove(0);
@@ -1731,7 +1942,7 @@ fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
 /// some adapters emit on a successful connection (e.g. "Connected to MCP
 /// server 'foo'"), so a failure-shaped word must co-occur before this
 /// counts as a warning rather than routine noise (F-CHAT-33).
-fn looks_like_mcp_warning(line: &str) -> bool {
+pub(crate) fn looks_like_mcp_warning(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     if !lower.contains("mcp") {
         return false;
@@ -1751,7 +1962,7 @@ fn looks_like_mcp_warning(line: &str) -> bool {
     FAILURE_WORDS.iter().any(|word| lower.contains(word))
 }
 
-fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
+pub(crate) fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
     if let Ok(mut reason) = reason.lock() {
         *reason = Some(timeout);
     }
@@ -1779,16 +1990,16 @@ async fn terminate_and_reap(child: &ChildHandle) -> Option<ExitStatus> {
     }
 }
 
-fn terminate_and_reap_blocking(child: &ChildHandle) -> Option<ExitStatus> {
+pub(crate) fn terminate_and_reap_blocking(child: &ChildHandle) -> Option<ExitStatus> {
     block_on(terminate_and_reap(child))
 }
 
 /// What the OS said about the agent's exit, recorded by whoever reaped it.
 /// [`terminate_and_reap`] takes the child out of its handle, so a report
 /// built afterwards has nothing left to ask.
-type ExitStatusSlot = Arc<Mutex<Option<ExitStatus>>>;
+pub(crate) type ExitStatusSlot = Arc<Mutex<Option<ExitStatus>>>;
 
-fn record_exit_status(slot: &ExitStatusSlot, status: Option<ExitStatus>) {
+pub(crate) fn record_exit_status(slot: &ExitStatusSlot, status: Option<ExitStatus>) {
     if let Some(status) = status
         && let Ok(mut slot) = slot.lock()
     {
@@ -1805,7 +2016,7 @@ const CHILD_EXIT_PROBE: Duration = Duration::from_millis(200);
 /// empty string when nothing has observed the exit yet — a still-running
 /// agent that merely closed its stdout is a real case, and guessing a cause
 /// there would be worse than saying nothing.
-async fn child_exit_report(child: &ChildHandle, recorded: &ExitStatusSlot) -> String {
+pub(crate) async fn child_exit_report(child: &ChildHandle, recorded: &ExitStatusSlot) -> String {
     let deadline = std::time::Instant::now() + CHILD_EXIT_PROBE;
     loop {
         if let Some(status) = recorded.lock().ok().and_then(|slot| *slot) {
@@ -1830,7 +2041,7 @@ fn try_child_status(child: &ChildHandle) -> Option<ExitStatus> {
     child.try_status().ok().flatten()
 }
 
-fn describe_exit(status: ExitStatus) -> String {
+pub(crate) fn describe_exit(status: ExitStatus) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -1846,7 +2057,7 @@ fn describe_exit(status: ExitStatus) -> String {
 
 /// The deadline Sirio itself enforced, when one fired. Without this the turn
 /// error blames the transport for a kill Sirio decided on.
-fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
+pub(crate) fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
     match reason.lock().ok().and_then(|reason| reason.clone()) {
         Some(AcpError::Timeout {
             operation: TimeoutOperation::Prompt,
@@ -1866,7 +2077,7 @@ fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
     }
 }
 
-fn detach_worker(worker: JoinHandle<()>) {
+pub(crate) fn detach_worker(worker: JoinHandle<()>) {
     let _ = thread::spawn(move || {
         let _ = worker.join();
     });
@@ -1893,7 +2104,9 @@ fn permission_option(option: &ProtocolPermissionOption) -> PermissionOption {
 /// question card needs. Only the first question is surfaced; multi-question
 /// payloads are rare and the extra ones would need a second card. A
 /// `_sirioTextInput` metadata object declares the free-text affordance.
-fn parse_permission_question(raw_input: &serde_json::Value) -> Option<PermissionQuestion> {
+pub(crate) fn parse_permission_question(
+    raw_input: &serde_json::Value,
+) -> Option<PermissionQuestion> {
     let input = raw_input.as_object()?;
     let questions = input.get("questions")?.as_array()?;
     let first = questions.first()?.as_object()?;
@@ -3386,8 +3599,10 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         // watchdog reaping it. The turn's own failure is what the user sees;
         // the connection-level `Timeout` never races ahead of it.
         assert!(
-            seen.iter()
-                .any(|event| matches!(event, AcpEvent::TransportError(_) | AcpEvent::Timeout { .. })),
+            seen.iter().any(|event| matches!(
+                event,
+                AcpEvent::TransportError(_) | AcpEvent::Timeout { .. }
+            )),
             "a silent agent was never reaped: {seen:?}"
         );
         assert!(
@@ -3505,5 +3720,28 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         );
 
         let _ = client.shutdown();
+    }
+
+    #[test]
+    fn a_launch_spec_names_its_transport_for_a_surface_that_asks() {
+        let acp = LaunchSpec::Acp(AgentCommand::new("/usr/bin/opencode").arg("acp"));
+        assert_eq!(acp.transport_name(), "acp");
+        assert!(!acp.is_native_claude());
+
+        let native = LaunchSpec::Claude(ClaudeLaunch::new("/usr/local/bin/claude"));
+        assert_eq!(native.transport_name(), "claude");
+        assert!(native.is_native_claude());
+    }
+
+    #[test]
+    fn only_the_native_transport_offers_a_rewind() {
+        // `supports_rewind` is what hides the affordance rather than
+        // offering a button that answers "unsupported" when pressed.
+        assert!(!ChatClient::supports_rewind_for(&LaunchSpec::Acp(
+            AgentCommand::new("x")
+        )));
+        assert!(ChatClient::supports_rewind_for(&LaunchSpec::Claude(
+            ClaudeLaunch::new("claude")
+        )));
     }
 }

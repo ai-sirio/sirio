@@ -8,6 +8,7 @@ publish = false
 libc = "0.2"
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sirio_claude = { path = "../sirio_claude" }
 
 # The Claude probe drives a hidden `claude` under a PTY. Unix opens one by
 # hand (`posix_openpt`, in `claude.rs`); Windows has no POSIX PTY, and its

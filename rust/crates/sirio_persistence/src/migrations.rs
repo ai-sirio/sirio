@@ -453,6 +453,15 @@ fn migrate_v17(db: &Transaction) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v18 — the agent-side session a chat tab is continuing.
+///
+/// Nullable and never backfilled: only a native Claude chat records one, and
+/// a tab that predates this column simply starts a fresh session, which is
+/// exactly what it did before.
+fn migrate_v18(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch("ALTER TABLE tab ADD COLUMN agent_session_id TEXT;")
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -473,6 +482,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v15,
     migrate_v16,
     migrate_v17,
+    migrate_v18,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -546,6 +556,7 @@ fn read_user_version(conn: &Connection) -> Result<i64, PersistenceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentRef, AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
     #[test]
     fn current_version_is_the_migration_count() {
@@ -671,19 +682,24 @@ mod tests {
         assert_eq!(reference, "session-abc");
 
         // tab: order_idx (planted before v3's active-tab invariant fixup)
-        // survives, and v10's `agent_id` column backfills to NULL for a
-        // row that predates it rather than dropping or blanking the row.
-        let (order_idx, agent_id): (i64, Option<String>) = conn
+        // survives, and v10's `agent_id` and this release's
+        // `agent_session_id` columns backfill to NULL for a row that
+        // predates them rather than dropping or blanking the row.
+        let (order_idx, agent_id, agent_session_id): (i64, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT order_idx, agent_id FROM tab WHERE id = 'tab-1'",
+                "SELECT order_idx, agent_id, agent_session_id FROM tab WHERE id = 'tab-1'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("tab row survives forward migration");
         assert_eq!(order_idx, 3, "tab ordering survives migration");
         assert_eq!(
             agent_id, None,
             "v10 backfills agent_id to NULL for a pre-existing row"
+        );
+        assert_eq!(
+            agent_session_id, None,
+            "the new column leaves a pre-existing row with no recorded session"
         );
 
         // chat_turn: the payload/ordinal planted at v6 survive, and v12's
@@ -799,5 +815,68 @@ mod tests {
             "v15 prefixes every non-NULL agent_id with 'adapter:' — known ids,\n  \
              unexpected ids alike — and leaves NULL and row count untouched"
         );
+    }
+
+    /// The plan's `seed_worktree` helper does not exist in this file's
+    /// tests, which seed parent rows by hand; this saves the same project
+    /// and worktree through the public API, the way the app does.
+    fn seed_worktree(db: &AppDatabase, worktree_id: &str) {
+        db.save_project(&ProjectRecord::new("project-1", "Project", "/tmp/project"))
+            .expect("project");
+        db.save_worktree(&WorktreeRecord::new(
+            worktree_id,
+            "project-1",
+            "main",
+            "/tmp/project",
+        ))
+        .expect("worktree");
+    }
+
+    #[test]
+    fn a_tab_keeps_the_agent_session_it_was_saved_with() {
+        let db = AppDatabase::in_memory().expect("open");
+        seed_worktree(&db, "worktree-1");
+        let tab = TabRecord::new("tab-1", "worktree-1", "Chat", "chat")
+            .with_agent_id(AgentRef::adapter("claude"))
+            .with_agent_session_id("5bbcaeb8-e523-4087-b33c-559163f2dc07");
+        db.save_tabs("worktree-1", &[tab]).expect("save");
+        let loaded = db.tabs_of_worktree("worktree-1").expect("load");
+        assert_eq!(
+            loaded[0].agent_session_id.as_deref(),
+            Some("5bbcaeb8-e523-4087-b33c-559163f2dc07")
+        );
+    }
+
+    #[test]
+    fn a_tab_saved_before_this_column_existed_loads_with_no_session() {
+        // The column is nullable and nothing backfills it: a chat that
+        // predates this release resumes the way it always did.
+        //
+        // `AppDatabase` exposes no raw connection (the plan's
+        // `db.connection()`), so — like the other migration tests here — the
+        // legacy row is planted on a raw connection stopped at the version
+        // before this column.
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate_up_to(&mut conn, 17).expect("migrate to the version before this column");
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path)
+                 VALUES ('project-1', 'Project', '/tmp/project');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx)
+                 VALUES ('worktree-1', 'project-1', 'main', '/tmp/project', 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-old', 'worktree-1', 'Chat', 'chat', 0, 0);",
+        )
+        .expect("insert a pre-migration row");
+
+        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward");
+
+        let agent_session_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_session_id FROM tab WHERE id = 'tab-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read the new column");
+        assert_eq!(agent_session_id, None);
     }
 }

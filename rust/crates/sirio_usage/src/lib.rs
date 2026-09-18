@@ -33,6 +33,7 @@
 
 mod account;
 mod claude;
+mod claude_native;
 mod codex;
 mod credentials;
 mod http;
@@ -46,6 +47,7 @@ pub use claude::{
     ClaudeUsageFetcher, classify_failure, claude_config_dir, claude_has_credentials_at,
     parse_claude_usage,
 };
+pub use claude_native::NativeUsageFetcher;
 pub use codex::{
     CodexOAuthCredentials, CodexUsageFetcher, CredentialLoadError, TokenRefreshFailure,
     classify_token_refresh_failure, codex_auth_file_path, codex_has_credentials_at,

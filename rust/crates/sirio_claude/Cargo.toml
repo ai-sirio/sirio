@@ -1,0 +1,12 @@
+[package]
+name = "sirio_claude"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The whole crate is serde types and pure functions over them: no process,
+# no channels, no local crates. That is what keeps it a leaf both sirio_acp
+# and sirio_usage can depend on without inverting the graph.
+serde = { workspace = true }
+serde_json.workspace = true

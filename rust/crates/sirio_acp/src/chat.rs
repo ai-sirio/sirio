@@ -15,7 +15,7 @@ use sirio_persistence::{
     ChatToolLocation, ChatTranscript, ChatTurn,
 };
 
-use crate::{AcpClient, AcpEvent, AgentCommand, EventStream, ToolCallLocationInfo};
+use crate::{AcpEvent, ChatClient, EventStream, LaunchSpec, ToolCallLocationInfo};
 
 /// Observable state of a non-drawing chat session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,8 +53,8 @@ pub struct ChatSessionConfig {
     pub tab_id: String,
     /// Worktree containing the chat tab and agent process.
     pub worktree_id: String,
-    /// ACP agent executable and arguments.
-    pub command: AgentCommand,
+    /// What to launch: an ACP agent or Claude Code over its own protocol.
+    pub launch: LaunchSpec,
     /// Working directory passed to ACP session creation.
     pub cwd: PathBuf,
     /// SQLite database shared with the workspace persistence layer.
@@ -67,14 +67,14 @@ impl ChatSessionConfig {
     pub fn new(
         tab_id: impl Into<String>,
         worktree_id: impl Into<String>,
-        command: AgentCommand,
+        launch: LaunchSpec,
         cwd: impl AsRef<Path>,
         database_path: impl AsRef<Path>,
     ) -> Self {
         Self {
             tab_id: tab_id.into(),
             worktree_id: worktree_id.into(),
-            command,
+            launch,
             cwd: cwd.as_ref().to_path_buf(),
             database_path: database_path.as_ref().to_path_buf(),
         }
@@ -185,7 +185,7 @@ impl ChatState {
 #[derive(Debug)]
 pub struct ChatSession {
     state: Arc<Mutex<ChatState>>,
-    client: Arc<Mutex<Option<AcpClient>>>,
+    client: Arc<Mutex<Option<ChatClient>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -201,8 +201,8 @@ impl ChatSession {
             });
         drop(database);
 
-        let (client, events) = AcpClient::launch(config.command, &config.cwd)?;
-        let agent_session_id = Some(client.session_id().to_string());
+        let (client, events) = ChatClient::launch(config.launch, &config.cwd)?;
+        let agent_session_id = client.session_id();
         let state = Arc::new(Mutex::new(ChatState::new(
             config.tab_id,
             config.worktree_id,
@@ -270,7 +270,10 @@ impl ChatSession {
             }
             state.error = None;
             state.composer_text.clear();
-            state.current_turn = vec![ChatEntry::UserMessage { text: text.clone(), at: None }];
+            state.current_turn = vec![ChatEntry::UserMessage {
+                text: text.clone(),
+                at: None,
+            }];
             state.status = ChatStatus::Streaming;
         }
 
@@ -449,7 +452,7 @@ impl Drop for ChatSession {
 fn spawn_event_worker(
     events: EventStream,
     state: Arc<Mutex<ChatState>>,
-    client: Arc<Mutex<Option<AcpClient>>>,
+    client: Arc<Mutex<Option<ChatClient>>>,
     database_path: PathBuf,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
@@ -461,7 +464,7 @@ fn spawn_event_worker(
 fn run_event_worker(
     events: EventStream,
     state: Arc<Mutex<ChatState>>,
-    client: Arc<Mutex<Option<AcpClient>>>,
+    client: Arc<Mutex<Option<ChatClient>>>,
     database_path: PathBuf,
 ) {
     let database = match AppDatabase::open(&database_path) {
@@ -476,12 +479,27 @@ fn run_event_worker(
     };
 
     while let Ok(event) = events.recv_blocking() {
+        // The native transport has no session until the first turn names
+        // one, so launch captured `None`; when its worker says so, re-read
+        // the live id so readback names the session like the ACP arm does.
+        let identified = matches!(
+            &event,
+            AcpEvent::OtherSessionUpdate { kind } if kind == "SessionIdentified"
+        );
         let fold = {
             let Ok(mut state) = state.lock() else {
                 return;
             };
             apply_event(&mut state, event)
         };
+        if identified
+            && let Ok(client) = client.lock()
+            && let Some(client) = client.as_ref()
+            && let Some(id) = client.session_id()
+            && let Ok(mut state) = state.lock()
+        {
+            state.agent_session_id = Some(id);
+        }
         let persisted = fold.persisted;
         let persistence_succeeded = match persisted {
             Some(transcript) => match database.save_chat_transcript(&transcript) {
@@ -532,7 +550,10 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             EventFold::default()
         }
         AcpEvent::ThoughtChunk(text) => {
-            state.current_turn.push(ChatEntry::Thought { text, duration_ms: None });
+            state.current_turn.push(ChatEntry::Thought {
+                text,
+                duration_ms: None,
+            });
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
@@ -638,7 +659,10 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
                 if text.is_empty() {
                     None
                 } else {
-                    state.current_turn = vec![ChatEntry::UserMessage { text: text.clone(), at: None }];
+                    state.current_turn = vec![ChatEntry::UserMessage {
+                        text: text.clone(),
+                        at: None,
+                    }];
                     state.status = ChatStatus::Streaming;
                     Some(text)
                 }

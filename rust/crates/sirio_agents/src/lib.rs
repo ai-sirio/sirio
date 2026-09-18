@@ -98,6 +98,22 @@ impl AcpProgram {
     }
 }
 
+/// A CLI Sirio can drive over that CLI's own protocol, rather than through
+/// an ACP wrapper.
+///
+/// Like [`AcpProgram`], this is a static claim about a binary the user
+/// already has — so it holds with no network round trip — and like it, the
+/// claim is kept honest by a live conformance test rather than by
+/// assertion. Unlike it, the protocol named here is not a published
+/// standard, so the claim carries the version it was verified against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeChat {
+    /// Executable name, resolved through `PATH`.
+    pub program: &'static str,
+    /// The oldest version whose protocol this build speaks.
+    pub min_version: &'static str,
+}
+
 /// One supported agent CLI, ported from `SirioAgents.AgentAdapter`.
 ///
 /// An adapter knows how to prepare a worktree for its CLI (writing *only*
@@ -166,6 +182,14 @@ pub trait AgentAdapter {
     /// The default is `None`: an adapter answers here only once its
     /// subcommand has been observed answering an ACP `initialize`.
     fn builtin_acp(&self) -> Option<AcpProgram> {
+        None
+    }
+
+    /// The CLI this adapter can drive over its own protocol, or `None`.
+    ///
+    /// The default is `None`: an adapter answers here only once its binary
+    /// has been observed completing the handshake.
+    fn native_chat(&self) -> Option<NativeChat> {
         None
     }
 
@@ -714,6 +738,31 @@ mod tests {
             OhMyPiAdapter.builtin_acp(),
             Some(AcpProgram::new("omp", &["acp"]))
         );
+    }
+
+    #[test]
+    fn only_claude_claims_a_native_chat_transport() {
+        assert_eq!(
+            ClaudeCodeAdapter.native_chat(),
+            Some(NativeChat {
+                program: "claude",
+                min_version: "2.1.257"
+            }),
+            "verified live 2026-09-18: claude 2.1.273 answers the stdio handshake"
+        );
+        for adapter in [
+            &CodexAdapter as &dyn AgentAdapter,
+            &OpenCodeAdapter,
+            &PiAdapter,
+            &OhMyPiAdapter,
+        ] {
+            assert_eq!(
+                adapter.native_chat(),
+                None,
+                "{} has no native chat protocol Sirio speaks",
+                adapter.id()
+            );
+        }
     }
 
     #[test]

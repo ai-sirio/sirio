@@ -13,4 +13,5 @@ anyhow.workspace = true
 futures = "0.3"
 libc = "0.2"
 serde_json = "1"
+sirio_claude = { path = "../sirio_claude" }
 sirio_persistence = { path = "../sirio_persistence" }

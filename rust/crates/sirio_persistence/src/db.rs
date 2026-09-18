@@ -338,7 +338,8 @@ impl AppDatabase {
     pub fn tabs(&self) -> Result<Vec<TabRecord>, PersistenceError> {
         read_tabs(
             &self.conn,
-            "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active
+            "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active,
+                    agent_session_id
              FROM tab
              ORDER BY worktree_id, order_idx, id",
             [],
@@ -349,7 +350,8 @@ impl AppDatabase {
     pub fn tabs_of_worktree(&self, worktree_id: &str) -> Result<Vec<TabRecord>, PersistenceError> {
         read_tabs(
             &self.conn,
-            "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active
+            "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active,
+                    agent_session_id
              FROM tab
              WHERE worktree_id = ?1
              ORDER BY order_idx, id",
@@ -378,13 +380,15 @@ impl AppDatabase {
         // form; encode once here at the write boundary.
         let agent_id = tab.agent_id.as_ref().map(AgentRef::to_db_string);
         transaction.execute(
-            "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO tab
+                (id, worktree_id, title, kind, agent_id, agent_session_id, order_idx, is_active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                  worktree_id = excluded.worktree_id,
                  title = excluded.title,
                  kind = excluded.kind,
                  agent_id = excluded.agent_id,
+                 agent_session_id = excluded.agent_session_id,
                  order_idx = excluded.order_idx,
                  is_active = excluded.is_active",
             params![
@@ -393,6 +397,7 @@ impl AppDatabase {
                 tab.title,
                 tab.kind,
                 agent_id,
+                tab.agent_session_id,
                 tab.order_idx,
                 tab.is_active,
             ],
@@ -1500,6 +1505,7 @@ fn map_tab(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<TabRecord> {
         title: row.get(offset + 2)?,
         kind: row.get(offset + 3)?,
         agent_id,
+        agent_session_id: row.get(offset + 7)?,
         order_idx: row.get(offset + 5)?,
         is_active: row.get(offset + 6)?,
     })
@@ -1659,13 +1665,15 @@ fn upsert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<(
     // form; encode once here at the write boundary.
     let agent_id = tab.agent_id.as_ref().map(AgentRef::to_db_string);
     tx.execute(
-        "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO tab
+            (id, worktree_id, title, kind, agent_id, agent_session_id, order_idx, is_active)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
              worktree_id = excluded.worktree_id,
              title = excluded.title,
              kind = excluded.kind,
              agent_id = excluded.agent_id,
+             agent_session_id = excluded.agent_session_id,
              order_idx = excluded.order_idx,
              is_active = excluded.is_active",
         params![
@@ -1674,6 +1682,7 @@ fn upsert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<(
             tab.title,
             tab.kind,
             agent_id,
+            tab.agent_session_id,
             tab.order_idx,
             tab.is_active,
         ],

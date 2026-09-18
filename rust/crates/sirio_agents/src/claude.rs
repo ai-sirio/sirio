@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::error::PrepareError;
 use crate::shell_quote::shell_quote;
-use crate::{GlobalHookInstall, write_atomic};
+use crate::{GlobalHookInstall, NativeChat, write_atomic};
 
 /// Adapter for Anthropic's Claude Code CLI.
 ///
@@ -35,6 +35,13 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
 
     fn has_native_hooks(&self) -> bool {
         true
+    }
+
+    fn native_chat(&self) -> Option<NativeChat> {
+        Some(NativeChat {
+            program: "claude",
+            min_version: sirio_claude::MIN_CLAUDE_VERSION,
+        })
     }
 
     fn skill_markdown(&self) -> Option<&'static str> {

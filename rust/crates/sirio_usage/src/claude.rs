@@ -87,8 +87,7 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// user carries a usable credential. See [`KEYCHAIN_SERVICE`].
 #[cfg(target_os = "macos")]
 pub fn claude_has_keychain_credentials() -> bool {
-    let Some(account) = std::env::var_os("USER").and_then(|value| value.into_string().ok())
-    else {
+    let Some(account) = std::env::var_os("USER").and_then(|value| value.into_string().ok()) else {
         return false;
     };
     crate::opencode_go::keychain_cookie(KEYCHAIN_SERVICE, &account)
@@ -551,6 +550,21 @@ impl ClaudeUsageFetcher {
         timeout: Duration,
         envs: &[(&str, &str)],
     ) -> UsageFetchOutcome {
+        // The structured `get_usage` probe answers from the CLI's own API
+        // instead of scraping a hidden TUI, so it runs first — but only
+        // when a `claude` that speaks the native protocol is there to
+        // answer: one that resolves at or above the version floor. Anything
+        // else (missing, too old, unreadable version) takes the PTY scraper
+        // below, which stays as the path for those CLIs. Transport choice
+        // itself is Task 11's resolution (`sirio::claude_transport::resolve`)
+        // — the source of truth; this mirrors only its floor check so the
+        // status bar does not need the app's launch state.
+        if let Some(program) = crate::claude_native::native_program(envs) {
+            return crate::claude_native::NativeUsageFetcher::fetch_with_program_timeout(
+                &program,
+                timeout.min(crate::claude_native::NativeUsageFetcher::TIMEOUT),
+            );
+        }
         let skip_dotfiles = envs
             .iter()
             .any(|(key, _)| *key == "SIRIO_USAGE_NO_DOTFILES");
@@ -1048,7 +1062,8 @@ impl Drop for Pty {
 /// trust for the probe directory in the user's own `~/.claude.json`, a
 /// config change nobody approved, while the flag changes nothing on disk
 /// and the probe never asks `claude` to touch the directory anyway.
-const PROBE_ENV: &[(&str, &str)] = &[("TERM", "xterm-256color"), ("CLAUDE_CODE_SANDBOXED", "1")];
+pub(crate) const PROBE_ENV: &[(&str, &str)] =
+    &[("TERM", "xterm-256color"), ("CLAUDE_CODE_SANDBOXED", "1")];
 
 #[cfg(unix)]
 fn probe_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Command {

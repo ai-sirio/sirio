@@ -15,9 +15,9 @@ use gpui::{
     quad, rgb, transparent_black,
 };
 use sirio_acp::{
-    AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
-    ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
-    ToolCallLocationInfo,
+    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
+    EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
+    ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -46,6 +46,7 @@ mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
+use bezel::ui::widgets::{ButtonStyle, Buttons};
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
@@ -698,7 +699,7 @@ struct PlanEntryRow {
 /// A pending approval attached to the Plan card (F-CHAT-24).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PlanApproval {
-    /// Handle passed to [`AcpClient::respond_permission`].
+    /// Handle passed to [`ChatClient::respond_permission`]..
     request_id: u64,
     /// Title of the tool asking for approval.
     title: String,
@@ -822,6 +823,24 @@ enum Entry {
     },
     /// The muted timestamp/rule footer closing out one completed turn.
     TurnFooter(String),
+    /// A file-restore preview for one user turn: the dry-run answer, or
+    /// the agent's refusal sentence when it cannot rewind. Never
+    /// persisted — it describes a filesystem state, not a conversation.
+    RewindPreview {
+        files: Vec<String>,
+        insertions: u64,
+        deletions: u64,
+        /// Some when the agent refused: the reason, and no Confirm button.
+        error: Option<String>,
+    },
+    /// A file restore that ran: what came back. Never persisted, same
+    /// reason as the preview.
+    RewindReport {
+        files: Vec<String>,
+        insertions: u64,
+        deletions: u64,
+        skipped_links: u64,
+    },
     /// A transport failure, surfaced instead of silently doing nothing.
     Error {
         message: String,
@@ -892,9 +911,94 @@ impl Entry {
                 .collect::<Vec<_>>()
                 .join("\n"),
             Self::TurnFooter(text) => text.clone(),
+            Self::RewindPreview {
+                files,
+                insertions,
+                deletions,
+                error,
+            } => rewind_preview_text(files, *insertions, *deletions, error),
+            Self::RewindReport {
+                files,
+                insertions,
+                deletions,
+                skipped_links,
+            } => rewind_report_text(files, *insertions, *deletions, *skipped_links),
             Self::Error { message, .. } => message.clone(),
         }
     }
+}
+
+/// The answer to one `rewind_files` call, reduced to what the surface
+/// renders. Mirrors `sirio_claude::RewindOutcome` without naming that
+/// crate, which this one does not depend on.
+#[derive(Clone, Debug)]
+struct RewindAnswer {
+    can_rewind: bool,
+    files: Vec<String>,
+    insertions: u64,
+    deletions: u64,
+    skipped_links: u64,
+    error: Option<String>,
+}
+
+/// A preview the reader has not confirmed yet: the turn it would restore.
+#[derive(Clone, Debug)]
+struct PendingRewind {
+    user_message_id: String,
+}
+
+fn file_count_noun(count: usize) -> &'static str {
+    if count == 1 { "file" } else { "files" }
+}
+
+fn rewind_preview_text(
+    files: &[String],
+    insertions: u64,
+    deletions: u64,
+    error: &Option<String>,
+) -> String {
+    if let Some(reason) = error {
+        return reason.clone();
+    }
+    let mut text = format!(
+        "Would restore {} {} (+{} -{})",
+        files.len(),
+        file_count_noun(files.len()),
+        insertions,
+        deletions
+    );
+    for file in files {
+        text.push('\n');
+        text.push_str(file);
+    }
+    text
+}
+
+fn rewind_report_text(
+    files: &[String],
+    insertions: u64,
+    deletions: u64,
+    skipped_links: u64,
+) -> String {
+    let mut text = format!(
+        "Restored {} {} (+{} -{})",
+        files.len(),
+        file_count_noun(files.len()),
+        insertions,
+        deletions
+    );
+    for file in files {
+        text.push('\n');
+        text.push_str(file);
+    }
+    if skipped_links > 0 {
+        text.push_str(&format!(
+            "\nSkipped {} {}",
+            skipped_links,
+            file_count_noun(skipped_links as usize)
+        ));
+    }
+    text
 }
 
 fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
@@ -1000,6 +1104,10 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                 .collect(),
         }),
         Entry::TurnFooter(text) => Some(ChatEntry::TurnFooter { text: text.clone() }),
+        // A rewind card describes a filesystem state at a moment in time,
+        // not the conversation: restoring it later would present a stale
+        // restore as a live one.
+        Entry::RewindPreview { .. } | Entry::RewindReport { .. } => None,
         Entry::Error {
             message, retryable, ..
         } => Some(ChatEntry::Error {
@@ -1299,6 +1407,11 @@ pub enum ChatEvent {
     /// synthesizes the running->done `Transition` `request_auto_rename`
     /// expects.
     TurnEnded,
+    /// The native Claude session identified itself: the agent-side id a
+    /// later restart passes back as `--resume`. The workspace persists it
+    /// at once, so the id survives a restart that comes before any other
+    /// save.
+    SessionIdentified(String),
     /// The Unavailable box's action. The workspace owns the Settings
     /// surface, so the chat states the problem and asks; it does not reach
     /// across and open a window itself.
@@ -1619,15 +1732,23 @@ impl IntoElement for TranscriptSelectableText {
     }
 }
 
-/// A chat surface wired to one live [`AcpClient`] session.
+/// A chat surface wired to one live [`ChatClient`] session.
 pub struct Chat {
-    client: Option<AcpClient>,
+    client: Option<ChatClient>,
     /// `None` when there is nothing to launch — see [`Chat::unavailable`].
-    agent_command: Option<AgentCommand>,
+    agent_launch: Option<LaunchSpec>,
     /// Display name shown in the empty composer placeholder when known.
     agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
+    /// One slot per entry in `entries`: the checkpoint id of a user turn
+    /// sent on this connection, `None` everywhere else — restored turns,
+    /// assistant rows, and turns whose send never reached the worker. Kept
+    /// in step with `entries` at every site that pushes or removes one.
+    turn_message_ids: Vec<Option<String>>,
+    /// A preview the reader has not confirmed yet. One slot: confirming
+    /// always answers the latest preview.
+    pending_rewind: Option<PendingRewind>,
     /// The draft, as bezel's field: IME, selection, undo, wrapping and scroll
     /// are its job. `Chat` observes it and reads `content()`/`cursor()` into
     /// `draft`/`draft_caret` on every change — the popups and Send read the
@@ -1678,7 +1799,7 @@ pub struct Chat {
     queue_expanded: bool,
     connecting: bool,
     has_completed_turn: bool,
-    /// F-CHAT-33: how many of `AcpClient::mcp_warnings()` have already been
+    /// F-CHAT-33: how many of `ChatClient::mcp_warnings()` have already been
     /// surfaced as transcript entries. `mcp_warnings()` returns the whole
     /// running list each call (it doesn't drain), so this is the cursor
     /// that keeps a warning from being re-posted on every later turn.
@@ -1695,7 +1816,7 @@ pub struct Chat {
     /// semantics — trimmed, case-insensitive substring match against
     /// name/id/description, order preserved, empty query keeps every model.
     /// F-CHAT-15: the session-mode selector (ask/plan/auto, entirely
-    /// agent-defined), re-read from `AcpClient::mode_catalog` on connect and
+    /// agent-defined), re-read from `ChatClient::mode_catalog` on connect and
     /// after every event since the wire only pushes mode changes as an
     /// untyped `CurrentModeUpdate` the ACP layer folds into that live cell
     /// rather than a discrete event. `None` when the agent never advertised
@@ -1706,6 +1827,10 @@ pub struct Chat {
     context_popover_open: bool,
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
+    /// The agent-side session this tab continues across restarts, once the
+    /// agent names it. Read live at session-save time, so the tab-strip
+    /// save carries what the last flush wrote rather than a stale copy.
+    agent_session_id: Option<String>,
     transcript_focus: FocusHandle,
     context_usage: Option<ContextUsage>,
     list_state: ListState,
@@ -1785,6 +1910,13 @@ pub struct Chat {
     /// file picker (never set outside `#[cfg(test)]`).
     #[cfg(test)]
     attach_test_paths: Vec<PathBuf>,
+    /// Test seam: canned `rewind_files` answers, preview then confirm, so
+    /// rewind tests need no subprocess (never set outside `#[cfg(test)]`).
+    #[cfg(test)]
+    test_rewind_preview_answer: Option<Result<RewindAnswer, String>>,
+    /// Test seam: the confirm half of the above.
+    #[cfg(test)]
+    test_rewind_confirm_answer: Option<Result<RewindAnswer, String>>,
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -1800,23 +1932,19 @@ impl Chat {
     pub fn launch_from_env(cx: &mut Context<Self>) -> Option<Self> {
         let command = std::env::var_os("SIRIO_ACP_PROGRAM")
             .map(PathBuf::from)
-            .map(AgentCommand::new)?;
+            .map(|program| LaunchSpec::Acp(AgentCommand::new(program)))?;
         Some(Self::launch_with_command(command, default_agent_cwd(), cx))
     }
 
-    /// Launches a real ACP agent from an explicit command and returns a
+    /// Launches a real agent from an explicit launch spec and returns a
     /// `Chat` wired to its event stream.
     ///
     /// This is the picker's door: the caller resolves the chosen adapter's
-    /// launch source (Task 8) and converts it with `agent_command_for`, so
+    /// launch source (Task 8) and converts it with `agent_launch_for`, so
     /// the tab connects to the source the user actually has rather than a
     /// hard-coded default.
-    pub fn launch_with_command(
-        command: AgentCommand,
-        cwd: PathBuf,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut chat = Self::new(Some(command), cwd, cx);
+    pub fn launch_with_command(launch: LaunchSpec, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+        let mut chat = Self::new(Some(launch), cwd, cx);
         chat.start_connection(cx);
 
         chat
@@ -1852,17 +1980,17 @@ impl Chat {
         }
     }
 
-    /// Launches an ACP chat whose completed turns are restored and saved in
+    /// Launches a chat whose completed turns are restored and saved in
     /// the durable transcript owned by its shell tab.
     pub fn launch_with_command_and_persistence(
-        command: AgentCommand,
+        launch: LaunchSpec,
         cwd: PathBuf,
         database_path: PathBuf,
         tab_id: String,
         worktree_id: String,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut chat = Self::new(Some(command), cwd, cx);
+        let mut chat = Self::new(Some(launch), cwd, cx);
         chat.persistence = Some(ChatPersistence {
             database_path,
             tab_id,
@@ -1885,7 +2013,7 @@ impl Chat {
         let cwd = default_agent_cwd();
         let command = std::env::var_os("SIRIO_ACP_PROGRAM")
             .map(PathBuf::from)
-            .map(AgentCommand::new)?;
+            .map(|program| LaunchSpec::Acp(AgentCommand::new(program)))?;
         Some(Self::launch_with_command_and_persistence(
             command,
             cwd,
@@ -1896,11 +2024,11 @@ impl Chat {
         ))
     }
 
-    /// `command` is `None` for a chat that has nothing to launch — see
+    /// `launch` is `None` for a chat that has nothing to launch — see
     /// [`Chat::unavailable`]. Storing a placeholder command instead would
     /// reintroduce, in miniature, the exact lie this crate spent a branch
     /// removing: a command that names something nobody verified exists.
-    fn new(command: Option<AgentCommand>, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+    fn new(launch: Option<LaunchSpec>, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         Self::bind_keys(cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(2048.0));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -1949,10 +2077,12 @@ impl Chat {
 
         Self {
             client: None,
-            agent_command: command,
+            agent_launch: launch,
             agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
+            turn_message_ids: Vec::new(),
+            pending_rewind: None,
             composer_field,
             draft: SharedString::default(),
             draft_caret: 0,
@@ -1987,6 +2117,7 @@ impl Chat {
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
+            agent_session_id: None,
             context_usage: None,
             list_state,
             transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
@@ -2020,6 +2151,10 @@ impl Chat {
             effort: None,
             #[cfg(test)]
             attach_test_paths: Vec::new(),
+            #[cfg(test)]
+            test_rewind_preview_answer: None,
+            #[cfg(test)]
+            test_rewind_confirm_answer: None,
         }
     }
 
@@ -2046,6 +2181,7 @@ impl Chat {
     /// Add one transcript row and keep the virtualizer's index tree in sync.
     fn push_entry(&mut self, entry: Entry) {
         let index = self.entries.len();
+        self.turn_message_ids.push(None);
         let following_tail = self.list_state.is_following_tail();
         if !matches!(entry, Entry::Thought { .. }) {
             self.settle_open_thought();
@@ -2221,6 +2357,24 @@ impl Chat {
 
     fn handle_event(&mut self, event: AcpEvent, cx: &mut Context<Self>) {
         let _perf = sirio_perf::span("Chat.handle_event", cx.entity_id().as_u64());
+        // The Claude worker records each sent turn's uuid when it processes
+        // the prompt, so reading it at send time would usually still see
+        // the previous turn's: backfill the latest unfilled user turn from
+        // the live cell instead. Only while connected — a failed send takes
+        // the client, and stamping its entry with the previous turn's id
+        // would name a checkpoint that is not this turn's.
+        if self.client.is_some()
+            && let Some(ChatClient::Claude(native)) = &self.client
+            && let Some(id) = native.last_user_message_id()
+            && let Some(latest_user) = self
+                .entries
+                .iter()
+                .rposition(|entry| matches!(entry, Entry::User { .. }))
+            && let Some(slot) = self.turn_message_ids.get_mut(latest_user)
+            && slot.is_none()
+        {
+            *slot = Some(id);
+        }
         let perf_notification = match &event {
             AcpEvent::AgentMessageChunk(_) => "notify.Chat.acp_message",
             AcpEvent::ThoughtChunk(_) => "notify.Chat.acp_thought",
@@ -2695,6 +2849,32 @@ impl Chat {
                 });
                 self.streaming = false;
             }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "SessionIdentified" => {
+                // The id arrives as a re-read signal rather than as its own
+                // event, so `AcpEvent` stays the enum every consumer in the
+                // workspace already matches exhaustively.
+                let identified = match &self.client {
+                    Some(ChatClient::Claude(native)) => {
+                        Some((native.resumed_session_refused(), native.session_id()))
+                    }
+                    _ => None,
+                };
+                match identified {
+                    Some((true, _)) => {
+                        // The stored id named a session that is gone: stop
+                        // offering it, so the next restart does not retry
+                        // the same refusal. The fresh session identifies
+                        // itself on its first turn.
+                        self.agent_session_id = None;
+                        self.persist_agent_session_id(None);
+                    }
+                    Some((false, Some(session_id))) => {
+                        self.agent_session_id = Some(session_id.clone());
+                        cx.emit(ChatEvent::SessionIdentified(session_id));
+                    }
+                    _ => {}
+                }
+            }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
@@ -2814,6 +2994,47 @@ impl Chat {
     /// [`Self::control_compose`] on restore.
     pub fn draft_text(&self) -> String {
         self.draft.to_string()
+    }
+
+    /// The agent-side session this tab continues, once the agent names it.
+    /// Read live at session-save time, the same pattern as [`Self::draft_text`].
+    pub fn agent_session_id(&self) -> Option<String> {
+        self.agent_session_id.clone()
+    }
+
+    /// Clears a stale agent session id from this tab's own row at once — a
+    /// hook write, like the workspace's save on [`ChatEvent::SessionIdentified`],
+    /// never batched with the tab-strip save. Only the refusal path writes
+    /// from here: a newly identified id goes through the event so the
+    /// workspace stays the one place saves originate.
+    fn persist_agent_session_id(&self, session_id: Option<&str>) {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!(
+                    "[chat] failed to open transcript database {}: {error}",
+                    persistence.database_path.display()
+                );
+                return;
+            }
+        };
+        let mut tabs = match database.tabs_of_worktree(&persistence.worktree_id) {
+            Ok(tabs) => tabs,
+            Err(error) => {
+                eprintln!("[chat] failed to read tabs for session save: {error}");
+                return;
+            }
+        };
+        let Some(tab) = tabs.iter_mut().find(|tab| tab.id == persistence.tab_id) else {
+            return;
+        };
+        tab.agent_session_id = session_id.map(str::to_string);
+        if let Err(error) = database.save_tabs(&persistence.worktree_id, &tabs) {
+            eprintln!("[chat] failed to save agent session id: {error}");
+        }
     }
 
     /// Replaces the visible composer's plain-text draft through the control
@@ -3012,6 +3233,7 @@ impl Chat {
         };
         persistence.tab_id = tab_id;
         self.entries.clear();
+        self.turn_message_ids.clear();
         // F-CHAT-22: `unfolded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
@@ -3231,15 +3453,24 @@ impl Chat {
 
     fn clear_recovered_connection_errors(&mut self) {
         let old_count = self.entries.len();
+        let old_ids = std::mem::take(&mut self.turn_message_ids);
+        let mut kept_ids = Vec::with_capacity(old_count);
+        let mut ids = old_ids.into_iter();
         self.entries.retain(|entry| {
-            !matches!(
+            let id = ids.next().unwrap_or(None);
+            let keep = !matches!(
                 entry,
                 Entry::Error {
                     kind: ErrorKind::Connection | ErrorKind::AuthRequired | ErrorKind::Disconnected,
                     ..
                 }
-            )
+            );
+            if keep {
+                kept_ids.push(id);
+            }
+            keep
         });
+        self.turn_message_ids = kept_ids;
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
             self.thought_scroll.clear();
@@ -3349,7 +3580,7 @@ impl Chat {
     }
 
     /// #136's twin for the model selector: offered as soon as the agent has
-    /// named models, which `Chat::launch` reads off `AcpClient::model_catalog`
+    /// named models, which `Chat::launch` reads off `ChatClient::model_catalog`
     /// before consuming a single event.
     fn model_control_visible(&self) -> bool {
         !self.available_models.is_empty()
@@ -3826,6 +4057,8 @@ impl Chat {
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
         self.entries.clear();
+        self.turn_message_ids.clear();
+        self.pending_rewind = None;
         self.unfolded_turns.clear();
         self.thought_scroll.clear();
         self.list_state.splice(0..old_count, 0);
@@ -4314,7 +4547,7 @@ impl Chat {
             return;
         }
 
-        let Some(command) = self.agent_command.clone() else {
+        let Some(launch) = self.agent_launch.clone() else {
             // An unavailable chat has no command by construction, so there
             // is nothing to spawn and no failure to report either.
             return;
@@ -4326,12 +4559,12 @@ impl Chat {
         self._event_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { AcpClient::launch(command, cwd) })
+                .spawn(async move { ChatClient::launch(launch, cwd) })
                 .await;
 
             match result {
                 Ok((client, events)) => {
-                    let initial_catalog = client.model_catalog().cloned();
+                    let initial_catalog = client.model_catalog();
                     let initial_mode_catalog = client.mode_catalog();
                     let _ = this.update(cx, |chat, _| {
                         chat.clear_recovered_connection_errors();
@@ -4409,6 +4642,153 @@ impl Chat {
         }));
     }
 
+    pub(crate) const REWIND_ACTION_LABEL: &'static str = "Restore files to this message";
+    /// The turn rail's restore action. It restores the filesystem, so the
+    /// label says files: a wording that implied the turn itself was undone
+    /// would promise something this cannot do.
+    fn rewind_action_label(&self) -> &'static str {
+        Self::REWIND_ACTION_LABEL
+    }
+
+    /// Whether the turn rail may offer a restore for `entry_index`: the
+    /// transport speaks rewind, no turn is in flight, and this connection
+    /// sent the turn — a restored turn's checkpoints belong to a process
+    /// that is gone. An ACP chat shows no button rather than one that
+    /// errors when pressed.
+    fn rewind_available_for_turn(&self, entry_index: usize) -> bool {
+        if self.streaming {
+            return false;
+        }
+        let transport_ok = match &self.agent_launch {
+            Some(launch) => ChatClient::supports_rewind_for(launch),
+            None => self
+                .client
+                .as_ref()
+                .is_some_and(|client| client.supports_rewind()),
+        };
+        transport_ok
+            && self
+                .turn_message_ids
+                .get(entry_index)
+                .is_some_and(|id| id.is_some())
+    }
+
+    /// Whether a preview is waiting for its confirm.
+    #[cfg(test)]
+    fn has_pending_rewind(&self) -> bool {
+        self.pending_rewind.is_some()
+    }
+
+    /// The transcript's last row as text, for tests.
+    #[cfg(test)]
+    fn last_entry_text(&self) -> String {
+        self.entries
+            .last()
+            .map(Entry::plain_text)
+            .unwrap_or_default()
+    }
+
+    /// Runs one `rewind_files` round trip. Synchronous: the answer is a
+    /// local file listing that arrives in milliseconds, and the client
+    /// owns no handle this surface could await off-thread.
+    fn run_rewind(&self, user_message_id: &str, dry_run: bool) -> Result<RewindAnswer, String> {
+        #[cfg(test)]
+        {
+            let stub = if dry_run {
+                &self.test_rewind_preview_answer
+            } else {
+                &self.test_rewind_confirm_answer
+            };
+            if let Some(answer) = stub {
+                return answer.clone();
+            }
+        }
+        let Some(client) = &self.client else {
+            return Err("the agent is no longer connected".to_string());
+        };
+        client
+            .rewind_files(user_message_id, dry_run)
+            .map(|outcome| RewindAnswer {
+                can_rewind: outcome.can_rewind,
+                files: outcome.files_changed,
+                insertions: outcome.insertions,
+                deletions: outcome.deletions,
+                skipped_links: outcome.skipped_links,
+                error: outcome.error,
+            })
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    /// Asks what restoring this turn would touch and shows the answer as a
+    /// confirmation card — or the agent's refusal sentence, with nothing to
+    /// confirm. A no-op where the action is unavailable.
+    fn request_rewind_preview(&mut self, entry_index: usize, cx: &mut Context<Self>) {
+        if !self.rewind_available_for_turn(entry_index) {
+            return;
+        }
+        let Some(user_message_id) = self.turn_message_ids.get(entry_index).cloned().flatten()
+        else {
+            return;
+        };
+        match self.run_rewind(&user_message_id, true) {
+            Ok(answer) if answer.can_rewind => {
+                self.pending_rewind = Some(PendingRewind { user_message_id });
+                self.push_entry(Entry::RewindPreview {
+                    files: answer.files,
+                    insertions: answer.insertions,
+                    deletions: answer.deletions,
+                    error: None,
+                });
+            }
+            Ok(answer) => {
+                self.push_entry(Entry::RewindPreview {
+                    files: Vec::new(),
+                    insertions: 0,
+                    deletions: 0,
+                    error: Some(answer.error.unwrap_or_else(|| {
+                        "the agent cannot restore files to this message".to_string()
+                    })),
+                });
+            }
+            Err(error) => {
+                self.push_entry(Entry::RewindPreview {
+                    files: Vec::new(),
+                    insertions: 0,
+                    deletions: 0,
+                    error: Some(error),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Restores the pending preview's turn and reports what came back. A
+    /// no-op with nothing pending — confirming twice restores once.
+    fn confirm_rewind(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_rewind.take() else {
+            return;
+        };
+        match self.run_rewind(&pending.user_message_id, false) {
+            Ok(answer) => {
+                self.push_entry(Entry::RewindReport {
+                    files: answer.files,
+                    insertions: answer.insertions,
+                    deletions: answer.deletions,
+                    skipped_links: answer.skipped_links,
+                });
+            }
+            Err(error) => {
+                self.push_entry(Entry::RewindPreview {
+                    files: Vec::new(),
+                    insertions: 0,
+                    deletions: 0,
+                    error: Some(error),
+                });
+            }
+        }
+        cx.notify();
+    }
+
     fn retry(&mut self, cx: &mut Context<Self>) {
         self.start_connection(cx);
     }
@@ -4430,6 +4810,7 @@ impl Chat {
             return;
         }
         self.entries.remove(index);
+        self.turn_message_ids.remove(index);
         self.list_state.splice(index..index + 1, 0);
         cx.notify();
     }
@@ -4450,8 +4831,8 @@ impl Chat {
     }
 
     #[cfg(test)]
-    fn from_test_command(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut chat = Self::new(Some(command), cwd, cx);
+    fn from_test_command(launch: LaunchSpec, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+        let mut chat = Self::new(Some(launch), cwd, cx);
         chat.start_connection(cx);
         chat
     }
@@ -5523,6 +5904,69 @@ impl Chat {
                 }
                 card.into_any_element()
             }
+            Entry::RewindPreview {
+                files,
+                insertions,
+                deletions,
+                error,
+            } => {
+                let mut card = div()
+                    .id(("rewind-preview", entry_index))
+                    .debug_selector(move || format!("rewind-preview-{entry_index}"))
+                    .w_full()
+                    .rounded(theme.radii.code_block)
+                    .bg(theme.surface_raised)
+                    .border_l_2()
+                    .border_color(theme.border_strong)
+                    .px(px(CARD_H_PADDING))
+                    .py(px(CARD_V_PADDING))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(typography.callout)
+                            .text_color(theme.text)
+                            .child(rewind_preview_text(&files, insertions, deletions, &error)),
+                    );
+                if error.is_none() {
+                    let confirm_entity = entity.clone();
+                    card = card.child(
+                        bezel_theme
+                            .button("Restore files", ButtonStyle::Prominent, None)
+                            .id(("rewind-confirm", entry_index))
+                            .debug_selector(move || format!("rewind-confirm-{entry_index}"))
+                            .on_click(move |_, _, cx| {
+                                confirm_entity.update(cx, |chat, cx| chat.confirm_rewind(cx));
+                            }),
+                    );
+                }
+                card.into_any_element()
+            }
+            Entry::RewindReport {
+                files,
+                insertions,
+                deletions,
+                skipped_links,
+            } => div()
+                .id(("rewind-report", entry_index))
+                .debug_selector(move || format!("rewind-report-{entry_index}"))
+                .w_full()
+                .rounded(theme.radii.code_block)
+                .bg(theme.surface_raised)
+                .border_l_2()
+                .border_color(theme.border_strong)
+                .px(px(CARD_H_PADDING))
+                .py(px(CARD_V_PADDING))
+                .text_size(typography.callout)
+                .text_color(theme.text)
+                .child(rewind_report_text(
+                    &files,
+                    insertions,
+                    deletions,
+                    skipped_links,
+                ))
+                .into_any_element(),
             Entry::TurnFooter(at) => div()
                 .w_full()
                 .h(px(24.0))
@@ -7199,7 +7643,7 @@ impl Chat {
         };
 
         // With no agent configured the chip row holds only the send disc.
-        let has_agent = self.agent_command.is_some();
+        let has_agent = self.agent_launch.is_some();
 
         let composer_context_menu = self
             .composer_context_menu
@@ -7494,6 +7938,12 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
         Entry::TurnFooter(text) => {
             row.insert("kind".into(), "turn".into());
             row.insert("text".into(), text.clone());
+        }
+        Entry::RewindPreview { .. } => {
+            row.insert("kind".into(), "rewind-preview".into());
+        }
+        Entry::RewindReport { .. } => {
+            row.insert("kind".into(), "rewind-report".into());
         }
         Entry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());
@@ -8689,13 +9139,12 @@ mod tests {
         }
     }
 
-
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -9050,9 +9499,166 @@ mod tests {
             for arg in &args {
                 command = command.arg(*arg);
             }
-            Chat::from_test_command(command, std::env::temp_dir(), cx)
+            Chat::from_test_command(LaunchSpec::Acp(command), std::env::temp_dir(), cx)
         });
         (chat, cx)
+    }
+
+    /// A chat on the given transport that never connects: state-only, so
+    /// rewind tests need no subprocess. `Chat::new` without
+    /// `start_connection` leaves `client` empty, which is exactly the
+    /// "before it connects" surface the affordance check must handle.
+    fn chat_with_transport(launch: LaunchSpec, cx: &mut TestAppContext) -> Entity<Chat> {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, _) =
+            cx.add_window_view(|_, cx| Chat::new(Some(launch), std::env::temp_dir(), cx));
+        chat
+    }
+
+    /// A native chat with one sent turn: a user entry whose checkpoint id
+    /// came from the current connection, plus canned answers for the
+    /// preview and the confirm calls `request_rewind_preview` /
+    /// `confirm_rewind` make.
+    fn native_chat_with_one_turn(cx: &mut TestAppContext) -> Entity<Chat> {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "fix the bug".into(),
+                at: None,
+            });
+            if let Some(slot) = chat.turn_message_ids.last_mut() {
+                *slot = Some("uuid-1".into());
+            }
+            let answer = Ok(RewindAnswer {
+                can_rewind: true,
+                files: vec!["/repo/a.rs".into(), "/repo/b.rs".into()],
+                insertions: 12,
+                deletions: 4,
+                skipped_links: 0,
+                error: None,
+            });
+            chat.test_rewind_preview_answer = Some(answer.clone());
+            chat.test_rewind_confirm_answer = Some(answer);
+        });
+        chat
+    }
+
+    /// A native chat whose one turn came from the database, not this
+    /// connection: the entry is there but no checkpoint id names it.
+    fn native_chat_with_restored_transcript(cx: &mut TestAppContext) -> Entity<Chat> {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "fix the bug".into(),
+                at: None,
+            });
+        });
+        chat
+    }
+
+    /// A native chat whose agent answers the preview with `canRewind:
+    /// false`: checkpointing is off, so there is nothing to confirm.
+    fn native_chat_that_refuses_rewind(cx: &mut TestAppContext) -> Entity<Chat> {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "fix the bug".into(),
+                at: None,
+            });
+            if let Some(slot) = chat.turn_message_ids.last_mut() {
+                *slot = Some("uuid-1".into());
+            }
+            chat.test_rewind_preview_answer = Some(Ok(RewindAnswer {
+                can_rewind: false,
+                files: Vec::new(),
+                insertions: 0,
+                deletions: 0,
+                skipped_links: 0,
+                error: Some("File checkpointing is not enabled".into()),
+            }));
+        });
+        chat
+    }
+
+    #[gpui::test]
+    async fn the_rewind_action_appears_only_where_it_can_work(cx: &mut TestAppContext) {
+        // Three conditions, each its own reason to hide it: a transport
+        // that cannot rewind, a turn from a previous connection whose
+        // checkpoints this process never took, and a turn in flight.
+        let acp = chat_with_transport(LaunchSpec::Acp(AgentCommand::new("x")), cx);
+        assert!(!acp.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)));
+
+        let native = native_chat_with_one_turn(cx);
+        assert!(native.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)));
+
+        native.update(cx, |chat, _| chat.streaming = true);
+        assert!(
+            !native.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)),
+            "a turn in flight is writing the files a rewind would restore"
+        );
+
+        let restored = native_chat_with_restored_transcript(cx);
+        assert!(
+            !restored.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)),
+            "a turn this connection never sent has no checkpoint to name"
+        );
+    }
+
+    #[gpui::test]
+    async fn confirming_a_preview_reports_what_was_restored(cx: &mut TestAppContext) {
+        let chat = native_chat_with_one_turn(cx);
+        chat.update(cx, |chat, cx| chat.request_rewind_preview(0, cx));
+        cx.run_until_parked();
+        let preview = chat.read_with(cx, |chat, _| chat.last_entry_text());
+        assert!(
+            preview.contains("2 files"),
+            "the preview counts them: {preview}"
+        );
+        assert!(preview.contains("+12"), "and the lines: {preview}");
+
+        chat.update(cx, |chat, cx| chat.confirm_rewind(cx));
+        cx.run_until_parked();
+        let report = chat.read_with(cx, |chat, _| chat.last_entry_text());
+        assert!(report.contains("Restored 2 files"), "{report}");
+        assert!(
+            report.contains("/repo/a.rs"),
+            "the report names them, so the reader can check: {report}"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_refusal_states_the_reason_and_offers_nothing(cx: &mut TestAppContext) {
+        let chat = native_chat_that_refuses_rewind(cx);
+        chat.update(cx, |chat, cx| chat.request_rewind_preview(0, cx));
+        cx.run_until_parked();
+        let entry = chat.read_with(cx, |chat, _| chat.last_entry_text());
+        assert!(
+            entry.contains("File checkpointing is not enabled"),
+            "{entry}"
+        );
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.has_pending_rewind()),
+            "nothing to confirm"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_label_says_files_not_conversation(cx: &mut TestAppContext) {
+        // It restores the filesystem. A label that implied the turn itself
+        // was undone would promise something this cannot do.
+        let chat = native_chat_with_one_turn(cx);
+        let label = chat.read_with(cx, |chat, _| chat.rewind_action_label());
+        assert_eq!(label, "Restore files to this message");
     }
 
     /// The card carries the chip row and the send disc: field on top, then
@@ -10681,7 +11287,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -10726,7 +11334,9 @@ let answer = 42;
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -10803,7 +11413,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 dir.0.clone(),
                 cx,
             );
@@ -11289,7 +11901,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             )
@@ -11362,7 +11974,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             )
@@ -13084,7 +13696,7 @@ let answer = 42;
         // start the connection exactly like `launch` does.
         let chat = cx.new(|cx| {
             Chat::launch_with_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             )
@@ -13094,11 +13706,11 @@ let answer = 42;
         cx.run_until_parked();
 
         chat.read_with(cx, |chat, _| {
+            let Some(LaunchSpec::Acp(command)) = chat.agent_launch.as_ref() else {
+                panic!("a launched chat keeps its launch spec");
+            };
             assert_eq!(
-                chat.agent_command
-                    .as_ref()
-                    .expect("a launched chat has its command")
-                    .program,
+                command.program,
                 PathBuf::from("/definitely/missing/sirio-acp-agent"),
                 "the command given to the constructor is the command wired"
             );
@@ -13123,7 +13735,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13176,9 +13788,11 @@ let answer = 42;
     ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let command = AgentCommand::new("python3")
-            .arg(CHAT_FIXTURE)
-            .arg("auth-required");
+        let command = LaunchSpec::Acp(
+            AgentCommand::new("python3")
+                .arg(CHAT_FIXTURE)
+                .arg("auth-required"),
+        );
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -13246,9 +13860,11 @@ let answer = 42;
     ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let command = AgentCommand::new("python3")
-            .arg(CHAT_FIXTURE)
-            .arg("auth-required");
+        let command = LaunchSpec::Acp(
+            AgentCommand::new("python3")
+                .arg(CHAT_FIXTURE)
+                .arg("auth-required"),
+        );
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -13336,9 +13952,11 @@ let answer = 42;
         // successfully, then on the first prompt replies with a line the
         // protocol layer cannot parse as a response to anything, and exits
         // — a transport failure, not an answerable request failure.
-        let command = AgentCommand::new("python3")
-            .arg(CHAT_FIXTURE)
-            .arg("broken-transport");
+        let command = LaunchSpec::Acp(
+            AgentCommand::new("python3")
+                .arg(CHAT_FIXTURE)
+                .arg("broken-transport"),
+        );
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -13435,7 +14053,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13497,7 +14117,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13540,7 +14162,7 @@ let answer = 42;
 
     /// F-CHAT-15: the session-mode pill opens a picker over the agent's
     /// advertised modes, selecting one calls through to the live
-    /// `AcpClient::set_mode` seam and updates the pill label in place —
+    /// `ChatClient::set_mode` seam and updates the pill label in place —
     /// this was a purely cosmetic 4-way string flip before this row wired
     /// it to `ModeCatalog`.
     #[gpui::test]
@@ -13551,7 +14173,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13615,7 +14237,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13715,7 +14337,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13804,7 +14426,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13888,7 +14510,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13941,7 +14563,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -13988,7 +14610,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14004,18 +14626,21 @@ let answer = 42;
                     },
                     AnswerOption {
                         id: "allow-always".into(),
-                        label: "Yes, and do not ask again for this session or any future one".into(),
+                        label: "Yes, and do not ask again for this session or any future one"
+                            .into(),
                         is_rejection: false,
                     },
                     AnswerOption {
                         id: "allow-session".into(),
-                        label: "Yes, and do not ask again for this session regardless of file".into(),
+                        label: "Yes, and do not ask again for this session regardless of file"
+                            .into(),
                         is_rejection: false,
                     },
                     AnswerOption {
                         id: "deny".into(),
-                        label: "No, never allow this tool call to modify anything in this directory"
-                            .into(),
+                        label:
+                            "No, never allow this tool call to modify anything in this directory"
+                                .into(),
                         is_rejection: true,
                     },
                 ],
@@ -14056,7 +14681,9 @@ let answer = 42;
         let long_path = format!("src/{}/edited.rs", "deeply-nested-segment/".repeat(20));
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14107,7 +14734,9 @@ let answer = 42;
         let long_path = format!("src/{}/edited.rs", "deeply-nested-segment/".repeat(20));
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14162,7 +14791,9 @@ let answer = 42;
         );
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14222,7 +14853,9 @@ let answer = 42;
         let long_title = "LongSessionTitle".repeat(20);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14262,7 +14895,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14315,7 +14948,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14361,7 +14994,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14411,7 +15046,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             )
@@ -14477,7 +15114,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14542,7 +15181,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14822,7 +15463,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14859,7 +15502,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14900,7 +15545,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14918,7 +15565,9 @@ let answer = 42;
 
         let (restored, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -14943,7 +15592,7 @@ let answer = 42;
         let cwd = std::env::temp_dir();
         let chat = cx.new(|cx| {
             Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 cwd.clone(),
                 cx,
             )
@@ -14975,7 +15624,9 @@ let answer = 42;
         // The only path back online: the transcript error banner's explicit
         // Retry control, not a side effect of a disabled Send.
         chat.update(cx, |chat, cx| {
-            chat.agent_command = Some(AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain"));
+            chat.agent_launch = Some(LaunchSpec::Acp(
+                AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain"),
+            ));
             chat.retry(cx);
         });
 
@@ -15036,7 +15687,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -15258,7 +15911,8 @@ let answer = 42;
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
+            let command =
+                LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
             Chat::from_test_command(command, cwd, cx)
         });
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
@@ -15492,7 +16146,8 @@ let answer = 42;
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
+            let command =
+                LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
             Chat::from_test_command(command, cwd, cx)
         });
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
@@ -15569,7 +16224,8 @@ let answer = 42;
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
+            let command =
+                LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
             Chat::from_test_command(command, cwd, cx)
         });
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
@@ -15623,7 +16279,8 @@ let answer = 42;
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "permission"]);
+            let command =
+                LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "permission"]));
             Chat::from_test_command(command, cwd, cx)
         });
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
@@ -15772,7 +16429,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             )
@@ -16067,7 +16726,7 @@ let answer = 42;
         // The 25% fixture state renders no warning.
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16094,7 +16753,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16138,7 +16797,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16183,7 +16842,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16323,7 +16982,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16421,7 +17082,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16497,7 +17160,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -16712,7 +17377,7 @@ let answer = 42;
 
         chat.read_with(cx, |chat, _| {
             assert!(
-                chat.client.is_none() && chat.agent_command.is_none(),
+                chat.client.is_none() && chat.agent_launch.is_none(),
                 "no process was started and no command was invented to start one"
             );
             assert!(!chat.can_send(), "the composer stays disabled");
@@ -16973,7 +17638,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
@@ -17016,7 +17683,9 @@ let answer = 42;
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );

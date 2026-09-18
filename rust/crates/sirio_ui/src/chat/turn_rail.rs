@@ -8,11 +8,12 @@
 //! the element itself is built from bezel's tokens in `Chat::render_turn_rail`.
 
 use bezel::theme::{Theme as BezelTheme, ink};
+use bezel::ui::widgets::{ButtonStyle, Buttons};
 use bezel::ui::{popover, surface};
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Empty, FontWeight, ListOffset, Pixels, SharedString,
-    Window, canvas, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Div, Empty, Entity, FontWeight, ListOffset, Pixels,
+    SharedString, Window, canvas, div, prelude::*, px,
 };
 
 use super::{Chat, Entry};
@@ -144,6 +145,19 @@ const HIT_ROW: Pixels = px(8.0);
 pub(crate) struct TurnPreview {
     message: SharedString,
     when: SharedString,
+    /// The restore action for the tick's turn, shown only when the chat
+    /// says the turn can be rewound — an ACP tick carries `None` rather
+    /// than a button that errors when pressed.
+    rewind: Option<RewindAction>,
+}
+
+/// A tick's restore action: which chat to ask, and which turn of it.
+#[derive(Clone)]
+pub(crate) struct RewindAction {
+    chat: Entity<Chat>,
+    entry_index: usize,
+    /// The button text, read off the chat so the wording has one owner.
+    label: &'static str,
 }
 
 impl TurnPreview {
@@ -151,10 +165,16 @@ impl TurnPreview {
     pub(crate) fn open(
         message: impl Into<SharedString>,
         when: impl Into<SharedString>,
+        rewind: Option<RewindAction>,
         cx: &mut App,
     ) -> AnyView {
         let (message, when) = (message.into(), when.into());
-        cx.new(|_| Self { message, when }).into()
+        cx.new(|_| Self {
+            message,
+            when,
+            rewind,
+        })
+        .into()
     }
 
     /// The card and its contents, before the surface it mounts on.
@@ -182,6 +202,19 @@ impl TurnPreview {
                     .text_color(theme.text_muted)
                     .child(self.when.clone()),
             )
+            .when_some(self.rewind.clone(), |card, action| {
+                card.child(
+                    theme
+                        .button(action.label, ButtonStyle::Ghost, None)
+                        .id("turn-rewind-action")
+                        .debug_selector(|| "turn-rewind-action".into())
+                        .on_click(move |_, _, cx| {
+                            action.chat.update(cx, |chat, cx| {
+                                chat.request_rewind_preview(action.entry_index, cx);
+                            });
+                        }),
+                )
+            })
     }
 }
 
@@ -260,6 +293,16 @@ impl Chat {
                 Some(at) => format!("Turn {} · {}", index + 1, at.format("%H:%M")),
                 None => format!("Turn {} of {count}", index + 1),
             };
+            // The affordance lives here and nowhere else: an ACP tick, a
+            // turn in flight, or a restored turn carries no action rather
+            // than one that errors.
+            let rewind = self
+                .rewind_available_for_turn(entry_index)
+                .then(|| RewindAction {
+                    chat: cx.entity(),
+                    entry_index,
+                    label: self.rewind_action_label(),
+                });
             let line = div()
                 .debug_selector(move || format!("turn-tick-line-{index}"))
                 .h(px(1.0))
@@ -282,7 +325,7 @@ impl Chat {
                     .items_center()
                     .cursor_pointer()
                     .hoverable_tooltip(move |_, cx| {
-                        TurnPreview::open(title.clone(), when.clone(), cx)
+                        TurnPreview::open(title.clone(), when.clone(), rewind.clone(), cx)
                     })
                     .on_click(cx.listener(move |chat, _, _, cx| {
                         chat.list_state.scroll_to(ListOffset {
@@ -436,6 +479,7 @@ mod tests {
         let (_preview, cx) = cx.add_window_view(|_, _| TurnPreview {
             message: message.into(),
             when: "Turn 2 · 13:28".into(),
+            rewind: None,
         });
         cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
         cx.update(|window, cx| {
@@ -457,6 +501,42 @@ mod tests {
         );
     }
 
+    /// The restore action is part of the card only when the tick's turn
+    /// can be rewound: an ACP tick shows the message with no button
+    /// rather than one that errors when pressed.
+    #[gpui::test]
+    async fn the_preview_action_appears_only_for_a_rewindable_turn(cx: &mut gpui::TestAppContext) {
+        async fn action_visible(cx: &mut gpui::TestAppContext, rewind: bool) -> bool {
+            cx.update(sirio_theme::Theme::init);
+            let (_preview, cx) = cx.add_window_view(|_, cx| {
+                let chat = cx.new(|cx| Chat::new(None, std::env::temp_dir(), cx));
+                TurnPreview {
+                    message: "fix the bug".into(),
+                    when: "Turn 1".into(),
+                    rewind: rewind.then(|| RewindAction {
+                        chat,
+                        entry_index: 0,
+                        label: Chat::REWIND_ACTION_LABEL,
+                    }),
+                }
+            });
+            cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+            cx.debug_bounds("turn-rewind-action").is_some()
+        }
+        assert!(
+            action_visible(cx, true).await,
+            "a rewindable turn offers the restore"
+        );
+        assert!(
+            !action_visible(cx, false).await,
+            "any other tick shows no restore button"
+        );
+    }
+
     /// Off macOS the popover surface is a translucent tint meant to sit over
     /// a blur, so the card must keep its own opaque fill under it.
     #[test]
@@ -465,6 +545,7 @@ mod tests {
         let preview = TurnPreview {
             message: "m".into(),
             when: "w".into(),
+            rewind: None,
         };
         let mut card = preview.card(&theme);
         let fill = card

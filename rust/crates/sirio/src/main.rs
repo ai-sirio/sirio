@@ -11,13 +11,13 @@ use gpui_platform::application;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use sirio_acp::AgentCommand;
+use sirio_acp::{AgentCommand, ClaudeLaunch, LaunchSpec};
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
     BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
     WorktreeMountPolicy,
 };
-use sirio_agents::ALL as AGENT_CATALOG;
+use sirio_agents::{ALL as AGENT_CATALOG, AgentAdapter};
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, base64_encode,
@@ -222,6 +222,7 @@ where
 }
 
 mod account_login;
+mod claude_transport;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
 /// environment. Linux-only by construction: the variables it reads and writes
@@ -2899,6 +2900,20 @@ fn agent_command_for(source: &sirio_registry::LaunchSource) -> Option<AgentComma
     }
 }
 
+/// The [`LaunchSpec`] a resolved adapter launches, or `None` when there is
+/// nothing honest to launch. Claude is the one adapter with two transports:
+/// when the resolution found a `claude` new enough for the protocol this
+/// build speaks, that binary launches directly; otherwise the registry
+/// wrapper does, exactly as before.
+fn agent_launch_for(launch: &AgentLaunchState, adapter_id: &str) -> Option<LaunchSpec> {
+    if adapter_id == sirio_agents::ClaudeCodeAdapter.id()
+        && let Some(program) = launch.claude.native_program()
+    {
+        return Some(LaunchSpec::Claude(ClaudeLaunch::new(program)));
+    }
+    agent_command_for(&launch_source_in(launch, adapter_id)).map(LaunchSpec::Acp)
+}
+
 /// Everything needed to answer "how does agent X launch". Refreshed when
 /// Settings -> Agents opens and when Refresh is pressed; never on the UI
 /// thread.
@@ -2906,6 +2921,10 @@ struct AgentLaunchState {
     registry: Option<sirio_registry::AcpRegistry>,
     store: sirio_registry::InstallStore,
     sources: std::collections::BTreeMap<String, sirio_registry::LaunchSource>,
+    /// Which transport a Claude chat opens on, and why. Not persisted and
+    /// not derived from a `LaunchSource`: a machine that gains or loses a
+    /// `claude` picks the right transport on the next resolution.
+    claude: crate::claude_transport::Resolution,
 }
 
 impl AgentLaunchState {
@@ -2927,6 +2946,7 @@ impl AgentLaunchState {
                     .unwrap_or_else(|| sirio_registry::InstallStore::default_root(&environment)),
             ),
             sources: std::collections::BTreeMap::new(),
+            claude: compute_claude_resolution(&environment),
         };
         state.sources = compute_launch_sources(state.registry.as_ref(), &state.store);
         state
@@ -2960,6 +2980,35 @@ fn lsp_store_root_for_startup() -> PathBuf {
 /// Test-only redirect for [`lsp_store_root_for_startup`].
 #[cfg(test)]
 static TEST_LSP_STORE_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// The transport a Claude chat opens on, from this machine's facts: the
+/// adapter's static claim, whether the binary it names is on `PATH`, and
+/// what `claude --version` says. One environment variable overrides the
+/// answer for diagnosis (`SIRIO_CLAUDE_TRANSPORT=acp`), in the spirit of
+/// `SIRIO_ACP_PROGRAM` — it is not a setting and appears in no UI. The
+/// decision itself is [`crate::claude_transport::resolve`], which is pure.
+///
+/// Blocking by one bounded exec: every caller runs it beside
+/// [`compute_launch_sources`], which is where the launch state is refreshed.
+fn compute_claude_resolution(
+    environment: &BTreeMap<String, String>,
+) -> crate::claude_transport::Resolution {
+    let forced_acp = environment
+        .get("SIRIO_CLAUDE_TRANSPORT")
+        .map(String::as_str)
+        == Some("acp");
+    let executable = sirio_agents::ClaudeCodeAdapter
+        .native_chat()
+        .and_then(|claim| sirio_agents::find_executable_on_path(claim.program));
+    let version_output = executable
+        .as_deref()
+        .and_then(crate::claude_transport::probe_version);
+    crate::claude_transport::resolve(crate::claude_transport::Inputs {
+        executable,
+        version_output,
+        forced_acp,
+    })
+}
 
 /// One pass over the catalog answering each adapter's launch source from
 /// existence facts: is the CLI on PATH, is there a manifest whose
@@ -3016,7 +3065,7 @@ fn first_resolved_chat_adapter(
     AGENT_CATALOG
         .iter()
         .copied()
-        .find(|adapter| agent_command_for(&launch_source_in(launch, adapter.id())).is_some())
+        .find(|adapter| agent_launch_for(launch, adapter.id()).is_some())
 }
 
 /// Sirio's cached copy of the registry document lives beside the agents
@@ -3267,17 +3316,28 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
 fn restored_chat_spec(
     launch: &AgentLaunchState,
     agent_id: Option<&str>,
-) -> Option<(AgentCommand, Option<Icon>, Option<String>)> {
+    agent_session_id: Option<&str>,
+    resume_enabled: bool,
+) -> Option<(LaunchSpec, Option<Icon>, Option<String>)> {
     let adapter = agent_id.and_then(|id| {
         AGENT_CATALOG
             .iter()
             .find(|adapter| adapter.id() == id)
             .copied()
     })?;
-    let source = launch_source_in(launch, adapter.id());
-    let command = agent_command_for(&source)?;
+    let mut launch = agent_launch_for(launch, adapter.id())?;
+    // A restored native Claude chat continues its recorded session rather
+    // than starting a new one beside its own transcript. Only the native
+    // transport resumes: an ACP id names a session on another server, and
+    // a user who turned resuming off gets a fresh session either way.
+    if resume_enabled
+        && let Some(session_id) = agent_session_id
+        && let LaunchSpec::Claude(claude) = launch
+    {
+        launch = LaunchSpec::Claude(claude.resuming(session_id));
+    }
     Some((
-        command,
+        launch,
         Icon::for_agent_id(adapter.id()),
         Some(adapter.id().to_string()),
     ))
@@ -4487,6 +4547,12 @@ impl SirioWorkspace {
     fn recompute_launch_sources(&mut self, cx: &mut Context<Self>) {
         self.launch.sources =
             compute_launch_sources(self.launch.registry.as_ref(), &self.launch.store);
+        // Which transport a Claude chat opens on is resolved here too, not
+        // once at startup: this machine gains or loses our own `claude`
+        // between refreshes (Settings → Agents installs one), and the next
+        // resolution is what notices.
+        self.launch.claude =
+            compute_claude_resolution(&std::env::vars().collect::<BTreeMap<_, _>>());
         let sources: Vec<(String, sirio_registry::LaunchSource)> = self
             .launch
             .sources
@@ -4507,8 +4573,13 @@ impl SirioWorkspace {
         self.tab_bar.update(cx, |tab_bar, _| {
             tab_bar.apply_chat_launch_sources(sources.clone())
         });
+        let transport_notes = vec![(
+            sirio_agents::ClaudeCodeAdapter.id().to_string(),
+            self.launch.claude.note(),
+        )];
         self.settings.update(cx, |settings, _| {
-            settings.apply_launch_sources(sources, registry_versions)
+            settings.apply_launch_sources(sources, registry_versions);
+            settings.apply_transport_notes(transport_notes);
         });
     }
 
@@ -5559,6 +5630,20 @@ impl SirioWorkspace {
                     // with; the persisted form is qualified, so wrap it at
                     // the persistence boundary.
                     agent_id: tab.agent_id.clone().map(AgentRef::adapter),
+                    // The live chat's agent-side session, read at save time
+                    // like the draft below: without this the save would
+                    // stamp `None` over an id the hook write already stored.
+                    agent_session_id: {
+                        let mut identified = None;
+                        tab.panes.for_each(&mut |_, content| {
+                            if identified.is_none()
+                                && let TabContent::Chat(chat) = content
+                            {
+                                identified = chat.read(cx).agent_session_id();
+                            }
+                        });
+                        identified
+                    },
                     active: active_tab_id == Some(tab.id),
                 })
                 .collect(),
@@ -6516,6 +6601,41 @@ impl SirioWorkspace {
                 ChatEvent::OpenSettings => {
                     if let Ok(mut actions) = workspace.pending_actions.lock() {
                         actions.push(WorkspaceAction::OpenAgentSettings);
+                    }
+                }
+                ChatEvent::SessionIdentified(session_id) => {
+                    // A hook write, like `save_session_ref`: the id must
+                    // survive a restart that comes before any other save.
+                    // Resolve which tab this emitting entity lives in (a chat
+                    // can be resumed/restored into any pane id, so this cannot
+                    // be captured once at bind time).
+                    let chat_id = chat_entity.entity_id();
+                    let mut tab_ref = None;
+                    for tab in &workspace.tabs {
+                        if tab_ref.is_some() {
+                            break;
+                        }
+                        tab.panes.for_each(&mut |_, content| {
+                            if tab_ref.is_none()
+                                && let TabContent::Chat(candidate) = content
+                                && candidate.entity_id() == chat_id
+                            {
+                                tab_ref = Some((
+                                    tab.persistence_id.clone(),
+                                    workspace.tab_worktree_paths.get(&tab.id).cloned(),
+                                ));
+                            }
+                        });
+                    }
+                    if let Some((persistence_id, worktree_path)) = tab_ref
+                        && let Some(worktree_path) = worktree_path
+                    {
+                        let worktree_id = workspace.session.persisted_worktree_id(&worktree_path);
+                        workspace.session.save_tab_agent_session(
+                            &persistence_id,
+                            &worktree_id,
+                            Some(session_id),
+                        );
                     }
                 }
                 ChatEvent::TurnEnded => {
@@ -8605,12 +8725,14 @@ impl SirioWorkspace {
             } else {
                 BTreeMap::new()
             };
+            let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
             let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
                 &restored,
                 &selected_path,
                 window,
                 &mut self.activity,
                 &saved_session_refs,
+                resume_agent_sessions,
                 Some(&self.terminal_pane_cache),
                 Some(&self.session),
                 self.retained_worktree_chats.get(&selected_worktree_id),
@@ -9037,6 +9159,7 @@ impl SirioWorkspace {
             } else {
                 BTreeMap::new()
             };
+            let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
             let (tabs, _) = restore_tabs_in_workspace(
                 &restored,
                 &self.working_directory,
@@ -9044,6 +9167,7 @@ impl SirioWorkspace {
                 self.next_pane_id,
                 &mut self.activity,
                 &saved_session_refs,
+                resume_agent_sessions,
                 window,
                 cx,
             );
@@ -9992,6 +10116,7 @@ impl SirioWorkspace {
                 title: "Terminal".to_string(),
                 kind: "terminal".to_string(),
                 agent_id: None,
+                agent_session_id: None,
                 active: cached_active_tab.is_none() && tab_index == 0,
             });
             tab_states.push(SessionTabState::with_root(*pane_id));
@@ -10417,7 +10542,7 @@ impl SirioWorkspace {
         let chat = match adapter {
             Some(adapter) => {
                 let source = self.launch_source_for(adapter.id());
-                let Some(command) = agent_command_for(&source) else {
+                let Some(launch) = agent_launch_for(&self.launch, adapter.id()) else {
                     // The user acted explicitly; a silent refusal would read
                     // as a broken button. The toast is the smallest surface
                     // that already exists for exactly this.
@@ -10435,7 +10560,7 @@ impl SirioWorkspace {
                 let tab_id = persistence_id.clone();
                 cx.new(|cx| {
                     Chat::launch_with_command_and_persistence(
-                        command,
+                        launch,
                         cwd,
                         database_path,
                         tab_id,
@@ -10525,19 +10650,26 @@ impl SirioWorkspace {
         // agent no longer resolved: the user clicked, and no tab appeared and
         // nothing said why. The tab now opens disarmed and states the reason,
         // the same as session restore.
-        let (command, agent_icon, agent_id, unavailable) =
-            match restored_chat_spec(&self.launch, retained.agent_id.as_deref()) {
-                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
-                None => (
-                    None,
-                    retained.agent_id.as_deref().and_then(Icon::for_agent_id),
-                    retained.agent_id.clone(),
-                    Some(restored_chat_refusal(
-                        &self.launch,
-                        retained.agent_id.as_deref(),
-                    )),
-                ),
-            };
+        // A retained chat holds its transcript, not an agent session: it
+        // always starts a fresh session beside the restored transcript.
+        let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
+        let (launch, agent_icon, agent_id, unavailable) = match restored_chat_spec(
+            &self.launch,
+            retained.agent_id.as_deref(),
+            None,
+            resume_agent_sessions,
+        ) {
+            Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
+            None => (
+                None,
+                retained.agent_id.as_deref().and_then(Icon::for_agent_id),
+                retained.agent_id.clone(),
+                Some(restored_chat_refusal(
+                    &self.launch,
+                    retained.agent_id.as_deref(),
+                )),
+            ),
+        };
         let agent_name = agent_id.as_deref().and_then(|agent_id| {
             AGENT_CATALOG
                 .iter()
@@ -10557,7 +10689,7 @@ impl SirioWorkspace {
             Some(reason) => Chat::unavailable(reason, cwd, cx),
             None => {
                 let mut chat = Chat::launch_with_command(
-                    command.expect("a retained chat with no refusal reason carries its command"),
+                    launch.expect("a retained chat with no refusal reason carries its launch"),
                     cwd,
                     cx,
                 );
@@ -17468,6 +17600,7 @@ fn restore_tabs(
     window: Option<&mut Window>,
     activity: &mut AgentActivityModel,
     saved_session_refs: &BTreeMap<String, String>,
+    resume_agent_sessions: bool,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
     let (tabs, active, _) = restore_tabs_with_terminal_cache(
@@ -17476,6 +17609,7 @@ fn restore_tabs(
         window,
         activity,
         saved_session_refs,
+        resume_agent_sessions,
         None,
         None,
         None,
@@ -17575,6 +17709,10 @@ fn restore_tabs_with_terminal_cache(
     mut window: Option<&mut Window>,
     activity: &mut AgentActivityModel,
     saved_session_refs: &BTreeMap<String, String>,
+    // F-SET-04: the same setting that decides whether a terminal pane
+    // resumes its own session decides whether a restored native chat
+    // passes its recorded agent session back as `--resume`.
+    resume_agent_sessions: bool,
     terminal_pane_cache: Option<&TerminalPaneCache<Entity<TerminalView>>>,
     session: Option<&SessionStore>,
     // Chat tabs of this worktree that stayed alive across a switch, keyed by
@@ -17662,14 +17800,19 @@ fn restore_tabs_with_terminal_cache(
         // helpers below key on the bare adapter id, so extract it once
         // (None for a `Registry` ref or a value that does not resolve).
         let stored_adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        let (command, agent_icon, agent_id, unavailable): (
-            Option<AgentCommand>,
+        let (launch, agent_icon, agent_id, unavailable): (
+            Option<LaunchSpec>,
             Option<Icon>,
             Option<String>,
             Option<String>,
         ) = if tab.kind == "chat" {
-            match restored_chat_spec(&launch, stored_adapter_id) {
-                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+            match restored_chat_spec(
+                &launch,
+                stored_adapter_id,
+                tab.agent_session_id.as_deref(),
+                resume_agent_sessions,
+            ) {
+                Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
                 None => (
                     None,
                     stored_adapter_id.and_then(Icon::for_agent_id),
@@ -17709,7 +17852,7 @@ fn restore_tabs_with_terminal_cache(
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
                     }
                     let mut chat = Chat::launch_with_command_and_persistence(
-                        command.expect("a chat with no refusal reason carries its command"),
+                        launch.expect("a chat with no refusal reason carries its launch"),
                         working_directory.to_path_buf(),
                         database_path.clone(),
                         tab.id.clone(),
@@ -17940,6 +18083,8 @@ fn restore_tabs_in_workspace(
     pane_id_start: usize,
     activity: &mut AgentActivityModel,
     saved_session_refs: &BTreeMap<String, String>,
+    // F-SET-04: see `restore_tabs_with_terminal_cache`.
+    resume_agent_sessions: bool,
     window: &mut Window,
     cx: &mut Context<SirioWorkspace>,
 ) -> (Vec<OpenTab>, usize) {
@@ -17981,14 +18126,19 @@ fn restore_tabs_in_workspace(
         // helpers below key on the bare adapter id, so extract it once
         // (None for a `Registry` ref or a value that does not resolve).
         let stored_adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        let (command, agent_icon, agent_id, unavailable): (
-            Option<AgentCommand>,
+        let (launch, agent_icon, agent_id, unavailable): (
+            Option<LaunchSpec>,
             Option<Icon>,
             Option<String>,
             Option<String>,
         ) = if tab.kind == "chat" {
-            match restored_chat_spec(&launch, stored_adapter_id) {
-                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+            match restored_chat_spec(
+                &launch,
+                stored_adapter_id,
+                tab.agent_session_id.as_deref(),
+                resume_agent_sessions,
+            ) {
+                Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
                 None => (
                     None,
                     stored_adapter_id.and_then(Icon::for_agent_id),
@@ -18028,7 +18178,7 @@ fn restore_tabs_in_workspace(
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
                     }
                     let mut chat = Chat::launch_with_command_and_persistence(
-                        command.expect("a chat with no refusal reason carries its command"),
+                        launch.expect("a chat with no refusal reason carries its launch"),
                         working_directory.to_path_buf(),
                         database_path.clone(),
                         tab.id.clone(),
@@ -19068,6 +19218,9 @@ fn main() {
         } else {
             BTreeMap::new()
         };
+        // F-SET-04: a restored native chat resumes its recorded agent
+        // session under the same setting as the terminal panes above.
+        let resume_agent_sessions = saved_settings.resume_agent_sessions;
         let control_environment: BTreeMap<String, String> = std::env::vars().collect();
         let socket_path = PathBuf::from(sirio_control::default_socket_path(&control_environment));
         let socket_info = ControlSocketInfo::new(socket_path);
@@ -19161,6 +19314,7 @@ fn main() {
                     Some(window),
                     &mut activity_model,
                     &saved_session_refs_for_restore,
+                    resume_agent_sessions,
                     cx,
                 );
                 let activity = tabs
@@ -20806,6 +20960,7 @@ done
                 title: "main.rs".into(),
                 kind: "file".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![{
@@ -20837,6 +20992,7 @@ done
                 Some(window),
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             );
             tabs
@@ -20890,6 +21046,7 @@ done
                 title: "main.rs".into(),
                 kind: "file".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![{
@@ -20918,6 +21075,7 @@ done
                 2000,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 window,
                 cx,
             );
@@ -22765,6 +22923,7 @@ done
                     title: "Second worktree".into(),
                     kind: "diff".into(),
                     agent_id: None,
+                    agent_session_id: None,
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -23209,6 +23368,7 @@ done
                     title: "WT1 Marker".into(),
                     kind: "diff".into(),
                     agent_id: None,
+                    agent_session_id: None,
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -23336,6 +23496,7 @@ done
             title: title.into(),
             kind: "chat".into(),
             agent_id: None,
+            agent_session_id: None,
             active,
         }
     }
@@ -27284,7 +27445,7 @@ done
             // already uses) with its own registered pane id.
             let chat = cx.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                    LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                     working_directory.clone(),
                     cx,
                 )
@@ -27386,7 +27547,7 @@ done
             let mut workspace = palette_test_workspace(cx);
             let chat = cx.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                    LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                     std::env::temp_dir(),
                     cx,
                 )
@@ -27464,6 +27625,7 @@ done
                     title: "Chat".into(),
                     kind: "chat".into(),
                     agent_id: Some(AgentRef::adapter("codex")),
+                    agent_session_id: None,
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -27476,6 +27638,7 @@ done
                 Some(window),
                 &mut activity_model,
                 &BTreeMap::new(),
+                false,
                 cx,
             );
             workspace.tabs = tabs;
@@ -27519,6 +27682,7 @@ done
                 title: title.into(),
                 kind: "chat".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active,
             };
             let restored = RestoredSession {
@@ -27546,6 +27710,7 @@ done
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             );
             workspace.tabs = tabs;
@@ -28462,7 +28627,7 @@ done
         let chat = cx.update(|_, app| {
             app.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/bin/false"),
+                    LaunchSpec::Acp(AgentCommand::new("/bin/false")),
                     PathBuf::from("/tmp"),
                     cx,
                 )
@@ -30298,6 +30463,7 @@ done
                 title: "Chat".into(),
                 kind: "chat".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: false,
             },
             SessionTab {
@@ -30305,6 +30471,7 @@ done
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             },
         ];
@@ -30313,6 +30480,7 @@ done
             title: "Changes".into(),
             kind: "diff".into(),
             agent_id: None,
+            agent_session_id: None,
             active: true,
         }];
 
@@ -30342,6 +30510,7 @@ done
             title: "Old title".into(),
             kind: "chat".into(),
             agent_id: None,
+            agent_session_id: None,
             active: false,
         }];
         let current = vec![SessionTab {
@@ -30349,6 +30518,7 @@ done
             title: "Renamed chat".into(),
             kind: "chat".into(),
             agent_id: None,
+            agent_session_id: None,
             active: true,
         }];
 
@@ -30602,9 +30772,9 @@ done
         // Nothing installed and no registry document yet: there is no honest
         // codex command, and connecting the persisted tab to ANOTHER
         // agent's server is the exact rule this work exists to enforce.
-        assert!(restored_chat_spec(&launch, Some("codex")).is_none());
-        assert!(restored_chat_spec(&launch, None).is_none());
-        assert!(restored_chat_spec(&launch, Some("unknown-agent")).is_none());
+        assert!(restored_chat_spec(&launch, Some("codex"), None, true).is_none());
+        assert!(restored_chat_spec(&launch, None, None, true).is_none());
+        assert!(restored_chat_spec(&launch, Some("unknown-agent"), None, true).is_none());
 
         // An installed manifest flips it back to identity-preserving even
         // fully offline. The manifest's executable must really exist — the
@@ -30615,8 +30785,11 @@ done
         let executable = seed_codex_acp_manifest(&agents_root);
         launch.store = sirio_registry::InstallStore::new(agents_root);
         launch.sources = compute_launch_sources(None, &launch.store);
-        let (command, icon, agent_id) =
-            restored_chat_spec(&launch, Some("codex")).expect("installed source launches");
+        let (launch, icon, agent_id) = restored_chat_spec(&launch, Some("codex"), None, true)
+            .expect("installed source launches");
+        let LaunchSpec::Acp(command) = launch else {
+            panic!("an installed source launches over ACP");
+        };
         assert_eq!(command.program, executable);
         assert_eq!(icon, Some(Icon::Codex));
         assert_eq!(agent_id.as_deref(), Some("codex"));
@@ -30652,6 +30825,93 @@ done
         );
     }
 
+    #[test]
+    fn a_native_claude_resolution_launches_the_binary_not_the_wrapper() {
+        let mut launch = test_launch_state();
+        launch.claude = crate::claude_transport::Resolution::Native {
+            program: "/usr/local/bin/claude".into(),
+            version: "2.1.273".into(),
+        };
+        let spec = agent_launch_for(&launch, "claude").expect("a native claude launches");
+        assert_eq!(
+            spec,
+            sirio_acp::LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("/usr/local/bin/claude"))
+        );
+    }
+
+    #[test]
+    fn a_wrapper_resolution_still_goes_through_the_registry() {
+        let mut launch = test_launch_state();
+        launch.claude = crate::claude_transport::Resolution::Wrapper {
+            reason: crate::claude_transport::WrapperReason::NotOnPath,
+        };
+        launch.sources.insert(
+            "claude".into(),
+            sirio_registry::LaunchSource::Installed(sirio_registry::InstalledAgent {
+                id: "claude-acp".into(),
+                version: "0.78.0".into(),
+                executable: "/data/claude-agent-acp".into(),
+                args: Vec::new(),
+                integrity: sirio_registry::Integrity::Sha256,
+            }),
+        );
+        let spec = agent_launch_for(&launch, "claude").expect("the wrapper launches");
+        assert!(matches!(spec, sirio_acp::LaunchSpec::Acp(_)));
+    }
+
+    #[test]
+    fn a_restored_native_chat_resumes_the_session_it_recorded() {
+        let mut launch = test_launch_state();
+        launch.claude = crate::claude_transport::Resolution::Native {
+            program: "/usr/local/bin/claude".into(),
+            version: "2.1.273".into(),
+        };
+        let spec = restored_chat_spec(&launch, Some("claude"), Some("sess-1"), true)
+            .expect("a native chat restores")
+            .0;
+        assert_eq!(
+            spec,
+            sirio_acp::LaunchSpec::Claude(
+                sirio_acp::ClaudeLaunch::new("/usr/local/bin/claude").resuming("sess-1")
+            )
+        );
+    }
+
+    #[test]
+    fn resume_is_skipped_when_the_user_turned_it_off() {
+        // F-SET-04: the same setting that decides whether a pane resumes
+        // its own session decides this.
+        let mut launch = test_launch_state();
+        launch.claude = crate::claude_transport::Resolution::Native {
+            program: "/usr/local/bin/claude".into(),
+            version: "2.1.273".into(),
+        };
+        let spec = restored_chat_spec(&launch, Some("claude"), Some("sess-1"), false)
+            .expect("a native chat restores")
+            .0;
+        assert_eq!(
+            spec,
+            sirio_acp::LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("/usr/local/bin/claude")),
+            "a fresh session, not a resumed one"
+        );
+    }
+
+    #[test]
+    fn an_acp_chat_ignores_a_recorded_session_id() {
+        let mut launch = test_launch_state();
+        launch.sources.insert(
+            "opencode".into(),
+            sirio_registry::LaunchSource::Builtin {
+                program: "opencode".into(),
+                args: vec!["acp".into()],
+            },
+        );
+        let spec = restored_chat_spec(&launch, Some("opencode"), Some("sess-1"), true)
+            .expect("an acp chat restores")
+            .0;
+        assert!(matches!(spec, sirio_acp::LaunchSpec::Acp(_)));
+    }
+
     fn test_launch_state() -> AgentLaunchState {
         let mut launch = AgentLaunchState {
             registry: None,
@@ -30659,6 +30919,9 @@ done
                 std::env::temp_dir().join(format!("sirio-launch-test-{}", std::process::id())),
             ),
             sources: std::collections::BTreeMap::new(),
+            // The tests never probe this machine for a `claude`: a fixture
+            // that needs a native resolution sets the field itself.
+            claude: crate::claude_transport::Resolution::default(),
         };
         launch.sources = compute_launch_sources(None, &launch.store);
         launch
@@ -30955,6 +31218,7 @@ done
                     title: "Linked".into(),
                     kind: "diff".into(),
                     agent_id: None,
+                    agent_session_id: None,
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -34430,6 +34694,7 @@ done
                     title: "Chat".into(),
                     kind: "chat".into(),
                     agent_id: Some(AgentRef::adapter("codex")),
+                    agent_session_id: None,
                     active: false,
                 },
                 session::SessionTab {
@@ -34437,6 +34702,7 @@ done
                     title: "Terminal".into(),
                     kind: "terminal".into(),
                     agent_id: None,
+                    agent_session_id: None,
                     active: true,
                 },
             ],
@@ -34455,6 +34721,7 @@ done
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             )
         });
@@ -34554,6 +34821,7 @@ done
                 title: "Codex".into(),
                 kind: "terminal".into(),
                 agent_id: Some(AgentRef::adapter("codex")),
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState::with_root(7)],
@@ -34568,6 +34836,7 @@ done
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             )
         });
@@ -34605,6 +34874,7 @@ done
                 title: "Codex".into(),
                 kind: "chat".into(),
                 agent_id: Some(AgentRef::adapter("codex")),
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![SessionTabState::default()],
@@ -34640,6 +34910,7 @@ done
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             )
         });
@@ -35560,7 +35831,7 @@ done
             let mut workspace = palette_test_workspace(cx);
             let chat = cx.new(|cx| {
                 Chat::launch_with_command(
-                    AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                    LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                     std::env::temp_dir(),
                     cx,
                 )
@@ -35628,6 +35899,7 @@ done
                 title: "Chat".into(),
                 kind: "chat".into(),
                 agent_id: Some(AgentRef::adapter("codex")),
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {
@@ -35649,6 +35921,7 @@ done
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             )
         });
@@ -35979,6 +36252,7 @@ browser  profile  "
                 title: "Browser".into(),
                 kind: "browser".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {
@@ -36004,6 +36278,7 @@ browser  profile  "
                 Some(window),
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             );
             let mut address = None;
@@ -36033,6 +36308,7 @@ browser  profile  "
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {
@@ -36054,6 +36330,7 @@ browser  profile  "
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             )
         });
@@ -36177,6 +36454,7 @@ browser  profile  "
                 title: "Changes".into(),
                 kind: "diff".into(),
                 agent_id: None,
+                agent_session_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState::default()],
@@ -36191,6 +36469,7 @@ browser  profile  "
                 None,
                 &mut activity,
                 &BTreeMap::new(),
+                false,
                 cx,
             )
         });
