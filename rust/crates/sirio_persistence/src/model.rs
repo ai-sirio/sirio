@@ -145,6 +145,11 @@ pub struct TabRecord {
     // own namespace and produce the right variant; the stored value is
     // decoded once, at the DB boundary, never here.
     pub agent_id: Option<AgentRef>,
+    /// The agent-side session this chat tab is continuing, when one has been
+    /// recorded (Claude Code's own session id). `None` for every tab that
+    /// predates the column — it is never backfilled — and for agents whose
+    /// sessions Sirio does not resume.
+    pub agent_session_id: Option<String>,
     /// Position in the worktree's tab strip, 0-based.
     pub order_idx: i64,
     /// Whether this tab is the active one in its worktree. At most one tab
@@ -165,6 +170,7 @@ impl TabRecord {
             title: title.into(),
             kind: kind.into(),
             agent_id: None,
+            agent_session_id: None,
             order_idx: 0,
             is_active: false,
         }
@@ -178,6 +184,15 @@ impl TabRecord {
     /// prevent.
     pub fn with_agent_id(mut self, agent_id: AgentRef) -> Self {
         self.agent_id = Some(agent_id);
+        self
+    }
+
+    /// Records the agent-side session this tab is continuing, so a restart
+    /// resumes the conversation rather than starting a new one beside its
+    /// own transcript.
+    #[must_use]
+    pub fn with_agent_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.agent_session_id = Some(session_id.into());
         self
     }
 }
