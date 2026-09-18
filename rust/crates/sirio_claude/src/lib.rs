@@ -29,5 +29,5 @@ pub use message::{
     UserPayload,
 };
 pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
-pub use usage::{PlanUsage, RateLimitWindow};
+pub use usage::{ContextUsageReport, PlanUsage, RateLimitWindow, RewindOutcome};
 pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};
