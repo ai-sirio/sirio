@@ -77,6 +77,7 @@ fn sample_tab(id: &str, worktree_id: &str, title: &str, kind: &str) -> TabRecord
         title: title.to_string(),
         kind: kind.to_string(),
         agent_id: None,
+        agent_session_id: None,
         order_idx: 0,
         is_active: false,
     }
