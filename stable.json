@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.20.0",
-  "notes": "Four things you can see, and one you could not.\n\n**Folders open and close**\n\nEvery directory in the Files tree carries its own mark now — a closed\nfolder when collapsed, an open one when expanded — and the disclosure\narrow that used to say the same thing is gone. So is the 10px slot it\nlived in, which was always empty beside a file and which pushed directory\nnames out of line with file names. Files and folders read as one column.\n\n**The agent marks are the agents' own**\n\nCodex had been wearing OpenAI's generic knot; it has its own mark now.\nClaude, OpenCode and Pi keep the shapes you know, and Oh-My-Pi its\ngradient. What changed underneath is that they all come from one icon set\ndrawn on one grid, instead of two sets that had to be nudged into\nagreeing about size — so the marks carry the same weight beside each\nother without anything being adjusted by hand.\n\n**A finished tab's dot is the size of a running one**\n\nA green (done) or amber (waiting) tab drew a mark filling the whole 14px\nslot while the running tab beside it read as a 6px dot: one glyph at two\nsizes, depending on which state it stopped in. They are one size now.\nWhat separates running from done is what always should have — motion, and\nwhere the brightness sits inside the mark.\n\n**The colour icons are sharp**\n\nEvery polychrome glyph in the Files tree, and Oh-My-Pi's mark with them,\nwas being rasterised at a fraction of the size it is drawn at and then\nstretched to fit. They are rendered at the size they are painted now.\n\n---\n\nThat last one had been true since those icons were first drawn, and no\none reported it. A raster that comes out too small is stretched rather\nthan refused, so the fault had no symptom beyond a softness you would\nhave to be looking for — and it surfaced only because a new mark needed\nthe same code path, and arrived with a test that measured what came out\nof it rather than reading what went in.",
+  "version": "0.21.0",
+  "notes": "This release changes how a Claude chat actually runs, changes where Project\nSettings lives, and closes off the one place a new chat had no starting\npoint at all.\n\n**Claude Code drives itself now, when it can**\n\nA Claude chat used to always go through the same ACP wrapper every other\nagent uses. When the `claude` on your `PATH` is new enough for the protocol\nthis build speaks, Sirio now launches it directly instead — no wrapper in\nbetween. There is no setting for this: Sirio checks the binary's own\nversion and decides. Too old, missing, or unreadable, and the chat opens on\nthe wrapper exactly as before; Settings → Agents names the reason in a\nsentence rather than leaving it to guess.\n\nDriving the real process directly is what makes several things possible\nthat the wrapper alone could not surface honestly: permissions, questions\nand plan approvals now come from Claude itself, not from a layer\ntranslating them; the context meter reads from the agent's own accounting\ninstead of an estimate; and a chat can ask the agent to restore files to an\nearlier turn, or resume the exact session a restored chat recorded, because\nthe native protocol carries what the wrapper's did not.\n\nOne bug this surfaced and fixed before it shipped: a turn's end was held\nback briefly so the context meter could reach the screen first, and released\non most ways a session could end — but not the one where Claude itself ends\nits process to answer an interrupt. On an idle machine that looked like a\nchat tab streaming forever, sixty seconds of silence with nothing to show\nfor it. It is released on every exit now, not just the ones that were\ntested.\n\n**Project Settings is a tab, not a sheet**\n\nIt used to slide in as an overlay from the sidebar. It now opens as a\nSecondary-pane tab titled \"Project Settings · {name}\" — one per project,\nreused rather than duplicated. Edits still save live to the project\ncatalog; the tab itself is ephemeral, the way any other utility tab is.\n\n**A blank worktree finally offers a chat, not just a terminal**\n\nA worktree with no tabs open showed New Terminal and nothing else. It now\nreads \"No Terminals or Chats\" and sits New Chat right beside it — click it\nand the same agent picker the tab bar's own New Chat menu shows expands in\nplace (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, or a link to add more).\nPick one and its chat tab replaces the empty state directly.\n\n---\n\nMost of this release is one feature built in stages — the handshake, the\nprotocol parsing, the turn and permission plumbing, the transport fallback\n— landing as one adapter behind a single launch decision, so a Claude chat\nis either fully native or fully the wrapper, never a mix of the two.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.20.0/Sirio-0.20.0.dmg",
-      "sha256": "dae4d47f26714b3fee535e9677008b15cf4572992842c3cdf2ace9b2c9e864cd",
-      "signature": "6HdyzsIySae6lNX/Q3FOWltMkIcUPmmVH63R9PBYF3t3gE5sT1sQKfW1eXZB+DGcvyU68Kk2Ibvi11vxtiFqCA=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.21.0/Sirio-0.21.0.dmg",
+      "sha256": "c491911cca652ca509dcc17b5a2e10549932a576c826a9778a82e657ee3b1dd4",
+      "signature": "Zup4S+ydt9iCb0mr+Iyn+dViqp8FuueN+UcMaCYnDIB9xZLItzEu++0CxRTx2TwXYVxuYotVQ1YtVucASud8Dw=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.20.0/Sirio-0.20.0-x86_64.AppImage",
-      "sha256": "324e570c9430c53c1c839c7eca8399f12fbacee5f82ccb1d132af4b91f16cfe9",
-      "signature": "+aZIaGOt21CAX3HO3HBmS9LOEv/2hpKH3ESjN6KiEt9KtX61+bSR4obMGIiHeIIwm8j9UI32mQPikAGQ0fkzBg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.21.0/Sirio-0.21.0-x86_64.AppImage",
+      "sha256": "decbac1a8bc50974b7e18c6210d4eca8cc45da44ae15836f9b3ef24356c44fe0",
+      "signature": "13WA7ju8h6G08vad4VMbLEqHpKKYMYB76gmPqQUtWaLStdKFhY97K2vpqeHm1Uo91lIgxJbrt0/55dJkih25BQ=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.20.0/SirioSetup-0.20.0.exe",
-      "sha256": "f7b0a425a966dbe45caf99a9948abf09e018ef7ca597ece9a400598c8558b85f",
-      "signature": "gECFmcG4pZJdG62aEN58uk650yLxs+7ldZ939WGzySURFVLbC7K3mM6I2nvchydKGehZOqjsh0IUngKZ7OISCg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.21.0/SirioSetup-0.21.0.exe",
+      "sha256": "c78d48ac4c6417a46ea70668ba9ca46eff8fefb9f1350facc89c0da25d6b8ca5",
+      "signature": "D3ZmEZB7nj3svY49OSSRu9ndjepFAGgIVlBG0JAsoZr7jSh+XbZWqDn91BaWhUUUKRHSDddvDndpHNevcNRfAg=="
     }
   }
 }
