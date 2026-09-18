@@ -12,14 +12,18 @@
 
 pub mod catalog;
 pub mod control;
+pub mod launch;
 pub mod message;
+pub mod version;
 
 pub use catalog::{
     AccountInfo, Catalog, CommandInfo, Effort, EffortChoice, ModeInfo, ModelInfo, Modes,
 };
 pub use control::{CanUseTool, ControlEnvelope, ControlRequest, PermissionResult};
+pub use launch::LaunchLine;
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
     ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
     UserPayload,
 };
+pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};
