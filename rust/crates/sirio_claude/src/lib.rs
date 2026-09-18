@@ -15,6 +15,7 @@ pub mod control;
 pub mod launch;
 pub mod message;
 pub mod tools;
+pub mod usage;
 pub mod version;
 
 pub use catalog::{
@@ -28,4 +29,5 @@ pub use message::{
     UserPayload,
 };
 pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
+pub use usage::{PlanUsage, RateLimitWindow};
 pub use version::{ClaudeVersion, MIN_CLAUDE_VERSION};
