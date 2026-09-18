@@ -339,15 +339,19 @@ pub fn diff_from_result(
                 line.split_at(line.char_indices().next().map_or(0, |(_, c)| c.len_utf8()));
             match marker {
                 " " => {
-                    // Context: it must be there in the original too.
-                    if cursor >= old_lines.len() {
+                    // Context: it must be there in the original too, and
+                    // say the same thing. A line that merely fits by
+                    // position is not the same line.
+                    if old_lines.get(cursor) != Some(&text) {
                         return None;
                     }
                     new_lines.push(old_lines[cursor].to_string());
                     cursor += 1;
                 }
                 "-" => {
-                    if cursor >= old_lines.len() {
+                    // Likewise: the original has to actually carry the
+                    // line the patch claims to be removing.
+                    if old_lines.get(cursor) != Some(&text) {
                         return None;
                     }
                     cursor += 1;
@@ -660,5 +664,23 @@ mod tests {
             }]
         });
         assert_eq!(diff_from_result("Edit", &mismatched), None);
+    }
+
+    #[test]
+    fn a_context_line_that_disagrees_with_the_original_is_refused() {
+        // The hunk lands inside the file, so nothing runs off the end —
+        // but it quotes a line the file does not contain. The two halves
+        // came from different states of the file just as surely as an
+        // out-of-range hunk did, and rebuilding from them would show a
+        // before-side that never existed.
+        let drifted = json!({
+            "filePath": "/repo/a.rs",
+            "originalFile": "one\ntwo\nthree\n",
+            "structuredPatch": [{
+                "oldStart": 2, "oldLines": 2, "newStart": 2, "newLines": 2,
+                "lines": [" TWO", "-three", "+THREE"]
+            }]
+        });
+        assert_eq!(diff_from_result("Edit", &drifted), None);
     }
 }
