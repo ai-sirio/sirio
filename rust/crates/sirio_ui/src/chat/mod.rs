@@ -46,6 +46,7 @@ mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
+use bezel::ui::widgets::{ButtonStyle, Buttons};
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
@@ -822,6 +823,24 @@ enum Entry {
     },
     /// The muted timestamp/rule footer closing out one completed turn.
     TurnFooter(String),
+    /// A file-restore preview for one user turn: the dry-run answer, or
+    /// the agent's refusal sentence when it cannot rewind. Never
+    /// persisted — it describes a filesystem state, not a conversation.
+    RewindPreview {
+        files: Vec<String>,
+        insertions: u64,
+        deletions: u64,
+        /// Some when the agent refused: the reason, and no Confirm button.
+        error: Option<String>,
+    },
+    /// A file restore that ran: what came back. Never persisted, same
+    /// reason as the preview.
+    RewindReport {
+        files: Vec<String>,
+        insertions: u64,
+        deletions: u64,
+        skipped_links: u64,
+    },
     /// A transport failure, surfaced instead of silently doing nothing.
     Error {
         message: String,
@@ -892,9 +911,94 @@ impl Entry {
                 .collect::<Vec<_>>()
                 .join("\n"),
             Self::TurnFooter(text) => text.clone(),
+            Self::RewindPreview {
+                files,
+                insertions,
+                deletions,
+                error,
+            } => rewind_preview_text(files, *insertions, *deletions, error),
+            Self::RewindReport {
+                files,
+                insertions,
+                deletions,
+                skipped_links,
+            } => rewind_report_text(files, *insertions, *deletions, *skipped_links),
             Self::Error { message, .. } => message.clone(),
         }
     }
+}
+
+/// The answer to one `rewind_files` call, reduced to what the surface
+/// renders. Mirrors `sirio_claude::RewindOutcome` without naming that
+/// crate, which this one does not depend on.
+#[derive(Clone, Debug)]
+struct RewindAnswer {
+    can_rewind: bool,
+    files: Vec<String>,
+    insertions: u64,
+    deletions: u64,
+    skipped_links: u64,
+    error: Option<String>,
+}
+
+/// A preview the reader has not confirmed yet: the turn it would restore.
+#[derive(Clone, Debug)]
+struct PendingRewind {
+    user_message_id: String,
+}
+
+fn file_count_noun(count: usize) -> &'static str {
+    if count == 1 { "file" } else { "files" }
+}
+
+fn rewind_preview_text(
+    files: &[String],
+    insertions: u64,
+    deletions: u64,
+    error: &Option<String>,
+) -> String {
+    if let Some(reason) = error {
+        return reason.clone();
+    }
+    let mut text = format!(
+        "Would restore {} {} (+{} -{})",
+        files.len(),
+        file_count_noun(files.len()),
+        insertions,
+        deletions
+    );
+    for file in files {
+        text.push('\n');
+        text.push_str(file);
+    }
+    text
+}
+
+fn rewind_report_text(
+    files: &[String],
+    insertions: u64,
+    deletions: u64,
+    skipped_links: u64,
+) -> String {
+    let mut text = format!(
+        "Restored {} {} (+{} -{})",
+        files.len(),
+        file_count_noun(files.len()),
+        insertions,
+        deletions
+    );
+    for file in files {
+        text.push('\n');
+        text.push_str(file);
+    }
+    if skipped_links > 0 {
+        text.push_str(&format!(
+            "\nSkipped {} {}",
+            skipped_links,
+            file_count_noun(skipped_links as usize)
+        ));
+    }
+    text
 }
 
 fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
@@ -1000,6 +1104,10 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                 .collect(),
         }),
         Entry::TurnFooter(text) => Some(ChatEntry::TurnFooter { text: text.clone() }),
+        // A rewind card describes a filesystem state at a moment in time,
+        // not the conversation: restoring it later would present a stale
+        // restore as a live one.
+        Entry::RewindPreview { .. } | Entry::RewindReport { .. } => None,
         Entry::Error {
             message, retryable, ..
         } => Some(ChatEntry::Error {
@@ -1633,6 +1741,14 @@ pub struct Chat {
     agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
+    /// One slot per entry in `entries`: the checkpoint id of a user turn
+    /// sent on this connection, `None` everywhere else — restored turns,
+    /// assistant rows, and turns whose send never reached the worker. Kept
+    /// in step with `entries` at every site that pushes or removes one.
+    turn_message_ids: Vec<Option<String>>,
+    /// A preview the reader has not confirmed yet. One slot: confirming
+    /// always answers the latest preview.
+    pending_rewind: Option<PendingRewind>,
     /// The draft, as bezel's field: IME, selection, undo, wrapping and scroll
     /// are its job. `Chat` observes it and reads `content()`/`cursor()` into
     /// `draft`/`draft_caret` on every change — the popups and Send read the
@@ -1794,6 +1910,13 @@ pub struct Chat {
     /// file picker (never set outside `#[cfg(test)]`).
     #[cfg(test)]
     attach_test_paths: Vec<PathBuf>,
+    /// Test seam: canned `rewind_files` answers, preview then confirm, so
+    /// rewind tests need no subprocess (never set outside `#[cfg(test)]`).
+    #[cfg(test)]
+    test_rewind_preview_answer: Option<Result<RewindAnswer, String>>,
+    /// Test seam: the confirm half of the above.
+    #[cfg(test)]
+    test_rewind_confirm_answer: Option<Result<RewindAnswer, String>>,
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -1958,6 +2081,8 @@ impl Chat {
             agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
+            turn_message_ids: Vec::new(),
+            pending_rewind: None,
             composer_field,
             draft: SharedString::default(),
             draft_caret: 0,
@@ -2026,6 +2151,10 @@ impl Chat {
             effort: None,
             #[cfg(test)]
             attach_test_paths: Vec::new(),
+            #[cfg(test)]
+            test_rewind_preview_answer: None,
+            #[cfg(test)]
+            test_rewind_confirm_answer: None,
         }
     }
 
@@ -2052,6 +2181,7 @@ impl Chat {
     /// Add one transcript row and keep the virtualizer's index tree in sync.
     fn push_entry(&mut self, entry: Entry) {
         let index = self.entries.len();
+        self.turn_message_ids.push(None);
         let following_tail = self.list_state.is_following_tail();
         if !matches!(entry, Entry::Thought { .. }) {
             self.settle_open_thought();
@@ -2227,6 +2357,24 @@ impl Chat {
 
     fn handle_event(&mut self, event: AcpEvent, cx: &mut Context<Self>) {
         let _perf = sirio_perf::span("Chat.handle_event", cx.entity_id().as_u64());
+        // The Claude worker records each sent turn's uuid when it processes
+        // the prompt, so reading it at send time would usually still see
+        // the previous turn's: backfill the latest unfilled user turn from
+        // the live cell instead. Only while connected — a failed send takes
+        // the client, and stamping its entry with the previous turn's id
+        // would name a checkpoint that is not this turn's.
+        if self.client.is_some()
+            && let Some(ChatClient::Claude(native)) = &self.client
+            && let Some(id) = native.last_user_message_id()
+            && let Some(latest_user) = self
+                .entries
+                .iter()
+                .rposition(|entry| matches!(entry, Entry::User { .. }))
+            && let Some(slot) = self.turn_message_ids.get_mut(latest_user)
+            && slot.is_none()
+        {
+            *slot = Some(id);
+        }
         let perf_notification = match &event {
             AcpEvent::AgentMessageChunk(_) => "notify.Chat.acp_message",
             AcpEvent::ThoughtChunk(_) => "notify.Chat.acp_thought",
@@ -3085,6 +3233,7 @@ impl Chat {
         };
         persistence.tab_id = tab_id;
         self.entries.clear();
+        self.turn_message_ids.clear();
         // F-CHAT-22: `unfolded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
@@ -3304,15 +3453,24 @@ impl Chat {
 
     fn clear_recovered_connection_errors(&mut self) {
         let old_count = self.entries.len();
+        let old_ids = std::mem::take(&mut self.turn_message_ids);
+        let mut kept_ids = Vec::with_capacity(old_count);
+        let mut ids = old_ids.into_iter();
         self.entries.retain(|entry| {
-            !matches!(
+            let id = ids.next().unwrap_or(None);
+            let keep = !matches!(
                 entry,
                 Entry::Error {
                     kind: ErrorKind::Connection | ErrorKind::AuthRequired | ErrorKind::Disconnected,
                     ..
                 }
-            )
+            );
+            if keep {
+                kept_ids.push(id);
+            }
+            keep
         });
+        self.turn_message_ids = kept_ids;
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
             self.thought_scroll.clear();
@@ -3899,6 +4057,8 @@ impl Chat {
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
         self.entries.clear();
+        self.turn_message_ids.clear();
+        self.pending_rewind = None;
         self.unfolded_turns.clear();
         self.thought_scroll.clear();
         self.list_state.splice(0..old_count, 0);
@@ -4482,6 +4642,153 @@ impl Chat {
         }));
     }
 
+    pub(crate) const REWIND_ACTION_LABEL: &'static str = "Restore files to this message";
+    /// The turn rail's restore action. It restores the filesystem, so the
+    /// label says files: a wording that implied the turn itself was undone
+    /// would promise something this cannot do.
+    fn rewind_action_label(&self) -> &'static str {
+        Self::REWIND_ACTION_LABEL
+    }
+
+    /// Whether the turn rail may offer a restore for `entry_index`: the
+    /// transport speaks rewind, no turn is in flight, and this connection
+    /// sent the turn — a restored turn's checkpoints belong to a process
+    /// that is gone. An ACP chat shows no button rather than one that
+    /// errors when pressed.
+    fn rewind_available_for_turn(&self, entry_index: usize) -> bool {
+        if self.streaming {
+            return false;
+        }
+        let transport_ok = match &self.agent_launch {
+            Some(launch) => ChatClient::supports_rewind_for(launch),
+            None => self
+                .client
+                .as_ref()
+                .is_some_and(|client| client.supports_rewind()),
+        };
+        transport_ok
+            && self
+                .turn_message_ids
+                .get(entry_index)
+                .is_some_and(|id| id.is_some())
+    }
+
+    /// Whether a preview is waiting for its confirm.
+    #[cfg(test)]
+    fn has_pending_rewind(&self) -> bool {
+        self.pending_rewind.is_some()
+    }
+
+    /// The transcript's last row as text, for tests.
+    #[cfg(test)]
+    fn last_entry_text(&self) -> String {
+        self.entries
+            .last()
+            .map(Entry::plain_text)
+            .unwrap_or_default()
+    }
+
+    /// Runs one `rewind_files` round trip. Synchronous: the answer is a
+    /// local file listing that arrives in milliseconds, and the client
+    /// owns no handle this surface could await off-thread.
+    fn run_rewind(&self, user_message_id: &str, dry_run: bool) -> Result<RewindAnswer, String> {
+        #[cfg(test)]
+        {
+            let stub = if dry_run {
+                &self.test_rewind_preview_answer
+            } else {
+                &self.test_rewind_confirm_answer
+            };
+            if let Some(answer) = stub {
+                return answer.clone();
+            }
+        }
+        let Some(client) = &self.client else {
+            return Err("the agent is no longer connected".to_string());
+        };
+        client
+            .rewind_files(user_message_id, dry_run)
+            .map(|outcome| RewindAnswer {
+                can_rewind: outcome.can_rewind,
+                files: outcome.files_changed,
+                insertions: outcome.insertions,
+                deletions: outcome.deletions,
+                skipped_links: outcome.skipped_links,
+                error: outcome.error,
+            })
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    /// Asks what restoring this turn would touch and shows the answer as a
+    /// confirmation card — or the agent's refusal sentence, with nothing to
+    /// confirm. A no-op where the action is unavailable.
+    fn request_rewind_preview(&mut self, entry_index: usize, cx: &mut Context<Self>) {
+        if !self.rewind_available_for_turn(entry_index) {
+            return;
+        }
+        let Some(user_message_id) = self.turn_message_ids.get(entry_index).cloned().flatten()
+        else {
+            return;
+        };
+        match self.run_rewind(&user_message_id, true) {
+            Ok(answer) if answer.can_rewind => {
+                self.pending_rewind = Some(PendingRewind { user_message_id });
+                self.push_entry(Entry::RewindPreview {
+                    files: answer.files,
+                    insertions: answer.insertions,
+                    deletions: answer.deletions,
+                    error: None,
+                });
+            }
+            Ok(answer) => {
+                self.push_entry(Entry::RewindPreview {
+                    files: Vec::new(),
+                    insertions: 0,
+                    deletions: 0,
+                    error: Some(answer.error.unwrap_or_else(|| {
+                        "the agent cannot restore files to this message".to_string()
+                    })),
+                });
+            }
+            Err(error) => {
+                self.push_entry(Entry::RewindPreview {
+                    files: Vec::new(),
+                    insertions: 0,
+                    deletions: 0,
+                    error: Some(error),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Restores the pending preview's turn and reports what came back. A
+    /// no-op with nothing pending — confirming twice restores once.
+    fn confirm_rewind(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_rewind.take() else {
+            return;
+        };
+        match self.run_rewind(&pending.user_message_id, false) {
+            Ok(answer) => {
+                self.push_entry(Entry::RewindReport {
+                    files: answer.files,
+                    insertions: answer.insertions,
+                    deletions: answer.deletions,
+                    skipped_links: answer.skipped_links,
+                });
+            }
+            Err(error) => {
+                self.push_entry(Entry::RewindPreview {
+                    files: Vec::new(),
+                    insertions: 0,
+                    deletions: 0,
+                    error: Some(error),
+                });
+            }
+        }
+        cx.notify();
+    }
+
     fn retry(&mut self, cx: &mut Context<Self>) {
         self.start_connection(cx);
     }
@@ -4503,6 +4810,7 @@ impl Chat {
             return;
         }
         self.entries.remove(index);
+        self.turn_message_ids.remove(index);
         self.list_state.splice(index..index + 1, 0);
         cx.notify();
     }
@@ -5596,6 +5904,69 @@ impl Chat {
                 }
                 card.into_any_element()
             }
+            Entry::RewindPreview {
+                files,
+                insertions,
+                deletions,
+                error,
+            } => {
+                let mut card = div()
+                    .id(("rewind-preview", entry_index))
+                    .debug_selector(move || format!("rewind-preview-{entry_index}"))
+                    .w_full()
+                    .rounded(theme.radii.code_block)
+                    .bg(theme.surface_raised)
+                    .border_l_2()
+                    .border_color(theme.border_strong)
+                    .px(px(CARD_H_PADDING))
+                    .py(px(CARD_V_PADDING))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(typography.callout)
+                            .text_color(theme.text)
+                            .child(rewind_preview_text(&files, insertions, deletions, &error)),
+                    );
+                if error.is_none() {
+                    let confirm_entity = entity.clone();
+                    card = card.child(
+                        bezel_theme
+                            .button("Restore files", ButtonStyle::Prominent, None)
+                            .id(("rewind-confirm", entry_index))
+                            .debug_selector(move || format!("rewind-confirm-{entry_index}"))
+                            .on_click(move |_, _, cx| {
+                                confirm_entity.update(cx, |chat, cx| chat.confirm_rewind(cx));
+                            }),
+                    );
+                }
+                card.into_any_element()
+            }
+            Entry::RewindReport {
+                files,
+                insertions,
+                deletions,
+                skipped_links,
+            } => div()
+                .id(("rewind-report", entry_index))
+                .debug_selector(move || format!("rewind-report-{entry_index}"))
+                .w_full()
+                .rounded(theme.radii.code_block)
+                .bg(theme.surface_raised)
+                .border_l_2()
+                .border_color(theme.border_strong)
+                .px(px(CARD_H_PADDING))
+                .py(px(CARD_V_PADDING))
+                .text_size(typography.callout)
+                .text_color(theme.text)
+                .child(rewind_report_text(
+                    &files,
+                    insertions,
+                    deletions,
+                    skipped_links,
+                ))
+                .into_any_element(),
             Entry::TurnFooter(at) => div()
                 .w_full()
                 .h(px(24.0))
@@ -7568,6 +7939,12 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
             row.insert("kind".into(), "turn".into());
             row.insert("text".into(), text.clone());
         }
+        Entry::RewindPreview { .. } => {
+            row.insert("kind".into(), "rewind-preview".into());
+        }
+        Entry::RewindReport { .. } => {
+            row.insert("kind".into(), "rewind-report".into());
+        }
         Entry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());
             row.insert("text".into(), message.clone());
@@ -9125,6 +9502,163 @@ mod tests {
             Chat::from_test_command(LaunchSpec::Acp(command), std::env::temp_dir(), cx)
         });
         (chat, cx)
+    }
+
+    /// A chat on the given transport that never connects: state-only, so
+    /// rewind tests need no subprocess. `Chat::new` without
+    /// `start_connection` leaves `client` empty, which is exactly the
+    /// "before it connects" surface the affordance check must handle.
+    fn chat_with_transport(launch: LaunchSpec, cx: &mut TestAppContext) -> Entity<Chat> {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, _) =
+            cx.add_window_view(|_, cx| Chat::new(Some(launch), std::env::temp_dir(), cx));
+        chat
+    }
+
+    /// A native chat with one sent turn: a user entry whose checkpoint id
+    /// came from the current connection, plus canned answers for the
+    /// preview and the confirm calls `request_rewind_preview` /
+    /// `confirm_rewind` make.
+    fn native_chat_with_one_turn(cx: &mut TestAppContext) -> Entity<Chat> {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "fix the bug".into(),
+                at: None,
+            });
+            if let Some(slot) = chat.turn_message_ids.last_mut() {
+                *slot = Some("uuid-1".into());
+            }
+            let answer = Ok(RewindAnswer {
+                can_rewind: true,
+                files: vec!["/repo/a.rs".into(), "/repo/b.rs".into()],
+                insertions: 12,
+                deletions: 4,
+                skipped_links: 0,
+                error: None,
+            });
+            chat.test_rewind_preview_answer = Some(answer.clone());
+            chat.test_rewind_confirm_answer = Some(answer);
+        });
+        chat
+    }
+
+    /// A native chat whose one turn came from the database, not this
+    /// connection: the entry is there but no checkpoint id names it.
+    fn native_chat_with_restored_transcript(cx: &mut TestAppContext) -> Entity<Chat> {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "fix the bug".into(),
+                at: None,
+            });
+        });
+        chat
+    }
+
+    /// A native chat whose agent answers the preview with `canRewind:
+    /// false`: checkpointing is off, so there is nothing to confirm.
+    fn native_chat_that_refuses_rewind(cx: &mut TestAppContext) -> Entity<Chat> {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "fix the bug".into(),
+                at: None,
+            });
+            if let Some(slot) = chat.turn_message_ids.last_mut() {
+                *slot = Some("uuid-1".into());
+            }
+            chat.test_rewind_preview_answer = Some(Ok(RewindAnswer {
+                can_rewind: false,
+                files: Vec::new(),
+                insertions: 0,
+                deletions: 0,
+                skipped_links: 0,
+                error: Some("File checkpointing is not enabled".into()),
+            }));
+        });
+        chat
+    }
+
+    #[gpui::test]
+    async fn the_rewind_action_appears_only_where_it_can_work(cx: &mut TestAppContext) {
+        // Three conditions, each its own reason to hide it: a transport
+        // that cannot rewind, a turn from a previous connection whose
+        // checkpoints this process never took, and a turn in flight.
+        let acp = chat_with_transport(LaunchSpec::Acp(AgentCommand::new("x")), cx);
+        assert!(!acp.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)));
+
+        let native = native_chat_with_one_turn(cx);
+        assert!(native.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)));
+
+        native.update(cx, |chat, _| chat.streaming = true);
+        assert!(
+            !native.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)),
+            "a turn in flight is writing the files a rewind would restore"
+        );
+
+        let restored = native_chat_with_restored_transcript(cx);
+        assert!(
+            !restored.read_with(cx, |chat, _| chat.rewind_available_for_turn(0)),
+            "a turn this connection never sent has no checkpoint to name"
+        );
+    }
+
+    #[gpui::test]
+    async fn confirming_a_preview_reports_what_was_restored(cx: &mut TestAppContext) {
+        let chat = native_chat_with_one_turn(cx);
+        chat.update(cx, |chat, cx| chat.request_rewind_preview(0, cx));
+        cx.run_until_parked();
+        let preview = chat.read_with(cx, |chat, _| chat.last_entry_text());
+        assert!(
+            preview.contains("2 files"),
+            "the preview counts them: {preview}"
+        );
+        assert!(preview.contains("+12"), "and the lines: {preview}");
+
+        chat.update(cx, |chat, cx| chat.confirm_rewind(cx));
+        cx.run_until_parked();
+        let report = chat.read_with(cx, |chat, _| chat.last_entry_text());
+        assert!(report.contains("Restored 2 files"), "{report}");
+        assert!(
+            report.contains("/repo/a.rs"),
+            "the report names them, so the reader can check: {report}"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_refusal_states_the_reason_and_offers_nothing(cx: &mut TestAppContext) {
+        let chat = native_chat_that_refuses_rewind(cx);
+        chat.update(cx, |chat, cx| chat.request_rewind_preview(0, cx));
+        cx.run_until_parked();
+        let entry = chat.read_with(cx, |chat, _| chat.last_entry_text());
+        assert!(
+            entry.contains("File checkpointing is not enabled"),
+            "{entry}"
+        );
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.has_pending_rewind()),
+            "nothing to confirm"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_label_says_files_not_conversation(cx: &mut TestAppContext) {
+        // It restores the filesystem. A label that implied the turn itself
+        // was undone would promise something this cannot do.
+        let chat = native_chat_with_one_turn(cx);
+        let label = chat.read_with(cx, |chat, _| chat.rewind_action_label());
+        assert_eq!(label, "Restore files to this message");
     }
 
     /// The card carries the chip row and the send disc: field on top, then
