@@ -7260,6 +7260,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_claude"
+version = "0.19.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sirio_control"
 version = "0.19.1"
 dependencies = [
