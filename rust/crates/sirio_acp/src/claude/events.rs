@@ -29,6 +29,9 @@ pub(crate) struct ResultSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_read_tokens: u64,
+    /// Cumulative tokens written to the prompt cache. Context like any
+    /// other: the meter's fallback counts them in.
+    pub cache_creation_tokens: u64,
     /// The context window of the model that answered, when reported. The
     /// context meter's fallback when `get_context_usage` is unavailable.
     pub context_window: Option<u64>,
@@ -304,11 +307,13 @@ impl Fold {
         let mut input_tokens = 0;
         let mut output_tokens = 0;
         let mut cached_read_tokens = 0;
+        let mut cache_creation_tokens = 0;
         let mut context_window = None;
         for (model, usage) in &result.model_usage {
             input_tokens += usage.input_tokens;
             output_tokens += usage.output_tokens;
             cached_read_tokens += usage.cache_read_input_tokens;
+            cache_creation_tokens += usage.cache_creation_input_tokens;
             if self.model.as_deref() == Some(model.as_str()) || context_window.is_none() {
                 context_window = usage.context_window.or(context_window);
             }
@@ -329,6 +334,7 @@ impl Fold {
             input_tokens,
             output_tokens,
             cached_read_tokens,
+            cache_creation_tokens,
             context_window,
         });
         // A turn that ends with calls still open had them abandoned; the
@@ -664,7 +670,7 @@ mod tests {
             "result": "Done.", "total_cost_usd": 0.0421,
             "modelUsage": {"claude-fable-5-1": {
                 "inputTokens": 1200, "outputTokens": 340, "cacheReadInputTokens": 8000,
-                "cacheCreationInputTokens": 0, "costUSD": 0.0421, "contextWindow": 200000}}
+                "cacheCreationInputTokens": 500, "costUSD": 0.0421, "contextWindow": 200000}}
         })));
         assert_eq!(
             events,
@@ -682,6 +688,9 @@ mod tests {
         let summary = fold.last_result().expect("a recorded result");
         assert_eq!(summary.context_window, Some(200_000));
         assert_eq!(summary.total_cost_usd, Some(0.0421));
+        // Recorded, not folded into another number: the meter's fallback
+        // adds each term itself.
+        assert_eq!(summary.cache_creation_tokens, 500);
     }
 
     #[test]

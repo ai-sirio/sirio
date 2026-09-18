@@ -237,6 +237,20 @@ def main():
                     "session_id": SESSION_ID,
                     "uuid": "status-uuid",
                 })
+            elif subtype == "get_context_usage":
+                if MODE == "no_context_usage":
+                    # Answers nothing: the turn still has to end, on the
+                    # numbers the result already carried.
+                    pass
+                else:
+                    control_response(request_id, {
+                        "totalTokens": 48000,
+                        "rawMaxTokens": 200000,
+                        "maxTokens": 180000,
+                        "percentage": 24,
+                        "model": "claude-fable-5-1",
+                        "categories": [],
+                    })
             elif subtype == "rewind_files":
                 if MODE == "no_rewind":
                     send({
@@ -297,6 +311,11 @@ def main():
                     time.sleep(0.15)
                 result()
                 return
+            if MODE in ("context_usage", "no_context_usage"):
+                init_line()
+                text("Hello")
+                result()
+                continue
             if MODE == "permission":
                 init_line()
                 tool_input = {"command": "rm -rf build", "description": "Remove build"}
