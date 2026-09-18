@@ -35,6 +35,7 @@ mod claude;
 mod mcp_config;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
+pub use claude::{ClaudeClient, ClaudeLaunch};
 pub use mcp_config::discover_mcp_servers;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
@@ -46,12 +47,12 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// agentic turn that runs for an hour is normal as long as it keeps
 /// reporting, and killing a working agent loses the whole session, not just
 /// the turn. The clock restarts on every notification the agent sends.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub(crate) const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
-type ChildHandle = Arc<Mutex<Option<Child>>>;
+pub(crate) type ChildHandle = Arc<Mutex<Option<Child>>>;
 
 /// The operation that exceeded its bounded wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1659,28 +1660,28 @@ async fn drain_stderr(
     }
 }
 
-type ActivityClock = Arc<Mutex<std::time::Instant>>;
+pub(crate) type ActivityClock = Arc<Mutex<std::time::Instant>>;
 
-fn touch_activity(clock: &ActivityClock) {
+pub(crate) fn touch_activity(clock: &ActivityClock) {
     if let Ok(mut at) = clock.lock() {
         *at = std::time::Instant::now();
     }
 }
 
-fn idle_for(clock: &ActivityClock) -> Duration {
+pub(crate) fn idle_for(clock: &ActivityClock) -> Duration {
     clock
         .lock()
         .map(|at| at.elapsed())
         .unwrap_or(Duration::ZERO)
 }
 
-type StderrTail = Arc<Mutex<VecDeque<String>>>;
+pub(crate) type StderrTail = Arc<Mutex<VecDeque<String>>>;
 
 /// How much of the agent's stderr is kept for the death report. Enough for a
 /// stack trace's first frames, small enough to sit inside an error message.
 const MAX_STDERR_TAIL: usize = 20;
 
-fn push_stderr_tail(tail: &StderrTail, line: String) {
+pub(crate) fn push_stderr_tail(tail: &StderrTail, line: String) {
     if let Ok(mut tail) = tail.lock() {
         if tail.len() >= MAX_STDERR_TAIL {
             tail.pop_front();
@@ -1697,14 +1698,14 @@ fn push_stderr_tail(tail: &StderrTail, line: String) {
 /// says anything about why the agent went away.
 const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
-async fn wait_for_stderr_drain(drained: &Arc<AtomicBool>) {
+pub(crate) async fn wait_for_stderr_drain(drained: &Arc<AtomicBool>) {
     let deadline = std::time::Instant::now() + STDERR_DRAIN_GRACE;
     while !drained.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
         async_io::Timer::after(Duration::from_millis(5)).await;
     }
 }
 
-fn stderr_tail_report(tail: &StderrTail) -> String {
+pub(crate) fn stderr_tail_report(tail: &StderrTail) -> String {
     let lines = tail
         .lock()
         .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
@@ -1717,9 +1718,9 @@ fn stderr_tail_report(tail: &StderrTail) -> String {
 
 /// The bound on [`AcpClient::mcp_warnings`] — a long session's stderr
 /// should not grow this without limit.
-const MAX_MCP_WARNINGS: usize = 20;
+pub(crate) const MAX_MCP_WARNINGS: usize = 20;
 
-fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
+pub(crate) fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
     if let Ok(mut warnings) = cell.lock() {
         if warnings.len() >= MAX_MCP_WARNINGS {
             warnings.remove(0);
@@ -1732,7 +1733,7 @@ fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
 /// some adapters emit on a successful connection (e.g. "Connected to MCP
 /// server 'foo'"), so a failure-shaped word must co-occur before this
 /// counts as a warning rather than routine noise (F-CHAT-33).
-fn looks_like_mcp_warning(line: &str) -> bool {
+pub(crate) fn looks_like_mcp_warning(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     if !lower.contains("mcp") {
         return false;
@@ -1752,7 +1753,7 @@ fn looks_like_mcp_warning(line: &str) -> bool {
     FAILURE_WORDS.iter().any(|word| lower.contains(word))
 }
 
-fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
+pub(crate) fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
     if let Ok(mut reason) = reason.lock() {
         *reason = Some(timeout);
     }
@@ -1780,16 +1781,16 @@ async fn terminate_and_reap(child: &ChildHandle) -> Option<ExitStatus> {
     }
 }
 
-fn terminate_and_reap_blocking(child: &ChildHandle) -> Option<ExitStatus> {
+pub(crate) fn terminate_and_reap_blocking(child: &ChildHandle) -> Option<ExitStatus> {
     block_on(terminate_and_reap(child))
 }
 
 /// What the OS said about the agent's exit, recorded by whoever reaped it.
 /// [`terminate_and_reap`] takes the child out of its handle, so a report
 /// built afterwards has nothing left to ask.
-type ExitStatusSlot = Arc<Mutex<Option<ExitStatus>>>;
+pub(crate) type ExitStatusSlot = Arc<Mutex<Option<ExitStatus>>>;
 
-fn record_exit_status(slot: &ExitStatusSlot, status: Option<ExitStatus>) {
+pub(crate) fn record_exit_status(slot: &ExitStatusSlot, status: Option<ExitStatus>) {
     if let Some(status) = status
         && let Ok(mut slot) = slot.lock()
     {
@@ -1806,7 +1807,7 @@ const CHILD_EXIT_PROBE: Duration = Duration::from_millis(200);
 /// empty string when nothing has observed the exit yet — a still-running
 /// agent that merely closed its stdout is a real case, and guessing a cause
 /// there would be worse than saying nothing.
-async fn child_exit_report(child: &ChildHandle, recorded: &ExitStatusSlot) -> String {
+pub(crate) async fn child_exit_report(child: &ChildHandle, recorded: &ExitStatusSlot) -> String {
     let deadline = std::time::Instant::now() + CHILD_EXIT_PROBE;
     loop {
         if let Some(status) = recorded.lock().ok().and_then(|slot| *slot) {
@@ -1831,7 +1832,7 @@ fn try_child_status(child: &ChildHandle) -> Option<ExitStatus> {
     child.try_status().ok().flatten()
 }
 
-fn describe_exit(status: ExitStatus) -> String {
+pub(crate) fn describe_exit(status: ExitStatus) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -1847,7 +1848,7 @@ fn describe_exit(status: ExitStatus) -> String {
 
 /// The deadline Sirio itself enforced, when one fired. Without this the turn
 /// error blames the transport for a kill Sirio decided on.
-fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
+pub(crate) fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
     match reason.lock().ok().and_then(|reason| reason.clone()) {
         Some(AcpError::Timeout {
             operation: TimeoutOperation::Prompt,
@@ -1867,7 +1868,7 @@ fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
     }
 }
 
-fn detach_worker(worker: JoinHandle<()>) {
+pub(crate) fn detach_worker(worker: JoinHandle<()>) {
     let _ = thread::spawn(move || {
         let _ = worker.join();
     });
