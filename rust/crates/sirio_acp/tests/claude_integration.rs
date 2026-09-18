@@ -238,3 +238,117 @@ fn process_exists(pid: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+#[test]
+fn a_model_change_reaches_the_cli_and_the_catalogue_follows() {
+    let (mut client, _events) = launch("echo_control");
+    client
+        .set_model("model", "sonnet")
+        .expect("model change is accepted");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while client
+        .model_catalog()
+        .is_none_or(|catalog| catalog.selected_id != "sonnet")
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        client.model_catalog().expect("a catalogue").selected_id,
+        "sonnet"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_mode_change_is_confirmed_by_the_agents_own_status_line() {
+    let (mut client, events) = launch("echo_control");
+    client.set_mode("plan").expect("mode change is accepted");
+    // The CLI echoes the new mode as a status line; that echo, not the
+    // request's own success, is what moves the pill.
+    let mut seen_update = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !seen_update && std::time::Instant::now() < deadline {
+        if let AcpEvent::OtherSessionUpdate { kind } = next_event(&events) {
+            seen_update = kind == "CurrentModeUpdate(plan)";
+        }
+    }
+    assert!(seen_update, "the mode change must reach the surface");
+    assert_eq!(client.mode_catalog().expect("modes").current_id, "plan");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn cancelling_a_turn_produces_a_terminal_outcome() {
+    let (mut client, events) = launch("slow_turn");
+    client.prompt("hello").expect("prompt is accepted");
+    // Wait until the turn is demonstrably running before interrupting it.
+    loop {
+        if matches!(next_event(&events), AcpEvent::AgentMessageChunk(_)) {
+            break;
+        }
+    }
+    client.cancel().expect("cancel is accepted");
+    let seen = drain_until_turn_end(&events);
+    assert_eq!(
+        seen.last(),
+        Some(&AcpEvent::TurnEnded {
+            stop_reason: "Cancelled".into()
+        }),
+        "a cancelled turn must say so, or the footer reads as an ordinary end"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_that_goes_silent_is_reaped_and_reported() {
+    let (_client, events) = ClaudeClient::launch_with_timeouts(
+        fixture_launch("silent_turn"),
+        std::env::temp_dir(),
+        Duration::from_secs(10),
+        Duration::from_millis(400),
+        Duration::from_secs(60),
+    )
+    .expect("handshake succeeds; it is the turn that hangs");
+    _client.prompt("hello").expect("prompt is accepted");
+    let event = loop {
+        match next_event(&events) {
+            event @ (AcpEvent::Timeout { .. } | AcpEvent::TransportError(_)) => break event,
+            _ => continue,
+        }
+    };
+    assert!(
+        matches!(
+            event,
+            AcpEvent::Timeout {
+                operation: sirio_acp::TimeoutOperation::Prompt,
+                ..
+            }
+        ),
+        "an idle turn must be reported as a prompt timeout, got {event:?}"
+    );
+}
+
+#[test]
+fn a_turn_that_keeps_reporting_is_never_reaped_for_taking_long() {
+    // The watchdog measures silence, not duration: an agent that works for
+    // longer than the window while still reporting must survive. Killing it
+    // loses the whole session, not just the turn.
+    let (mut client, events) = ClaudeClient::launch_with_timeouts(
+        fixture_launch("chatty_slow_turn"),
+        std::env::temp_dir(),
+        Duration::from_secs(10),
+        Duration::from_millis(400),
+        Duration::from_secs(60),
+    )
+    .expect("handshake succeeds");
+    client.prompt("hello").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Timeout { .. })),
+        "a reporting agent must not be reaped: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}

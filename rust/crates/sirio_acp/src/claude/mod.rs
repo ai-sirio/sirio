@@ -8,10 +8,11 @@
 //! tab uses is invisible above this line.
 
 mod events;
+mod prompt;
 mod worker;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic::Ordering, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -182,11 +183,14 @@ impl ClaudeClient {
         ))
     }
 
-    /// Sends a plain-text turn. [`Self::prompt_content`] (Task 8) is the
-    /// full form; this is the one the integration tests drive.
+    /// Sends a plain-text turn. [`Self::prompt_content`] is the full
+    /// form; this is the one the integration tests drive.
     pub fn prompt(&self, text: impl Into<String>) -> Result<()> {
+        let uuid = new_uuid();
+        // No mentions, so no working directory is needed to resolve them.
+        let line = prompt::user_message(&text.into(), &[], &[], Path::new(""), &uuid);
         self.command_tx
-            .send_blocking(worker::Command::Prompt(text.into()))
+            .send_blocking(worker::Command::Prompt { line, uuid })
             .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
     }
 
@@ -262,10 +266,102 @@ impl ClaudeClient {
         self.event_tx.take();
         result
     }
+
+    /// Sends a turn made of text, file mentions and images.
+    pub fn prompt_content(
+        &self,
+        text: impl Into<String>,
+        mention_paths: Vec<String>,
+        images: Vec<crate::ImageAttachment>,
+        cwd: impl AsRef<Path>,
+    ) -> Result<()> {
+        let uuid = new_uuid();
+        let line = prompt::user_message(&text.into(), &mention_paths, &images, cwd.as_ref(), &uuid);
+        if line["message"]["content"]
+            .as_array()
+            .is_none_or(|blocks| blocks.is_empty())
+        {
+            // Nothing to say and nothing attached: sending an empty turn
+            // would burn a turn and return nothing.
+            return Ok(());
+        }
+        self.command_tx
+            .send_blocking(worker::Command::Prompt { line, uuid })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// Switches model. `config_id` is accepted for signature parity with
+    /// the ACP client and is always `"model"` here.
+    pub fn set_model(&self, _config_id: impl Into<String>, value: impl Into<String>) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::SetModel(value.into()))
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// Sets a non-model option. Only `"effort"` exists on this transport;
+    /// anything else is refused rather than silently dropped.
+    pub fn set_config_option(
+        &self,
+        option_id: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<()> {
+        let option_id = option_id.into();
+        if option_id != "effort" {
+            return Err(anyhow!("Claude Code has no `{option_id}` option"));
+        }
+        let value = value.into();
+        // "default" is the surface's word for "no override"; the wire
+        // spells that as a null effort level.
+        let level = (value != "default").then_some(value);
+        self.command_tx
+            .send_blocking(worker::Command::SetEffort(level))
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// Switches permission mode.
+    pub fn set_mode(&self, mode_id: impl Into<String>) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::SetMode(mode_id.into()))
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// Ends the turn in flight.
+    pub fn cancel(&self) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::Cancel)
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// The id of the last turn this client sent, which a rewind names.
+    #[must_use]
+    pub fn last_user_message_id(&self) -> Option<String> {
+        self.shared.last_user_message_id()
+    }
 }
 
 impl Drop for ClaudeClient {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+/// A v4-shaped identifier for one turn. It never leaves this session — the
+/// CLI only ever compares it to ids Sirio itself sent — so a monotonic
+/// source is enough, and it keeps the dependency graph unchanged.
+fn new_uuid() -> String {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or_default();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (nanos >> 32) as u32,
+        (nanos >> 16) as u16,
+        (nanos & 0xfff) as u16,
+        (count & 0xfff) as u16,
+        u64::from(std::process::id()) << 16 | (count >> 12) & 0xffff,
+    )
 }

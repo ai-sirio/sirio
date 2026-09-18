@@ -6,6 +6,7 @@
 //! client's own helpers, shared rather than re-derived — a death report
 //! that names one cause here and another there would be worse than none.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -20,19 +21,28 @@ use super::ClaudeLaunch;
 use super::events::Fold;
 use crate::{
     AcpError, AcpEvent, AgentMode, ChildHandle, EffortChoice, EffortOption, ExitStatusSlot,
-    ModeCatalog, ModelCatalog, ModelOption, StderrTail,
+    ModeCatalog, ModelCatalog, ModelOption, StderrTail, TimeoutOperation,
 };
 
 /// What the client asks the worker to do.
 #[derive(Debug)]
 pub(super) enum Command {
-    /// A plain-text turn. Task 8 replaces this arm with the block-building
-    /// one; the variant stays.
-    Prompt(String),
+    /// A turn, already built as its `user` line, plus the id it is known by.
+    Prompt {
+        line: serde_json::Value,
+        uuid: String,
+    },
+    /// Switch model.
+    SetModel(String),
+    /// Switch permission mode.
+    SetMode(String),
+    /// Set the effort level; `None` resets to the settings' own value.
+    SetEffort(Option<String>),
+    /// End the turn in flight.
+    Cancel,
     /// Stop: close the CLI's stdin, wait for it, acknowledge.
     Shutdown(mpsc::SyncSender<()>),
-    // Tasks 8 and 9 add SetModel, SetMode, SetEffort, Cancel,
-    // RespondPermission and RewindFiles here.
+    // Task 9 adds RespondPermission and RewindFiles here.
 }
 
 /// The handshake's progress, reported to the launching thread.
@@ -53,6 +63,7 @@ pub(super) struct Shared {
     model_catalog: Mutex<Option<ModelCatalog>>,
     mode_catalog: Mutex<Option<ModeCatalog>>,
     mcp_warnings: Mutex<Vec<String>>,
+    last_user_message_id: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -77,6 +88,13 @@ impl Shared {
             .lock()
             .map(|w| w.clone())
             .unwrap_or_default()
+    }
+
+    pub(super) fn last_user_message_id(&self) -> Option<String> {
+        self.last_user_message_id
+            .lock()
+            .ok()
+            .and_then(|id| id.clone())
     }
 
     fn push_mcp_warnings(&self, warnings: Vec<String>) {
@@ -238,16 +256,18 @@ async fn session(context: SessionContext) -> SessionOutcome {
         event_tx,
         startup_tx,
         shared,
-        child: _child,
+        child,
         activity,
-        prompt_timeout: _prompt_timeout,
+        prompt_timeout,
         permission_timeout: _permission_timeout,
     } = context;
     let mut lines = BufReader::new(stdout).lines();
     let mut fold = Fold::new();
     let request_ids = AtomicU64::new(1);
     let next_request_id = || format!("sirio-{}", request_ids.fetch_add(1, Ordering::Relaxed));
-    let prompt_ids = AtomicU64::new(1);
+    let mut turn_in_flight = false;
+    let mut pending_model: HashMap<String, String> = HashMap::new();
+    let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
 
     // The handshake. Its answer is the whole catalogue, so every picker is
     // populated before the user can type into the composer.
@@ -312,72 +332,173 @@ async fn session(context: SessionContext) -> SessionOutcome {
     }
 
     // The session proper: read lines and serve commands until one side
-    // stops. Tasks 8 and 9 extend the command arm.
+    // stops. Task 9 extends the command arm with the permission answer.
     loop {
         let next_line = lines.next();
         let next_command = command_rx.recv();
-        futures::pin_mut!(next_line, next_command);
-        match futures::future::select(next_line, next_command).await {
-            futures::future::Either::Left((line, _)) => match line {
-                Some(Ok(line)) => {
-                    crate::touch_activity(&activity);
-                    let Some(message) = CliMessage::parse(&line) else {
-                        continue;
-                    };
-                    if let CliMessage::System(system) = &message
-                        && let Some(mode) = system.permission_mode.clone()
-                    {
-                        apply_current_mode(&shared, &mode);
+        // The idle window, not a cap on the turn. An agentic turn that
+        // runs for an hour is normal as long as it keeps reporting; the
+        // clock restarts on every line the CLI writes.
+        let idle_check = async_io::Timer::after(Duration::from_millis(250));
+        futures::pin_mut!(next_line, next_command, idle_check);
+        match futures::future::select(futures::future::select(next_line, next_command), idle_check)
+            .await
+        {
+            futures::future::Either::Left((futures::future::Either::Left((line, _)), _)) => {
+                match line {
+                    Some(Ok(line)) => {
+                        crate::touch_activity(&activity);
+                        let Some(message) = CliMessage::parse(&line) else {
+                            continue;
+                        };
+                        if let CliMessage::ControlResponse(value) = &message
+                            && let Some(envelope) = ControlEnvelope::parse(value)
+                        {
+                            if let Some(model) = pending_model.remove(&envelope.request_id) {
+                                match envelope.error {
+                                    // The wire confirms by echoing; a refusal
+                                    // leaves the catalogue where it was rather
+                                    // than showing a model the session is not on.
+                                    None => {
+                                        if let Some(catalog) = apply_selected_model(&shared, &model)
+                                        {
+                                            let _ = event_tx
+                                                .send(AcpEvent::ModelCatalog(catalog))
+                                                .await;
+                                        }
+                                    }
+                                    Some(error) => {
+                                        let _ = event_tx
+                                            .send(AcpEvent::TransportError(format!(
+                                                "model selection failed: {error}"
+                                            )))
+                                            .await;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if matches!(message, CliMessage::Result(_)) {
+                            turn_in_flight = false;
+                        }
+                        if let CliMessage::System(system) = &message
+                            && let Some(mode) = system.permission_mode.clone()
+                        {
+                            apply_current_mode(&shared, &mode);
+                        }
+                        let events = fold.apply(message);
+                        shared.push_mcp_warnings(fold.take_mcp_warnings());
+                        if let Some(id) = fold.session_id()
+                            && let Ok(mut held) = shared.session_id.lock()
+                        {
+                            *held = Some(id.to_string());
+                        }
+                        if let Some(version) = fold.claude_version()
+                            && let Ok(mut held) = shared.claude_version.lock()
+                        {
+                            *held = Some(version.to_string());
+                        }
+                        for event in events {
+                            let _ = event_tx.send(event).await;
+                        }
                     }
-                    let events = fold.apply(message);
-                    shared.push_mcp_warnings(fold.take_mcp_warnings());
-                    if let Some(id) = fold.session_id()
-                        && let Ok(mut held) = shared.session_id.lock()
-                    {
-                        *held = Some(id.to_string());
+                    Some(Err(error)) => {
+                        return SessionOutcome::Died(format!(": {error}"));
                     }
-                    if let Some(version) = fold.claude_version()
-                        && let Ok(mut held) = shared.claude_version.lock()
-                    {
-                        *held = Some(version.to_string());
-                    }
-                    for event in events {
-                        let _ = event_tx.send(event).await;
-                    }
+                    None => return SessionOutcome::Died(String::new()),
                 }
-                Some(Err(error)) => {
-                    return SessionOutcome::Died(format!(": {error}"));
-                }
-                None => return SessionOutcome::Died(String::new()),
-            },
-            futures::future::Either::Right((command, _)) => match command {
-                Ok(Command::Prompt(text)) => {
-                    // The watchdog measures silence from here. A turn that
-                    // reports is a turn that lives, however long it takes.
-                    crate::touch_activity(&activity);
-                    let uuid = format!(
-                        "sirio-prompt-{}",
-                        prompt_ids.fetch_add(1, Ordering::Relaxed)
-                    );
-                    let line = serde_json::json!({
-                        "type": "user",
-                        "uuid": uuid,
-                        "message": {
-                            "role": "user",
-                            "content": [{"type": "text", "text": text}],
-                        },
-                    });
-                    if write_line(&mut stdin, &line).await.is_err() {
-                        return SessionOutcome::Died(": could not write the turn".into());
+            }
+            futures::future::Either::Left((futures::future::Either::Right((command, _)), _)) => {
+                match command {
+                    Ok(Command::Prompt { line, uuid }) => {
+                        if let Ok(mut held) = shared.last_user_message_id.lock() {
+                            *held = Some(uuid);
+                        }
+                        // The watchdog measures silence from here. A turn that
+                        // reports is a turn that lives, however long it takes.
+                        crate::touch_activity(&activity);
+                        turn_in_flight = true;
+                        if write_line(&mut stdin, &line).await.is_err() {
+                            return SessionOutcome::Died(": could not write the turn".into());
+                        }
                     }
+                    Ok(Command::SetModel(model)) => {
+                        let id = next_request_id();
+                        pending_model.insert(id.clone(), model.clone());
+                        if write_line(&mut stdin, &ControlRequest::set_model(&id, &model))
+                            .await
+                            .is_err()
+                        {
+                            return SessionOutcome::Died(
+                                ": could not write the model change".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::SetMode(mode)) => {
+                        let id = next_request_id();
+                        if write_line(&mut stdin, &ControlRequest::set_permission_mode(&id, &mode))
+                            .await
+                            .is_err()
+                        {
+                            return SessionOutcome::Died(
+                                ": could not write the mode change".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::SetEffort(level)) => {
+                        let id = next_request_id();
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::set_effort(&id, level.as_deref()),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return SessionOutcome::Died(
+                                ": could not write the effort change".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::Cancel) => {
+                        let id = next_request_id();
+                        if write_line(&mut stdin, &ControlRequest::interrupt(&id))
+                            .await
+                            .is_err()
+                        {
+                            return SessionOutcome::Died(": could not write the interrupt".into());
+                        }
+                    }
+                    Ok(Command::Shutdown(ack)) => {
+                        // Closing stdin is how a stream-json session ends.
+                        drop(stdin);
+                        return SessionOutcome::CleanShutdown(ack);
+                    }
+                    Err(_) => return SessionOutcome::Died(String::new()),
                 }
-                Ok(Command::Shutdown(ack)) => {
-                    // Closing stdin is how a stream-json session ends.
-                    drop(stdin);
-                    return SessionOutcome::CleanShutdown(ack);
-                }
-                Err(_) => return SessionOutcome::Died(String::new()),
-            },
+            }
+            // The idle timer: nothing to serve, fall through to the
+            // watchdog check below.
+            futures::future::Either::Right((_, _)) => {}
+        }
+        if turn_in_flight && crate::idle_for(&activity) >= prompt_timeout {
+            // An idle turn is reaped and reported. There is no permission
+            // exemption here yet: Task 9 owns the inbound cards and extends
+            // this condition when an open card explains the silence.
+            crate::record_timeout(
+                &timeout_reason,
+                AcpError::Timeout {
+                    operation: TimeoutOperation::Prompt,
+                    duration: prompt_timeout,
+                },
+            );
+            let _ = event_tx
+                .send(AcpEvent::Timeout {
+                    operation: TimeoutOperation::Prompt,
+                    duration: prompt_timeout,
+                })
+                .await;
+            crate::terminate_and_reap_blocking(&child);
+            return SessionOutcome::NeverStarted;
         }
     }
 }
@@ -459,6 +580,14 @@ fn catalogue_events(catalog: &Catalog) -> Vec<AcpEvent> {
             .collect(),
     }));
     events
+}
+
+/// Moves the catalogue's selection, returning the new catalogue to publish.
+fn apply_selected_model(shared: &Shared, model_id: &str) -> Option<ModelCatalog> {
+    let mut catalog = shared.model_catalog.lock().ok()?;
+    let catalog = catalog.as_mut()?;
+    catalog.selected_id = model_id.to_string();
+    Some(catalog.clone())
 }
 
 fn apply_current_mode(shared: &Shared, mode_id: &str) {

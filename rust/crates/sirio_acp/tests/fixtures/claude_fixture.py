@@ -120,6 +120,11 @@ def normal_turn():
     result()
 
 
+def send_flush_and_exit():
+    sys.stdout.flush()
+    os._exit(0)
+
+
 def main():
     if MODE == "silent":
         # Answers nothing, ever: the startup-timeout case.
@@ -142,6 +147,10 @@ def main():
                 control_response(request_id, initialize_payload())
             elif subtype == "interrupt":
                 control_response(request_id, {"still_queued": 0})
+                if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
+                    result(subtype="error_during_execution", is_error=True,
+                           text_body="Interrupted by user")
+                    send_flush_and_exit()
             elif subtype == "set_permission_mode":
                 control_response(request_id, {"mode": request.get("mode")})
                 send({
@@ -165,6 +174,30 @@ def main():
                 sys.stderr.write("fixture agent: fatal error, going away\n")
                 sys.stderr.flush()
                 os._exit(3)
+            if MODE == "echo_control":
+                # Stays up answering control requests; the turn is not the
+                # subject of these tests.
+                continue
+            if MODE == "slow_turn":
+                # Emits one chunk and waits: the test interrupts the turn,
+                # so blocking here would swallow the interrupt and end the
+                # turn normally instead of cancelled.
+                init_line()
+                text("working")
+                continue
+            if MODE == "silent_turn":
+                init_line()
+                time.sleep(600)
+                return
+            if MODE == "chatty_slow_turn":
+                init_line()
+                # Six reports across a window the test sets to 400 ms: the
+                # turn outlives the window without ever being silent for one.
+                for index in range(6):
+                    text(f"step {index} ")
+                    time.sleep(0.15)
+                result()
+                return
             # Stay up serving turns until stdin closes: the worker owns our
             # lifetime, and exiting after one turn would read as a death.
             normal_turn()
