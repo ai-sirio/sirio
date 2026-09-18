@@ -8,16 +8,24 @@
 //!
 //! # Agent marks are different
 //!
-//! The agent brand marks (Claude Code, Codex, OpenCode, Pi, omp) are
-//! embedded SVGs on every platform, taken from icon libraries rather than
-//! the Zed catalog: Claude and OpenAI from Microsoft's Codicons
-//! (`rust/assets/icons/codicons/`), OpenCode and Pi from Simple Icons
-//! (`rust/assets/icons/simple-icons/`). No library carries an Oh My Pi
-//! mark, so omp keeps Sirio's own asset.
-//! Oh My Pi's three-stop gradient is rendered **full-colour, never tinted**:
-//! its brand logo keeps its identity and must not be recoloured by a theme.
-//! The four library marks are single `currentColor` paths and go through
-//! the normal tinted path like the reference does.
+//! The agent brand marks are embedded SVGs on every platform, taken from
+//! one icon library rather than the Zed catalog: LobeHub's
+//! [lobe-icons](https://github.com/lobehub/lobe-icons), vendored in
+//! `rust/assets/icons/lobehub/`. One set, not several, is the point — it
+//! carries every mark on the same 24-unit grid, so the marks share an
+//! optical weight instead of each needing its own correction. No library
+//! carries an Oh My Pi mark, so omp keeps Sirio's own asset.
+//!
+//! Two of them paint themselves and must never be recoloured by a theme:
+//! omp's three-stop gradient, and Gemini's blue base under three gradient
+//! overlays. The rest are single `currentColor` paths on the tinted path.
+//! Claude is the seam between the two: its asset bakes `#D97757`, but it
+//! rides the tinted path anyway, because the tint it is handed is that
+//! same hex (see [`Icon::agent_mark_color`]).
+//!
+//! Gemini and Grok are vendored without an adapter behind them. Nothing in
+//! `sirio_agents::ALL` produces those ids; [`Icon::for_agent_id`] maps them
+//! for the registry, whose rows otherwise fall back to a generic sparkle.
 //!
 //! The SVG bytes are embedded with `include_bytes!`, so icons ship inside
 //! the binary. Colour comes from the caller's `text_color` — which must come
@@ -26,7 +34,7 @@
 
 use gpui::{
     App, AssetSource, Bounds, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce, Rgba,
-    SharedString, StyleRefinement, Styled, Window, canvas, px, svg,
+    SharedString, StyleRefinement, Styled, SvgSize, Window, canvas, px, size, svg,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -44,13 +52,17 @@ use sirio_theme::AgentBrandColor;
 ///
 /// Generic icons resolve to byte-identical SVGs vendored from Zed's pinned
 /// upstream catalog; see `rust/assets/icons/zed/ATTRIBUTION.md`. Agent marks
-/// come from Codicons and Simple Icons (each directory carries its own
-/// `ATTRIBUTION.md`); Oh My Pi keeps its Sirio asset because no library
-/// provides its mark.
+/// come from LobeHub's lobe-icons (`rust/assets/icons/lobehub/`, which
+/// carries its own `ATTRIBUTION.md`); Oh My Pi keeps its Sirio asset
+/// because no library provides its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     /// A project directory (`zed/folder.svg`).
     FolderFill,
+    /// A project directory whose row is expanded (`zed/folder_open.svg`).
+    /// Paired with [`Icon::FolderFill`]: the file tree swaps between the two
+    /// instead of drawing a separate disclosure arrow.
+    FolderOpen,
     /// A git worktree (`zed/git_branch.svg`).
     GitBranch,
     /// A chat surface (`zed/chat.svg`).
@@ -83,16 +95,24 @@ pub enum Icon {
     SunMoon,
     /// A browser surface (`zed/public.svg`).
     Globe,
-    /// Anthropic's Claude mark, monochrome (`codicons/claude.svg`).
+    /// Anthropic's Claude starburst (`lobehub/claude-color.svg`), the one
+    /// mark whose asset bakes its colour and is tinted all the same.
     ClaudeCode,
-    /// OpenAI's knot, monochrome (`codicons/openai.svg`), like the Swift
-    /// app's `.primary` rendering.
+    /// Codex's own mark, monochrome (`lobehub/codex.svg`). Not the colour
+    /// variant: that one paints a white plate behind a gradient, which is
+    /// illegible in dark mode and muddy at a sidebar's 15px.
     Codex,
-    /// OpenCode's nested-frame mark, monochrome
-    /// (`simple-icons/opencode.svg`).
+    /// OpenCode's nested-frame mark, monochrome (`lobehub/opencode.svg`).
     OpenCode,
-    /// pi.dev's monogram, monochrome (`simple-icons/pi.svg`).
+    /// pi.dev's monogram, monochrome (`lobehub/pi.svg`).
     Pi,
+    /// Google's Gemini spark (`lobehub/gemini-color.svg`) — a `#3186FF`
+    /// base under green, red and yellow gradient overlays, so it takes the
+    /// full-colour path. No adapter produces this id; see the module docs.
+    Gemini,
+    /// xAI's Grok mark, monochrome (`lobehub/grok.svg`). No adapter
+    /// produces this id either.
+    Grok,
     /// Oh-My-Pi's mark with the pink→purple→cyan gradient, ported from
     /// `App/AgentIcon.swift` — full colour. It remains a Sirio fallback
     /// because Zed does not provide an Oh My Pi mark.
@@ -166,6 +186,7 @@ impl Icon {
     pub fn path(self) -> &'static str {
         match self {
             Icon::FolderFill => "icons/zed/folder.svg",
+            Icon::FolderOpen => "icons/zed/folder_open.svg",
             Icon::GitBranch => "icons/zed/git_branch.svg",
             Icon::MessageSquare => "icons/zed/chat.svg",
             Icon::SquareTerminal => "icons/zed/terminal.svg",
@@ -182,10 +203,12 @@ impl Icon {
             Icon::Shield => "icons/zed/lock.svg",
             Icon::SunMoon => "icons/zed/screen.svg",
             Icon::Globe => "icons/zed/public.svg",
-            Icon::ClaudeCode => "icons/codicons/claude.svg",
-            Icon::Codex => "icons/codicons/openai.svg",
-            Icon::OpenCode => "icons/simple-icons/opencode.svg",
-            Icon::Pi => "icons/simple-icons/pi.svg",
+            Icon::ClaudeCode => "icons/lobehub/claude-color.svg",
+            Icon::Codex => "icons/lobehub/codex.svg",
+            Icon::OpenCode => "icons/lobehub/opencode.svg",
+            Icon::Pi => "icons/lobehub/pi.svg",
+            Icon::Gemini => "icons/lobehub/gemini-color.svg",
+            Icon::Grok => "icons/lobehub/grok.svg",
             Icon::OhMyPi => "icons/agent-omp.svg",
             Icon::SidebarLeft => "icons/zed/threads_sidebar_left_open.svg",
             Icon::PanelRight => "icons/zed/threads_sidebar_right_open.svg",
@@ -250,6 +273,7 @@ impl Icon {
     pub fn svg(self) -> &'static [u8] {
         match self {
             Icon::FolderFill => include_bytes!("../../../assets/icons/zed/folder.svg"),
+            Icon::FolderOpen => include_bytes!("../../../assets/icons/zed/folder_open.svg"),
             Icon::GitBranch => include_bytes!("../../../assets/icons/zed/git_branch.svg"),
             Icon::MessageSquare => include_bytes!("../../../assets/icons/zed/chat.svg"),
             Icon::SquareTerminal => include_bytes!("../../../assets/icons/zed/terminal.svg"),
@@ -266,10 +290,12 @@ impl Icon {
             Icon::Shield => include_bytes!("../../../assets/icons/zed/lock.svg"),
             Icon::SunMoon => include_bytes!("../../../assets/icons/zed/screen.svg"),
             Icon::Globe => include_bytes!("../../../assets/icons/zed/public.svg"),
-            Icon::ClaudeCode => include_bytes!("../../../assets/icons/codicons/claude.svg"),
-            Icon::Codex => include_bytes!("../../../assets/icons/codicons/openai.svg"),
-            Icon::OpenCode => include_bytes!("../../../assets/icons/simple-icons/opencode.svg"),
-            Icon::Pi => include_bytes!("../../../assets/icons/simple-icons/pi.svg"),
+            Icon::ClaudeCode => include_bytes!("../../../assets/icons/lobehub/claude-color.svg"),
+            Icon::Codex => include_bytes!("../../../assets/icons/lobehub/codex.svg"),
+            Icon::OpenCode => include_bytes!("../../../assets/icons/lobehub/opencode.svg"),
+            Icon::Pi => include_bytes!("../../../assets/icons/lobehub/pi.svg"),
+            Icon::Gemini => include_bytes!("../../../assets/icons/lobehub/gemini-color.svg"),
+            Icon::Grok => include_bytes!("../../../assets/icons/lobehub/grok.svg"),
             Icon::OhMyPi => include_bytes!("../../../assets/icons/agent-omp.svg"),
             Icon::SidebarLeft => {
                 include_bytes!("../../../assets/icons/zed/threads_sidebar_left_open.svg")
@@ -339,20 +365,28 @@ impl Icon {
     pub fn is_agent_mark(self) -> bool {
         matches!(
             self,
-            Icon::ClaudeCode | Icon::Codex | Icon::OpenCode | Icon::Pi | Icon::OhMyPi
+            Icon::ClaudeCode
+                | Icon::Codex
+                | Icon::OpenCode
+                | Icon::Pi
+                | Icon::Gemini
+                | Icon::Grok
+                | Icon::OhMyPi
         )
     }
 
     /// Whether the mark carries its own chromatic colours (omp's gradient,
-    /// and every Material file-type asset's baked-in fills). Such marks are
-    /// painted full-colour and never tinted by the theme; the remaining
-    /// marks are monochrome by design and follow the tinted path, exactly
-    /// as the Swift app renders them with `.primary`.
+    /// Gemini's overlays, and every Material file-type asset's baked-in
+    /// fills). Such marks are painted full-colour and never tinted by the
+    /// theme; the remaining marks are monochrome by design and follow the
+    /// tinted path, exactly as the Swift app renders them with `.primary`.
     ///
-    /// Only `OhMyPi` and the `FileType` set stay chromatic. The Codicons and
-    /// Simple Icons marks are monochrome and follow the theme tint.
+    /// `ClaudeCode` is the exception that looks like a bug: its asset bakes
+    /// `#D97757`, yet it stays on the tinted path, because that hex is the
+    /// tint it is given. Same pixels, one fewer raster cache entry per
+    /// size — and a test keeps the two from drifting apart.
     pub fn has_own_colours(self) -> bool {
-        matches!(self, Icon::OhMyPi | Icon::FileType(_))
+        matches!(self, Icon::OhMyPi | Icon::Gemini | Icon::FileType(_))
     }
 
     /// Resolves the stable icon for a catalog agent id.
@@ -363,6 +397,10 @@ impl Icon {
             "opencode" => Some(Self::OpenCode),
             "pi" => Some(Self::Pi),
             "omp" => Some(Self::OhMyPi),
+            // Neither of these has an adapter. They answer for the
+            // registry, where an unmapped id draws the generic sparkle.
+            "gemini" => Some(Self::Gemini),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -375,9 +413,11 @@ impl Icon {
     ///   is exactly [`AgentBrandColor::Claude`].
     /// - **Oh-My-Pi** — its mark *is* its colours: the pink→purple→cyan
     ///   gradient baked into the asset. `None` — it must never be tinted.
-    /// - **Codex, OpenCode, Pi** — all three publish strictly monochrome
-    ///   marks (OpenAI's black-on-white knot; opencode.ai/brand's grey
-    ///   `#211E1E`/`#CFCECD` wordmarks with no chromatic accent anywhere in
+    ///   **Gemini** is `None` for the same reason: a blue base under three
+    ///   gradient overlays, which a tint would flatten into one silhouette.
+    /// - **Codex, OpenCode, Pi, Grok** — all publish strictly monochrome
+    ///   marks (Codex's black-on-white glyph, and xAI's; opencode.ai's
+    ///   grey `#211E1E`/`#CFCECD` wordmarks with no chromatic accent in
     ///   the guidelines; pi.dev's `logo-auto.svg`, black on light and white
     ///   on dark). Their original colour is therefore the UI's own
     ///   foreground, passed in as `theme_title`, so they stay legible in
@@ -391,9 +431,9 @@ impl Icon {
     /// the brands.
     pub fn agent_mark_color(self, theme_title: Rgba) -> Option<Rgba> {
         match self {
-            Icon::OhMyPi => None,
+            Icon::OhMyPi | Icon::Gemini => None,
             Icon::ClaudeCode => Some(AgentBrandColor::Claude.color()),
-            Icon::Codex | Icon::OpenCode | Icon::Pi => Some(theme_title),
+            Icon::Codex | Icon::OpenCode | Icon::Pi | Icon::Grok => Some(theme_title),
             _ => None,
         }
     }
@@ -438,7 +478,7 @@ pub fn file_glyph(path: &Path, is_dir: bool) -> Icon {
     }
     match key {
         FileIconKey::Shell => Icon::SquareTerminal,
-        FileIconKey::Git | FileIconKey::FolderGit => Icon::GitBranch,
+        FileIconKey::Git => Icon::GitBranch,
         FileIconKey::Env | FileIconKey::Settings => Icon::Settings,
         FileIconKey::Archive => Icon::Archive,
         FileIconKey::Lock => Icon::Lock,
@@ -482,11 +522,18 @@ pub fn file_glyph(path: &Path, is_dir: bool) -> Icon {
         | FileIconKey::Makefile
         | FileIconKey::File
         | FileIconKey::Symlink => Icon::File,
-        // Every folder key beyond `.git` (Src, Tests, Docs, Github,
-        // NodeModules, Dist, Scripts, Config, Assets, Public, Packages,
-        // Vscode, Lib, Tools, and the plain default) shares the folder
-        // mark: the approved Zed subset has one folder shape, not fifteen.
+        // Every folder key (Git, Src, Tests, Docs, Github, NodeModules,
+        // Dist, Scripts, Config, Assets, Public, Packages, Vscode, Lib,
+        // Tools, and the plain default) shares the folder mark: the
+        // approved Zed subset has one folder shape, not fifteen.
+        //
+        // `.git` used to deviate onto `GitBranch` here. It no longer does:
+        // the file tree pairs this mark with `Icon::FolderOpen` to show
+        // expansion, and a directory that kept a branch mark would be the
+        // one row in the tree that never opened. `FileIconKey::Git` — the
+        // *file* family, `.gitignore` and friends — still takes the branch.
         FileIconKey::Folder
+        | FileIconKey::FolderGit
         | FileIconKey::FolderSrc
         | FileIconKey::FolderTests
         | FileIconKey::FolderDocs
@@ -526,17 +573,24 @@ impl IconElement {
 /// colours. The SVG is rasterized once per (icon, pixel size) and
 /// cached; the resulting `RenderImage` is painted into `bounds`.
 fn paint_agent_mark(icon: Icon, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-    // Render at 2x the point size, matching GPUI's own SVG renderer
+    // Rasterize at 2x the point size, matching GPUI's own SVG renderer
     // (`SMOOTH_SVG_SCALE_FACTOR`): pixel-perfect on retina displays.
-    let pixel = (f32::from(bounds.size.width) * 2.0).round().max(1.0);
+    //
+    // The size is asked for in device pixels, not as a scale factor, and
+    // that distinction is the whole correctness of this function. A scale
+    // factor multiplies the size the *file* declares, and every asset here
+    // declares `width="1em"` — which usvg resolves against its default 12pt
+    // font size, never against the 24- or 64-unit viewBox the artwork is
+    // drawn in. Scaling from that produced a 15px raster for a 30px box:
+    // stretched to fit by `paint_image`, so it never failed, it just went
+    // soft. `SvgSize::Size` asks for a width and keeps the aspect ratio.
+    let pixel = (f32::from(bounds.size.width) * 2.0).round().max(1.0) as i32;
     let key = (icon, pixel as u32);
     let image = agent_mark_cache().get_or_insert(key, || {
-        let view_box = view_box_size(icon);
-        // render_single_frame multiplies its scale argument by its own
-        // 2x factor, so divide it back out.
-        let scale = pixel / view_box / 2.0;
-        cx.svg_renderer()
-            .render_single_frame(icon.svg(), scale)
+        let renderer = cx.svg_renderer();
+        let parsed = renderer.parse_svg(icon.svg()).ok()?;
+        renderer
+            .render_parsed(&parsed, SvgSize::Size(size(pixel.into(), pixel.into())))
             .ok()
     });
     let Some(image) = image else {
@@ -610,25 +664,6 @@ impl AgentMarkCache {
     }
 }
 
-/// The largest viewBox dimension of an icon's SVG, in user units. Used to
-/// derive the raster scale for a target pixel size.
-fn view_box_size(icon: Icon) -> f32 {
-    let text = std::str::from_utf8(icon.svg()).unwrap_or_default();
-    let view_box = text
-        .split("viewBox=\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or("0 0 24 24");
-    let parts: Vec<f32> = view_box
-        .split_whitespace()
-        .filter_map(|part| part.parse().ok())
-        .collect();
-    match parts.as_slice() {
-        [_, _, w, h] => w.max(*h),
-        _ => 24.0,
-    }
-}
-
 /// The embedded asset source, for hosts that use GPUI's stock `svg()`
 /// element (`application().with_assets(SirioAssets)`). Every icon in the
 /// enum is served; `list` reports the icon directory.
@@ -653,8 +688,9 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 34] = [
+pub const ALL_ICONS: [Icon; 37] = [
     Icon::FolderFill,
+    Icon::FolderOpen,
     Icon::GitBranch,
     Icon::MessageSquare,
     Icon::SquareTerminal,
@@ -675,6 +711,8 @@ pub const ALL_ICONS: [Icon; 34] = [
     Icon::Codex,
     Icon::OpenCode,
     Icon::Pi,
+    Icon::Gemini,
+    Icon::Grok,
     Icon::OhMyPi,
     Icon::SidebarLeft,
     Icon::PanelRight,
@@ -693,7 +731,39 @@ pub const ALL_ICONS: [Icon; 34] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::px;
+    use gpui::{TestAppContext, px};
+
+    /// The embedded payload must be the file its path names.
+    ///
+    /// `path()` and `svg()` are two independent match arms per variant, so
+    /// nothing but this test ties them together: an `include_bytes!`
+    /// pointing at the neighbouring file compiles, renders a real icon, and
+    /// looks right everywhere except that it is the wrong picture. The
+    /// folder pair is exactly the shape that invites the slip — `folder.svg`
+    /// and `folder_open.svg`, one character apart at the call site.
+    ///
+    /// Only `icons/zed/` is walked: the agent marks live in sibling
+    /// directories with their own provenance rules.
+    #[test]
+    fn every_zed_icon_embeds_the_file_its_path_names() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut checked = 0;
+        for icon in ALL_ICONS {
+            let Some(name) = icon.path().strip_prefix("icons/zed/") else {
+                continue;
+            };
+            let on_disk = std::fs::read(assets.join("icons/zed").join(name))
+                .unwrap_or_else(|error| panic!("{} is not vendored: {error}", icon.path()));
+            assert_eq!(
+                icon.svg(),
+                on_disk.as_slice(),
+                "{icon:?} embeds bytes other than {}",
+                icon.path()
+            );
+            checked += 1;
+        }
+        assert!(checked >= 29, "expected the zed icons to be walked, saw {checked}");
+    }
 
     #[test]
     fn every_icon_has_embedded_svg_payload() {
@@ -747,10 +817,12 @@ mod tests {
             (Icon::Shield, "icons/zed/lock.svg"),
             (Icon::SunMoon, "icons/zed/screen.svg"),
             (Icon::Globe, "icons/zed/public.svg"),
-            (Icon::ClaudeCode, "icons/codicons/claude.svg"),
-            (Icon::Codex, "icons/codicons/openai.svg"),
-            (Icon::OpenCode, "icons/simple-icons/opencode.svg"),
-            (Icon::Pi, "icons/simple-icons/pi.svg"),
+            (Icon::ClaudeCode, "icons/lobehub/claude-color.svg"),
+            (Icon::Codex, "icons/lobehub/codex.svg"),
+            (Icon::OpenCode, "icons/lobehub/opencode.svg"),
+            (Icon::Pi, "icons/lobehub/pi.svg"),
+            (Icon::Gemini, "icons/lobehub/gemini-color.svg"),
+            (Icon::Grok, "icons/lobehub/grok.svg"),
             (Icon::OhMyPi, "icons/agent-omp.svg"),
             (Icon::SidebarLeft, "icons/zed/threads_sidebar_left_open.svg"),
             (Icon::PanelRight, "icons/zed/threads_sidebar_right_open.svg"),
@@ -764,6 +836,7 @@ mod tests {
             (Icon::SquarePlus, "icons/zed/square_plus.svg"),
             (Icon::SquareMinus, "icons/zed/square_minus.svg"),
             (Icon::Undo, "icons/zed/undo.svg"),
+            (Icon::FolderOpen, "icons/zed/folder_open.svg"),
         ];
 
         assert_eq!(expected.len(), ALL_ICONS.len());
@@ -790,14 +863,42 @@ mod tests {
     }
 
     #[test]
-    fn agent_marks_come_from_codicons_simple_icons_and_sirio_for_omp() {
-        // Codicons ships Claude and OpenAI; Simple Icons ships OpenCode and
-        // Pi; no library carries Oh My Pi, so its Sirio gradient stays.
-        assert_eq!(Icon::ClaudeCode.path(), "icons/codicons/claude.svg");
-        assert_eq!(Icon::Codex.path(), "icons/codicons/openai.svg");
-        assert_eq!(Icon::OpenCode.path(), "icons/simple-icons/opencode.svg");
-        assert_eq!(Icon::Pi.path(), "icons/simple-icons/pi.svg");
+    fn agent_marks_come_from_lobehub_and_sirio_for_omp() {
+        // One library carries every mark but one, which is why it was
+        // chosen; no library carries Oh My Pi, so its Sirio gradient stays.
+        assert_eq!(Icon::ClaudeCode.path(), "icons/lobehub/claude-color.svg");
+        assert_eq!(Icon::Codex.path(), "icons/lobehub/codex.svg");
+        assert_eq!(Icon::OpenCode.path(), "icons/lobehub/opencode.svg");
+        assert_eq!(Icon::Pi.path(), "icons/lobehub/pi.svg");
+        assert_eq!(Icon::Gemini.path(), "icons/lobehub/gemini-color.svg");
+        assert_eq!(Icon::Grok.path(), "icons/lobehub/grok.svg");
         assert_eq!(Icon::OhMyPi.path(), "icons/agent-omp.svg");
+    }
+
+    /// The vendoring rule for `icons/lobehub/` is byte-for-byte: what the
+    /// binary embeds must be what upstream served, so a refresh is a file
+    /// swap and never a hand edit. The same slip the Zed walk guards
+    /// against lives here too — `codex.svg` and a hypothetical
+    /// `codex-color.svg` are one word apart at the `include_bytes!` site.
+    #[test]
+    fn every_lobehub_mark_embeds_the_file_its_path_names() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut checked = 0;
+        for icon in ALL_ICONS {
+            let Some(name) = icon.path().strip_prefix("icons/lobehub/") else {
+                continue;
+            };
+            let on_disk = std::fs::read(assets.join("icons/lobehub").join(name))
+                .unwrap_or_else(|error| panic!("{} is not vendored: {error}", icon.path()));
+            assert_eq!(
+                icon.svg(),
+                on_disk.as_slice(),
+                "{icon:?} embeds bytes other than {}",
+                icon.path()
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 6, "the six LobeHub marks must all be walked");
     }
 
     #[test]
@@ -840,6 +941,24 @@ mod tests {
         assert_eq!(Icon::for_agent_id("unknown"), None);
     }
 
+    /// Gemini and Grok have no adapter in `sirio_agents::ALL`; nothing in
+    /// the app produces those ids today. The mapping exists for the
+    /// registry, whose rows resolve a mark by id and otherwise fall back to
+    /// the generic sparkle — so a published `gemini` or `grok` agent draws
+    /// its own brand without another code change.
+    #[test]
+    fn registry_only_agents_resolve_to_their_brand_marks() {
+        assert_eq!(Icon::for_agent_id("gemini"), Some(Icon::Gemini));
+        assert_eq!(Icon::for_agent_id("gemini-acp"), Some(Icon::Gemini));
+        assert_eq!(Icon::for_agent_id("grok"), Some(Icon::Grok));
+        assert!(
+            !sirio_agents::ALL.iter().any(|adapter| {
+                matches!(adapter.id(), "gemini" | "grok")
+            }),
+            "these marks are dormant: an adapter would need its own brand colour too"
+        );
+    }
+
     #[test]
     fn agent_marks_wear_their_published_brand_colours() {
         let foreground = gpui::rgb(0x11_12_13);
@@ -849,17 +968,18 @@ mod tests {
             Some(gpui::rgb(0xD97757)),
             "claude must wear #D97757, not a theme token"
         );
-        // Codex, OpenCode and Pi publish monochrome marks only; their
+        // Codex, OpenCode, Pi and Grok publish monochrome marks only; their
         // original colour is the UI foreground, adaptive per appearance.
-        for icon in [Icon::Codex, Icon::OpenCode, Icon::Pi] {
+        for icon in [Icon::Codex, Icon::OpenCode, Icon::Pi, Icon::Grok] {
             assert_eq!(
                 icon.agent_mark_color(foreground),
                 Some(foreground),
                 "{icon:?} is a monochrome brand and must take the foreground"
             );
         }
-        // omp paints itself with its baked gradient — never tinted.
+        // omp and Gemini paint themselves — never tinted.
         assert_eq!(Icon::OhMyPi.agent_mark_color(foreground), None);
+        assert_eq!(Icon::Gemini.agent_mark_color(foreground), None);
         // Non-agent icons are nobody's brand.
         assert_eq!(Icon::FolderFill.agent_mark_color(foreground), None);
     }
@@ -884,8 +1004,8 @@ mod tests {
 
     #[test]
     fn chromatic_marks_carry_their_own_colours() {
-        // Oh My Pi is the sole full-colour fallback; its gradient asset is
-        // baked in and never resolved through currentColor.
+        // Oh My Pi's gradient asset is baked in and never resolved through
+        // currentColor.
         let omp = std::str::from_utf8(Icon::OhMyPi.svg()).expect("utf-8");
         assert!(omp.contains("linearGradient"), "omp is a gradient mark");
         assert!(omp.contains("#ED4ABF") && omp.contains("#9B4DFF") && omp.contains("#5AD8E6"));
@@ -893,22 +1013,32 @@ mod tests {
             !omp.contains("currentColor"),
             "omp must not resolve through the theme tint"
         );
+
+        // Gemini is the other one: a `#3186FF` base under three gradient
+        // overlays. Tinting it would flatten all four into one silhouette.
+        let gemini = std::str::from_utf8(Icon::Gemini.svg()).expect("utf-8");
+        assert!(gemini.contains("#3186FF"), "gemini keeps its blue base");
+        for stop in ["#08B962", "#F94543", "#FABC12"] {
+            assert!(
+                gemini.contains(stop),
+                "gemini keeps its {stop} gradient overlay"
+            );
+        }
+        assert!(
+            !gemini.contains("currentColor"),
+            "gemini must not resolve through the theme tint"
+        );
     }
 
     #[test]
-    fn monochrome_agent_marks_use_the_approved_sources() {
-        // Every library mark is a single `currentColor` path, so it rides
-        // GPUI's tinted svg path and never the full-colour raster.
-        for (icon, library) in [
-            (Icon::ClaudeCode, "icons/codicons/"),
-            (Icon::Codex, "icons/codicons/"),
-            (Icon::OpenCode, "icons/simple-icons/"),
-            (Icon::Pi, "icons/simple-icons/"),
-        ] {
+    fn monochrome_agent_marks_use_the_approved_source() {
+        // Each of these is a single `currentColor` path, so it rides GPUI's
+        // tinted svg path and never the full-colour raster.
+        for icon in [Icon::Codex, Icon::OpenCode, Icon::Pi, Icon::Grok] {
             let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
             assert!(
-                icon.path().starts_with(library),
-                "{icon:?} must come from {library}, got {}",
+                icon.path().starts_with("icons/lobehub/"),
+                "{icon:?} must come from the one vendored set, got {}",
                 icon.path()
             );
             assert!(
@@ -926,36 +1056,83 @@ mod tests {
         }
     }
 
+    /// Claude is the deliberate exception to the rule above: its asset
+    /// bakes `#D97757` and it is still painted through the tinted path.
+    /// That works because the tint it is given *is* that hex, so the two
+    /// agree pixel for pixel — and it saves a raster cache entry per size.
+    /// The day the brand colour and the asset diverge, this test is what
+    /// fails instead of the colour silently coming from the wrong one.
     #[test]
-    fn library_marks_share_one_optical_margin() {
-        // Codicons draw inside a padded 16px canvas; Simple Icons fill the
-        // whole 24px box. The Simple Icons marks get a 2-unit margin on the
-        // viewBox (geometry untouched) so OpenCode and Pi do not read larger
-        // than Claude and Codex at the same IconSize.
-        for icon in [Icon::ClaudeCode, Icon::Codex] {
-            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            assert!(
-                svg.contains("viewBox=\"0 0 16 16\""),
-                "{icon:?} keeps Codicons' 16px canvas"
-            );
-        }
-        for icon in [Icon::OpenCode, Icon::Pi] {
-            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            assert!(
-                svg.contains("viewBox=\"-2 -2 28 28\""),
-                "{icon:?} wears the padded Simple Icons canvas"
-            );
-        }
+    fn claudes_baked_colour_matches_the_tint_it_is_painted_with() {
+        let svg = std::str::from_utf8(Icon::ClaudeCode.svg()).expect("svg is utf-8");
+        assert!(
+            svg.contains("fill=\"#D97757\""),
+            "claude's asset bakes the brand orange"
+        );
+        assert!(
+            !Icon::ClaudeCode.has_own_colours(),
+            "claude still rides the tinted path"
+        );
+        assert_eq!(
+            Icon::ClaudeCode.agent_mark_color(gpui::rgb(0x11_12_13)),
+            Some(gpui::rgb(0xD97757)),
+            "the tint must equal the hex baked into the asset"
+        );
     }
 
+    /// Taking every mark from one set is what buys a shared optical weight:
+    /// the previous vendoring mixed two libraries and had to invent a
+    /// `-2 -2 28 28` viewBox for half its marks to make them agree. Nothing
+    /// here is re-boxed, and this test is what says so — if a future mark
+    /// needs an adjustment, it is a recorded deviation in that directory's
+    /// ATTRIBUTION.md, made visible by this failing.
     #[test]
-    fn only_oh_my_pi_uses_the_full_colour_path() {
+    fn lobehub_marks_share_one_24px_canvas() {
+        let mut checked = 0;
         for icon in ALL_ICONS {
+            if !icon.path().starts_with("icons/lobehub/") {
+                continue;
+            }
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            assert!(
+                svg.contains("viewBox=\"0 0 24 24\""),
+                "{icon:?} must keep the set's 24px canvas",
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 6, "the six LobeHub marks must all be walked");
+    }
+
+    /// The two ways to paint an icon are chosen by `has_own_colours`, and
+    /// the wrong choice fails silently: a chromatic asset on the tinted
+    /// path renders as a flat silhouette, which looks like an icon and is
+    /// not the brand. So for a brand mark the flag and the bytes must
+    /// agree — with Claude the one documented exception, pinned by its own
+    /// test above.
+    ///
+    /// Only marks are walked. The Zed catalog is the other convention
+    /// entirely: eight of its glyphs carry design-time greys (`#DCE0E5`,
+    /// `#C6CAD0`) that the mask path is *meant* to throw away, so chromatic
+    /// bytes there say nothing about how the icon should be painted.
+    #[test]
+    fn every_chromatic_mark_declares_its_own_colours() {
+        for icon in ALL_ICONS {
+            if !icon.is_agent_mark() || icon == Icon::ClaudeCode {
+                continue;
+            }
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            let is_chromatic = svg.contains("fill=\"#") || svg.contains("fill=\"url(#");
             assert_eq!(
                 icon.has_own_colours(),
-                icon == Icon::OhMyPi,
-                "unexpected full-colour icon: {icon:?}"
+                is_chromatic,
+                "{icon:?} paints itself {} but is flagged {}",
+                if is_chromatic { "in colour" } else { "monochrome" },
+                icon.has_own_colours(),
             );
+        }
+        // Both directions of the rule, named: nothing else is chromatic.
+        for icon in [Icon::Gemini, Icon::OhMyPi] {
+            assert!(icon.has_own_colours(), "{icon:?} is a full-colour mark");
         }
     }
 
@@ -977,22 +1154,52 @@ mod tests {
         }
     }
 
+    /// The full-colour path is what this change extends, and reading the
+    /// file cannot tell you whether it works: the two ways it fails are
+    /// both silent. A mark that rasterises smaller than the box it is
+    /// painted into is stretched to fit — soft edges, no error — and a
+    /// mark whose colours are lost still draws a shape. So drive GPUI's
+    /// real renderer with `paint_agent_mark`'s own arithmetic.
+    #[gpui::test]
+    async fn full_colour_marks_rasterise_in_colour_at_the_size_they_are_painted(
+        cx: &mut TestAppContext,
+    ) {
+        // `IconSize::Small` at the default type scale, on a retina display:
+        // `paint_agent_mark`'s own arithmetic, kept in step with it.
+        let pixel = 15 * 2;
+        for icon in [Icon::Gemini, Icon::OhMyPi, Icon::file_type("rust")] {
+            let image = cx
+                .update(|cx| {
+                    let renderer = cx.svg_renderer();
+                    let parsed = renderer.parse_svg(icon.svg()).expect("the asset parses");
+                    renderer.render_parsed(&parsed, SvgSize::Size(size(pixel.into(), pixel.into())))
+                })
+                .unwrap_or_else(|error| panic!("{icon:?} must rasterise: {error}"));
+
+            let width = image.size(0).width.0;
+            assert!(
+                width >= pixel,
+                "{icon:?} rasterises {width}px wide for a {pixel}px box, so it is stretched"
+            );
+
+            let bytes = image.as_bytes(0).expect("the frame carries pixels");
+            let colours: std::collections::HashSet<[u8; 3]> = bytes
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] > 0)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect();
+            assert!(
+                colours.len() > 8,
+                "{icon:?} must paint its own colours, saw {} distinct",
+                colours.len()
+            );
+        }
+    }
+
     #[test]
     fn constructor_keeps_the_semantic_size_until_render() {
         let element = IconElement::new(Icon::FolderFill, IconSize::Small);
         assert_eq!(element.size, IconSize::Small);
-    }
-
-    #[test]
-    fn view_box_size_parses_embedded_svgs() {
-        assert!(
-            (view_box_size(Icon::FolderFill) - 16.0).abs() < 1.0,
-            "zed's 16x16 home format"
-        );
-        assert!(
-            (view_box_size(Icon::Pi) - 28.0).abs() < 1.0,
-            "pi's padded Simple Icons viewBox"
-        );
     }
 
     #[test]

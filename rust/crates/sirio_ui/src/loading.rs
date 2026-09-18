@@ -173,20 +173,46 @@ pub fn bloom(
     .into_any_element()
 }
 
-/// A settled bloom's rings as `(diameter, opacity)`, outermost first.
+/// How much of its slot a settled bloom's mark actually fills — the widest
+/// ring a *travelling* bloom still paints at real strength.
 ///
-/// The radii are Bezel's: the span a travelling ring interpolates across
-/// (`ORB_BLOOM_MIN`..`ORB_BLOOM_MAX`), sampled at the even steps
+/// A travelling ring fades as it leaves the centre (`orb_bloom_opacity`,
+/// `(1 - phase)²`), so the frame where a ring reaches the rim is the frame
+/// where it has become invisible: a running bloom's visible mark is only its
+/// innermost rings. Settling one at `ORB_BLOOM_MAX` therefore drew the mark
+/// on the rim nothing else ever reaches, more than twice the width of the
+/// running bloom it shares a green with — so the same status read as two
+/// different sizes depending on which state it settled in, which is the
+/// defect this exists to close. Stopping at the ring one stagger step out
+/// puts both on the same footprint.
+///
+/// Derived from Bezel's own curve rather than written down as a number, so a
+/// `bezel` bump that retunes the bloom carries this with it instead of
+/// silently drifting away from it.
+pub fn settled_bloom_span() -> f32 {
+    motion::orb_bloom_radius(1.0 / motion::ORB_BLOOM_RINGS as f32)
+}
+
+/// A settled bloom's rings as `(diameter, opacity)`, outermost first, in the
+/// coordinates of the `slot` the caller reserves for the glyph.
+///
+/// The proportions are Bezel's: the span a travelling ring interpolates
+/// across (`ORB_BLOOM_MIN`..`ORB_BLOOM_MAX`), sampled at the even steps
 /// `ORB_BLOOM_RINGS` divides the travel into, with the outermost held at the
 /// far end. `orb_bloom_radius` cannot be asked for that far end — it takes
 /// `phase.rem_euclid(1.0)`, so a phase of exactly 1 wraps back to the centre
 /// and would silently return the *smallest* ring — hence `lerp` against the
 /// two constants directly.
-pub fn settled_bloom_rings(size: f32) -> Vec<(f32, f32)> {
+///
+/// The whole figure is then drawn at [`settled_bloom_span`] of the slot: the
+/// same picture as before, at the size the running bloom reads at. The slot
+/// itself is unchanged, so no strip or row relayouts around it.
+pub fn settled_bloom_rings(slot: f32) -> Vec<(f32, f32)> {
+    let mark = slot * settled_bloom_span();
     (0..motion::ORB_BLOOM_RINGS)
         .map(|index| {
             let step = (motion::ORB_BLOOM_RINGS - index) as f32 / motion::ORB_BLOOM_RINGS as f32;
-            let diameter = size
+            let diameter = mark
                 * motion::lerp(
                     motion::phase::ORB_BLOOM_MIN,
                     motion::phase::ORB_BLOOM_MAX,
@@ -205,8 +231,14 @@ pub fn settled_bloom_rings(size: f32) -> Vec<(f32, f32)> {
 /// `pulse_delta`. It is built from Bezel's constants and mirrors the geometry
 /// of `loaders::orb`'s `Orb::Bloom` arm (a border, not a fill, centred in the
 /// box) so the moving and settled forms stay the same shape.
+/// `size` is the *slot*, not the mark: the rings are drawn at
+/// [`settled_bloom_span`] of it and centred, so the element a caller lays out
+/// keeps the same footprint as the travelling bloom it stands in for.
 pub fn settled_bloom(id: &'static str, size: f32, tint: Rgba) -> AnyElement {
-    let border = px((size * BLOOM_BORDER_RATIO).max(1.0));
+    // The stroke belongs to the mark it outlines, not to the slot around it:
+    // scaling it off `size` would leave a 6px figure wearing a 14px figure's
+    // border and fill itself in.
+    let border = px((size * settled_bloom_span() * BLOOM_BORDER_RATIO).max(1.0));
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -336,14 +368,43 @@ mod tests {
     }
 
     /// "Stopped at full" is the whole point of the settled shape: the outer
-    /// ring sits on the box, at full strength.
+    /// ring is the one at full strength.
+    ///
+    /// What it is *not* is the whole slot. A travelling ring fades as it
+    /// leaves the centre, so the rim is where a running bloom has become
+    /// invisible; a settled mark held out there read more than twice as wide
+    /// as the running one it shares a green with. The outer ring stops at
+    /// [`settled_bloom_span`] instead -- see the test below.
     #[test]
-    fn a_settled_bloom_holds_its_outer_ring_on_the_box_at_full_strength() {
+    fn a_settled_bloom_holds_its_outer_ring_at_full_strength() {
         let rings = settled_bloom_rings(BLOOM_GLYPH);
         assert_eq!(rings.len(), motion::ORB_BLOOM_RINGS);
         let (diameter, opacity) = rings[0];
-        assert_eq!(diameter, BLOOM_GLYPH * motion::phase::ORB_BLOOM_MAX);
+        assert_eq!(diameter, BLOOM_GLYPH * settled_bloom_span());
         assert_eq!(opacity, 1.0);
+    }
+
+    /// The defect this pins: a finished (green) or waiting (amber) tab drew a
+    /// mark spanning the full 14px slot, while the running tab beside it read
+    /// as a ~6px dot -- the same glyph at two sizes depending on which state
+    /// it settled in.
+    ///
+    /// A travelling bloom's rings fade by `(1 - phase)²`, so its widest ring
+    /// painted at real strength is the one a single stagger step out. The
+    /// settled mark stops exactly there, so both states read the same size.
+    #[test]
+    fn a_settled_bloom_is_no_wider_than_a_travelling_blooms_bright_extent() {
+        let bright_extent =
+            motion::orb_bloom_radius(1.0 / motion::ORB_BLOOM_RINGS as f32) * BLOOM_GLYPH;
+        let settled = settled_bloom_rings(BLOOM_GLYPH)[0].0;
+        assert_eq!(
+            settled, bright_extent,
+            "the settled outer ring rides the travelling bloom's brightest travelling ring"
+        );
+        assert!(
+            settled < BLOOM_GLYPH * motion::phase::ORB_BLOOM_MAX,
+            "and no longer spans the whole slot ({settled} vs {BLOOM_GLYPH})"
+        );
     }
 
     #[test]
@@ -369,23 +430,37 @@ mod tests {
     /// to stay readable against a running one *even when the running one is
     /// not moving*. Under reduced motion `pulse_delta` returns a static 0
     /// (`bezel-motion`'s own documented behavior), which freezes a travelling
-    /// bloom with its widest ring well inside the box — so the two never
-    /// collapse onto the same picture.
+    /// bloom at its three staggered phases.
+    ///
+    /// The two are told apart by where the strength sits, not by overall
+    /// width: a frozen running bloom is a pinprick core inside a wide, nearly
+    /// invisible halo, while a settled one is a crisp ring at the extent the
+    /// running one only reaches while fading out. Width alone used to carry
+    /// this, which is exactly what made the settled mark oversized.
     #[test]
-    fn a_settled_bloom_is_wider_than_a_running_one_frozen_by_reduced_motion() {
+    fn a_settled_bloom_stays_told_apart_from_a_running_one_frozen_by_reduced_motion() {
+        let frozen = |index: usize| {
+            motion::orb_bloom_radius(motion::staggered_phase(
+                0.0,
+                index,
+                1.0 / motion::ORB_BLOOM_RINGS as f32,
+            ))
+        };
         let widest_travelling = (0..motion::ORB_BLOOM_RINGS)
-            .map(|index| {
-                motion::orb_bloom_radius(motion::staggered_phase(
-                    0.0,
-                    index,
-                    1.0 / motion::ORB_BLOOM_RINGS as f32,
-                ))
-            })
+            .map(frozen)
             .fold(f32::MIN, f32::max);
+        let brightest_travelling = (0..motion::ORB_BLOOM_RINGS)
+            .map(frozen)
+            .fold(f32::MAX, f32::min);
         let settled = settled_bloom_rings(1.0)[0].0;
+
         assert!(
-            settled > widest_travelling,
-            "a settled bloom ({settled}) outgrows a reduced-motion running one ({widest_travelling})"
+            settled > brightest_travelling,
+            "a settled ring ({settled}) is wider than a frozen running bloom's bright core ({brightest_travelling})"
+        );
+        assert!(
+            settled < widest_travelling,
+            "and narrower than its faint outer halo ({widest_travelling}), so the settled mark is the smaller picture"
         );
     }
 
