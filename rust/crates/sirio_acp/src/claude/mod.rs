@@ -223,6 +223,14 @@ impl ClaudeClient {
         self.shared.mode_catalog()
     }
 
+    /// Whether the launch's `--resume` id was refused and the session is
+    /// fresh instead. The surface clears its stored id when this is true,
+    /// so the next restart does not retry a session that is gone.
+    #[must_use]
+    pub fn resumed_session_refused(&self) -> bool {
+        self.shared.resumed_session_refused()
+    }
+
     /// MCP servers that failed to connect, as sentences (F-CHAT-33).
     #[must_use]
     pub fn mcp_warnings(&self) -> Vec<String> {

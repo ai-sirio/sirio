@@ -93,6 +93,7 @@ pub(super) struct Shared {
     mode_catalog: Mutex<Option<ModeCatalog>>,
     mcp_warnings: Mutex<Vec<String>>,
     last_user_message_id: Mutex<Option<String>>,
+    resumed_session_refused: AtomicBool,
 }
 
 impl Shared {
@@ -124,6 +125,10 @@ impl Shared {
             .lock()
             .ok()
             .and_then(|id| id.clone())
+    }
+
+    pub(super) fn resumed_session_refused(&self) -> bool {
+        self.resumed_session_refused.load(Ordering::Acquire)
     }
 
     fn push_mcp_warnings(&self, warnings: Vec<String>) {
@@ -166,6 +171,78 @@ pub(super) fn run(config: Config) {
         permission_timeout,
     } = config;
 
+    // A resume the CLI will not honour is not a dead tab: the visible
+    // transcript came from Sirio's own database, so a fresh session under
+    // it loses the agent's memory of the conversation and nothing else.
+    // Exactly one retry: a second failure is a real failure.
+    let mut resume = launch.resume.clone();
+    for attempt in 0..2 {
+        let retryable = attempt == 0 && launch.resume.is_some();
+        match run_attempt(Attempt {
+            launch: ClaudeLaunch {
+                program: launch.program.clone(),
+                resume: resume.clone(),
+                prefix_args: launch.prefix_args.clone(),
+            },
+            cwd: cwd.clone(),
+            command_rx: command_rx.clone(),
+            event_tx: event_tx.clone(),
+            startup_tx: startup_tx.clone(),
+            shared: Arc::clone(&shared),
+            prompt_timeout,
+            permission_timeout,
+            retryable,
+        }) {
+            AttemptOutcome::Finished => return,
+            AttemptOutcome::RetryWithoutResume => {
+                resume = None;
+                shared
+                    .resumed_session_refused
+                    .store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+/// One process: spawn, handshake, serve until the CLI is gone.
+struct Attempt {
+    launch: ClaudeLaunch,
+    cwd: std::path::PathBuf,
+    command_rx: async_channel::Receiver<Command>,
+    event_tx: async_channel::Sender<AcpEvent>,
+    startup_tx: mpsc::SyncSender<Startup>,
+    shared: Arc<Shared>,
+    prompt_timeout: Duration,
+    permission_timeout: Duration,
+    /// Suppress the handshake-failure report so the caller can retry
+    /// without the id. Only true on the first attempt of a resuming launch.
+    retryable: bool,
+}
+
+/// What one attempt owes its caller.
+enum AttemptOutcome {
+    /// The launcher was told everything it is owed: the session ran, or
+    /// its failure was reported.
+    Finished,
+    /// The handshake failed in a way a stale `--resume` id explains, and
+    /// nothing was reported yet: the caller retries once without the id.
+    RetryWithoutResume,
+}
+
+fn run_attempt(attempt: Attempt) -> AttemptOutcome {
+    let retryable = attempt.retryable;
+    let Attempt {
+        launch,
+        cwd,
+        command_rx,
+        event_tx,
+        startup_tx,
+        shared,
+        prompt_timeout,
+        permission_timeout,
+        retryable: _,
+    } = attempt;
+
     let line = LaunchLine::chat(launch.resume.as_deref());
     let mut std_command = std::process::Command::new(&launch.program);
     std_command
@@ -195,7 +272,7 @@ pub(super) fn run(config: Config) {
                 "could not launch `{}`: {error}",
                 launch.program.display()
             ))));
-            return;
+            return AttemptOutcome::Finished;
         }
     };
     let stdin = child.stdin.take().expect("stdin was piped");
@@ -207,7 +284,7 @@ pub(super) fn run(config: Config) {
         .is_err()
     {
         crate::terminate_and_reap_blocking(&child);
-        return;
+        return AttemptOutcome::Finished;
     }
 
     let stderr_tail: StderrTail = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -229,7 +306,7 @@ pub(super) fn run(config: Config) {
         stdout,
         command_rx,
         event_tx: event_tx.clone(),
-        startup_tx,
+        startup_tx: startup_tx.clone(),
         shared: Arc::clone(&shared),
         child: Arc::clone(&child),
         activity: Arc::clone(&activity),
@@ -241,8 +318,16 @@ pub(super) fn run(config: Config) {
     match outcome {
         SessionOutcome::CleanShutdown(ack) => {
             let _ = ack.send(());
+            AttemptOutcome::Finished
         }
-        SessionOutcome::NeverStarted => {}
+        SessionOutcome::NeverStarted => AttemptOutcome::Finished,
+        SessionOutcome::HandshakeFailed(error) => {
+            if retryable {
+                return AttemptOutcome::RetryWithoutResume;
+            }
+            let _ = startup_tx.send(Startup::Failed(AcpError::Transport(error)));
+            AttemptOutcome::Finished
+        }
         SessionOutcome::Died(detail) => {
             // `pending_permissions` lived inside `session` and died with
             // it: the command channel is gone, so any later answer fails,
@@ -254,6 +339,7 @@ pub(super) fn run(config: Config) {
             let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
                 "the Claude agent stopped{detail}{exit}{report}"
             )));
+            AttemptOutcome::Finished
         }
     }
 }
@@ -264,6 +350,11 @@ enum SessionOutcome {
     CleanShutdown(mpsc::SyncSender<()>),
     /// The handshake never completed; the launcher already has the error.
     NeverStarted,
+    /// The handshake failed before any session existed, in a way a stale
+    /// `--resume` id explains: the CLI exited, or refused `initialize`.
+    /// Carries the sentence the launcher reports when there is no id left
+    /// to retry without.
+    HandshakeFailed(String),
     /// The CLI went away on its own.
     Died(String),
 }
@@ -314,18 +405,14 @@ async fn session(context: SessionContext) -> SessionOutcome {
         .await
         .is_err()
     {
-        let _ = startup_tx.send(Startup::Failed(AcpError::Transport(
-            "could not write the Claude handshake".into(),
-        )));
-        return SessionOutcome::NeverStarted;
+        return SessionOutcome::HandshakeFailed("could not write the Claude handshake".into());
     }
 
     let catalog = loop {
         let Some(Ok(line)) = lines.next().await else {
-            let _ = startup_tx.send(Startup::Failed(AcpError::Transport(
+            return SessionOutcome::HandshakeFailed(
                 "the Claude agent closed its output before answering the handshake".into(),
-            )));
-            return SessionOutcome::NeverStarted;
+            );
         };
         crate::touch_activity(&activity);
         let Some(message) = CliMessage::parse(&line) else {
@@ -340,10 +427,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
             match (envelope.payload, envelope.error) {
                 (Some(payload), _) => break Catalog::from_initialize(&payload),
                 (None, Some(error)) => {
-                    let _ = startup_tx.send(Startup::Failed(AcpError::Transport(format!(
+                    return SessionOutcome::HandshakeFailed(format!(
                         "the Claude agent refused the handshake: {error}"
-                    ))));
-                    return SessionOutcome::NeverStarted;
+                    ));
                 }
                 (None, None) => break Catalog::default(),
             }
@@ -364,6 +450,15 @@ async fn session(context: SessionContext) -> SessionOutcome {
     }
 
     publish_catalogues(&shared, &catalog);
+    // The CLI prints its init line unprompted, possibly before answering
+    // the handshake, so the fold may already hold the version. Publish it
+    // before `Ready`: unlike the session id — which stays `None` until the
+    // first turn opens one — the version is a property of the binary.
+    if let Some(version) = fold.claude_version()
+        && let Ok(mut held) = shared.claude_version.lock()
+    {
+        *held = Some(version.to_string());
+    }
     let _ = startup_tx.send(Startup::Ready);
     for event in catalogue_events(&catalog) {
         let _ = event_tx.send(event).await;

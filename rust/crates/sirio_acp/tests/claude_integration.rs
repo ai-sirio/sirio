@@ -556,3 +556,47 @@ fn a_cli_that_does_not_know_the_verb_degrades_that_feature_only() {
     );
     client.shutdown().expect("clean shutdown");
 }
+
+#[test]
+fn a_resumed_launch_passes_the_session_id_to_the_cli() {
+    let (mut client, _events) = ClaudeClient::launch(
+        ClaudeLaunch::fixture(
+            PathBuf::from("python3"),
+            vec![FIXTURE.into(), "echo_argv".into()],
+        )
+        .resuming("sess-42"),
+        std::env::temp_dir(),
+    )
+    .expect("handshake succeeds");
+    // The `echo_argv` fixture reports its own argv in the handshake's
+    // account email field, which is the only string a test can read back
+    // through the public API without a new accessor.
+    let argv = client.claude_version().unwrap_or_default();
+    assert!(argv.contains("--resume sess-42"), "argv was {argv}");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_refused_resume_starts_a_fresh_session_instead_of_a_dead_tab() {
+    // The session file is gone. Losing the conversation is bad; losing the
+    // tab is worse, and the transcript on screen came from Sirio's own
+    // database either way.
+    let (mut client, _events) = ClaudeClient::launch(
+        ClaudeLaunch::fixture(
+            PathBuf::from("python3"),
+            vec![FIXTURE.into(), "refuse_resume".into()],
+        )
+        .resuming("sess-gone"),
+        std::env::temp_dir(),
+    )
+    .expect("a refused resume must still yield a usable session");
+    assert!(
+        client.model_catalog().is_some(),
+        "the fresh session is usable"
+    );
+    assert!(
+        client.resumed_session_refused(),
+        "the surface has to know the id it held is stale"
+    );
+    client.shutdown().expect("clean shutdown");
+}

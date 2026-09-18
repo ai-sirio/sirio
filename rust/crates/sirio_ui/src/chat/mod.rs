@@ -1299,6 +1299,11 @@ pub enum ChatEvent {
     /// synthesizes the running->done `Transition` `request_auto_rename`
     /// expects.
     TurnEnded,
+    /// The native Claude session identified itself: the agent-side id a
+    /// later restart passes back as `--resume`. The workspace persists it
+    /// at once, so the id survives a restart that comes before any other
+    /// save.
+    SessionIdentified(String),
     /// The Unavailable box's action. The workspace owns the Settings
     /// surface, so the chat states the problem and asks; it does not reach
     /// across and open a window itself.
@@ -1706,6 +1711,10 @@ pub struct Chat {
     context_popover_open: bool,
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
+    /// The agent-side session this tab continues across restarts, once the
+    /// agent names it. Read live at session-save time, so the tab-strip
+    /// save carries what the last flush wrote rather than a stale copy.
+    agent_session_id: Option<String>,
     transcript_focus: FocusHandle,
     context_usage: Option<ContextUsage>,
     list_state: ListState,
@@ -1983,6 +1992,7 @@ impl Chat {
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
+            agent_session_id: None,
             context_usage: None,
             list_state,
             transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
@@ -2691,6 +2701,32 @@ impl Chat {
                 });
                 self.streaming = false;
             }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "SessionIdentified" => {
+                // The id arrives as a re-read signal rather than as its own
+                // event, so `AcpEvent` stays the enum every consumer in the
+                // workspace already matches exhaustively.
+                let identified = match &self.client {
+                    Some(ChatClient::Claude(native)) => {
+                        Some((native.resumed_session_refused(), native.session_id()))
+                    }
+                    _ => None,
+                };
+                match identified {
+                    Some((true, _)) => {
+                        // The stored id named a session that is gone: stop
+                        // offering it, so the next restart does not retry
+                        // the same refusal. The fresh session identifies
+                        // itself on its first turn.
+                        self.agent_session_id = None;
+                        self.persist_agent_session_id(None);
+                    }
+                    Some((false, Some(session_id))) => {
+                        self.agent_session_id = Some(session_id.clone());
+                        cx.emit(ChatEvent::SessionIdentified(session_id));
+                    }
+                    _ => {}
+                }
+            }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
@@ -2810,6 +2846,47 @@ impl Chat {
     /// [`Self::control_compose`] on restore.
     pub fn draft_text(&self) -> String {
         self.draft.to_string()
+    }
+
+    /// The agent-side session this tab continues, once the agent names it.
+    /// Read live at session-save time, the same pattern as [`Self::draft_text`].
+    pub fn agent_session_id(&self) -> Option<String> {
+        self.agent_session_id.clone()
+    }
+
+    /// Clears a stale agent session id from this tab's own row at once — a
+    /// hook write, like the workspace's save on [`ChatEvent::SessionIdentified`],
+    /// never batched with the tab-strip save. Only the refusal path writes
+    /// from here: a newly identified id goes through the event so the
+    /// workspace stays the one place saves originate.
+    fn persist_agent_session_id(&self, session_id: Option<&str>) {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!(
+                    "[chat] failed to open transcript database {}: {error}",
+                    persistence.database_path.display()
+                );
+                return;
+            }
+        };
+        let mut tabs = match database.tabs_of_worktree(&persistence.worktree_id) {
+            Ok(tabs) => tabs,
+            Err(error) => {
+                eprintln!("[chat] failed to read tabs for session save: {error}");
+                return;
+            }
+        };
+        let Some(tab) = tabs.iter_mut().find(|tab| tab.id == persistence.tab_id) else {
+            return;
+        };
+        tab.agent_session_id = session_id.map(str::to_string);
+        if let Err(error) = database.save_tabs(&persistence.worktree_id, &tabs) {
+            eprintln!("[chat] failed to save agent session id: {error}");
+        }
     }
 
     /// Replaces the visible composer's plain-text draft through the control
