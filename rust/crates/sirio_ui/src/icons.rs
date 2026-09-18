@@ -51,6 +51,10 @@ use sirio_theme::AgentBrandColor;
 pub enum Icon {
     /// A project directory (`zed/folder.svg`).
     FolderFill,
+    /// A project directory whose row is expanded (`zed/folder_open.svg`).
+    /// Paired with [`Icon::FolderFill`]: the file tree swaps between the two
+    /// instead of drawing a separate disclosure arrow.
+    FolderOpen,
     /// A git worktree (`zed/git_branch.svg`).
     GitBranch,
     /// A chat surface (`zed/chat.svg`).
@@ -166,6 +170,7 @@ impl Icon {
     pub fn path(self) -> &'static str {
         match self {
             Icon::FolderFill => "icons/zed/folder.svg",
+            Icon::FolderOpen => "icons/zed/folder_open.svg",
             Icon::GitBranch => "icons/zed/git_branch.svg",
             Icon::MessageSquare => "icons/zed/chat.svg",
             Icon::SquareTerminal => "icons/zed/terminal.svg",
@@ -250,6 +255,7 @@ impl Icon {
     pub fn svg(self) -> &'static [u8] {
         match self {
             Icon::FolderFill => include_bytes!("../../../assets/icons/zed/folder.svg"),
+            Icon::FolderOpen => include_bytes!("../../../assets/icons/zed/folder_open.svg"),
             Icon::GitBranch => include_bytes!("../../../assets/icons/zed/git_branch.svg"),
             Icon::MessageSquare => include_bytes!("../../../assets/icons/zed/chat.svg"),
             Icon::SquareTerminal => include_bytes!("../../../assets/icons/zed/terminal.svg"),
@@ -438,7 +444,7 @@ pub fn file_glyph(path: &Path, is_dir: bool) -> Icon {
     }
     match key {
         FileIconKey::Shell => Icon::SquareTerminal,
-        FileIconKey::Git | FileIconKey::FolderGit => Icon::GitBranch,
+        FileIconKey::Git => Icon::GitBranch,
         FileIconKey::Env | FileIconKey::Settings => Icon::Settings,
         FileIconKey::Archive => Icon::Archive,
         FileIconKey::Lock => Icon::Lock,
@@ -482,11 +488,18 @@ pub fn file_glyph(path: &Path, is_dir: bool) -> Icon {
         | FileIconKey::Makefile
         | FileIconKey::File
         | FileIconKey::Symlink => Icon::File,
-        // Every folder key beyond `.git` (Src, Tests, Docs, Github,
-        // NodeModules, Dist, Scripts, Config, Assets, Public, Packages,
-        // Vscode, Lib, Tools, and the plain default) shares the folder
-        // mark: the approved Zed subset has one folder shape, not fifteen.
+        // Every folder key (Git, Src, Tests, Docs, Github, NodeModules,
+        // Dist, Scripts, Config, Assets, Public, Packages, Vscode, Lib,
+        // Tools, and the plain default) shares the folder mark: the
+        // approved Zed subset has one folder shape, not fifteen.
+        //
+        // `.git` used to deviate onto `GitBranch` here. It no longer does:
+        // the file tree pairs this mark with `Icon::FolderOpen` to show
+        // expansion, and a directory that kept a branch mark would be the
+        // one row in the tree that never opened. `FileIconKey::Git` — the
+        // *file* family, `.gitignore` and friends — still takes the branch.
         FileIconKey::Folder
+        | FileIconKey::FolderGit
         | FileIconKey::FolderSrc
         | FileIconKey::FolderTests
         | FileIconKey::FolderDocs
@@ -653,8 +666,9 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 34] = [
+pub const ALL_ICONS: [Icon; 35] = [
     Icon::FolderFill,
+    Icon::FolderOpen,
     Icon::GitBranch,
     Icon::MessageSquare,
     Icon::SquareTerminal,
@@ -694,6 +708,38 @@ pub const ALL_ICONS: [Icon; 34] = [
 mod tests {
     use super::*;
     use gpui::px;
+
+    /// The embedded payload must be the file its path names.
+    ///
+    /// `path()` and `svg()` are two independent match arms per variant, so
+    /// nothing but this test ties them together: an `include_bytes!`
+    /// pointing at the neighbouring file compiles, renders a real icon, and
+    /// looks right everywhere except that it is the wrong picture. The
+    /// folder pair is exactly the shape that invites the slip — `folder.svg`
+    /// and `folder_open.svg`, one character apart at the call site.
+    ///
+    /// Only `icons/zed/` is walked: the agent marks live in sibling
+    /// directories with their own provenance rules.
+    #[test]
+    fn every_zed_icon_embeds_the_file_its_path_names() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut checked = 0;
+        for icon in ALL_ICONS {
+            let Some(name) = icon.path().strip_prefix("icons/zed/") else {
+                continue;
+            };
+            let on_disk = std::fs::read(assets.join("icons/zed").join(name))
+                .unwrap_or_else(|error| panic!("{} is not vendored: {error}", icon.path()));
+            assert_eq!(
+                icon.svg(),
+                on_disk.as_slice(),
+                "{icon:?} embeds bytes other than {}",
+                icon.path()
+            );
+            checked += 1;
+        }
+        assert!(checked >= 29, "expected the zed icons to be walked, saw {checked}");
+    }
 
     #[test]
     fn every_icon_has_embedded_svg_payload() {
@@ -764,6 +810,7 @@ mod tests {
             (Icon::SquarePlus, "icons/zed/square_plus.svg"),
             (Icon::SquareMinus, "icons/zed/square_minus.svg"),
             (Icon::Undo, "icons/zed/undo.svg"),
+            (Icon::FolderOpen, "icons/zed/folder_open.svg"),
         ];
 
         assert_eq!(expected.len(), ALL_ICONS.len());

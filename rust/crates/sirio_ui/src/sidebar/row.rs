@@ -258,6 +258,7 @@ impl Sidebar {
     pub(super) fn icon_selector_name(icon: Icon) -> &'static str {
         match icon {
             Icon::FolderFill => "folder",
+            Icon::FolderOpen => "folder-open",
             Icon::GitBranch => "git-branch",
             Icon::MessageSquare => "chat-round-line",
             Icon::SquareTerminal => "terminal",
