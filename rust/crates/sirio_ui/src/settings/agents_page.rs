@@ -70,7 +70,11 @@ impl Settings {
         let mut first_visible_row = true;
         for (index, availability) in self.provider_availability.iter().enumerate() {
             let source = self.launch_source_for_row(availability.id);
-            let row = provider_row(availability, Some(&source));
+            let row = provider_row(
+                availability,
+                Some(&source),
+                self.transport_notes.get(availability.id).cloned(),
+            );
             if !query.is_empty()
                 && !row.name.to_lowercase().contains(&query)
                 && !row.description.to_lowercase().contains(&query)
@@ -85,8 +89,9 @@ impl Settings {
             let install_state = self.install_states.get(availability.id);
 
             // The quiet meta line under the name: the CLI path (or the
-            // install hint), the ACP version, the checksum note, the
-            // unavailable reason, install progress — in that order.
+            // install hint), the ACP version, the resolved transport, the
+            // checksum note, the unavailable reason, install progress — in
+            // that order.
             let mut fragments: Vec<AnyElement> = Vec::new();
             if let Some(path) = &availability.executable {
                 let shown = sirio_project::display_path(path);
@@ -133,6 +138,14 @@ impl Settings {
                             // `sirio_registry` — never the CLI binary's.
                             format!("ACP v{version}")
                         ))
+                        .into_any_element(),
+                );
+            }
+            if let Some(note) = row.transport_note.as_ref() {
+                fragments.push(
+                    div()
+                        .debug_selector(move || format!("settings-agent-transport-{index}"))
+                        .child(text!(note.as_str()))
                         .into_any_element(),
                 );
             }
@@ -660,6 +673,52 @@ mod tests {
         assert!(
             cx.debug_bounds("settings-agent-row-2").is_some(),
             "row 2 returns after the search is cleared"
+        );
+    }
+
+    /// Task 11: a row whose transport the host had to resolve says which one
+    /// it got, and why. The note is a report, never a control — there is no
+    /// selector here to switch it — and a row with one transport renders
+    /// exactly as it did before the field existed.
+    #[gpui::test]
+    async fn the_claude_row_says_which_transport_it_resolved(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "claude",
+                display_name: "Claude Code",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            },
+            AgentAvailability {
+                id: "codex",
+                display_name: "Codex",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/codex")),
+            },
+        ];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_transport_notes(vec![("claude".into(), "Native · claude 2.1.273".into())])
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Claude row renders");
+        let note = cx
+            .debug_bounds("settings-agent-transport-0")
+            .expect("the resolved transport renders as a meta fragment");
+        assert!(
+            note.origin.y >= row.origin.y
+                && note.origin.y + note.size.height <= row.origin.y + row.size.height,
+            "the sentence sits inside the row: note={note:?} row={row:?}"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-transport-1").is_none(),
+            "a row whose transport was never resolved renders no sentence"
         );
     }
 
