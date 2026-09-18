@@ -7232,6 +7232,7 @@ dependencies = [
  "futures",
  "libc",
  "serde_json",
+ "sirio_claude",
  "sirio_persistence",
 ]
 
