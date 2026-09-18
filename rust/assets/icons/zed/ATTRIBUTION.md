@@ -14,3 +14,9 @@ The agent marks (`ai_claude.svg`, `ai_open_ai.svg`, `ai_open_code.svg`) that
 used to live here were replaced on 2026-09-05 by the Codicons and Simple
 Icons assets in `../codicons/` and `../simple-icons/`; this directory now
 holds generic UI glyphs only.
+
+`folder_open.svg` was added on 2026-09-18, after the initial vendoring, from
+that same commit and by the same byte-for-byte rule: the file tree pairs it
+with `folder.svg` to show whether a directory is expanded, in place of a
+disclosure arrow. Take any further icon from the commit named above rather
+than from elsewhere, so this directory stays one provenance.

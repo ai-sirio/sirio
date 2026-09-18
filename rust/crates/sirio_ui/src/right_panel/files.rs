@@ -568,21 +568,7 @@ impl RightPanel {
                 .replace(std::path::MAIN_SEPARATOR, "/");
             format!("file-status-{}-{relative}", status.slug())
         });
-        let disclosure = if is_dir {
-            if row.node.expanded {
-                Some(
-                    IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                        .text_color(theme.text_muted),
-                )
-            } else {
-                Some(
-                    IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                        .text_color(theme.text_muted),
-                )
-            }
-        } else {
-            None
-        };
+        let expanded = row.node.expanded;
         let indent = row.depth as f32 * 16.0;
         let row_id = format!("file-{}", path.display());
         let click_path = path.clone();
@@ -590,7 +576,7 @@ impl RightPanel {
         let context_entity = entity.clone();
         let diff_path = path.clone();
         let diff_entity = entity.clone();
-        let glyph = file_row_glyph(&path, is_dir);
+        let glyph = file_row_glyph(&path, is_dir, expanded);
         div()
             .id(row_id)
             .debug_selector(move || {
@@ -649,31 +635,20 @@ impl RightPanel {
                 let drag_path = repo_root.join(&path);
                 this.on_drag(drag_path, |_, _, _, cx| cx.new(|_| gpui::Empty))
             })
-            .child(
-                div()
-                    .debug_selector(move || {
-                        if is_dir {
-                            "file-directory-disclosure".to_owned()
-                        } else {
-                            "file-file-disclosure".to_owned()
-                        }
-                    })
-                    .w(px(10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(match disclosure {
-                        Some(element) => element.into_any_element(),
-                        None => div().into_any_element(),
-                    }),
-            )
-            // The per-type file glyph — the visible subject of the "File
-            // icons" setting. Directory rows intentionally have no glyph or
-            // icon slot so their names follow the disclosure control directly.
+            // One icon slot, the same width on every row, so directory and
+            // file names read as a single column. A directory's mark carries
+            // its open/closed state — there is no separate arrow — which is
+            // why the selector names that state rather than just the slot.
             .when_some(glyph, |this, glyph| {
                 this.child(
                     div()
-                        .debug_selector(|| "file-file-icon".to_owned())
+                        .debug_selector(move || {
+                            if is_dir {
+                                directory_icon_selector(glyph).to_owned()
+                            } else {
+                                "file-file-icon".to_owned()
+                            }
+                        })
                         .w(px(16.0))
                         .flex_none()
                         .flex()
@@ -982,9 +957,37 @@ fn files_action_button(
         .child(label)
 }
 
-fn file_row_glyph(path: &Path, is_dir: bool) -> Option<Icon> {
+/// How a directory's mark is named in a drawn frame.
+///
+/// Derived from the icon that is actually drawn, never from the row's
+/// `expanded` flag. A selector computed from the flag would report "open"
+/// on a row that drew the closed folder, so a test asserting on it would
+/// only be checking that `expanded == expanded` — it stayed green when the
+/// swap was mutated away, which is how this function came to exist.
+fn directory_icon_selector(glyph: Icon) -> &'static str {
+    match glyph {
+        Icon::FolderOpen => "file-directory-icon-open",
+        Icon::FolderFill => "file-directory-icon-closed",
+        // Unreachable while every directory resolves to the folder pair.
+        // Named distinctly rather than folded into "closed" so a third
+        // folder mark fails the tests loudly instead of passing as shut.
+        _ => "file-directory-icon-unknown",
+    }
+}
+
+/// The mark at the head of a row.
+///
+/// A directory draws the folder pair — closed, or open while its row is
+/// expanded. That swap *is* the disclosure control: the tree draws no
+/// arrow, so this is the only thing telling a reader whether a folder is
+/// open, and a directory may never resolve to `None`.
+fn file_row_glyph(path: &Path, is_dir: bool, expanded: bool) -> Option<Icon> {
     if is_dir {
-        return None;
+        return Some(if expanded {
+            Icon::FolderOpen
+        } else {
+            file_glyph(path, true)
+        });
     }
     Some(file_glyph(path, false))
 }
@@ -1279,11 +1282,42 @@ mod tests {
     }
 
     #[test]
-    fn file_row_glyph_keeps_file_icons_but_omits_directory_icons() {
-        assert_eq!(file_row_glyph(Path::new("/repo/src"), true), None);
+    fn file_row_glyph_marks_a_directory_open_or_closed_and_keeps_file_icons() {
         assert_eq!(
-            file_row_glyph(Path::new("/repo/main.rs"), false),
-            Some(Icon::file_type("rust"))
+            file_row_glyph(Path::new("/repo/src"), true, false),
+            Some(Icon::FolderFill),
+            "a collapsed directory shows the closed folder"
+        );
+        assert_eq!(
+            file_row_glyph(Path::new("/repo/src"), true, true),
+            Some(Icon::FolderOpen),
+            "an expanded directory shows the open folder"
+        );
+        assert_eq!(
+            file_row_glyph(Path::new("/repo/main.rs"), false, false),
+            Some(Icon::file_type("rust")),
+            "a file keeps its per-type glyph"
+        );
+    }
+
+    /// `.git` is a directory like any other now. It used to deviate onto
+    /// `Icon::GitBranch`, which was invisible while directories drew no
+    /// glyph at all; with the folder pair drawn it would have been the one
+    /// row in the tree that never opened.
+    #[test]
+    fn file_row_glyph_opens_dot_git_like_every_other_directory() {
+        assert_eq!(
+            file_row_glyph(Path::new("/repo/.git"), true, false),
+            Some(Icon::FolderFill)
+        );
+        assert_eq!(
+            file_row_glyph(Path::new("/repo/.git"), true, true),
+            Some(Icon::FolderOpen)
+        );
+        assert_eq!(
+            file_row_glyph(Path::new("/repo/.gitignore"), false, false),
+            Some(Icon::GitBranch),
+            "the git *file* family keeps the branch mark"
         );
     }
 
@@ -1291,7 +1325,7 @@ mod tests {
     fn file_glyph_resolves_directory_kinds_and_falls_back_to_the_default_folder() {
         let cases: &[(&str, Icon)] = &[
             ("/repo/src", Icon::FolderFill),
-            ("/repo/.git", Icon::GitBranch),
+            ("/repo/.git", Icon::FolderFill),
             ("/repo/node_modules", Icon::FolderFill),
             ("/repo/random-name", Icon::FolderFill),
         ];
@@ -2232,16 +2266,26 @@ mod tests {
             window.simulate_next_frame(cx);
             window.simulate_next_frame(cx);
         });
-        let directory_disclosure = cx
-            .debug_bounds("file-directory-disclosure")
-            .expect("the directory disclosure slot is drawn");
+        // The expansion is visible as the icon itself: the open folder is
+        // drawn and the closed one is gone. Asserting on the drawn frame,
+        // rather than on `node.expanded`, is what makes this a test of the
+        // icon swap instead of a second test of the model flag the block
+        // below already checks.
+        let directory_icon = cx
+            .debug_bounds("file-directory-icon-open")
+            .expect("the expanded directory draws the open folder");
+        assert!(
+            cx.debug_bounds("file-directory-icon-closed").is_none(),
+            "an expanded directory does not also draw the closed folder"
+        );
+        assert!(
+            cx.debug_bounds("file-directory-disclosure").is_none()
+                && cx.debug_bounds("file-file-disclosure").is_none(),
+            "the disclosure arrow and its slot are gone from every row"
+        );
         let directory_name = cx
             .debug_bounds("file-directory-name")
             .expect("the directory name is drawn");
-        assert!(
-            cx.debug_bounds("file-directory-icon").is_none(),
-            "directory rows do not draw a file icon or reserve its slot"
-        );
 
         let file_icon = cx
             .debug_bounds("file-file-icon")
@@ -2249,13 +2293,20 @@ mod tests {
         let file_name = cx
             .debug_bounds("file-file-name")
             .expect("the file name is drawn");
+        // Depth differs (the file is inside the directory), so the two rows
+        // cannot share an x. What must match is the icon-to-name gap and the
+        // slot width: that is what makes the names read as one column.
+        assert!(
+            (directory_icon.size.width.as_f32() - file_icon.size.width.as_f32()).abs() <= 0.5,
+            "directory and file icons reserve the same slot: directory={directory_icon:?}, file={file_icon:?}"
+        );
         let gap = file_name.origin.x.as_f32()
             - (file_icon.origin.x.as_f32() + file_icon.size.width.as_f32());
         let expected_directory_name_x =
-            directory_disclosure.origin.x.as_f32() + directory_disclosure.size.width.as_f32() + gap;
+            directory_icon.origin.x.as_f32() + directory_icon.size.width.as_f32() + gap;
         assert!(
             (directory_name.origin.x.as_f32() - expected_directory_name_x).abs() <= 0.5,
-            "directory name follows the disclosure slot directly: disclosure={directory_disclosure:?}, name={directory_name:?}, file_gap={gap}"
+            "directory name follows its folder icon exactly as a file name follows its glyph: icon={directory_icon:?}, name={directory_name:?}, file_gap={gap}"
         );
         assert!(
             cx.debug_bounds("file-row").is_some(),
@@ -2272,6 +2323,17 @@ mod tests {
                 find_node(&panel.file_tree, &subdir).is_some_and(|node| !node.expanded)
             }),
             "clicking the drawn directory row again collapses it"
+        );
+        cx.update(|_, app| panel.update(app, |_, cx| cx.notify()));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-directory-icon-closed").is_some()
+                && cx.debug_bounds("file-directory-icon-open").is_none(),
+            "collapsing swaps the folder back to closed"
         );
     }
 
