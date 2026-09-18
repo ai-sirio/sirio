@@ -78,16 +78,22 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
                     sirio_activity, sirio_ui and sirio)
     ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
-sirio_agents, sirio_activity, sirio_markdown, sirio_usage,
-sirio_registry, sirio_release, sirio_lsp,
-sirio_syntax                    (leaves — no local deps beyond sirio_perf;
+sirio_activity, sirio_markdown, sirio_registry, sirio_release,
+sirio_lsp, sirio_syntax, sirio_claude
+                                (leaves — no local deps beyond sirio_perf;
                                  sirio_theme and sirio_ui take the external
                                  `bezel` crate, pinned `=0.1.4`, and
                                  sirio_syntax takes `bezel-syntax` plus the
                                  fifteen tree-sitter grammars bezel does not
-                                 carry)
+                                 carry; sirio_claude is Claude Code's own
+                                 stdio protocol as types and pure functions —
+                                 no process, no channels — which is what lets
+                                 sirio_agents, sirio_acp and sirio_usage all
+                                 take it without inverting the graph)
     ^
-sirio_acp        (-> sirio_persistence)
+sirio_agents     (-> sirio_claude)
+sirio_usage      (-> sirio_claude)
+sirio_acp        (-> sirio_persistence, sirio_claude)
 sirio_terminal    (-> sirio_project, sirio_theme)
 sirio_control    (-> sirio_acp, sirio_persistence)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
@@ -204,6 +210,31 @@ of which server each language names and why a missing one says nothing.
 ### Agent adapters (`sirio_agents`)
 
 Every supported CLI implements the `AgentAdapter` trait (`id`, `display_name`, `has_native_hooks`, `prepare`, `command`, `resume_command`). `sirio_agents::ALL` is the fixed list of 5 adapters, in display order. An adapter's ACP claim (`builtin_acp`) covers only its own binary's subcommand — verified, defaulting to `None`; everything reachable through a separate package resolves through `sirio_registry`. `prepare` writes only worktree-local hook config — **never** touches user-global config (`~/.claude/settings.json`, `~/.codex/config.toml`, etc.). The one writer of user-global config is the explicit Settings → General → **Install Hooks** action (`install_global_hooks`, a trait method defaulting to `NotSupported`): Claude merges the five hook arrays into `$CLAUDE_CONFIG_DIR`/`~/.claude/settings.json`, Codex sets `notify` in `$CODEX_HOME`/`~/.codex/config.toml` via `toml_edit` (format-preserving), OpenCode writes `~/.config/opencode/plugins/sirio-session.js`; Pi and omp honestly report no user-global mechanism. Those hooks carry **no** `--session`: `sirioctl notify`/`session-ref` fall back to the `SIRIO_PANE_ID` every Sirio pane exports and exit 0 silently outside one (no pane, or no socket), so a global hook never surfaces an error inside an agent Sirio did not launch. Adapters that generate command-line overrides embedding JSON (Codex's `-c notify=[...]`, omp's hook file) share `json_string_literal` in `sirio_agents/src/shell_quote.rs` — it must build a JSON string literal without escaping slashes, because Codex's `-c key=value` override is parsed as **TOML**, and `\/` (JSON's optional slash-escaping) is not a valid TOML escape. Getting this wrong makes Codex fail silently at config load, before it ever reaches its TUI.
+
+### A Claude chat talks to Claude Code, not to a wrapper
+
+A chat tab for Claude Code drives the `claude` already on the user's PATH
+over the stdio protocol the Claude Agent SDK uses internally
+(`claude -p --output-format stream-json --input-format stream-json`), not
+the `claude-acp` registry wrapper. `sirio_claude` is that protocol as types
+and pure functions; `sirio_acp::claude` owns the process and emits the same
+`AcpEvent`s the ACP client does, so `sirio_ui::chat` cannot tell which
+transport a tab uses. The resolution lives in `sirio`'s `claude_transport`:
+native when `claude` is on PATH at or above `sirio_claude::MIN_CLAUDE_VERSION`
+(2.1.257, the version the official wrapper's SDK bundles and therefore
+certifies), the wrapper otherwise, with the reason shown in Settings →
+Agents. `SIRIO_CLAUDE_TRANSPORT=acp` forces the fallback for diagnosis.
+
+**That protocol is not a published contract.** It is versioned with the
+Agent SDK, and `claude` self-updates, so everything in `sirio_claude` is
+written to degrade rather than reject: an unknown `type` or `subtype`
+becomes an `Other`, unknown fields are ignored, a malformed line is skipped,
+and a control request the CLI refuses degrades that one feature rather than
+the session. `claude_answers_the_native_handshake_it_claims`
+(`sirio_agents/tests/acp_conformance.rs`) is what notices the day the claim
+stops holding; like its two siblings it SKIPs without the binary and is on
+the release gate's skip list. The terminal pane is unaffected — it has
+always run `claude` interactively.
 
 ### Agent activity detection — layered evidence, not one signal (`sirio_activity`)
 
