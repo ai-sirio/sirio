@@ -4208,6 +4208,10 @@ struct SirioWorkspace {
     overflow_menu_open: bool,
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
+    /// Whether the empty-worktree state's New Chat picker (the agent list)
+    /// is expanded. Mirrors `TabBar::chat_picker_open`, owned here because
+    /// the empty state renders in this crate, not in `sirio_ui`.
+    empty_chat_picker_open: bool,
     tab_rename: Option<TabRename>,
     pending_title_prompt: Option<PendingTitlePrompt>,
     /// Blink state of the "Set Title" modal field's insertion caret, and
@@ -5086,6 +5090,7 @@ impl SirioWorkspace {
             overflow_menu_open: false,
             tab_menu_open: false,
             tab_menu_tab: None,
+            empty_chat_picker_open: false,
             tab_rename: None,
             pending_title_prompt: None,
             modal_field_blink: sirio_ui::caret::Blink::new(),
@@ -13566,7 +13571,20 @@ impl SirioWorkspace {
                 // the Primary pane does not, and can be.
                 if role == PaneRole::Primary && self.has_current_worktree() {
                     let new_terminal_entity = entity.clone();
-                    div()
+                    let new_chat_entity = entity.clone();
+                    let dismiss_chat_picker_entity = entity.clone();
+                    let picker_open = self.empty_chat_picker_open;
+                    // The same resolved-source gate the tab bar's New Chat
+                    // picker applies: only adapters with a concrete command
+                    // today (Builtin or Installed) are offered as chats.
+                    let available: Vec<(&'static str, &'static str)> = AGENT_CATALOG
+                        .iter()
+                        .filter(|adapter| {
+                            agent_command_for(&self.launch_source_for(adapter.id())).is_some()
+                        })
+                        .map(|adapter| (adapter.id(), adapter.display_name()))
+                        .collect();
+                    let mut empty = div()
                         .id("empty-worktree")
                         .debug_selector(|| "empty-worktree".to_owned())
                         .flex_1()
@@ -13588,29 +13606,162 @@ impl SirioWorkspace {
                                 .text_size(theme.typography.headline)
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text)
-                                .child("No Terminals"),
+                                .child("No Terminals or Chats"),
                         )
-                        .child("Open a new terminal to get started.")
+                        .child("Open a new terminal or chat to get started.")
                         .child(
                             div()
-                                .id("empty-worktree-new-terminal")
-                                .debug_selector(|| "empty-worktree-new-terminal".to_owned())
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .gap(theme.spacing.card_gap)
                                 .mt(theme.spacing.titlebar_control_spacing)
-                                .px(theme.spacing.card_gap)
-                                .py(theme.spacing.titlebar_control_spacing)
-                                .rounded(theme.radii.control)
-                                .bg(theme.solid)
-                                .text_size(theme.typography.footnote)
-                                .text_color(theme.on_solid)
-                                .hover(|style| style.opacity(0.9))
-                                .on_click(move |_, _, cx| {
-                                    new_terminal_entity.update(cx, |workspace, cx| {
-                                        workspace.add_terminal_tab("Terminal", cx);
-                                    });
-                                })
-                                .child("New Terminal"),
-                        )
-                        .into_any_element()
+                                .child(
+                                    div()
+                                        .id("empty-worktree-new-terminal")
+                                        .debug_selector(|| "empty-worktree-new-terminal".to_owned())
+                                        .px(theme.spacing.card_gap)
+                                        .py(theme.spacing.titlebar_control_spacing)
+                                        .rounded(theme.radii.control)
+                                        .bg(theme.solid)
+                                        .text_size(theme.typography.footnote)
+                                        .text_color(theme.on_solid)
+                                        .hover(|style| style.opacity(0.9))
+                                        .on_click(move |_, _, cx| {
+                                            new_terminal_entity.update(cx, |workspace, cx| {
+                                                workspace.add_terminal_tab("Terminal", cx);
+                                            });
+                                        })
+                                        .child("New Terminal"),
+                                )
+                                .child(
+                                    div()
+                                        .id("empty-worktree-new-chat")
+                                        .debug_selector(|| "empty-worktree-new-chat".to_owned())
+                                        .px(theme.spacing.card_gap)
+                                        .py(theme.spacing.titlebar_control_spacing)
+                                        .rounded(theme.radii.control)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .text_size(theme.typography.footnote)
+                                        .text_color(theme.text)
+                                        .hover(|style| style.bg(theme.element_hover))
+                                        .on_click(move |_, _, cx| {
+                                            new_chat_entity.update(cx, |workspace, cx| {
+                                                workspace.empty_chat_picker_open =
+                                                    !workspace.empty_chat_picker_open;
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child("New Chat"),
+                                ),
+                        );
+                    if picker_open {
+                        let mut menu = div()
+                            .id("empty-chat-agent-menu")
+                            .debug_selector(|| "empty-chat-agent-menu".to_owned())
+                            .flex()
+                            .flex_col()
+                            .gap(theme.spacing.titlebar_control_spacing)
+                            .mt(theme.spacing.titlebar_control_spacing)
+                            .p(theme.spacing.titlebar_control_spacing)
+                            .w(theme.spacing.menu_width)
+                            .rounded(theme.radii.control)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.floating_surface)
+                            .shadow_lg()
+                            .text_size(theme.typography.footnote)
+                            .on_mouse_down_out(move |_, _, cx| {
+                                dismiss_chat_picker_entity.update(cx, |workspace, cx| {
+                                    workspace.empty_chat_picker_open = false;
+                                    cx.notify();
+                                });
+                            });
+                        if available.is_empty() {
+                            let empty_settings_entity = entity.clone();
+                            menu = menu.child(
+                                div()
+                                    .id("empty-chat-empty")
+                                    .debug_selector(|| "empty-chat-empty".to_owned())
+                                    .flex()
+                                    .flex_col()
+                                    .gap(theme.spacing.titlebar_control_spacing)
+                                    .px(theme.spacing.card_gap)
+                                    .py(theme.spacing.titlebar_control_spacing)
+                                    .rounded(theme.radii.control)
+                                    .text_color(theme.text_faint)
+                                    .hover(|style| style.bg(theme.element_hover))
+                                    .on_click(move |_, _, cx| {
+                                        empty_settings_entity.update(cx, |workspace, cx| {
+                                            workspace.empty_chat_picker_open = false;
+                                            workspace
+                                                .open_settings(Some(SettingsCategory::Agents), cx);
+                                        });
+                                    })
+                                    .child("Other agents…")
+                                    .child(
+                                        div()
+                                            .text_size(theme.typography.caption2)
+                                            .child("No supported agent found on PATH"),
+                                    ),
+                            );
+                        } else {
+                            for (id, display_name) in available {
+                                let row_entity = entity.clone();
+                                let selector = format!("empty-chat-agent-{id}");
+                                let selector_for_debug = selector.clone();
+                                let label_selector = format!("empty-chat-label-{id}");
+                                let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
+                                menu = menu.child(
+                                    div()
+                                        .id(selector)
+                                        .debug_selector(move || selector_for_debug.clone())
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(7.0))
+                                        .px(theme.spacing.card_gap)
+                                        .py(theme.spacing.titlebar_control_spacing)
+                                        .rounded(theme.radii.control)
+                                        .text_color(theme.text)
+                                        .hover(|style| style.bg(theme.element_hover))
+                                        .on_click(move |_, window, cx| {
+                                            row_entity.update(cx, |workspace, cx| {
+                                                workspace.empty_chat_picker_open = false;
+                                                workspace.open_chat_agent(id, window, cx);
+                                            });
+                                        })
+                                        .child(
+                                            IconElement::new(icon, IconSize::Small)
+                                                .text_color(theme.text),
+                                        )
+                                        .child(div().id(label_selector).child(display_name)),
+                                );
+                            }
+                            let other_entity = entity.clone();
+                            menu = menu.child(
+                                div()
+                                    .id("empty-chat-other-agents")
+                                    .debug_selector(|| "empty-chat-other-agents".to_owned())
+                                    .px(theme.spacing.card_gap)
+                                    .py(theme.spacing.titlebar_control_spacing)
+                                    .rounded(theme.radii.control)
+                                    .text_color(theme.text_faint)
+                                    .hover(|style| style.bg(theme.element_hover))
+                                    .on_click(move |_, _, cx| {
+                                        other_entity.update(cx, |workspace, cx| {
+                                            workspace.empty_chat_picker_open = false;
+                                            workspace
+                                                .open_settings(Some(SettingsCategory::Agents), cx);
+                                        });
+                                    })
+                                    .child("Other agents…"),
+                            );
+                        }
+                        empty = empty.child(menu);
+                    }
+                    empty.into_any_element()
                 } else if role == PaneRole::Primary
                     && let Some(prompt) = self.empty_pane_prompts.get(&0)
                 {
@@ -35028,6 +35179,75 @@ done
             workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
             1,
             "New Terminal must replace the empty state with a terminal tab"
+        );
+    }
+
+    /// Empty-state New Chat: the zero-tab worktree surface offers a New Chat
+    /// button next to New Terminal; clicking it expands the same
+    /// resolved-source agent picker the tab bar's New Chat menu shows, and
+    /// picking an agent opens its chat tab.
+    #[gpui::test]
+    async fn drawn_selected_worktree_without_tabs_offers_new_chat_picker(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_center_split();
+            // Deterministic picker: one resolvable agent regardless of what
+            // this machine has on PATH.
+            workspace.launch.sources.insert(
+                "codex".into(),
+                sirio_registry::LaunchSource::Builtin {
+                    program: "codex-acp".into(),
+                    args: Vec::new(),
+                },
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("empty-worktree-new-chat").is_some(),
+            "the empty state must provide the New Chat action"
+        );
+        assert!(
+            cx.debug_bounds("empty-chat-agent-menu").is_none(),
+            "the agent picker stays hidden until New Chat is clicked"
+        );
+
+        let new_chat = cx
+            .debug_bounds("empty-worktree-new-chat")
+            .expect("new chat action is drawn");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("empty-chat-agent-menu").is_some(),
+            "clicking New Chat must expand the agent picker"
+        );
+        let agent = cx
+            .debug_bounds("empty-chat-agent-codex")
+            .expect("the picker lists the resolved Codex agent");
+        cx.simulate_click(agent.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "picking an agent must replace the empty state with its chat tab"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace
+                .tabs
+                .last()
+                .map(|tab| tab.title.clone())),
+            Some("Codex".to_string()),
+            "the new tab carries the picked agent's identity"
         );
     }
 
