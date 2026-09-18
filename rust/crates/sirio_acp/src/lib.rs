@@ -371,6 +371,20 @@ impl ChatClient {
     pub fn supports_rewind_for(launch: &LaunchSpec) -> bool {
         launch.is_native_claude()
     }
+
+    /// Asks the agent to restore tracked files to their state at a turn.
+    /// Only the native transport speaks this request; anything else is
+    /// refused rather than silently dropped.
+    pub fn rewind_files(
+        &self,
+        user_message_id: &str,
+        dry_run: bool,
+    ) -> Result<sirio_claude::RewindOutcome> {
+        match self {
+            Self::Claude(client) => client.rewind_files(user_message_id, dry_run),
+            Self::Acp(_) => Err(anyhow!("this agent cannot restore files")),
+        }
+    }
 }
 
 /// A permission option exposed to the caller.

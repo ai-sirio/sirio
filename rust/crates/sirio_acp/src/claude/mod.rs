@@ -18,6 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use sirio_claude::RewindOutcome;
 
 use crate::{
     AcpError, ChildHandle, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT,
@@ -359,6 +360,31 @@ impl ClaudeClient {
     #[must_use]
     pub fn last_user_message_id(&self) -> Option<String> {
         self.shared.last_user_message_id()
+    }
+
+    /// Asks the agent to restore tracked files to their state at a turn.
+    /// With `dry_run` the CLI reports what it would change and touches
+    /// nothing. Blocking, with a bounded wait: a rewind is a question with
+    /// one answer, not a turn to stream.
+    pub fn rewind_files(&self, user_message_id: &str, dry_run: bool) -> Result<RewindOutcome> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::RewindFiles {
+                user_message_id: user_message_id.to_string(),
+                dry_run,
+                reply: reply_tx,
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        match reply_rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => Err(anyhow!("rewind_files failed: {error}")),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(anyhow!("rewind_files timed out after 30s"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+                "the Claude worker is not running: rewind went unanswered"
+            )),
+        }
     }
 }
 

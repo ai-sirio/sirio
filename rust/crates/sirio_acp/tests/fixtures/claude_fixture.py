@@ -226,6 +226,23 @@ def main():
                     "session_id": SESSION_ID,
                     "uuid": "status-uuid",
                 })
+            elif subtype == "rewind_files":
+                if MODE == "no_rewind":
+                    send({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "Unknown control request subtype: rewind_files",
+                        },
+                    })
+                else:
+                    control_response(request_id, {
+                        "canRewind": True,
+                        "filesChanged": ["/repo/a.rs"],
+                        "insertions": 12,
+                        "deletions": 4,
+                    })
             else:
                 control_response(request_id, {})
         elif kind == "control_response":
