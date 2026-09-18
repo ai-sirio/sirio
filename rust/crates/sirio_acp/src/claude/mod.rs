@@ -8,6 +8,7 @@
 //! tab uses is invisible above this line.
 
 mod events;
+mod permission;
 mod prompt;
 mod worker;
 
@@ -329,6 +330,28 @@ impl ClaudeClient {
     pub fn cancel(&self) -> Result<()> {
         self.command_tx
             .send_blocking(worker::Command::Cancel)
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// Answers a permission card. For a structured question, `option_id`
+    /// is the chosen label or the typed text.
+    pub fn respond_permission(&self, request_id: u64, option_id: impl Into<String>) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::RespondPermission {
+                request_id,
+                choice: worker::PermissionChoice::Selected(option_id.into()),
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// Withdraws a card without choosing, which the agent reads as a
+    /// refusal (F-CHAT-25).
+    pub fn cancel_permission(&self, request_id: u64) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::RespondPermission {
+                request_id,
+                choice: worker::PermissionChoice::Cancelled,
+            })
             .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
     }
 

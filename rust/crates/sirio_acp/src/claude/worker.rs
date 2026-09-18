@@ -19,6 +19,7 @@ use sirio_claude::{Catalog, CliMessage, ControlEnvelope, ControlRequest, LaunchL
 
 use super::ClaudeLaunch;
 use super::events::Fold;
+use super::permission;
 use crate::{
     AcpError, AcpEvent, AgentMode, ChildHandle, EffortChoice, EffortOption, ExitStatusSlot,
     ModeCatalog, ModelCatalog, ModelOption, StderrTail, TimeoutOperation,
@@ -42,7 +43,27 @@ pub(super) enum Command {
     Cancel,
     /// Stop: close the CLI's stdin, wait for it, acknowledge.
     Shutdown(mpsc::SyncSender<()>),
-    // Task 9 adds RespondPermission and RewindFiles here.
+    /// Answer a permission card the CLI asked about.
+    RespondPermission {
+        request_id: u64,
+        choice: PermissionChoice,
+    },
+}
+
+/// A card the surface is showing, waiting on a human.
+struct PendingPermission {
+    request: sirio_claude::CanUseTool,
+    /// When it was asked, for the expiry sweep. A card is not a turn: it
+    /// has its own deadline, and missing it is a refusal rather than a
+    /// fault.
+    asked_at: std::time::Instant,
+}
+
+/// What the surface answered with.
+#[derive(Debug)]
+pub(super) enum PermissionChoice {
+    Selected(String),
+    Cancelled,
 }
 
 /// The handshake's progress, reported to the launching thread.
@@ -215,6 +236,10 @@ pub(super) fn run(config: Config) {
         }
         SessionOutcome::NeverStarted => {}
         SessionOutcome::Died(detail) => {
+            // `pending_permissions` lived inside `session` and died with
+            // it: the command channel is gone, so any later answer fails,
+            // and this report tells the surface to close the cards — the
+            // native equivalent of `cancel_permissions`.
             block_on(crate::wait_for_stderr_drain(&stderr_drained));
             let report = crate::stderr_tail_report(&stderr_tail);
             let exit = block_on(crate::child_exit_report(&child, &exit_status));
@@ -259,7 +284,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
         child,
         activity,
         prompt_timeout,
-        permission_timeout: _permission_timeout,
+        permission_timeout,
     } = context;
     let mut lines = BufReader::new(stdout).lines();
     let mut fold = Fold::new();
@@ -268,6 +293,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut turn_in_flight = false;
     let mut pending_model: HashMap<String, String> = HashMap::new();
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
+    let permission_counter = AtomicU64::new(1);
+    let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
+    let mut open_permissions: usize = 0;
 
     // The handshake. Its answer is the whole catalogue, so every picker is
     // populated before the user can type into the composer.
@@ -332,7 +360,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     }
 
     // The session proper: read lines and serve commands until one side
-    // stops. Task 9 extends the command arm with the permission answer.
+    // stops.
     loop {
         let next_line = lines.next();
         let next_command = command_rx.recv();
@@ -376,6 +404,61 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                 }
                             }
+                            continue;
+                        }
+                        if let CliMessage::ControlRequest(value) = &message
+                            && let Some(request) = sirio_claude::CanUseTool::parse(value)
+                        {
+                            let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
+                            // Draw or pause the row this decision belongs to,
+                            // so a card never asks about a call nobody sees.
+                            let row_events = match request.tool_use_id.as_deref() {
+                                Some(tool_use_id) => {
+                                    let mut events = fold.start_from_permission(
+                                        &request.tool_name,
+                                        tool_use_id,
+                                        &request.input,
+                                    );
+                                    events.extend(fold.mark_pending(tool_use_id));
+                                    events
+                                }
+                                None => Vec::new(),
+                            };
+                            for event in row_events {
+                                let _ = event_tx.send(event).await;
+                            }
+                            let question = permission::is_question(&request)
+                                .then(|| crate::parse_permission_question(&request.input))
+                                .flatten();
+                            let options = if permission::is_question(&request) {
+                                permission::question_options(&request)
+                            } else {
+                                permission::options_for(&request)
+                            };
+                            let _ = event_tx
+                                .send(AcpEvent::PermissionRequest {
+                                    request_id,
+                                    session_id: shared.session_id().unwrap_or_default(),
+                                    title: sirio_claude::tools::describe(
+                                        &sirio_claude::message::ToolUse {
+                                            id: request.tool_use_id.clone().unwrap_or_default(),
+                                            name: request.tool_name.clone(),
+                                            input: request.input.clone(),
+                                        },
+                                    )
+                                    .title,
+                                    options,
+                                    question,
+                                })
+                                .await;
+                            open_permissions += 1;
+                            pending_permissions.insert(
+                                request_id,
+                                PendingPermission {
+                                    request,
+                                    asked_at: std::time::Instant::now(),
+                                },
+                            );
                             continue;
                         }
                         if matches!(message, CliMessage::Result(_)) {
@@ -468,6 +551,56 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             return SessionOutcome::Died(": could not write the interrupt".into());
                         }
                     }
+                    Ok(Command::RespondPermission { request_id, choice }) => {
+                        let Some(pending) = pending_permissions.remove(&request_id) else {
+                            continue;
+                        };
+                        open_permissions = open_permissions.saturating_sub(1);
+                        // The card closing is fresh evidence about the agent:
+                        // the idle window starts from the answer, not the
+                        // question.
+                        crate::touch_activity(&activity);
+                        let answer = match choice {
+                            PermissionChoice::Selected(option_id)
+                                if permission::is_question(&pending.request) =>
+                            {
+                                permission::answer_for_question(&pending.request, &option_id)
+                            }
+                            PermissionChoice::Selected(option_id) => {
+                                permission::answer_for(&pending.request, &option_id)
+                            }
+                            PermissionChoice::Cancelled => permission::Answer {
+                                result: sirio_claude::PermissionResult::deny(permission::REFUSED),
+                                then_mode: None,
+                            },
+                        };
+                        let allowed =
+                            matches!(answer.result, sirio_claude::PermissionResult::Allow { .. });
+                        let line = answer.result.into_response(&pending.request.request_id);
+                        if write_line(&mut stdin, &line).await.is_err() {
+                            return SessionOutcome::Died(": could not answer a permission".into());
+                        }
+                        if allowed && let Some(tool_use_id) = pending.request.tool_use_id.as_deref()
+                        {
+                            for event in fold.mark_running(tool_use_id) {
+                                let _ = event_tx.send(event).await;
+                            }
+                        }
+                        if let Some(mode) = answer.then_mode {
+                            let id = next_request_id();
+                            if write_line(
+                                &mut stdin,
+                                &ControlRequest::set_permission_mode(&id, &mode),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                return SessionOutcome::Died(
+                                    ": could not apply the approved mode".into(),
+                                );
+                            }
+                        }
+                    }
                     Ok(Command::Shutdown(ack)) => {
                         // Closing stdin is how a stream-json session ends.
                         drop(stdin);
@@ -480,10 +613,36 @@ async fn session(context: SessionContext) -> SessionOutcome {
             // watchdog check below.
             futures::future::Either::Right((_, _)) => {}
         }
-        if turn_in_flight && crate::idle_for(&activity) >= prompt_timeout {
-            // An idle turn is reaped and reported. There is no permission
-            // exemption here yet: Task 9 owns the inbound cards and extends
-            // this condition when an open card explains the silence.
+        // A card the user never answered is a refusal, not a protocol
+        // fault. Answering `internal_error` would hand the agent a failed
+        // request it never got wrong.
+        let expired: Vec<u64> = pending_permissions
+            .iter()
+            .filter(|(_, pending)| pending.asked_at.elapsed() >= permission_timeout)
+            .map(|(id, _)| *id)
+            .collect();
+        for request_id in expired {
+            let Some(pending) = pending_permissions.remove(&request_id) else {
+                continue;
+            };
+            open_permissions = open_permissions.saturating_sub(1);
+            crate::record_timeout(
+                &timeout_reason,
+                AcpError::Timeout {
+                    operation: TimeoutOperation::Permission,
+                    duration: permission_timeout,
+                },
+            );
+            let line = sirio_claude::PermissionResult::deny(permission::REFUSED)
+                .into_response(&pending.request.request_id);
+            if write_line(&mut stdin, &line).await.is_err() {
+                return SessionOutcome::Died(": could not expire a permission".into());
+            }
+        }
+        if turn_in_flight && open_permissions == 0 && crate::idle_for(&activity) >= prompt_timeout {
+            // An unanswered permission card is the client's silence, not
+            // the agent's: the agent asked and is doing exactly what it
+            // should, which is nothing.
             crate::record_timeout(
                 &timeout_reason,
                 AcpError::Timeout {

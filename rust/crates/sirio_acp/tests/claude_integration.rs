@@ -352,3 +352,173 @@ fn a_turn_that_keeps_reporting_is_never_reaped_for_taking_long() {
     );
     client.shutdown().expect("clean shutdown");
 }
+
+#[test]
+fn a_tool_that_needs_permission_pauses_its_row_and_resumes_on_allow() {
+    let (mut client, events) = launch("permission");
+    client.prompt("delete it").expect("prompt is accepted");
+    let (request_id, options) = loop {
+        match next_event(&events) {
+            AcpEvent::PermissionRequest {
+                request_id,
+                options,
+                title,
+                ..
+            } => {
+                assert_eq!(title, "rm -rf build");
+                break (request_id, options);
+            }
+            _ => continue,
+        }
+    };
+    assert!(options.iter().any(|option| option.id == "allow_once"));
+    client
+        .respond_permission(request_id, "allow_once")
+        .expect("the choice reaches the agent");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCallCompleted { status, .. } if status == "Completed"
+        )),
+        "an allowed tool must complete: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn an_open_permission_does_not_freeze_the_stream() {
+    // The card waits on a human. While it waits, the agent's other output
+    // must keep arriving, or a second request could never be answered.
+    let (mut client, events) = launch("permission_then_text");
+    client.prompt("go").expect("prompt is accepted");
+    let mut saw_request = false;
+    let mut saw_text_after = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !saw_text_after && std::time::Instant::now() < deadline {
+        match next_event(&events) {
+            AcpEvent::PermissionRequest { .. } => saw_request = true,
+            AcpEvent::AgentMessageChunk(_) if saw_request => saw_text_after = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_request && saw_text_after,
+        "the stream must keep flowing"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_withdrawn_permission_is_answered_as_a_refusal() {
+    let (mut client, events) = launch("permission");
+    client.prompt("delete it").expect("prompt is accepted");
+    let request_id = loop {
+        if let AcpEvent::PermissionRequest { request_id, .. } = next_event(&events) {
+            break request_id;
+        }
+    };
+    client
+        .cancel_permission(request_id)
+        .expect("withdrawal reaches the agent");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCallCompleted { status, .. } if status == "Failed"
+        )),
+        "a refused tool must not read as completed: {seen:?}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_permission_left_open_expires_into_a_refusal() {
+    let (mut client, events) = ClaudeClient::launch_with_timeouts(
+        fixture_launch("permission"),
+        std::env::temp_dir(),
+        Duration::from_secs(10),
+        Duration::from_secs(60),
+        Duration::from_millis(400),
+    )
+    .expect("handshake succeeds");
+    client.prompt("delete it").expect("prompt is accepted");
+    loop {
+        if matches!(next_event(&events), AcpEvent::PermissionRequest { .. }) {
+            break;
+        }
+    }
+    // Answer nothing. The deadline the user missed is a refusal, not a
+    // protocol fault: the session stays alive and the tool is denied.
+    let seen = drain_until_turn_end(&events);
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        AcpEvent::ToolCallCompleted { status, .. } if status == "Failed"
+    )));
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_structured_question_carries_its_prompt_and_its_options() {
+    let (mut client, events) = launch("question");
+    client.prompt("ask me").expect("prompt is accepted");
+    let (request_id, question) = loop {
+        if let AcpEvent::PermissionRequest {
+            request_id,
+            question,
+            ..
+        } = next_event(&events)
+        {
+            break (request_id, question.expect("a structured question"));
+        }
+    };
+    assert_eq!(question.header, "Pick a branch");
+    assert_eq!(question.prompt, "Which branch should this target?");
+    client
+        .respond_permission(request_id, "main")
+        .expect("the answer reaches the agent");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, AcpEvent::TurnEnded { .. }))
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn approving_a_plan_moves_the_session_out_of_plan_mode() {
+    let (mut client, events) = launch("exit_plan_mode");
+    client.prompt("plan it").expect("prompt is accepted");
+    let request_id = loop {
+        if let AcpEvent::PermissionRequest {
+            request_id,
+            options,
+            ..
+        } = next_event(&events)
+        {
+            assert!(
+                options
+                    .iter()
+                    .any(|option| option.id == "approve_accept_edits")
+            );
+            break request_id;
+        }
+    };
+    client
+        .respond_permission(request_id, "approve_accept_edits")
+        .expect("the choice reaches the agent");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while client
+        .mode_catalog()
+        .is_none_or(|catalog| catalog.current_id != "acceptEdits")
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        client.mode_catalog().expect("modes").current_id,
+        "acceptEdits",
+        "approving a plan that still asks for every edit approves nothing"
+    );
+    client.shutdown().expect("clean shutdown");
+}
