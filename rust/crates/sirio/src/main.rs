@@ -1127,7 +1127,15 @@ enum ParkedRows {
 #[derive(Clone)]
 struct ParkedWorktreeTabs {
     layout: SessionLayout,
+    /// The panes `restore_tabs_for_mounted_worktree` can re-attach from the
+    /// terminal cache, which holds terminals and nothing else.
     terminal_panes_by_tab: Vec<HashSet<usize>>,
+    /// The chat panes of the same tabs, kept apart from the terminals above
+    /// because the two answer different questions: nothing re-attaches a
+    /// chat from the terminal cache, but a parked chat still carries a live
+    /// status under its own `pane-N` key, which is what the Activity list
+    /// reads.
+    chat_panes_by_tab: Vec<HashSet<usize>>,
 }
 
 struct TabRename {
@@ -8198,7 +8206,7 @@ impl SirioWorkspace {
     /// they happen to be looking at. `self.tabs` is the selected worktree's
     /// strip and nothing else -- a switch replaces it (see `select_worktree`'s
     /// CENTER-01 comment) -- so the other mounted worktrees' rows come from
-    /// their parked strips, whose terminals are still alive in the cache.
+    /// their parked strips, whose terminals and chats are both still alive.
     ///
     /// Rows are named by `ActivityRef`, not by their position: the list now
     /// crosses worktrees, and the caller that acts on a row
@@ -8230,9 +8238,17 @@ impl SirioWorkspace {
 
     /// The rows of every mounted worktree that is not the selected one, read
     /// from its parked strip. Each row's status comes from the pane ids
-    /// parked with that tab, which is why this can show a real status for a
-    /// worktree the user is not looking at: `self.activity` is keyed by pane
-    /// id, not by worktree.
+    /// parked with that tab -- terminal and chat alike -- which is why this
+    /// can show a real status for a worktree the user is not looking at:
+    /// `self.activity` is keyed by pane id, not by worktree.
+    ///
+    /// Membership in `parked_worktree_tabs` is the whole test of whether a
+    /// worktree belongs here: it is written when a worktree is parked and
+    /// dropped, with the terminal cache and the retained chats, when one is
+    /// evicted or closed. This deliberately does *not* additionally ask the
+    /// terminal cache, which knows only about PTYs: a worktree holding
+    /// nothing but a chat has no entry there, and gating on it dropped every
+    /// row that worktree owned.
     ///
     /// Worktrees are ordered by urgency (`AttentionSort::sorted`, the tray
     /// roster's rule) and for the same reason: this list has no manual order
@@ -8244,9 +8260,6 @@ impl SirioWorkspace {
         let mut groups: Vec<(String, ActivityStatus, Vec<ActivitySurface>)> = Vec::new();
         for (key, parked) in &self.parked_worktree_tabs {
             if paths_name_the_same_document(Path::new(key), &self.working_directory) {
-                continue;
-            }
-            if !self.terminal_pane_cache.has_in_worktree(key) {
                 continue;
             }
             let label = self.parked_worktree_label(key, parked);
@@ -8267,6 +8280,7 @@ impl SirioWorkspace {
                     .get(index)
                     .into_iter()
                     .flatten()
+                    .chain(parked.chat_panes_by_tab.get(index).into_iter().flatten())
                     .filter_map(|pane_id| {
                         self.activity
                             .status(&format!("pane-{pane_id}"))
@@ -10060,20 +10074,25 @@ impl SirioWorkspace {
     fn park_current_worktree_tabs(&mut self, cx: &App) -> SessionLayout {
         let layout = self.layout(cx);
         let current_path = self.working_directory.clone();
-        let terminal_panes_by_tab = self
+        let (terminal_panes_by_tab, chat_panes_by_tab) = self
             .tabs
             .iter()
             .filter(|tab| {
                 paths_name_the_same_document(&self.tab_worktree_path(tab.id), &current_path)
             })
             .map(|tab| {
-                let mut pane_ids = HashSet::new();
-                tab.panes.for_each(&mut |pane_id, content| {
-                    if matches!(content, TabContent::Terminal { .. }) {
-                        pane_ids.insert(pane_id);
+                let mut terminal_pane_ids = HashSet::new();
+                let mut chat_pane_ids = HashSet::new();
+                tab.panes.for_each(&mut |pane_id, content| match content {
+                    TabContent::Terminal { .. } => {
+                        terminal_pane_ids.insert(pane_id);
                     }
+                    TabContent::Chat(_) => {
+                        chat_pane_ids.insert(pane_id);
+                    }
+                    _ => {}
                 });
-                pane_ids
+                (terminal_pane_ids, chat_pane_ids)
             })
             .collect();
         let worktree_id = current_path.to_string_lossy().into_owned();
@@ -10082,6 +10101,7 @@ impl SirioWorkspace {
             ParkedWorktreeTabs {
                 layout: layout.clone(),
                 terminal_panes_by_tab,
+                chat_panes_by_tab,
             },
         );
         layout
@@ -25069,6 +25089,103 @@ done
             row.location, "Urgency Project/branch-0",
             "a row of another worktree names the worktree it comes from, not \
              the one the user is looking at"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mounted worktree holding nothing but a chat is still listed, with
+    /// the chat's own live status.
+    ///
+    /// Two separate things used to hide it. The worktree was gated on
+    /// `terminal_pane_cache.has_in_worktree`, which only ever knows about
+    /// terminal PTYs -- a chat-only worktree has no entry there, so every
+    /// row it owned was dropped rather than just its (nonexistent)
+    /// terminals. And the status of what did survive was resolved from
+    /// `terminal_panes_by_tab` alone, so a chat could never report anything
+    /// but `Idle` from here. Both are about the same blind spot: parking
+    /// recorded terminals and forgot that a chat pane carries a status
+    /// under the very same `pane-N` key.
+    #[gpui::test]
+    async fn activity_lists_a_parked_worktree_whose_only_surface_is_a_chat(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("activity-parked-chat");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // wt-1 is mounted but not selected, and holds one chat and no
+        // terminal at all -- so nothing of it ever reaches the terminal
+        // pane cache.
+        let wt1 = worktrees[1].clone();
+        let chat_pane = 90usize;
+        workspace.update(&mut cx.cx, |workspace, _| {
+            workspace.parked_worktree_tabs.insert(
+                wt1.to_string_lossy().into_owned(),
+                ParkedWorktreeTabs {
+                    layout: SessionLayout {
+                        working_directory: wt1.clone(),
+                        branch: "branch-1".into(),
+                        tabs: vec![SessionTab {
+                            id: "parked-chat".into(),
+                            title: "Claude".into(),
+                            kind: "chat".into(),
+                            agent_id: None,
+                            agent_session_id: None,
+                            active: true,
+                        }],
+                        tab_states: Vec::new(),
+                    },
+                    terminal_panes_by_tab: vec![HashSet::new()],
+                    chat_panes_by_tab: vec![HashSet::from([chat_pane])],
+                },
+            );
+            let now = Instant::now();
+            let pane_key = format!("pane-{chat_pane}");
+            workspace.activity.agent_spawned(&pane_key, "claude", now);
+            workspace
+                .activity
+                .notify(&pane_key, AgentStatus::NeedsInput, now);
+        });
+
+        let rows = workspace.read_with(&cx.cx, |workspace, cx| workspace.activity_surfaces(cx));
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.reference
+                    == ActivityRef::Parked {
+                        worktree: wt1.to_string_lossy().into_owned(),
+                        index: 0,
+                    }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "a mounted worktree's chat is listed even with no terminal \
+                     of its own, got {:?}",
+                    rows.iter().map(|row| &row.reference).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(row.title, "Claude");
+        assert_eq!(
+            row.location, "Urgency Project/branch-1",
+            "the chat row names the worktree it comes from"
+        );
+        assert_eq!(
+            row.status,
+            ActivityStatus::NeedsInput,
+            "a parked chat reports the status pushed under its own pane key, \
+             not a default idle"
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);
