@@ -550,10 +550,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             EventFold::default()
         }
         AcpEvent::ThoughtChunk(text) => {
-            state.current_turn.push(ChatEntry::Thought {
-                text,
-                duration_ms: None,
-            });
+            append_thought(&mut state.current_turn, text);
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
@@ -726,6 +723,21 @@ fn append_assistant(entries: &mut Vec<ChatEntry>, text: String) {
     }
 }
 
+/// The same growth for reasoning, and for the same reason: `sirio_ui::chat`
+/// grows the thought it is already showing rather than starting a second
+/// one, so a transcript that pushed an entry per chunk came back from the
+/// database split where the live view had been whole.
+fn append_thought(entries: &mut Vec<ChatEntry>, text: String) {
+    if let Some(ChatEntry::Thought { text: existing, .. }) = entries.last_mut() {
+        existing.push_str(&text);
+    } else {
+        entries.push(ChatEntry::Thought {
+            text,
+            duration_ms: None,
+        });
+    }
+}
+
 /// Converts the ACP locations of a tool call into their stored form (#168).
 /// The path is kept as the agent wrote it; it is de-verbatimised and
 /// shortened only when rendered, which is where that decision belongs.
@@ -759,4 +771,52 @@ fn update_tool(entries: &mut [ChatEntry], id: &str, title: Option<String>, statu
 
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> anyhow::Error {
     anyhow!("chat session state is poisoned")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> ChatState {
+        ChatState::new(
+            "tab".into(),
+            "worktree".into(),
+            None,
+            ChatTranscript {
+                tab_id: "tab".into(),
+                turns: Vec::new(),
+            },
+        )
+    }
+
+    /// The drawing transcript grows one thought in place, chunk by chunk
+    /// (`sirio_ui::chat`'s `ThoughtChunk` arm). This fold pushed a fresh
+    /// entry per chunk instead, so the same reasoning that read as one
+    /// thought live came back from the database as one section per delta.
+    /// Only the entry that is still the last one grows: a thought that a
+    /// reply has already interrupted is finished.
+    #[test]
+    fn consecutive_thought_chunks_grow_one_entry() {
+        let mut state = state();
+        apply_event(&mut state, AcpEvent::ThoughtChunk("weighing ".into()));
+        apply_event(&mut state, AcpEvent::ThoughtChunk("the options".into()));
+        apply_event(&mut state, AcpEvent::AgentMessageChunk("done".into()));
+        apply_event(&mut state, AcpEvent::ThoughtChunk("second".into()));
+        assert_eq!(
+            state.current_turn,
+            vec![
+                ChatEntry::Thought {
+                    text: "weighing the options".into(),
+                    duration_ms: None,
+                },
+                ChatEntry::AssistantMessage {
+                    text: "done".into(),
+                },
+                ChatEntry::Thought {
+                    text: "second".into(),
+                    duration_ms: None,
+                },
+            ]
+        );
+    }
 }
