@@ -8880,24 +8880,22 @@ impl SirioWorkspace {
         // — and with them the status its sidebar row was showing. That is
         // how selecting a worktree used to erase a sibling's error.
 
-        let pending_actions = self.pending_actions.clone();
-        let status_data = UsageBarData {
-            branch: context.branch,
-            path: context.path,
-        };
-        // Rebuilt bars start from the settings surface's current values
-        // (P58, F-SET-10): visibility and interval must survive a worktree
-        // switch, not reset to the defaults.
-        let bar_prefs =
-            sirio_ui::status_bar::UsageBarPrefs::from_snapshot(&self.settings.read(cx).snapshot());
-        self.status_bar = cx.new(|_| {
-            StatusBar::new(status_data)
-                .with_preferences(bar_prefs)
-                .on_settings(move || {
-                    if let Ok(mut actions) = pending_actions.lock() {
-                        actions.push(WorkspaceAction::OpenSettings);
-                    }
-                })
+        // The bar itself is not rebuilt: only its right-edge label is a
+        // property of the selected worktree. A fresh `StatusBar` starts every
+        // provider at `Loading` -- which draws no segment at all, by design --
+        // and arms a brand-new refresh task, so the numbers the user was
+        // reading vanished on the click and only came back when the new fetch
+        // round-tripped. Its fetched states, update facts, armed task and
+        // callbacks are the session's, not a worktree's, and the settings
+        // observer above keeps its preferences current (P58, F-SET-10).
+        self.status_bar.update(cx, |bar, cx| {
+            bar.apply_data(
+                UsageBarData {
+                    branch: context.branch,
+                    path: context.path,
+                },
+                cx,
+            )
         });
 
         let activity = self.activity_surfaces(cx);
@@ -29567,6 +29565,96 @@ done
             "hiding Claude in settings reaches the bar's preferences"
         );
         assert!(prefs.codex_visible, "the other visible providers stay");
+    }
+
+    /// A worktree switch must not rebuild the usage bar.
+    ///
+    /// `select_worktree` used to install a fresh `StatusBar` on every switch.
+    /// A fresh bar starts every provider at `Loading`, which by design draws
+    /// no segment at all, and arms a brand-new refresh task — so the numbers
+    /// the user was reading vanished on the click and only came back once the
+    /// new fetch round-tripped. The rebuilt bar also dropped the host's
+    /// update state and its `on_update`/`on_refresh` callbacks. None of that
+    /// is per worktree: only the right-edge branch/path label is.
+    #[gpui::test]
+    async fn a_worktree_switch_keeps_the_usage_bar_entity_and_its_state(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("usage-bar-switch");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let bar = cx.update(|_, cx| workspace.read(cx).status_bar.clone());
+
+        // A settled, non-default bar state. `Available` is what the live
+        // updater pushes, and unlike the provider numbers it is drawable in
+        // a test, so the switch's effect is visible rather than merely
+        // internal state a rebuild would restore later on its own.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.push_update_state(
+                UiUpdateState {
+                    enabled: true,
+                    channel: "stable".into(),
+                    status: UiUpdateStatus::Available {
+                        version: "9.9.9".into(),
+                        notes: String::new(),
+                    },
+                    last_checked: Some("just now".into()),
+                },
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("status-update-indicator").is_some(),
+            "the bar draws the indicator the updater just reported"
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("select the second worktree");
+        });
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.status_bar.entity_id()),
+            bar.entity_id(),
+            "the switch must update the bar in place: a rebuilt entity starts \
+             every provider at Loading (so no segment is drawn at all) and \
+             re-arms a fresh refresh task, which is the vanish-and-return the \
+             user sees on the click"
+        );
+        assert_eq!(
+            cx.update(|_, cx| workspace
+                .read(cx)
+                .status_bar
+                .read(cx)
+                .update_state()
+                .status
+                .clone()),
+            UiUpdateStatus::Available {
+                version: "9.9.9".into(),
+                notes: String::new(),
+            },
+            "and the update facts the host pushed survive it"
+        );
+        assert!(
+            cx.debug_bounds("status-update-indicator").is_some(),
+            "so the indicator never leaves the drawn frame"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]
