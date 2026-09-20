@@ -47,15 +47,26 @@ impl ControlRequest {
         Self::envelope(request_id, json!({"subtype": "set_model", "model": model}))
     }
 
-    /// Sets the effort level. `None` clears the flag layer, which is how
-    /// the wire spells "back to whatever the settings say".
+    /// Sets the effort level. `None` clears the level, leaving the model on
+    /// its own default.
+    ///
+    /// Ultracode is a level in the picker and in the CLI's own `/effort`
+    /// menu, but never on the wire: `apply_flag_settings` takes exactly two
+    /// keys — `effortLevel` and a separate `ultracode` boolean — and a
+    /// session with `ultracode` standing runs at xhigh whatever
+    /// `effortLevel` says. So the pseudo-level is translated here, at the
+    /// one place that owns the wire format, and *both* keys are always
+    /// written: leaving `ultracode` out is what would let it stand through
+    /// a switch to another level.
     #[must_use]
     pub fn set_effort(request_id: &str, level: Option<&str>) -> Value {
+        let ultracode = level == Some(crate::catalog::EFFORT_ULTRACODE);
+        let level = level.filter(|_| !ultracode);
         Self::envelope(
             request_id,
             json!({
                 "subtype": "apply_flag_settings",
-                "settings": {"effortLevel": level}
+                "settings": {"effortLevel": level, "ultracode": ultracode}
             }),
         )
     }
@@ -265,6 +276,19 @@ mod tests {
     }
 
     #[test]
+    fn ultracode_is_a_boolean_beside_the_level_not_a_level() {
+        // Verified against claude 2.1.274: `{"ultracode": true}` reports
+        // back as `applied: {effort: "xhigh", ultracode: true}`, while
+        // `{"effortLevel": "ultracode"}` is not a value the CLI's settings
+        // normaliser keeps — so the pseudo-level must never reach the wire.
+        assert_eq!(
+            ControlRequest::set_effort("req-uc", Some("ultracode"))["request"],
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"effortLevel": null, "ultracode": true}})
+        );
+    }
+
+    #[test]
     fn each_command_request_names_its_subtype_and_payload() {
         assert_eq!(
             ControlRequest::set_permission_mode("req-2", "plan")["request"],
@@ -274,14 +298,23 @@ mod tests {
             ControlRequest::set_model("req-3", "sonnet")["request"],
             serde_json::json!({"subtype": "set_model", "model": "sonnet"})
         );
-        // "default" is how the wire says "reset to the session default".
+        // A null level is how the wire says "no level of mine".
         assert_eq!(
             ControlRequest::set_effort("req-4", None)["request"],
-            serde_json::json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": null}})
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"effortLevel": null, "ultracode": false}})
         );
         assert_eq!(
             ControlRequest::set_effort("req-5", Some("high"))["request"],
-            serde_json::json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}})
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"effortLevel": "high", "ultracode": false}})
+        );
+        // `xhigh` and `max` are ordinary levels: the CLI has taken them on
+        // `--effort` all along, and `apply_flag_settings` applies them.
+        assert_eq!(
+            ControlRequest::set_effort("req-5b", Some("max"))["request"],
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"effortLevel": "max", "ultracode": false}})
         );
         assert_eq!(
             ControlRequest::interrupt("req-6")["request"],

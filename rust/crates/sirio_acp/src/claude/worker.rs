@@ -16,8 +16,8 @@ use futures::StreamExt as _;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use sirio_claude::{
-    Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, LaunchLine,
-    RewindOutcome,
+    Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, EFFORT_DEFAULT,
+    LaunchLine, RewindOutcome,
 };
 
 use super::ClaudeLaunch;
@@ -492,7 +492,17 @@ async fn session(context: SessionContext) -> SessionOutcome {
         *held = Some(version.to_string());
     }
     let _ = startup_tx.send(Startup::Ready);
-    for event in catalogue_events(&catalog) {
+    // The effort levels are per-model, so the selector has to be republished
+    // whenever the model moves, and the selection carried across the move.
+    // This is the same model `publish_catalogues` marks as selected: the CLI
+    // lists the session's own model first.
+    let mut selected_effort = EFFORT_DEFAULT.to_string();
+    let mut selected_model = catalog
+        .models()
+        .first()
+        .map(|model| model.id.clone())
+        .unwrap_or_default();
+    for event in catalogue_events(&catalog, &selected_model, &mut selected_effort) {
         let _ = event_tx.send(event).await;
     }
 
@@ -525,12 +535,26 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     // leaves the catalogue where it was rather
                                     // than showing a model the session is not on.
                                     None => {
-                                        if let Some(catalog) = apply_selected_model(&shared, &model)
+                                        if let Some(catalogue) =
+                                            apply_selected_model(&shared, &model)
                                         {
                                             let _ = event_tx
-                                                .send(AcpEvent::ModelCatalog(catalog))
+                                                .send(AcpEvent::ModelCatalog(catalogue))
                                                 .await;
                                         }
+                                        // A model carries its own effort
+                                        // ladder — five levels, three, or
+                                        // none at all — so the selector is
+                                        // republished for the model the
+                                        // session is now on.
+                                        selected_model = model;
+                                        let _ = event_tx
+                                            .send(effort_event(
+                                                &catalog,
+                                                &selected_model,
+                                                &mut selected_effort,
+                                            ))
+                                            .await;
                                     }
                                     Some(error) => {
                                         let _ = event_tx
@@ -741,6 +765,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         }
                     }
                     Ok(Command::SetEffort(level)) => {
+                        selected_effort =
+                            level.clone().unwrap_or_else(|| EFFORT_DEFAULT.to_string());
                         let id = next_request_id();
                         if write_line(
                             &mut stdin,
@@ -1020,7 +1046,11 @@ fn publish_catalogues(shared: &Shared, catalog: &Catalog) {
     }
 }
 
-fn catalogue_events(catalog: &Catalog) -> Vec<AcpEvent> {
+fn catalogue_events(
+    catalog: &Catalog,
+    model_id: &str,
+    selected_effort: &mut String,
+) -> Vec<AcpEvent> {
     let mut events = Vec::new();
     let commands: Vec<crate::AvailableCommandInfo> = catalog
         .commands()
@@ -1033,21 +1063,42 @@ fn catalogue_events(catalog: &Catalog) -> Vec<AcpEvent> {
     if !commands.is_empty() {
         events.push(AcpEvent::AvailableCommands(commands));
     }
-    let effort = catalog.effort();
-    events.push(AcpEvent::Effort(EffortOption {
-        option_id: effort.option_id,
-        name: Some("Effort".into()),
-        current_value: Some("default".into()),
-        choices: effort
-            .choices
-            .into_iter()
-            .map(|choice| EffortChoice {
-                value: choice.value,
-                name: choice.name,
-            })
-            .collect(),
-    }));
+    events.push(effort_event(catalog, model_id, selected_effort));
     events
+}
+
+/// The effort selector for `model_id`, with `selected` moved to whatever
+/// survives: the levels are the model's own, so a level the session was on
+/// may simply not exist on the model it just moved to, and a selector
+/// showing a level its own list does not carry would be a worse answer than
+/// the model's default.
+///
+/// Empty choices are how a model with no effort at all says so — Haiku sends
+/// neither effort field — and the surface reads that as "no selector" rather
+/// than as an empty one.
+fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> AcpEvent {
+    let effort = catalog.effort_for(model_id);
+    let choices: Vec<EffortChoice> = effort
+        .map(|effort| {
+            effort
+                .choices
+                .into_iter()
+                .map(|choice| EffortChoice {
+                    value: choice.value,
+                    name: choice.name,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !choices.iter().any(|choice| choice.value == *selected) {
+        *selected = EFFORT_DEFAULT.to_string();
+    }
+    AcpEvent::Effort(EffortOption {
+        option_id: "effort".into(),
+        name: Some("Effort".into()),
+        current_value: Some(selected.clone()),
+        choices,
+    })
 }
 
 /// Moves the catalogue's selection, returning the new catalogue to publish.
@@ -1110,6 +1161,83 @@ mod tests {
             panic!("expected a context usage event, got {event:?}");
         };
         usage
+    }
+
+    /// A handshake payload carrying only what the effort selector reads.
+    fn handshake(models: serde_json::Value) -> Catalog {
+        Catalog::from_initialize(&serde_json::json!({ "models": models }))
+    }
+
+    fn selector(event: AcpEvent) -> EffortOption {
+        let AcpEvent::Effort(option) = event else {
+            panic!("expected an effort event, got {event:?}");
+        };
+        option
+    }
+
+    fn levels(option: &EffortOption) -> Vec<&str> {
+        option
+            .choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_effort_selector_is_the_selected_models_own_ladder() {
+        let catalog = handshake(serde_json::json!([{
+            "value": "opus", "displayName": "Opus", "supportsEffort": true,
+            "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        }]));
+        let mut selected = EFFORT_DEFAULT.to_string();
+        let option = selector(effort_event(&catalog, "opus", &mut selected));
+        assert_eq!(
+            levels(&option),
+            [
+                "default",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode"
+            ]
+        );
+        assert_eq!(option.current_value.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn a_model_with_no_effort_publishes_an_empty_selector() {
+        // Haiku's real shape: neither effort field. An empty list is how the
+        // surface is told there is nothing to pick, as opposed to a picker
+        // with nothing in it.
+        let catalog = handshake(serde_json::json!([
+            {"value": "haiku", "displayName": "Haiku"}
+        ]));
+        let mut selected = EFFORT_DEFAULT.to_string();
+        let option = selector(effort_event(&catalog, "haiku", &mut selected));
+        assert!(option.choices.is_empty());
+    }
+
+    #[test]
+    fn a_level_the_new_model_does_not_offer_gives_way_to_its_default() {
+        let catalog = handshake(serde_json::json!([
+            {"value": "opus", "displayName": "Opus", "supportsEffort": true,
+             "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+            {"value": "thrifty", "displayName": "Thrifty", "supportsEffort": true,
+             "supportedEffortLevels": ["low", "medium", "high"]},
+        ]));
+        let mut selected = "max".to_string();
+        // Staying on a model that offers it keeps the selection.
+        let option = selector(effort_event(&catalog, "opus", &mut selected));
+        assert_eq!(option.current_value.as_deref(), Some("max"));
+        assert_eq!(selected, "max");
+        // Moving to one that does not cannot leave the chip reading "Max"
+        // for a session that is no longer anywhere near it.
+        let option = selector(effort_event(&catalog, "thrifty", &mut selected));
+        assert_eq!(option.current_value.as_deref(), Some("default"));
+        assert_eq!(selected, "default");
+        assert!(!levels(&option).contains(&"ultracode"));
     }
 
     #[test]

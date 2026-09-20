@@ -19,7 +19,8 @@ pub mod usage;
 pub mod version;
 
 pub use catalog::{
-    AccountInfo, Catalog, CommandInfo, Effort, EffortChoice, ModeInfo, ModelInfo, Modes,
+    AccountInfo, Catalog, CommandInfo, EFFORT_DEFAULT, EFFORT_ULTRACODE, Effort, EffortChoice,
+    ModeInfo, ModelInfo, Modes,
 };
 pub use control::{CanUseTool, ControlEnvelope, ControlRequest, PermissionResult};
 pub use launch::LaunchLine;
