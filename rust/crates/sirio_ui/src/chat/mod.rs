@@ -7,17 +7,17 @@
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    DragMoveEvent, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
+    Focusable, FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
     SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
-    quad, rgb, transparent_black,
+    quad, relative, rgb, transparent_black,
 };
 use sirio_acp::{
     AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
-    EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
-    ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    EffortChoice, EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
+    ModelOption, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -46,8 +46,11 @@ mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
-use bezel::ui::widgets::{ButtonStyle, Buttons};
-use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
+use bezel::ui::widgets::{ButtonStyle, Buttons, Controls, SliderDrag, slider_fraction};
+use composer_view::{
+    EFFORT_RESET, TokenPopup, assemble_prompt, effort_fraction_for_stop, effort_stop_for_fraction,
+    effort_stop_share, effort_stops, mention_token, slash_token,
+};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -1825,8 +1828,13 @@ pub struct Chat {
     mode_catalog: Option<ModeCatalog>,
     mode_picker_open: bool,
     context_popover_open: bool,
+    /// The effort selector, anchored to the effort chip. Its own popover
+    /// rather than a section of the model picker: effort is a scale, and a
+    /// scale is picked with a slider, not with a row per rung.
+    effort_picker_open: bool,
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
+    effort_picker_focus: FocusHandle,
     /// The agent-side session this tab continues across restarts, once the
     /// agent names it. Read live at session-save time, so the tab-strip
     /// save carries what the last flush wrote rather than a stale copy.
@@ -2100,6 +2108,7 @@ impl Chat {
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
+            effort_picker_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
@@ -2117,6 +2126,7 @@ impl Chat {
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
+            effort_picker_open: false,
             agent_session_id: None,
             context_usage: None,
             list_state,
@@ -2671,7 +2681,12 @@ impl Chat {
                 }
             }
             AcpEvent::Effort(effort) => {
-                self.effort = Some(effort);
+                // An empty list of levels is how a session says this model
+                // has no effort to pick at all — Claude's Haiku advertises
+                // neither effort field, and the levels the others offer are
+                // each model's own. A chip opening on an empty picker would
+                // be a worse answer than no chip.
+                self.effort = (!effort.choices.is_empty()).then_some(effort);
             }
             AcpEvent::ContextUsage(usage) => {
                 self.context_usage = Some(usage);
@@ -2917,19 +2932,6 @@ impl Chat {
             && !self.is_offline()
             && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
             && self.pending_question().is_none()
-    }
-
-    /// The share of the context window in use, as the composer shows it.
-    ///
-    /// `None` is deliberately a state of its own: no `usage_update` has
-    /// arrived, or the one that did named no window size, so the honest
-    /// answer is "not reported" — the chip used to fold that into `0%`,
-    /// claiming an empty context nobody measured. Agents that never send a
-    /// usage update (Pi's ACP adapter among them) are exactly the ones that
-    /// read as a fabricated zero.
-    fn context_percent(&self) -> Option<u64> {
-        let usage = self.context_usage.as_ref()?;
-        (usage.size > 0).then(|| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
     }
 
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
@@ -3480,6 +3482,7 @@ impl Chat {
 
     fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_popover_open = false;
+        self.effort_picker_open = false;
         self.model_picker_open = !self.model_picker_open;
         if self.model_picker_open {
             // F-CHAT-16: a fresh search every time the picker opens, same as
@@ -3496,6 +3499,7 @@ impl Chat {
 
     fn toggle_context_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_picker_open = false;
+        self.effort_picker_open = false;
         self.context_popover_open = !self.context_popover_open;
         if self.context_popover_open {
             let focus = self.context_popover_focus.clone();
@@ -3526,9 +3530,31 @@ impl Chat {
         }
         self.model_picker_open = false;
         self.context_popover_open = false;
+        self.effort_picker_open = false;
         self.mode_picker_open = !self.mode_picker_open;
         if self.mode_picker_open {
             let focus = self.mode_picker_focus.clone();
+            window.focus(&focus, cx);
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+            });
+        }
+        cx.notify();
+    }
+
+    /// Opens the effort slider anchored to the effort chip. A no-op when the
+    /// session advertised no effort at all — the chip is not drawn in that
+    /// case, so nothing can reach this.
+    fn toggle_effort_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.effort.is_none() {
+            return;
+        }
+        self.model_picker_open = false;
+        self.mode_picker_open = false;
+        self.context_popover_open = false;
+        self.effort_picker_open = !self.effort_picker_open;
+        if self.effort_picker_open {
+            let focus = self.effort_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
                 window.on_next_frame(move |window, cx| window.focus(&focus, cx));
@@ -4492,6 +4518,9 @@ impl Chat {
             cx.notify();
         } else if self.context_popover_open {
             self.context_popover_open = false;
+            cx.notify();
+        } else if self.effort_picker_open {
+            self.effort_picker_open = false;
             cx.notify();
         } else if self.overflow_open {
             self.overflow_open = false;
@@ -6610,7 +6639,7 @@ impl Chat {
                     .text_size(typography.ui_size)
                     .hover(|style| style.bg(bezel_theme.element_hover))
                     .on_click(move |_, window, cx| {
-                        effort_entity.update(cx, |chat, cx| chat.toggle_model_picker(window, cx));
+                        effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
                     })
                     .child(div().text_color(theme.text_faint).child("Effort"))
                     .child(
@@ -6628,6 +6657,269 @@ impl Chat {
                             .justify_center()
                             .child(picker_chevron(theme)),
                     )
+            });
+
+        // The effort selector, anchored to the chip above. A slider rather
+        // than a row per level: effort is a scale, and the levels are the
+        // session's own — `supportedEffortLevels` differs per model, so the
+        // track grows and shrinks with the model instead of naming rungs the
+        // model does not have.
+        let effort_picker = self
+            .effort_picker_open
+            .then(|| self.effort.clone())
+            .flatten()
+            .map(|effort| {
+                let stops: Vec<EffortChoice> =
+                    effort_stops(&effort.choices).into_iter().cloned().collect();
+                let count = stops.len();
+                let current = effort
+                    .current_value
+                    .clone()
+                    .unwrap_or_else(|| EFFORT_RESET.to_string());
+                // `None` while the session is on its model's own default:
+                // that is not a point on the track, so nothing is filled and
+                // the value reads in the muted tone the rest of the row uses
+                // for "not chosen".
+                let selected = stops.iter().position(|stop| stop.value == current);
+                let fraction = selected.map_or(0.0, |index| effort_fraction_for_stop(count, index));
+                let current_name = effort
+                    .choices
+                    .iter()
+                    .find(|choice| choice.value == current)
+                    .map(|choice| choice.name.clone())
+                    .unwrap_or_else(|| current.clone());
+                let reset = effort
+                    .choices
+                    .iter()
+                    .find(|choice| choice.value == EFFORT_RESET)
+                    .cloned();
+                let heading = effort.name.clone().unwrap_or_else(|| "Effort".to_string());
+
+                let zones: Vec<AnyElement> = stops
+                    .iter()
+                    .enumerate()
+                    .map(|(index, stop)| {
+                        let value = stop.value.clone();
+                        let selector_value = value.clone();
+                        let zone_entity = entity.clone();
+                        div()
+                            .id(format!("effort-stop-{value}"))
+                            .debug_selector(move || format!("effort-stop-{selector_value}"))
+                            // Not an equal share each: a stop owns the track
+                            // that is nearer to it than to its neighbours, and
+                            // the two ends have a neighbour on one side only.
+                            // Equal shares would put every boundary half a
+                            // step away from where the drag snaps.
+                            .w(relative(effort_stop_share(count, index)))
+                            .h_full()
+                            .cursor_pointer()
+                            // The zones sit above the track, so they are what
+                            // the pointer actually lands on: gpui only arms a
+                            // drag on the element whose hitbox is topmost at
+                            // mouse-down. Each one therefore starts the
+                            // track's drag, under the track's own id — the
+                            // move is read against the whole track's bounds
+                            // by the listener below, not against one zone's.
+                            .on_drag(SliderDrag("effort-slider".into()), |_, _, _, cx| {
+                                cx.new(|_| gpui::Empty)
+                            })
+                            .on_click(move |_, _, cx| {
+                                zone_entity.update(cx, |chat, cx| {
+                                    chat.select_effort(value.clone(), cx);
+                                });
+                            })
+                            .into_any_element()
+                    })
+                    .collect();
+
+                let drag_stops = stops.clone();
+                let track = div()
+                    .relative()
+                    .w_full()
+                    .h(px(16.0))
+                    .child(bezel_theme.slider(fraction))
+                    .child(
+                        div()
+                            .id("effort-slider")
+                            .debug_selector(|| "effort-slider".into())
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_stretch()
+                            .on_drag_move(cx.listener(
+                                move |chat, event: &DragMoveEvent<SliderDrag>, _, cx| {
+                                    let Some(fraction) =
+                                        slider_fraction(event, "effort-slider", cx)
+                                    else {
+                                        return;
+                                    };
+                                    let Some(stop) =
+                                        drag_stops.get(effort_stop_for_fraction(count, fraction))
+                                    else {
+                                        return;
+                                    };
+                                    // Every stop reached is a control request
+                                    // to the agent, and a drag crosses the
+                                    // track in dozens of moves. Only a stop
+                                    // the session is not already on is worth
+                                    // asking for.
+                                    let standing = chat
+                                        .effort
+                                        .as_ref()
+                                        .and_then(|effort| effort.current_value.as_deref());
+                                    if standing != Some(stop.value.as_str()) {
+                                        chat.select_effort(stop.value.clone(), cx);
+                                    }
+                                },
+                            ))
+                            .children(zones),
+                    );
+
+                let ends = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(typography.caption2)
+                    .text_color(theme.text_faint)
+                    .child(
+                        stops
+                            .first()
+                            .map(|stop| stop.name.clone())
+                            .unwrap_or_default(),
+                    )
+                    .child(
+                        stops
+                            .last()
+                            .map(|stop| stop.name.clone())
+                            .unwrap_or_default(),
+                    );
+
+                let reset_row = reset.map(|reset| {
+                    let reset_entity = entity.clone();
+                    let reset_value = reset.value.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(div().h(px(1.0)).w_full().bg(theme.border))
+                        .child(
+                            div()
+                                .id("effort-reset")
+                                .debug_selector(|| "effort-reset".into())
+                                .h(px(22.0))
+                                .px(px(6.0))
+                                .flex()
+                                .items_center()
+                                .rounded(theme.radii.control)
+                                .text_size(typography.caption2)
+                                .text_color(theme.text)
+                                .when(selected.is_none(), |this| this.bg(theme.element_active))
+                                .hover(|style| style.bg(theme.overlay))
+                                .on_click(move |_, _, cx| {
+                                    reset_entity.update(cx, |chat, cx| {
+                                        chat.select_effort(reset_value.clone(), cx);
+                                        // A reset is a command, not an
+                                        // adjustment: it answers and closes,
+                                        // where the track stays open because
+                                        // moving a knob is something you do
+                                        // more than once.
+                                        chat.effort_picker_open = false;
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Use the model's default"),
+                        )
+                });
+
+                // A scale needs two ends. One level is a choice between it
+                // and the model's default, which is a row — a knob with
+                // nowhere to slide would be a control that cannot be worked.
+                let scale = (count > 1).then(|| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(track)
+                        .child(ends)
+                });
+                let lone_stop = stops.first().filter(|_| count == 1).map(|stop| {
+                    let value = stop.value.clone();
+                    let selector_value = value.clone();
+                    let lone_entity = entity.clone();
+                    div()
+                        .id(format!("effort-stop-{value}"))
+                        .debug_selector(move || format!("effort-stop-{selector_value}"))
+                        .h(px(22.0))
+                        .px(px(6.0))
+                        .flex()
+                        .items_center()
+                        .rounded(theme.radii.control)
+                        .text_size(typography.caption2)
+                        .text_color(theme.text)
+                        .when(selected.is_some(), |this| this.bg(theme.element_active))
+                        .hover(|style| style.bg(theme.overlay))
+                        .on_click(move |_, _, cx| {
+                            lone_entity
+                                .update(cx, |chat, cx| chat.select_effort(value.clone(), cx));
+                        })
+                        .child(stop.name.clone())
+                });
+
+                popover::anchored_menu_above(
+                    "effort-picker-menu",
+                    div()
+                        .id("effort-picker")
+                        .debug_selector(|| "effort-picker".into())
+                        .key_context("ChatEffortPicker")
+                        .track_focus(&self.effort_picker_focus)
+                        .on_action(cx.listener(Self::cancel))
+                        .w(px(220.0))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.effort_picker_open = false;
+                            cx.notify();
+                        }))
+                        .child(
+                            popover::popover_card(&bezel_theme).child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap(px(8.0))
+                                            .text_size(typography.caption2)
+                                            .child(
+                                                div().text_color(theme.text_faint).child(heading),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("effort-current")
+                                                    .debug_selector(move || {
+                                                        if selected.is_some() {
+                                                            "effort-current".into()
+                                                        } else {
+                                                            "effort-current-unset".into()
+                                                        }
+                                                    })
+                                                    .text_color(if selected.is_some() {
+                                                        theme.text
+                                                    } else {
+                                                        theme.text_faint
+                                                    })
+                                                    .child(current_name),
+                                            ),
+                                    )
+                                    .children(scale)
+                                    .children(lone_stop)
+                                    .children(reset_row),
+                            ),
+                        )
+                        .into_any_element(),
+                    None,
+                )
             });
 
         let view = bezel::motion::Painter::of(cx);
@@ -6766,74 +7058,6 @@ impl Chat {
                                             })
                                         })),
                                 )
-                                .when_some(self.effort.clone(), |this, effort| {
-                                    if effort.choices.is_empty() {
-                                        return this;
-                                    }
-                                    let effort_entity = picker_entity.clone();
-                                    let effort_name =
-                                        effort.name.clone().unwrap_or_else(|| "Effort".to_string());
-                                    let current = effort.current_value.clone();
-                                    let choices: Vec<AnyElement> = effort
-                                        .choices
-                                        .iter()
-                                        .map(|choice| {
-                                            let choice_value = choice.value.clone();
-                                            let choice_name = choice.name.clone();
-                                            let is_selected =
-                                                current.as_deref() == Some(choice_value.as_str());
-                                            let row_entity = effort_entity.clone();
-                                            let choice_value_for_id = choice_value.clone();
-                                            div()
-                                                .id(format!("effort-option-{}", choice_value))
-                                                .debug_selector(move || {
-                                                    format!("effort-option-{}", choice_value_for_id)
-                                                })
-                                                .h(px(22.0))
-                                                .px(px(8.0))
-                                                .rounded(theme.radii.control)
-                                                .flex()
-                                                .items_center()
-                                                .text_size(typography.caption2)
-                                                .text_color(theme.text)
-                                                .when(is_selected, |this| {
-                                                    this.bg(theme.element_active)
-                                                })
-                                                .hover(|style| style.bg(theme.overlay))
-                                                .on_click(move |_, _, cx| {
-                                                    row_entity.update(cx, |chat, cx| {
-                                                        chat.select_effort(
-                                                            choice_value.clone(),
-                                                            cx,
-                                                        );
-                                                    });
-                                                })
-                                                .child(choice_name)
-                                                .into_any_element()
-                                        })
-                                        .collect::<Vec<_>>();
-                                    this.child(div().h(px(1.0)).w_full().bg(theme.border))
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .pt(px(4.0))
-                                                .text_size(typography.caption2)
-                                                .text_color(theme.text_faint)
-                                                .child(effort_name),
-                                        )
-                                        .child(
-                                            // #233: the choice count is agent-reported
-                                            // and not under the picker's control (Claude
-                                            // Code advertises six, whose chips plus gaps
-                                            // exceed the popup's usable width), so the
-                                            // row wraps onto a second line instead of
-                                            // painting chips outside the picker border —
-                                            // same shape as the colour swatch row's
-                                            // `flex_wrap` in `controls::color_picker`
-                                            // (F-PRJ-13).
-                                            div().flex().flex_wrap().gap(px(4.0)).children(choices),
-                                        )
-                                }),
                         ),
                     )
                     .into_any_element(),
@@ -7033,6 +7257,13 @@ impl Chat {
                         cx.notify();
                     }))
                     .when_some(usage, |this, usage| {
+                        // `None` is a state of its own, not a zero: a
+                        // session whose `usage_update` named no window size
+                        // has nothing to report, and folding that into "0%"
+                        // would claim an empty context nobody measured.
+                        // Agents that never send a usage update (Pi's ACP
+                        // adapter among them) are exactly the ones a
+                        // fabricated zero would libel.
                         let percent = if usage.size == 0 {
                             None
                         } else {
@@ -7572,8 +7803,6 @@ impl Chat {
                     .child("…"),
             );
 
-        let context_percent = self.context_percent();
-
         // Three looks, one `AnyElement`: the ready arm is `Stateful` (it
         // carries an id), the other two are plain `Div`s.
         let ready = can_send;
@@ -7802,7 +8031,13 @@ impl Chat {
                         // ellipsizes its name down to its 56px floor, never to
                         // nothing.
                         .child(div().relative().child(model_control).children(model_picker))
-                        .children(effort_control)
+                        .child(
+                            div()
+                                .relative()
+                                .flex_none()
+                                .children(effort_control)
+                                .children(effort_picker),
+                        )
                         .child(
                             div()
                                 .relative()
@@ -7821,30 +8056,6 @@ impl Chat {
                                         .debug_selector(|| "context-label".into())
                                         .text_color(theme.text_faint)
                                         .child("Context"),
-                                )
-                                .child(
-                                    div()
-                                        .id("context-percent")
-                                        // The selector itself carries the
-                                        // distinction, so a drawn test can
-                                        // tell "not reported" from "0% used"
-                                        // without reading pixels.
-                                        .debug_selector(move || {
-                                            if context_percent.is_some() {
-                                                "context-percent".into()
-                                            } else {
-                                                "context-percent-unknown".into()
-                                            }
-                                        })
-                                        .text_color(if context_percent.is_some() {
-                                            theme.text
-                                        } else {
-                                            theme.text_faint
-                                        })
-                                        .child(match context_percent {
-                                            Some(percent) => format!("{percent}%"),
-                                            None => "—".to_string(),
-                                        }),
                                 )
                                 .children(context_popover),
                         )
@@ -9137,6 +9348,40 @@ mod tests {
                 theme.ring
             );
         }
+    }
+
+    /// A model that offers no effort retires the selector rather than
+    /// opening an empty one. The levels are the model's own, so this is a
+    /// state a plain model switch reaches (Claude's Haiku advertises no
+    /// effort at all), not an edge case only a broken agent produces.
+    #[gpui::test]
+    async fn a_selector_with_no_levels_is_no_selector(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::Effort(EffortOption {
+                    option_id: "effort".into(),
+                    name: Some("Effort".into()),
+                    current_value: Some("xhigh".into()),
+                    choices: vec![EffortChoice {
+                        value: "xhigh".into(),
+                        name: "Extra high".into(),
+                    }],
+                }),
+                cx,
+            );
+            assert!(chat.effort.is_some(), "a model with a level has a picker");
+            chat.handle_event(
+                AcpEvent::Effort(EffortOption {
+                    option_id: "effort".into(),
+                    name: Some("Effort".into()),
+                    current_value: Some("default".into()),
+                    choices: Vec::new(),
+                }),
+                cx,
+            );
+            assert!(chat.effort.is_none(), "a model with no level has none");
+        });
     }
 
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
@@ -14413,15 +14658,15 @@ let answer = 42;
         );
     }
 
-    /// #233: the effort row is a plain flex row inside a fixed 245px popup,
-    /// and the choice count is agent-reported (Claude Code advertises six,
-    /// whose chips plus gaps exceed the popup's usable width), so the row
-    /// must wrap like the colour swatch row in `controls::color_picker`
-    /// (F-PRJ-13) instead of painting chips outside the picker border. The
-    /// popup is fixed-width regardless of window size, so these bounds
-    /// assertions are deterministic.
+    /// #233 again, on the control that replaced the chips: the choice count
+    /// is agent-reported (Claude Code advertises seven with Ultracode), and
+    /// a row of one chip per level overflowed a fixed-width popup. A track
+    /// cannot: every stop is a share of a width that is already the
+    /// picker's, so the levels grow denser instead of wider. This pins that
+    /// -- and that the shares tile the track exactly once, with no gap for a
+    /// click to fall through and no overlap for two stops to fight over.
     #[gpui::test]
-    async fn every_effort_chip_stays_inside_the_picker_border(cx: &mut TestAppContext) {
+    async fn every_effort_stop_stays_inside_the_track(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
@@ -14460,8 +14705,8 @@ let answer = 42;
         cx.update(|window, _| window.refresh());
 
         let chip = cx
-            .debug_bounds("model-chip")
-            .expect("model chip is rendered");
+            .debug_bounds("effort-chip")
+            .expect("effort chip is rendered");
         cx.simulate_click(chip.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -14469,30 +14714,255 @@ let answer = 42;
             window.simulate_next_frame(cx);
         });
 
-        let picker = cx
-            .debug_bounds("model-picker")
-            .expect("model picker is rendered");
+        let track = cx
+            .debug_bounds("effort-slider")
+            .expect("the slider track is rendered");
+        // The reset is not a stop: it is an action below the track.
+        assert!(
+            cx.debug_bounds("effort-stop-default").is_none(),
+            "the reset must not take a place on the scale"
+        );
+        assert!(
+            cx.debug_bounds("effort-reset").is_some(),
+            "an agent that offers a default gets the reset row"
+        );
+
+        let mut edge = f32::from(track.left());
         for (selector, name) in [
-            ("effort-option-default", "Default"),
-            ("effort-option-low", "Low"),
-            ("effort-option-medium", "Medium"),
-            ("effort-option-high", "High"),
-            ("effort-option-xhigh", "Xhigh"),
-            ("effort-option-max", "Max"),
+            ("effort-stop-low", "Low"),
+            ("effort-stop-medium", "Medium"),
+            ("effort-stop-high", "High"),
+            ("effort-stop-xhigh", "Xhigh"),
+            ("effort-stop-max", "Max"),
         ] {
             let bounds = cx
                 .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("effort chip {name} ({selector}) is rendered"));
+                .unwrap_or_else(|| panic!("effort stop {name} ({selector}) is rendered"));
             assert!(
-                bounds.right() <= picker.right() && bounds.left() >= picker.left(),
-                "effort chip {name} ({selector}) overflows the picker border: \
-                 chip [{}, {}] vs picker right {} / picker left {}",
-                bounds.right(),
+                bounds.right() <= track.right() && bounds.left() >= track.left(),
+                "effort stop {name} ({selector}) leaves the track: \
+                 stop [{}, {}] vs track [{}, {}]",
                 bounds.left(),
-                picker.right(),
-                picker.left(),
+                bounds.right(),
+                track.left(),
+                track.right(),
             );
+            assert!(
+                (f32::from(bounds.left()) - edge).abs() < 1.0,
+                "effort stop {name} ({selector}) starts at {}px, but the \
+                 previous stop ended at {edge}px -- a gap or an overlap",
+                f32::from(bounds.left()),
+            );
+            edge = f32::from(bounds.right());
         }
+        assert!(
+            (edge - f32::from(track.right())).abs() < 1.0,
+            "the stops stop short of the track's end: {edge}px of {}px",
+            f32::from(track.right())
+        );
+    }
+
+    /// A chat holding an effort selector and nothing else it needs: no
+    /// subprocess, so the levels under test are exactly the ones written
+    /// here rather than whatever a fixture happens to advertise.
+    fn effort_chat<'a>(
+        cx: &'a mut TestAppContext,
+        current: &str,
+        levels: &[(&str, &str)],
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let current = current.to_string();
+        let levels: Vec<(String, String)> = levels
+            .iter()
+            .map(|(value, name)| ((*value).to_string(), (*name).to_string()))
+            .collect();
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = vec![ModelOption {
+                id: "opus".into(),
+                name: "Opus".into(),
+                description: None,
+            }];
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some(current),
+                choices: levels
+                    .into_iter()
+                    .map(|(value, name)| EffortChoice { value, name })
+                    .collect(),
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+        (chat, cx)
+    }
+
+    fn open_effort_picker(cx: &mut VisualTestContext) {
+        let chip = cx
+            .debug_bounds("effort-chip")
+            .expect("the effort chip is drawn");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+    }
+
+    fn current_effort(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> Option<String> {
+        chat.read_with(&cx.cx, |chat, _| {
+            chat.effort.as_ref().and_then(|e| e.current_value.clone())
+        })
+    }
+
+    const FULL_LADDER: [(&str, &str); 7] = [
+        ("default", "Default"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("xhigh", "Extra high"),
+        ("max", "Max"),
+        ("ultracode", "Ultracode"),
+    ];
+
+    /// Dragging the knob lands on a level, not between two.
+    ///
+    /// The track is continuous and the levels are not, so every pixel has to
+    /// answer with one of them -- and the one it answers with is the nearest,
+    /// not the last one the pointer passed.
+    #[gpui::test]
+    async fn dragging_the_knob_settles_on_the_nearest_level(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "low", &FULL_LADDER);
+        open_effort_picker(cx);
+
+        let track = cx
+            .debug_bounds("effort-slider")
+            .expect("the slider track is drawn");
+        let y = track.center().y;
+        let left = track.left();
+        let width = f32::from(track.size.width);
+
+        // The pointer has to arrive before it can press: gpui arms a drag
+        // only on the hitbox that was topmost at mouse-down, and which one
+        // that is comes from the hit test of the last painted frame.
+        cx.simulate_mouse_move(point(left + px(1.0), y), None, Modifiers::none());
+        refresh_frame(cx);
+        cx.simulate_mouse_down(
+            point(left + px(1.0), y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        // The first move past the threshold is the one that *arms* the drag,
+        // and gpui stops it there — no listener sees it. The knob starts
+        // moving on the move after that.
+        cx.simulate_mouse_move(
+            point(left + px(8.0), y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        // Six stops: the rungs sit a fifth of the track apart. Just past the
+        // fourth is still the fourth.
+        cx.simulate_mouse_move(
+            point(left + px(width * 0.61), y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            current_effort(&chat, cx).as_deref(),
+            Some("xhigh"),
+            "0.61 of the track is nearer the fourth rung than the fifth"
+        );
+
+        cx.simulate_mouse_move(
+            point(left + px(width), y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            point(left + px(width), y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            current_effort(&chat, cx).as_deref(),
+            Some("ultracode"),
+            "the far end of the track is the last level offered"
+        );
+    }
+
+    /// The reset is an action, not a rung: it answers and closes, where the
+    /// track stays open because moving a knob is something you do more than
+    /// once.
+    #[gpui::test]
+    async fn the_reset_leaves_the_track_and_closes_the_picker(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "max", &FULL_LADDER);
+        open_effort_picker(cx);
+
+        let reset = cx
+            .debug_bounds("effort-reset")
+            .expect("the reset row is drawn");
+        cx.simulate_click(reset.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("default"));
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("effort-picker").is_none(),
+            "the reset closes the picker it answered from"
+        );
+    }
+
+    /// A session on its model's own default is not a session at the bottom
+    /// of the scale -- on most models "default" resolves to High. The track
+    /// has no point to fill, so the value says so instead of pointing at Low.
+    #[gpui::test]
+    async fn a_session_on_the_models_default_is_not_at_the_foot_of_the_track(
+        cx: &mut TestAppContext,
+    ) {
+        let (_chat, cx) = effort_chat(cx, "default", &FULL_LADDER);
+        open_effort_picker(cx);
+
+        assert!(
+            cx.debug_bounds("effort-current-unset").is_some(),
+            "a session on the model's default marks the value as unchosen"
+        );
+        assert!(
+            cx.debug_bounds("effort-current").is_none(),
+            "nothing on the scale is selected, so nothing reads as selected"
+        );
+    }
+
+    /// A model that offers one level is not a range. The chip still names
+    /// it; the track would be a knob with nowhere to go.
+    #[gpui::test]
+    async fn a_single_level_draws_no_track(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "default", &[("default", "Default"), ("high", "High")]);
+        open_effort_picker(cx);
+
+        assert!(
+            cx.debug_bounds("effort-picker").is_some(),
+            "the picker still opens: the reset is still an answer"
+        );
+        assert!(
+            cx.debug_bounds("effort-slider").is_none(),
+            "one level is not a scale, so there is no track to drag"
+        );
+        // And it stays reachable: a level nothing can select is a level the
+        // session may as well not have been offered.
+        let stop = cx
+            .debug_bounds("effort-stop-high")
+            .expect("the one level is still offered, as a row");
+        cx.simulate_click(stop.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
     }
 
     /// #233: the model name in an option row never shrinks below
@@ -16568,11 +17038,14 @@ let answer = 42;
         );
     }
 
-    /// F-CHAT-17: the model picker offers the agent's advertised effort
-    /// levels, the current one is marked, and choosing one updates the
-    /// selection and the effort label on the model chip.
+    /// F-CHAT-17: the slider carries the agent's advertised effort levels,
+    /// the session's current one included, and picking one updates both the
+    /// selection and the label on the chip.
+    ///
+    /// The levels used to be rows inside the model picker -- two controls
+    /// for one value, one of them reachable only by opening the other.
     #[gpui::test]
-    async fn model_picker_offers_effort_levels_and_updates_the_selection(cx: &mut TestAppContext) {
+    async fn the_effort_slider_offers_every_level_and_moves_the_selection(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
         pump_chat_until(cx, &chat, |chat| {
             chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
@@ -16586,14 +17059,22 @@ let answer = 42;
         refresh_frame(cx);
 
         let chip = cx
-            .debug_bounds("model-chip")
-            .expect("the model chip is drawn");
+            .debug_bounds("effort-chip")
+            .expect("the effort chip is drawn");
         cx.simulate_click(chip.center(), Modifiers::none());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("model-picker").is_some());
-        assert!(cx.debug_bounds("effort-option-low").is_some());
-        assert!(cx.debug_bounds("effort-option-medium").is_some());
-        assert!(cx.debug_bounds("effort-option-high").is_some());
+        assert!(cx.debug_bounds("effort-picker").is_some());
+        for stop in ["effort-stop-low", "effort-stop-medium", "effort-stop-high"] {
+            assert!(
+                cx.debug_bounds(stop).is_some(),
+                "every advertised level is a stop on the track: {stop}"
+            );
+        }
+        // This agent advertises no reset, so the track is all there is.
+        assert!(
+            cx.debug_bounds("effort-reset").is_none(),
+            "an agent that offers no default gets no reset row"
+        );
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| {
                 chat.effort.as_ref().and_then(|e| e.current_value.clone())
@@ -16603,8 +17084,8 @@ let answer = 42;
         );
 
         let high = cx
-            .debug_bounds("effort-option-high")
-            .expect("the high effort row is drawn");
+            .debug_bounds("effort-stop-high")
+            .expect("the high stop is drawn");
         cx.simulate_click(high.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(
@@ -16660,26 +17141,35 @@ let answer = 42;
 
         assert_effort_is_a_peer_of_the_model(cx);
 
-        // And it opens the picker on its own, rather than being a label the
-        // user has to know is hidden behind the model chip.
+        // And it opens its own control, rather than being a label the user
+        // has to know is hidden behind the model chip.
         let effort = cx
             .debug_bounds("effort-chip")
             .expect("the effort pill is drawn");
         cx.simulate_click(effort.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("effort-option-high").is_some(),
-            "clicking the effort pill must reach the effort choices"
+            cx.debug_bounds("effort-picker").is_some(),
+            "clicking the effort pill must open the effort control"
+        );
+        assert!(
+            cx.debug_bounds("effort-slider").is_some(),
+            "effort is a scale, so the control is a slider"
+        );
+        assert!(
+            cx.debug_bounds("model-picker").is_none(),
+            "the effort pill opens its own picker, not the model's"
         );
     }
 
-    /// The context meter names what it measures.
+    /// The context meter is a ring and its name, and no longer a number.
     ///
-    /// It used to be a ring and a bare percentage. A blind review could read
-    /// both and still not know what they measured -- the answer only existed
-    /// in the popover, a click away, which spells out "N% of context used".
-    /// Every other value in this row carries its field name inline; this one
-    /// now does too, between the ring and the number.
+    /// The number left the row to make space for the effort control beside
+    /// the model. What it measured has to survive that: the ring still shows
+    /// the fill and still turns to the danger tone past 80%, its name still
+    /// sits beside it -- a bare ring nobody can read was the state this row
+    /// deliberately left -- and the exact figure is one click away in the
+    /// popover, which spells out "N% of context used".
     #[gpui::test]
     async fn the_context_meter_names_what_it_measures(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
@@ -16692,9 +17182,6 @@ let answer = 42;
         let label = cx
             .debug_bounds("context-label")
             .expect("the context meter is labelled");
-        let percent = cx
-            .debug_bounds("context-percent")
-            .expect("the context percentage is drawn");
 
         assert!(
             f32::from(label.left()) >= f32::from(ring.right()),
@@ -16702,11 +17189,19 @@ let answer = 42;
             f32::from(label.left()),
             f32::from(ring.right())
         );
+        for gone in ["context-percent", "context-percent-unknown"] {
+            assert!(
+                cx.debug_bounds(gone).is_none(),
+                "the percentage left the row, but {gone} is still drawn"
+            );
+        }
+
+        // The figure itself is not lost, only moved.
+        cx.simulate_click(ring.center(), Modifiers::none());
+        cx.run_until_parked();
         assert!(
-            f32::from(percent.left()) >= f32::from(label.right()),
-            "the value follows its label, the same order the model and effort              pills use: value left {}px vs label right {}px",
-            f32::from(percent.left()),
-            f32::from(label.right())
+            cx.debug_bounds("context-popover").is_some(),
+            "the ring still opens the popover that carries the number"
         );
     }
 
@@ -16744,7 +17239,10 @@ let answer = 42;
     /// An agent that never reported context usage is not an agent with an
     /// empty context. The chip used to fold "nothing arrived" into `0%`,
     /// which is the reading Pi's ACP adapter (and any adapter that sends no
-    /// `usage_update`) always produced; it must say so instead.
+    /// `usage_update`) always produced.
+    ///
+    /// The row carries no number at all any more, so the distinction now
+    /// lives only where the number does -- in the popover, which this pins.
     #[gpui::test]
     async fn context_chip_says_unknown_rather_than_zero_when_nothing_was_reported(
         cx: &mut TestAppContext,
@@ -16761,15 +17259,6 @@ let answer = 42;
             chat
         });
         cx.update(|window, _| window.refresh());
-
-        assert!(
-            cx.debug_bounds("context-percent-unknown").is_some(),
-            "no reported usage renders the unknown marker"
-        );
-        assert!(
-            cx.debug_bounds("context-percent").is_none(),
-            "an unreported context must not render a percentage"
-        );
 
         let ring = cx
             .debug_bounds("context-ring")
@@ -16812,11 +17301,6 @@ let answer = 42;
             chat
         });
         cx.update(|window, _| window.refresh());
-
-        assert!(
-            cx.debug_bounds("context-percent-unknown").is_some(),
-            "a breakdown without a window renders the unknown marker"
-        );
 
         let ring = cx
             .debug_bounds("context-ring")
