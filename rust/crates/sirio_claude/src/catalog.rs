@@ -34,13 +34,32 @@ const OFFERED_MODES: [(&str, &str, &str); 4] = [
     ("auto", "Auto", "Let the model decide what needs asking"),
 ];
 
-/// The effort levels the CLI accepts, plus the reset.
-const EFFORT_CHOICES: [(&str, &str); 4] = [
-    ("default", "Default"),
+/// The value that leaves the model on its own default effort. Not a level
+/// the CLI names: on the wire it is a null `effortLevel`.
+pub const EFFORT_DEFAULT: &str = "default";
+
+/// Ultracode, offered beside the levels exactly the way the CLI's own
+/// `/effort` menu offers it (`low|medium|high|xhigh|ultracode|auto`). It is
+/// *not* a level on the wire — see `ControlRequest::set_effort` for the
+/// boolean it actually sets.
+pub const EFFORT_ULTRACODE: &str = "ultracode";
+
+/// How each level the CLI reports is read out. A level missing from this
+/// table still reaches the picker under its own wire spelling: what the
+/// session advertises is the authority, this is only its display name.
+const EFFORT_LEVEL_NAMES: [(&str, &str); 5] = [
     ("low", "Low"),
     ("medium", "Medium"),
     ("high", "High"),
+    ("xhigh", "Extra high"),
+    ("max", "Max"),
 ];
+
+/// What to offer a model that claims effort support without enumerating it.
+/// Offering one level too many degrades well — the CLI clamps anything above
+/// a model's cap and says which level it used instead — while offering none
+/// would retire the selector silently, which is the worse failure.
+const EFFORT_LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// One slash command the session offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +79,10 @@ pub struct ModelInfo {
     pub name: String,
     /// The CLI's own description, when it gave one.
     pub description: Option<String>,
+    /// The effort levels this model offers, in the CLI's own order, as the
+    /// handshake reported them. Empty when the model has no effort at all —
+    /// Haiku, as of 2.1.274, which sends neither effort field.
+    pub effort_levels: Vec<String>,
 }
 
 /// One permission mode.
@@ -176,6 +199,7 @@ impl Catalog {
                                 .get("description")
                                 .and_then(|text| text.as_str())
                                 .map(str::to_string),
+                            effort_levels: model_effort_levels(model),
                         })
                     })
                     .collect()
@@ -238,20 +262,46 @@ impl Catalog {
         }
     }
 
-    /// The effort selector. The levels are fixed by the CLI's own flag, not
-    /// advertised in the handshake, so they are named here.
+    /// The effort selector for `model_id`, or `None` when that model has no
+    /// effort to select.
+    ///
+    /// The levels are neither fixed nor universal: the handshake reports
+    /// them per model (`supportedEffortLevels`), the CLI builds its own
+    /// `/effort` menu the same way, and a model may offer all five, none, or
+    /// something in between. Naming them here instead is what kept `xhigh`,
+    /// `max` and Ultracode out of the picker while offering three levels on
+    /// a model that has none.
     #[must_use]
-    pub fn effort(&self) -> Effort {
-        Effort {
-            option_id: "effort".to_string(),
-            choices: EFFORT_CHOICES
-                .iter()
-                .map(|(value, name)| EffortChoice {
-                    value: (*value).to_string(),
-                    name: (*name).to_string(),
-                })
-                .collect(),
+    pub fn effort_for(&self, model_id: &str) -> Option<Effort> {
+        let levels = &self
+            .models
+            .iter()
+            .find(|model| model.id == model_id)?
+            .effort_levels;
+        if levels.is_empty() {
+            return None;
         }
+        let mut choices = vec![EffortChoice {
+            value: EFFORT_DEFAULT.to_string(),
+            name: "Default".to_string(),
+        }];
+        choices.extend(levels.iter().map(|level| EffortChoice {
+            value: level.clone(),
+            name: effort_level_name(level),
+        }));
+        // Ultracode *is* xhigh effort, plus standing dynamic-workflow
+        // orchestration, so it is offered exactly where xhigh is — the same
+        // gate the CLI's own menu uses.
+        if levels.iter().any(|level| level == "xhigh") {
+            choices.push(EffortChoice {
+                value: EFFORT_ULTRACODE.to_string(),
+                name: "Ultracode".to_string(),
+            });
+        }
+        Some(Effort {
+            option_id: "effort".to_string(),
+            choices,
+        })
     }
 
     /// The signed-in account, as reported.
@@ -277,6 +327,40 @@ impl Catalog {
             && self.account.token_source.as_deref() == Some("none")
             && self.account.email.is_none()
     }
+}
+
+/// The effort ladder a model advertises. `supportedEffortLevels` is the
+/// answer whenever it is there; `supportsEffort` alone means a CLI that kept
+/// the claim and dropped the list, which falls back rather than reporting no
+/// effort at all.
+fn model_effort_levels(model: &Value) -> Vec<String> {
+    let advertised: Vec<String> = model
+        .get("supportedEffortLevels")
+        .and_then(|value| value.as_array())
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| level.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !advertised.is_empty() {
+        return advertised;
+    }
+    if model.get("supportsEffort").and_then(Value::as_bool) == Some(true) {
+        return EFFORT_LADDER
+            .iter()
+            .map(|level| (*level).to_string())
+            .collect();
+    }
+    Vec::new()
+}
+
+fn effort_level_name(level: &str) -> String {
+    EFFORT_LEVEL_NAMES
+        .iter()
+        .find(|(value, _)| *value == level)
+        .map_or_else(|| level.to_string(), |(_, name)| (*name).to_string())
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -307,7 +391,7 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["default", "claude-fable-5-1", "sonnet"]
+            ["default", "claude-fable-5-1", "sonnet", "haiku"]
         );
         assert_eq!(models[1].name, "Fable");
         assert_eq!(
@@ -354,17 +438,111 @@ mod tests {
         );
     }
 
+    fn values(effort: &Effort) -> Vec<&str> {
+        effort
+            .choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect()
+    }
+
     #[test]
-    fn effort_offers_the_three_levels_plus_the_reset() {
-        let effort = catalog().effort();
+    fn effort_offers_every_level_the_model_advertises_plus_ultracode() {
+        let catalog = catalog();
+        let effort = catalog.effort_for("sonnet").expect("sonnet has effort");
         assert_eq!(effort.option_id, "effort");
+        // `xhigh` and `max` are levels the CLI has accepted all along
+        // (`--effort low|medium|high|xhigh|max`); Ultracode rides beside
+        // them the way the CLI's own `/effort` menu lists it.
+        assert_eq!(
+            values(&effort),
+            [
+                "default",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode"
+            ]
+        );
         assert_eq!(
             effort
                 .choices
                 .iter()
-                .map(|choice| choice.value.as_str())
+                .map(|choice| choice.name.as_str())
                 .collect::<Vec<_>>(),
-            ["default", "low", "medium", "high"]
+            [
+                "Default",
+                "Low",
+                "Medium",
+                "High",
+                "Extra high",
+                "Max",
+                "Ultracode"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_effort_has_no_selector() {
+        // Haiku, as the CLI really reports it: neither `supportsEffort` nor
+        // `supportedEffortLevels`. Offering it three levels was as wrong as
+        // hiding two from the models that have five.
+        assert!(catalog().effort_for("haiku").is_none());
+        assert!(catalog().effort_for("no-such-model").is_none());
+    }
+
+    #[test]
+    fn a_model_without_xhigh_is_not_offered_ultracode() {
+        let catalog = Catalog::from_initialize(&serde_json::json!({
+            "models": [{
+                "value": "thrifty", "displayName": "Thrifty",
+                "supportsEffort": true,
+                "supportedEffortLevels": ["low", "medium", "high"],
+            }]
+        }));
+        let effort = catalog.effort_for("thrifty").expect("thrifty has effort");
+        assert_eq!(values(&effort), ["default", "low", "medium", "high"]);
+    }
+
+    #[test]
+    fn a_level_the_table_does_not_name_still_reaches_the_picker() {
+        // The protocol is versioned with the CLI and self-updates: a level
+        // added tomorrow is offered under its wire spelling rather than
+        // dropped for want of a display name.
+        let catalog = Catalog::from_initialize(&serde_json::json!({
+            "models": [{
+                "value": "next", "displayName": "Next",
+                "supportedEffortLevels": ["high", "colossal"],
+            }]
+        }));
+        let effort = catalog.effort_for("next").expect("next has effort");
+        assert_eq!(values(&effort), ["default", "high", "colossal"]);
+        assert_eq!(effort.choices[2].name, "colossal");
+    }
+
+    #[test]
+    fn a_claim_of_effort_without_a_list_falls_back_to_the_ladder() {
+        // Losing the selector outright would be a worse answer than
+        // offering a level the CLI will clamp and report clamping.
+        let catalog = Catalog::from_initialize(&serde_json::json!({
+            "models": [{
+                "value": "terse", "displayName": "Terse", "supportsEffort": true,
+            }]
+        }));
+        let effort = catalog.effort_for("terse").expect("terse claims effort");
+        assert_eq!(
+            values(&effort),
+            [
+                "default",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode"
+            ]
         );
     }
 
