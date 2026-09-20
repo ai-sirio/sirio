@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.21.0",
-  "notes": "This release changes how a Claude chat actually runs, changes where Project\nSettings lives, and closes off the one place a new chat had no starting\npoint at all.\n\n**Claude Code drives itself now, when it can**\n\nA Claude chat used to always go through the same ACP wrapper every other\nagent uses. When the `claude` on your `PATH` is new enough for the protocol\nthis build speaks, Sirio now launches it directly instead — no wrapper in\nbetween. There is no setting for this: Sirio checks the binary's own\nversion and decides. Too old, missing, or unreadable, and the chat opens on\nthe wrapper exactly as before; Settings → Agents names the reason in a\nsentence rather than leaving it to guess.\n\nDriving the real process directly is what makes several things possible\nthat the wrapper alone could not surface honestly: permissions, questions\nand plan approvals now come from Claude itself, not from a layer\ntranslating them; the context meter reads from the agent's own accounting\ninstead of an estimate; and a chat can ask the agent to restore files to an\nearlier turn, or resume the exact session a restored chat recorded, because\nthe native protocol carries what the wrapper's did not.\n\nOne bug this surfaced and fixed before it shipped: a turn's end was held\nback briefly so the context meter could reach the screen first, and released\non most ways a session could end — but not the one where Claude itself ends\nits process to answer an interrupt. On an idle machine that looked like a\nchat tab streaming forever, sixty seconds of silence with nothing to show\nfor it. It is released on every exit now, not just the ones that were\ntested.\n\n**Project Settings is a tab, not a sheet**\n\nIt used to slide in as an overlay from the sidebar. It now opens as a\nSecondary-pane tab titled \"Project Settings · {name}\" — one per project,\nreused rather than duplicated. Edits still save live to the project\ncatalog; the tab itself is ephemeral, the way any other utility tab is.\n\n**A blank worktree finally offers a chat, not just a terminal**\n\nA worktree with no tabs open showed New Terminal and nothing else. It now\nreads \"No Terminals or Chats\" and sits New Chat right beside it — click it\nand the same agent picker the tab bar's own New Chat menu shows expands in\nplace (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, or a link to add more).\nPick one and its chat tab replaces the empty state directly.\n\n---\n\nMost of this release is one feature built in stages — the handshake, the\nprotocol parsing, the turn and permission plumbing, the transport fallback\n— landing as one adapter behind a single launch decision, so a Claude chat\nis either fully native or fully the wrapper, never a mix of the two.",
+  "version": "0.22.0",
+  "notes": "This release makes the effort a Claude chat runs at both complete and\ndirectly settable, and stops a worktree that runs chats and nothing else\nfrom going missing in Activity.\n\n**Every effort level the model actually offers**\n\nA Claude chat offered Low, Medium and High. The CLI has taken five all\nalong — the two above High, `xhigh` and `max`, were simply unreachable from\na chat tab while the terminal pane beside it took them without comment.\nThey are there now, and so is Ultracode, which pairs the highest effort\nwith Claude's own multi-agent orchestration.\n\nThe list is no longer written down inside Sirio at all: it comes from the\nsession, per model. A model that offers five shows five, one that offers\nthree shows three, and Haiku — which has no effort setting — no longer\nshows the control at all. It used to be offered three levels it never had.\n\n**Effort is a slider, beside the model**\n\nThe levels used to be a row of chips inside the model picker, which meant\nopening one control to find another. Effort now has its own label next to\nthe model: click it and the levels are a track you drag, with the level you\nare on named above it. \"Use the model's default\" sits below the track\nrather than on it, because a default is not a point on a scale — on most\nmodels it resolves to High, well above the bottom.\n\nTo make room, the context meter lost its percentage. The ring beside it\nstill fills as the window fills and still turns red past 80%, and the exact\nfigure is one click away in the popover, where it always was.\n\n**A worktree with only chats appears in Activity**\n\nActivity listed a mounted worktree only when it had a terminal open, so a\nworktree running nothing but chats was invisible there — and a parked chat\ntab could not report what it was doing. Both are fixed.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.21.0/Sirio-0.21.0.dmg",
-      "sha256": "c491911cca652ca509dcc17b5a2e10549932a576c826a9778a82e657ee3b1dd4",
-      "signature": "Zup4S+ydt9iCb0mr+Iyn+dViqp8FuueN+UcMaCYnDIB9xZLItzEu++0CxRTx2TwXYVxuYotVQ1YtVucASud8Dw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.22.0/Sirio-0.22.0.dmg",
+      "sha256": "33b455a8eab2f72724ef8ef798370e2bf604463bd8242f0305860b464564a6f7",
+      "signature": "1mIQT0+3vWS3wWWTOpsbWib9f/7eLZOcBUGTnpbsFaDzUZ25OxjwvBVL1ikenyrd2IysHabXyQ1sscX8/XqWBg=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.21.0/Sirio-0.21.0-x86_64.AppImage",
-      "sha256": "decbac1a8bc50974b7e18c6210d4eca8cc45da44ae15836f9b3ef24356c44fe0",
-      "signature": "13WA7ju8h6G08vad4VMbLEqHpKKYMYB76gmPqQUtWaLStdKFhY97K2vpqeHm1Uo91lIgxJbrt0/55dJkih25BQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.22.0/Sirio-0.22.0-x86_64.AppImage",
+      "sha256": "fc4c176d1870e08f25f44f0ee4385ad202a60709d223e98d4ab34fe1b6c23eac",
+      "signature": "8ffowcAjvIJo4zsNNSA9ZdexfJqckrnb3JxcPg2KxYkP6ak7UNNTEWXRyZ3lCI7KaaJFHnBlhB7Pa26ZBK2fDw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.21.0/SirioSetup-0.21.0.exe",
-      "sha256": "c78d48ac4c6417a46ea70668ba9ca46eff8fefb9f1350facc89c0da25d6b8ca5",
-      "signature": "D3ZmEZB7nj3svY49OSSRu9ndjepFAGgIVlBG0JAsoZr7jSh+XbZWqDn91BaWhUUUKRHSDddvDndpHNevcNRfAg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.22.0/SirioSetup-0.22.0.exe",
+      "sha256": "7b2214f7b2e19e5d38475e656f7dca879414f6ad8fae64f0c807267b493a4bec",
+      "signature": "f5DY1nYJqsUPPnc1r/BxpqHN6ue+wjxMDE6upddOl7BpwneI3XLBMpq8VkJcYnLOMItfNBrW2RqG71ZA0fvBAQ=="
     }
   }
 }
