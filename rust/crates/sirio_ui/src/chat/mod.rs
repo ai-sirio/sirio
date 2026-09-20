@@ -1802,10 +1802,12 @@ pub struct Chat {
     queue_expanded: bool,
     connecting: bool,
     has_completed_turn: bool,
-    /// F-CHAT-33: how many of `ChatClient::mcp_warnings()` have already been
-    /// surfaced as transcript entries. `mcp_warnings()` returns the whole
-    /// running list each call (it doesn't drain), so this is the cursor
-    /// that keeps a warning from being re-posted on every later turn.
+    /// How many of `ChatClient::mcp_warnings()` have already been seen.
+    /// `mcp_warnings()` returns the whole running list each call (it doesn't
+    /// drain), so this is the cursor that keeps the list from growing
+    /// unboundedly in the client's eyes. MCP failures are deliberately never
+    /// surfaced as transcript entries: a broken user server must not banner
+    /// the chat on any transport.
     mcp_warnings_shown: usize,
     available_models: Vec<ModelOption>,
     model_config_id: Option<String>,
@@ -2211,27 +2213,15 @@ impl Chat {
         }
     }
 
-    /// F-CHAT-33: append any MCP-configuration-flavored stderr lines the
-    /// live client has observed since the last time this ran, as
-    /// non-retryable transcript errors. Called once per turn end so a
-    /// misconfigured MCP server the agent silently ignored isn't invisible
-    /// to the user just because the turn itself "succeeded".
+    /// MCP failures are deliberately never surfaced: the client's warning
+    /// list is only drained so the cursor keeps up, and nothing is pushed
+    /// as a transcript entry. Called once per turn end, covering every
+    /// transport (native and ACP wrapper alike).
     fn surface_mcp_warnings(&mut self) {
         let Some(client) = &self.client else {
             return;
         };
-        let warnings = client.mcp_warnings();
-        if warnings.len() <= self.mcp_warnings_shown {
-            return;
-        }
-        for warning in &warnings[self.mcp_warnings_shown..] {
-            self.push_entry(Entry::Error {
-                message: warning.clone(),
-                retryable: false,
-                kind: ErrorKind::McpWarning,
-            });
-        }
-        self.mcp_warnings_shown = warnings.len();
+        self.mcp_warnings_shown = client.mcp_warnings().len();
     }
 
     fn remeasure_entry(&self, index: usize) {

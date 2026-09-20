@@ -1117,7 +1117,7 @@ fn apply_current_mode(shared: &Shared, mode_id: &str) {
     }
 }
 
-async fn drain_stderr(stderr: async_process::ChildStderr, tail: StderrTail, shared: Arc<Shared>) {
+async fn drain_stderr(stderr: async_process::ChildStderr, tail: StderrTail, _shared: Arc<Shared>) {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     loop {
@@ -1129,9 +1129,9 @@ async fn drain_stderr(stderr: async_process::ChildStderr, tail: StderrTail, shar
                 if trimmed.is_empty() {
                     continue;
                 }
-                if crate::looks_like_mcp_warning(trimmed) {
-                    shared.push_mcp_warnings(vec![trimmed.to_string()]);
-                }
+                // MCP stderr lines are intentionally not surfaced as warnings
+                // on the native path (see `Fold::apply_system`): a broken
+                // user server must not banner the chat.
                 crate::push_stderr_tail(&tail, trimmed.to_string());
             }
         }
