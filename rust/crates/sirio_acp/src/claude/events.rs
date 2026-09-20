@@ -290,12 +290,9 @@ impl Fold {
                         });
                     }
                 }
-                for server in &system.mcp_servers {
-                    if server.status.eq_ignore_ascii_case("failed") {
-                        self.mcp_warnings
-                            .push(format!("MCP server \"{}\" failed to connect", server.name));
-                    }
-                }
+                // MCP connection failures are intentionally not surfaced: the
+                // native session loads the user's own `.mcp.json`/plugins and
+                // a broken server would otherwise banner every chat.
             }
             "status" => {}
             other => events.push(AcpEvent::OtherSessionUpdate {
@@ -754,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn system_init_records_the_session_the_version_and_a_failed_mcp_server() {
+    fn system_init_records_the_session_the_version_and_ignores_failed_mcp_servers() {
         let mut fold = Fold::new();
         let events = fold.apply(parse(json!({
             "type": "system", "subtype": "init",
@@ -769,11 +766,7 @@ mod tests {
         assert!(events.contains(&AcpEvent::OtherSessionUpdate {
             kind: "SessionIdentified".into()
         }));
-        assert_eq!(
-            fold.take_mcp_warnings(),
-            vec!["MCP server \"linear\" failed to connect"]
-        );
-        // Drained, not re-reported on every later read.
+        // Failed MCP servers must not banner the chat on the native path.
         assert!(fold.take_mcp_warnings().is_empty());
     }
 
