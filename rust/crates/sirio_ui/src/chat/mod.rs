@@ -1868,6 +1868,13 @@ pub struct Chat {
     /// Not persisted; created the first time a thought's body is drawn,
     /// cleared with the entries.
     thought_scroll: HashMap<usize, thought::ThoughtScroll>,
+    /// Per-output scroll state for capped Execute wells, keyed by the
+    /// output element id (`tool-output-{entry}-{ord}` /
+    /// `subagent-tool-output-{entry}-{child}-{ord}`). Senza handle
+    /// persistente la wheel interna ribollirebbe anche alla lista esterna
+    /// (doppio scroll); con l'handle la well può trattenere la wheel
+    /// finché ha ancora corsa (edge-aware chaining).
+    tool_output_scroll: HashMap<String, ScrollHandle>,
     persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
@@ -2138,6 +2145,7 @@ impl Chat {
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
             thought_scroll: HashMap::new(),
+            tool_output_scroll: HashMap::new(),
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
@@ -3241,6 +3249,7 @@ impl Chat {
         // whatever slid into its place.
         self.unfolded_turns.clear();
         self.thought_scroll.clear();
+        self.tool_output_scroll.clear();
         for turn in transcript.turns {
             for entry in turn.entries {
                 self.push_entry(restored_entry(entry));
@@ -3476,6 +3485,7 @@ impl Chat {
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
             self.thought_scroll.clear();
+            self.tool_output_scroll.clear();
             self.list_state.splice(0..old_count, self.entries.len());
         }
     }
@@ -4087,6 +4097,7 @@ impl Chat {
         self.pending_rewind = None;
         self.unfolded_turns.clear();
         self.thought_scroll.clear();
+        self.tool_output_scroll.clear();
         self.list_state.splice(0..old_count, 0);
         self.accepted_mentions.clear();
         self.attachments.clear();
@@ -5492,6 +5503,7 @@ impl Chat {
         edit_summary: Option<EditSummaryState>,
         thought_streaming: bool,
         thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
+        tool_output_scroll: &HashMap<String, ScrollHandle>,
         day_heading: Option<&str>,
         window: &mut Window,
         cx: &mut App,
@@ -5676,6 +5688,7 @@ impl Chat {
                 theme,
                 &bezel_theme,
                 entity.clone(),
+                tool_output_scroll,
             ),
             Entry::SubagentTask {
                 title,
@@ -5692,6 +5705,7 @@ impl Chat {
                 theme,
                 &bezel_theme,
                 entity.clone(),
+                tool_output_scroll,
             ),
             Entry::Permission {
                 request_id,
@@ -8295,6 +8309,9 @@ impl Render for Chat {
                                         );
                                     }
                                 }
+                                // Execute wells: handle persistente per isolare
+                                // la wheel interna dalla lista esterna.
+                                this.ensure_tool_output_scroll_for_entry(entry_index);
                                 // F-CHAT-22, turn half: an older turn stands
                                 // in for itself with one row. Resolved before
                                 // the tool-call grouping below, because a
@@ -8372,6 +8389,7 @@ impl Render for Chat {
                                                                         entry_index,
                                                                     ),
                                                                     &this.thought_scroll,
+                                                                    &this.tool_output_scroll,
                                                                     None,
                                                                     &mut *window,
                                                                     &mut *cx,
@@ -8412,6 +8430,9 @@ impl Render for Chat {
                                             })
                                         })
                                         .collect();
+                                    for (member_index, _, _) in &members {
+                                        this.ensure_tool_output_scroll_for_entry(*member_index);
+                                    }
                                     // Bezel Transcript pattern §2: a tool
                                     // run sits 8px from the prose that
                                     // follows it, tighter than the 10px
@@ -8468,6 +8489,7 @@ impl Render for Chat {
                                             this.edit_summaries.get(&entry_index).cloned(),
                                             this.thought_is_streaming(entry_index),
                                             &this.thought_scroll,
+                                            &this.tool_output_scroll,
                                             day_heading.as_deref(),
                                             &mut *window,
                                             &mut *cx,
@@ -10652,6 +10674,48 @@ two"
             assert!(
                 chat.thought_scroll.contains_key(&0),
                 "scroll state was created on first draw"
+            );
+        });
+    }
+
+    /// Execute espanso: la well è cappata a 256px e ha un handle persistente
+    /// che isola la wheel dalla lista (niente doppio scroll).
+    #[gpui::test]
+    async fn an_expanded_execute_output_is_a_capped_well_with_scroll_state(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let long: String = (0..120).map(|i| format!("line {i}\n")).collect();
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::ToolCall {
+                id: "tool-1".into(),
+                title: "grep -rn".into(),
+                status: "Completed".into(),
+                kind: "Execute".into(),
+                content: vec![ToolCallContentInfo::Text(long)],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: true,
+                duration_ms: Some(142),
+            });
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        let well = cx
+            .debug_bounds("tool-output-0-0")
+            .expect("expanded: the output well");
+        assert!(
+            well.size.height <= px(256.0),
+            "the well is capped at 256: {well:?}"
+        );
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                chat.tool_output_scroll.contains_key("tool-output-0-0"),
+                "scroll state was created on first draw so the wheel can be isolated"
             );
         });
     }
