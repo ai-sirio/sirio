@@ -152,6 +152,13 @@ pub enum Icon {
     SquareMinus,
     /// Undo (`zed/undo.svg`).
     Undo,
+    /// The file editor's Markdown Preview mode (`zed/eye.svg`). Paired with
+    /// [`Icon::Code`]: the two are the whole Markdown mode switch, which
+    /// carries no text label of its own.
+    Eye,
+    /// The file editor's Markdown Code mode (`zed/code.svg`), the other
+    /// half of that pair.
+    Code,
     /// A full-colour Material icon for a file type.
     FileType(&'static str),
 }
@@ -226,6 +233,8 @@ impl Icon {
             Icon::SquarePlus => "icons/zed/square_plus.svg",
             Icon::SquareMinus => "icons/zed/square_minus.svg",
             Icon::Undo => "icons/zed/undo.svg",
+            Icon::Eye => "icons/zed/eye.svg",
+            Icon::Code => "icons/zed/code.svg",
             Icon::FileType(name) => match name {
                 "audio" => "icons/file-types/audio.svg",
                 "c" => "icons/file-types/c.svg",
@@ -317,6 +326,8 @@ impl Icon {
             Icon::SquarePlus => include_bytes!("../../../assets/icons/zed/square_plus.svg"),
             Icon::SquareMinus => include_bytes!("../../../assets/icons/zed/square_minus.svg"),
             Icon::Undo => include_bytes!("../../../assets/icons/zed/undo.svg"),
+            Icon::Eye => include_bytes!("../../../assets/icons/zed/eye.svg"),
+            Icon::Code => include_bytes!("../../../assets/icons/zed/code.svg"),
             Icon::FileType(name) => match name {
                 "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
                 "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
@@ -688,7 +699,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 37] = [
+pub const ALL_ICONS: [Icon; 39] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -726,6 +737,8 @@ pub const ALL_ICONS: [Icon; 37] = [
     Icon::SquarePlus,
     Icon::SquareMinus,
     Icon::Undo,
+    Icon::Eye,
+    Icon::Code,
 ];
 
 #[cfg(test)]
@@ -836,6 +849,8 @@ mod tests {
             (Icon::SquarePlus, "icons/zed/square_plus.svg"),
             (Icon::SquareMinus, "icons/zed/square_minus.svg"),
             (Icon::Undo, "icons/zed/undo.svg"),
+            (Icon::Eye, "icons/zed/eye.svg"),
+            (Icon::Code, "icons/zed/code.svg"),
             (Icon::FolderOpen, "icons/zed/folder_open.svg"),
         ];
 

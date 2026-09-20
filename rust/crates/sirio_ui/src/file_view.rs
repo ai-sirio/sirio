@@ -15,11 +15,15 @@
 //!   `conflict`, `check_external`, `save`, `reload` and `keep` for the shell
 //!   to drive: save on ⌘S, conflict check on tab activation, close
 //!   confirmation when dirty;
-//! - the conflict banner, Markdown toolbar, and Code/Preview switch are
-//!   rendered here as interactive controls over the model operations.
+//! - the conflict banner and the Markdown row — formatting controls plus
+//!   the Code/Preview icons — are rendered here as interactive controls
+//!   over the model operations. There is no header bar above them: the
+//!   file's name and its dirty mark belong to the tab that hosts this
+//!   view, and repeating them here cost a whole row of the document.
 
 use bezel::motion::Painter;
 use bezel::ui::scroll::{self, ScrollbarState};
+use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
@@ -29,7 +33,7 @@ use gpui::{
     canvas, deferred, div, point, prelude::*, px, quad, size, transparent_black, uniform_list,
 };
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
-use sirio_project::{display_absolute_path, resolve_file_link};
+use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -43,6 +47,7 @@ use crate::editor::{
 };
 use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
 use crate::loading;
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
@@ -611,6 +616,14 @@ impl FileView {
         file_context_menu::items(&self.menu_facts())
     }
 
+    /// Whether this file is Markdown — the one question the Code/Preview
+    /// pair and the context menu's Preview entry both hang off. A code file
+    /// has nothing to preview, so neither is offered for one.
+    fn is_markdown(&self) -> bool {
+        self.editor()
+            .is_some_and(|editor| editor.language() == Language::Markdown)
+    }
+
     /// The shell's facts plus the two this view answers itself.
     fn menu_facts(&self) -> FileContextFacts {
         let has_selection = self
@@ -767,16 +780,6 @@ impl FileView {
         if event.path == self.path {
             self.check_external(cx);
         }
-    }
-
-    /// The path as the editor header shows it (#214).
-    ///
-    /// Rendered through `display_absolute_path`, not `Path::display`:
-    /// the verbatim prefix is stripped from the *string only*, so
-    /// `self.path` keeps the long-path capability every filesystem
-    /// call in this view depends on.
-    fn breadcrumb_text(&self) -> String {
-        display_absolute_path(&self.path)
     }
 
     fn poll_file_system_events(&mut self, cx: &mut Context<Self>) {
@@ -1184,58 +1187,6 @@ impl FileView {
         }
     }
 
-    /// Whether the Code/Preview switcher should render: only for Markdown
-    /// files — a code file has nothing to preview, so offering the switch
-    /// would be a lie.
-    fn is_markdown(&self) -> bool {
-        self.editor()
-            .is_some_and(|editor| editor.language() == Language::Markdown)
-    }
-
-    fn render_header(&self, theme: Theme, entity: gpui::Entity<Self>) -> impl IntoElement {
-        let language = self.editor().map(|editor| editor.language().name());
-        let dirty = self.is_dirty();
-        div()
-            .w_full()
-            .border_b_1()
-            .border_color(theme.border)
-            .px(px(20.0))
-            .py(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text_faint)
-            // #214: rendered through the helper written for this, not
-            // `Path::display`, which put a verbatim `\\?\` prefix on
-            // screen. The prefix is stripped from the *string only* --
-            // `self.path` is untouched, so every filesystem call this
-            // view makes keeps its long-path capability.
-            .child(self.breadcrumb_text())
-            .when(dirty, |this| {
-                this.child(
-                    div()
-                        .text_size(theme.typography.caption2)
-                        .text_color(theme.text)
-                        .child("● edited"),
-                )
-            })
-            .when(language.is_some(), |this| {
-                this.child(
-                    div()
-                        .px(px(6.0))
-                        .py(px(1.0))
-                        .rounded(theme.radii.chip)
-                        .bg(theme.surface_raised)
-                        .text_color(theme.text_muted)
-                        .child(language.unwrap_or_default()),
-                )
-            })
-            .when(self.is_markdown(), |this| {
-                this.child(render_mode_switch(self.effective_mode(), theme, entity))
-            })
-    }
-
     fn render_state(
         &self,
         theme: Theme,
@@ -1269,8 +1220,7 @@ impl FileView {
                 LoadStatus::Loaded => {
                     let conflict = editor.conflict();
                     let mode = self.effective_mode();
-                    let markdown_editing =
-                        editor.language() == Language::Markdown && mode == MarkdownMode::Code;
+                    let is_markdown = editor.language() == Language::Markdown;
                     let editor_entity = entity.clone();
                     let key_entity = entity.clone();
                     let editor_focus = self.editor_focus.clone();
@@ -1295,8 +1245,8 @@ impl FileView {
                         .when(conflict != Conflict::None, |this| {
                             this.child(render_conflict_banner(conflict, theme, entity.clone()))
                         })
-                        .when(markdown_editing, |this| {
-                            this.child(render_markdown_toolbar(theme, entity.clone()))
+                        .when(is_markdown, |this| {
+                            this.child(render_markdown_bar(mode, theme, entity.clone()))
                         })
                         .child(render_content(
                             editor,
@@ -1506,7 +1456,6 @@ impl Render for FileView {
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
             .when_some(message, |this, card| this.child(card))
-            .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
                 cx.entity(),
@@ -1523,12 +1472,20 @@ impl Render for FileView {
 /// the view entity, and the active option is marked with the same 6%
 /// selected-row layer the rest of the app uses — never a colour, because
 /// this is selection state, not meaning.
+///
+/// The two options are icons, not words: they sit at the right end of the
+/// Markdown row, where a pair of labels would read as two more formatting
+/// controls. Each one keeps its word in a tooltip, because an eye and a
+/// pair of angle brackets are recognisable but not self-naming, and the
+/// selector names (`file-mode-preview`, `file-mode-code`) are unchanged —
+/// what the control *is* did not change, only how it is drawn.
 fn render_mode_switch(
     mode: MarkdownMode,
     theme: Theme,
     entity: gpui::Entity<FileView>,
 ) -> impl IntoElement {
     let preview = render_mode_option(
+        Icon::Eye,
         "Preview",
         "file-mode-preview",
         mode == MarkdownMode::Preview,
@@ -1537,6 +1494,7 @@ fn render_mode_switch(
         theme,
     );
     let code = render_mode_option(
+        Icon::Code,
         "Code",
         "file-mode-code",
         mode == MarkdownMode::Code,
@@ -1550,15 +1508,13 @@ fn render_mode_switch(
         .flex()
         .items_center()
         .gap(px(2.0))
-        .p(px(2.0))
-        .rounded(theme.radii.control)
-        .bg(theme.surface_raised)
         .child(preview)
         .child(code)
 }
 
 fn render_mode_option(
-    label: &'static str,
+    icon: Icon,
+    tooltip: &'static str,
     selector: &'static str,
     active: bool,
     mode: MarkdownMode,
@@ -1568,17 +1524,20 @@ fn render_mode_option(
     div()
         .id(selector)
         .debug_selector(move || selector.into())
-        .px(px(8.0))
-        .py(px(2.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .flex()
+        .items_center()
+        .justify_center()
         .rounded(theme.radii.chip)
-        .text_size(theme.typography.caption2)
         .text_color(if active { theme.text } else { theme.text_faint })
         .when(active, |this| this.bg(theme.element_active))
         .hover(|style| style.bg(theme.element_hover))
+        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
         })
-        .child(label)
+        .child(IconElement::new(icon, IconSize::Small))
 }
 
 /// The conflict banner (F-EDIT-05/06): a real surface with working
@@ -1644,13 +1603,27 @@ fn render_conflict_banner(
         })
 }
 
-/// The Markdown formatting toolbar (F-EDIT-02). It is deliberately shown in
-/// edit mode; Preview remains a reading surface. The link URL is a
+/// The Markdown row: the formatting controls (F-EDIT-02) on the left, the
+/// Code/Preview icons (F-EDIT-01) at its right end.
+///
+/// It is drawn for **every** Markdown file, in both modes — not only while
+/// editing, as the formatting toolbar alone used to be. That is load-bearing
+/// now that the editor has no header: the mode icons are the only way back
+/// out of Preview, so the row that carries them cannot be Code-only or
+/// Preview would be a dead end.
+///
+/// The formatting controls themselves stay Code-only: Preview is a reading
+/// surface, and there is nothing rendered there to format. The link URL is a
 /// deterministic placeholder until the view has a text prompt seam of its own.
-fn render_markdown_toolbar(theme: Theme, file_view: gpui::Entity<FileView>) -> impl IntoElement {
+fn render_markdown_bar(
+    mode: MarkdownMode,
+    theme: Theme,
+    file_view: gpui::Entity<FileView>,
+) -> impl IntoElement {
+    let formatting = file_view.clone();
     div()
-        .id("file-format-toolbar")
-        .debug_selector(|| "file-format-toolbar".into())
+        .id("file-markdown-row")
+        .debug_selector(|| "file-markdown-row".into())
         .w_full()
         .px(theme.spacing.titlebar_control_spacing)
         .py(theme.spacing.titlebar_control_spacing)
@@ -1660,43 +1633,50 @@ fn render_markdown_toolbar(theme: Theme, file_view: gpui::Entity<FileView>) -> i
         .border_b_1()
         .border_color(theme.border)
         .bg(theme.surface_raised)
-        .child(render_format_button(
-            "B",
-            "file-format-bold",
-            MarkdownFormatOp::Bold,
-            file_view.clone(),
-            theme,
-        ))
-        .child(render_format_button(
-            "I",
-            "file-format-italic",
-            MarkdownFormatOp::Italic,
-            file_view.clone(),
-            theme,
-        ))
-        .child(render_format_button(
-            "H",
-            "file-format-heading",
-            MarkdownFormatOp::Heading,
-            file_view.clone(),
-            theme,
-        ))
-        .child(render_format_button(
-            "List",
-            "file-format-list",
-            MarkdownFormatOp::List,
-            file_view.clone(),
-            theme,
-        ))
-        .child(render_format_button(
-            "Link",
-            "file-format-link",
-            MarkdownFormatOp::Link {
-                url: "https://example.com".to_owned(),
-            },
-            file_view,
-            theme,
-        ))
+        .when(mode == MarkdownMode::Code, move |this| {
+            this.child(render_format_button(
+                "B",
+                "file-format-bold",
+                MarkdownFormatOp::Bold,
+                formatting.clone(),
+                theme,
+            ))
+            .child(render_format_button(
+                "I",
+                "file-format-italic",
+                MarkdownFormatOp::Italic,
+                formatting.clone(),
+                theme,
+            ))
+            .child(render_format_button(
+                "H",
+                "file-format-heading",
+                MarkdownFormatOp::Heading,
+                formatting.clone(),
+                theme,
+            ))
+            .child(render_format_button(
+                "List",
+                "file-format-list",
+                MarkdownFormatOp::List,
+                formatting.clone(),
+                theme,
+            ))
+            .child(render_format_button(
+                "Link",
+                "file-format-link",
+                MarkdownFormatOp::Link {
+                    url: "https://example.com".to_owned(),
+                },
+                formatting,
+                theme,
+            ))
+        })
+        // The spacer is what puts the icons at the *end* of the row rather
+        // than beside the last formatting control — and it is why the row
+        // reads the same in Preview, where there is nothing to its left.
+        .child(div().flex_1())
+        .child(render_mode_switch(mode, theme, file_view))
 }
 
 fn render_format_button(
@@ -2575,52 +2555,6 @@ mod tests {
     use gpui::{Modifiers, VisualTestContext};
     use sirio_markdown::{Block, Inline};
     use std::sync::atomic::{AtomicU64, Ordering};
-
-    /// #214: the breadcrumb must not put a verbatim prefix on screen.
-    ///
-    /// It rendered `self.path.display()` raw, so opening a file showed
-    /// `\?\D:\Progetti\sirio\sirio\README.md` in the editor header --
-    /// the same leak #118/#121 closed "across the control surface", in a
-    /// surface that was not part of it.
-    ///
-    /// The `Path` itself is deliberately left verbatim here, and the test
-    /// asserts that too: stripping the prefix from the value rather than
-    /// from the rendered string would cost the long-path capability every
-    /// filesystem call this view makes depends on.
-    ///
-    /// Windows-only, because the prefix only exists there.
-    #[cfg(windows)]
-    #[gpui::test]
-    async fn the_breadcrumb_does_not_show_a_verbatim_prefix(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::new("verbatim-breadcrumb", "hello\n");
-        let verbatim = PathBuf::from(format!(r"\\?\{}", file.path().display()));
-
-        cx.update(|cx| {
-            Theme::init(cx);
-            ::editor::init(cx);
-        });
-        let window = cx.add_window(|_window, cx| FileView::new(verbatim.clone(), cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("view root"));
-        cx.run_until_parked();
-
-        let shown = view.read_with(&cx.cx, |view, _| view.breadcrumb_text());
-        assert!(
-            !shown.starts_with(r"\\?\"),
-            "the breadcrumb must not show the verbatim prefix, got {shown:?}"
-        );
-        assert!(
-            shown.ends_with("verbatim-breadcrumb") || shown.contains("verbatim-breadcrumb"),
-            "and it must still name the file, got {shown:?}"
-        );
-        assert!(
-            view.read_with(&cx.cx, |view, _| {
-                view.path.to_string_lossy().starts_with(r"\\?\")
-            }),
-            "the Path itself stays verbatim -- only the rendered string is \
-             stripped, or the view loses long-path capability"
-        );
-    }
 
     struct TempFile(PathBuf);
 
@@ -4058,6 +3992,91 @@ mod tests {
             cx.debug_bounds("file-mode-preview").is_none()
                 && cx.debug_bounds("file-mode-code").is_none(),
             "a code file has nothing to preview, so no switcher is offered"
+        );
+    }
+
+    /// The editor has no header bar. It used to carry the file's absolute
+    /// path, a `● edited` mark and a language chip above every document —
+    /// a whole row spent on three things the tab already answers
+    /// (`SirioWorkspace::tab_is_dirty` draws the dirty mark, the tab label
+    /// names the file). The content now starts at the top of the tab, and
+    /// any bar reappearing above it pushes this origin down and fails here.
+    #[gpui::test]
+    async fn a_code_file_draws_no_bar_above_its_content(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let content = cx
+            .debug_bounds("file-text-scroll")
+            .expect("a code file renders its source");
+        assert!(
+            content.origin.y < px(2.0),
+            "the source surface must start at the top of the tab, got y={:?}",
+            content.origin.y
+        );
+    }
+
+    /// F-EDIT-01/02: one Markdown row, and the Code/Preview icons end it.
+    ///
+    /// Two things are load-bearing here and were not before. The row is
+    /// drawn in **Preview** as well as Code — with the header gone, the
+    /// icons on it are the only way out of Preview, so a Code-only row
+    /// would make Preview a dead end. And the icons sit at the row's right
+    /// edge rather than beside the formatting controls, so their position
+    /// does not move when those controls appear and disappear with the mode.
+    #[gpui::test]
+    async fn the_markdown_mode_icons_end_the_row_in_both_modes(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("md", "# Title\n");
+        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        // Preview, the default: the row carries the icons and nothing else.
+        let row = cx
+            .debug_bounds("file-markdown-row")
+            .expect("the Markdown row is drawn in Preview too");
+        let switch = cx
+            .debug_bounds("file-mode-switch")
+            .expect("the mode icons are drawn in Preview");
+        assert!(
+            cx.debug_bounds("file-format-bold").is_none(),
+            "Preview is a reading surface: it offers nothing to format"
+        );
+        assert!(
+            row.origin.y <= switch.origin.y
+                && switch.origin.y + switch.size.height <= row.origin.y + row.size.height,
+            "the icons sit on the row, not above or below it: row {row:?}, icons {switch:?}"
+        );
+        let row_right = row.origin.x + row.size.width;
+        let switch_right = switch.origin.x + switch.size.width;
+        assert!(
+            row_right - switch_right < px(24.0),
+            "the icons end the row: it ends at {row_right:?}, they end at {switch_right:?}"
+        );
+
+        // Code: the formatting controls appear to their left, and they stay
+        // where they were.
+        let code = cx
+            .debug_bounds("file-mode-code")
+            .expect("the Code icon is drawn");
+        cx.simulate_click(code.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let link = cx
+            .debug_bounds("file-format-link")
+            .expect("Code mode offers the formatting controls");
+        let switch_in_code = cx
+            .debug_bounds("file-mode-switch")
+            .expect("the mode icons stay on the row in Code");
+        assert!(
+            switch_in_code.origin.x > link.origin.x + link.size.width,
+            "the icons stay after the last formatting control"
+        );
+        assert_eq!(
+            switch_in_code.origin.x, switch.origin.x,
+            "and they do not move when the formatting controls appear"
         );
     }
 
