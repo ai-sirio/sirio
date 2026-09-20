@@ -7182,7 +7182,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sirio"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "bezel",
@@ -7223,7 +7223,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_acp"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7255,7 +7255,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_apply"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "sirio_release",
  "sirio_update",
@@ -7264,7 +7264,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_claude"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -7272,7 +7272,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_control"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -7332,7 +7332,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_project"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "libc",
  "serde",
@@ -7341,7 +7341,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_registry"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -7356,7 +7356,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_release"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -7370,7 +7370,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_syntax"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "bezel-syntax",
  "bezel-theme",
@@ -7393,7 +7393,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_terminal"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "bezel-gpui",
@@ -7411,7 +7411,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_theme"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -7423,7 +7423,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_ui"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7462,7 +7462,7 @@ dependencies = [
 
 [[package]]
 name = "sirio_update"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
