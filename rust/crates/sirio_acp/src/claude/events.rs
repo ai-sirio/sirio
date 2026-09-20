@@ -109,6 +109,17 @@ impl Fold {
                 }
                 match event.delta() {
                     Some(Delta::Text(text)) => vec![AcpEvent::AgentMessageChunk(text)],
+                    // A thought with no text is not a thought. Every model
+                    // that does not expose its reasoning still sends the
+                    // block -- one `thinking_delta` carrying `""`, then the
+                    // signature that proves it happened -- and a section the
+                    // reader expands onto nothing reads as content this
+                    // build lost, not as content the CLI never sent.
+                    // Exactly empty, never trimmed: a whitespace-only delta
+                    // between two words of a real thought is the space
+                    // between them, and dropping it would glue them
+                    // together.
+                    Some(Delta::Thinking(text)) if text.is_empty() => Vec::new(),
                     Some(Delta::Thinking(text)) => vec![AcpEvent::ThoughtChunk(text)],
                     None => Vec::new(),
                 }
@@ -482,6 +493,27 @@ mod tests {
                           "delta": {"type": "thinking_delta", "thinking": "weighing"}}
             }))),
             vec![AcpEvent::ThoughtChunk("weighing".into())]
+        );
+    }
+
+    #[test]
+    fn an_empty_thinking_delta_is_not_a_thought() {
+        // Claude sends a thinking block's plaintext only for the models
+        // that expose it. For every other model the block still arrives --
+        // one `thinking_delta` carrying `""`, then the signature that
+        // proves the reasoning happened -- and forwarding that opens a
+        // thought section the reader expands onto nothing, which reads as
+        // content this build lost rather than content the CLI never sent.
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(json!({
+            "type": "stream_event",
+            "event": {"type": "content_block_delta",
+                      "delta": {"type": "thinking_delta", "thinking": "",
+                                "estimated_tokens": null}}
+        })));
+        assert!(
+            events.is_empty(),
+            "a thought with no text is not a thought: {events:?}"
         );
     }
 

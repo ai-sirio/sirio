@@ -2218,13 +2218,15 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                     kind: "AgentMessageChunk(non-text)".into(),
                 }),
         ],
-        SessionUpdate::AgentThoughtChunk(content) => vec![
-            content_text(content)
-                .map(AcpEvent::ThoughtChunk)
-                .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
-                    kind: "AgentThoughtChunk(non-text)".into(),
-                }),
-        ],
+        SessionUpdate::AgentThoughtChunk(content) => match content_text(content) {
+            // The same empty thinking the native transport drops: this
+            // wrapper drives the same `claude`. See `claude::events`.
+            Some(text) if text.is_empty() => Vec::new(),
+            Some(text) => vec![AcpEvent::ThoughtChunk(text)],
+            None => vec![AcpEvent::OtherSessionUpdate {
+                kind: "AgentThoughtChunk(non-text)".into(),
+            }],
+        },
         SessionUpdate::ToolCall(tool) => vec![AcpEvent::ToolCallStarted {
             id: tool.tool_call_id.to_string(),
             title: tool.title,
@@ -2580,6 +2582,20 @@ mod tests {
             notification_to_events(message),
             vec![AcpEvent::AgentMessageChunk("ciao".into())]
         );
+    }
+
+    #[test]
+    fn an_empty_thought_chunk_is_not_a_thought() {
+        // The wrapper drives the same `claude` the native transport does,
+        // so it relays the same empty thinking -- see
+        // `an_empty_thinking_delta_is_not_a_thought` in `claude::events`.
+        let update = SessionNotification::new(
+            "session",
+            SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(""),
+            ))),
+        );
+        assert!(notification_to_events(update).is_empty());
     }
 
     #[test]
