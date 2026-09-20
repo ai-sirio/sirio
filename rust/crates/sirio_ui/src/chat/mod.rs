@@ -7266,6 +7266,12 @@ impl Chat {
                     .track_focus(&self.context_popover_focus)
                     .on_action(cx.listener(Self::cancel))
                     .w(px(285.0))
+                    // `anchored_menu_*` mounts this straight on the popover
+                    // surface, which paints the fill and the hairline but no
+                    // inset -- unlike the pickers above, which go through
+                    // `popover::popover_card`. Without it the usage lines sat
+                    // flush against the border.
+                    .p(px(4.0))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.context_popover_open = false;
                         cx.notify();
@@ -7579,6 +7585,10 @@ impl Chat {
                     .track_focus(&self.overflow_focus)
                     .on_action(cx.listener(Self::cancel))
                     .w(px(200.0))
+                    // The card inset `popover_card` would have carried: this
+                    // menu mounts on the bare popover surface, so its rows'
+                    // hover wash ran into the border.
+                    .p(px(4.0))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.overflow_open = false;
                         cx.notify();
@@ -7763,6 +7773,9 @@ impl Chat {
                     .on_action(cx.listener(Self::cancel))
                     .w(px(260.0))
                     .max_h(px(320.0))
+                    // Same card inset as the overflow menu above; the rows
+                    // scroll inside it rather than against the border.
+                    .p(px(4.0))
                     .overflow_y_scroll()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.history_open = false;
@@ -15517,6 +15530,165 @@ let answer = 42;
         assert!(
             cx.debug_bounds("context-usage-25-of-100").is_some(),
             "the used/size percent from the earlier UsageUpdate survives the merge"
+        );
+    }
+
+    /// Every floating menu keeps its content at least this far inside the
+    /// card's own edge -- the inset `bezel::ui::popover::popover_card`
+    /// bakes in as `MENU_PAD`, restated here because three of this pane's
+    /// popovers mount their content straight onto the popover *surface*
+    /// (`anchored_menu_*` -> `surface::popover`), which paints the fill and
+    /// the hairline but no padding, so a label sat flush against the
+    /// border.
+    const MENU_INSET: f32 = 4.0;
+
+    /// Asserts a menu's first and last row stay `MENU_INSET` inside the
+    /// card on every side. `first`/`last` may name the same element when a
+    /// menu draws a single row.
+    #[track_caller]
+    fn assert_menu_content_is_inset(
+        cx: &mut VisualTestContext,
+        card: &'static str,
+        first: &'static str,
+        last: &'static str,
+    ) {
+        let card_bounds = cx
+            .debug_bounds(card)
+            .unwrap_or_else(|| panic!("{card} is drawn"));
+        let first_bounds = cx
+            .debug_bounds(first)
+            .unwrap_or_else(|| panic!("{first} is drawn"));
+        let last_bounds = cx
+            .debug_bounds(last)
+            .unwrap_or_else(|| panic!("{last} is drawn"));
+        let inset = px(MENU_INSET);
+        assert!(
+            first_bounds.top() >= card_bounds.top() + inset,
+            "{first} touches the top border of {card}: \
+             row top {} vs card top {}",
+            first_bounds.top(),
+            card_bounds.top(),
+        );
+        assert!(
+            first_bounds.left() >= card_bounds.left() + inset,
+            "{first} touches the left border of {card}: \
+             row left {} vs card left {}",
+            first_bounds.left(),
+            card_bounds.left(),
+        );
+        assert!(
+            first_bounds.right() <= card_bounds.right() - inset,
+            "{first} touches the right border of {card}: \
+             row right {} vs card right {}",
+            first_bounds.right(),
+            card_bounds.right(),
+        );
+        assert!(
+            last_bounds.bottom() <= card_bounds.bottom() - inset,
+            "{last} touches the bottom border of {card}: \
+             row bottom {} vs card bottom {}",
+            last_bounds.bottom(),
+            card_bounds.bottom(),
+        );
+    }
+
+    /// The context ring's popover mounts on the bare popover surface, so
+    /// its usage lines need the card inset of their own.
+    #[gpui::test]
+    async fn context_popover_insets_its_text_from_the_card_edge(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            configure_test_chat(&mut chat);
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let ring = cx
+            .debug_bounds("context-ring")
+            .expect("context ring is rendered");
+        cx.simulate_click(ring.center(), Modifiers::none());
+        cx.run_until_parked();
+        // The breakdown gives the popover a last row with a selector of
+        // its own, so the bottom inset is observable.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::TokenUsageBreakdown {
+                    input_tokens: 40,
+                    output_tokens: 12,
+                    cached_read_tokens: Some(8),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert_menu_content_is_inset(
+            cx,
+            "context-popover",
+            "context-usage-25-of-100",
+            "context-usage-breakdown",
+        );
+    }
+
+    /// Same for the composer's overflow menu: its rows carry their own
+    /// hover wash, which ran flush to the card border without the inset.
+    #[gpui::test]
+    async fn composer_overflow_menu_insets_its_rows_from_the_card_edge(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let overflow = cx
+            .debug_bounds("composer-overflow")
+            .expect("the overflow control is drawn");
+        cx.simulate_click(overflow.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert_menu_content_is_inset(
+            cx,
+            "composer-overflow-menu",
+            "overflow-follow",
+            "overflow-chat-history",
+        );
+    }
+
+    /// And for the Chat History popover (F-CHAT-34).
+    #[gpui::test]
+    async fn chat_history_menu_insets_its_rows_from_the_card_edge(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.history_open = true;
+            chat.history_sessions = vec![ChatSessionSummary {
+                tab_id: "only-chat".into(),
+                title: "Only chat".into(),
+                agent_id: None,
+                turn_count: 1,
+                last_activity: 0,
+            }];
+            chat
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        assert_menu_content_is_inset(
+            cx,
+            "chat-history-menu",
+            "chat-history-row-only-chat",
+            "chat-history-row-only-chat",
         );
     }
 
