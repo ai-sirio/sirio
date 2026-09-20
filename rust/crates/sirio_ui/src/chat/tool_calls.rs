@@ -9,7 +9,11 @@
 
 use bezel::ui::icons;
 use bezel::ui::widgets::{Status as _, step_row_hover};
-use gpui::{AnyElement, Div, ElementId, Entity, FocusHandle, SharedString, div, prelude::*, px};
+use gpui::{
+    AnyElement, Div, ElementId, Entity, FocusHandle, ScrollHandle, SharedString, div, prelude::*,
+    px,
+};
+use std::collections::HashMap;
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
@@ -87,6 +91,31 @@ pub(crate) fn is_failed_status(status: &str) -> bool {
     )
 }
 
+/// Whether a wheel over a capped tool output should be consumed by the
+/// output itself instead of bubbling to the transcript list.
+///
+/// GPUI: `offset_y` negativo verso il basso, `max_y` overflow (>=0),
+/// `delta_y` negativo = giù, positivo = su. Trattiene solo se l'inner può
+/// ancora scorrere in quella direzione; ai bordi lascia passare (chaining
+/// nativo), altrimenti l'outer resterebbe intrappolato.
+pub(crate) fn tool_output_consumes_scroll(
+    offset_y: gpui::Pixels,
+    max_y: gpui::Pixels,
+    delta_y: gpui::Pixels,
+) -> bool {
+    if max_y <= px(0.0) || delta_y == px(0.0) {
+        return false;
+    }
+    let travelled = offset_y.clamp(-max_y, px(0.0)).abs();
+    if delta_y > px(0.0) {
+        // Su: c'è ancora strada verso la cima.
+        travelled > px(0.5)
+    } else {
+        // Giù: c'è ancora strada verso il fondo.
+        max_y - travelled > px(0.5)
+    }
+}
+
 /// Consecutive same-verb runs as `(start, len)` — the gallery's grouping,
 /// straight out of std.
 pub(crate) fn verb_folds(kinds: &[&str]) -> Vec<(usize, usize)> {
@@ -100,6 +129,46 @@ pub(crate) fn verb_folds(kinds: &[&str]) -> Vec<(usize, usize)> {
 }
 
 impl Chat {
+    /// Assicura un `ScrollHandle` persistente per ogni output testuale
+    /// dell'entry: senza handle la well non può trattenere la wheel e
+    /// l'evento ribolle anche alla lista (doppio scroll).
+    pub(crate) fn ensure_tool_output_scroll_for_entry(&mut self, entry_index: usize) {
+        let Some(entry) = self.entries.get(entry_index).cloned() else {
+            return;
+        };
+        match entry {
+            Entry::ToolCall { content, .. } => {
+                let mut ordinal = 0usize;
+                for item in &content {
+                    if matches!(item, ToolCallContentInfo::Text(_)) {
+                        let key = format!("tool-output-{entry_index}-{ordinal}");
+                        self.tool_output_scroll
+                            .entry(key)
+                            .or_insert_with(ScrollHandle::new);
+                        ordinal += 1;
+                    }
+                }
+            }
+            Entry::SubagentTask { tool_calls, .. } => {
+                for (child_index, call) in tool_calls.iter().enumerate() {
+                    let mut ordinal = 0usize;
+                    for item in &call.content {
+                        if matches!(item, ToolCallContentInfo::Text(_)) {
+                            let key = format!(
+                                "subagent-tool-output-{entry_index}-{child_index}-{ordinal}"
+                            );
+                            self.tool_output_scroll
+                                .entry(key)
+                                .or_insert_with(ScrollHandle::new);
+                            ordinal += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The right-aligned figure: how long the call took when this process
     /// measured it, otherwise the status word (`running`, `failed`, …) — a
     /// restored transcript has no clock to offer.
@@ -143,6 +212,7 @@ impl Chat {
         theme: &Theme,
         bezel_theme: &bezel::theme::Theme,
         entity: Entity<Chat>,
+        output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
         let failed = is_failed_status(status);
         let has_body = Self::tool_has_body(&content, &locations);
@@ -225,6 +295,7 @@ impl Chat {
                 theme,
                 bezel_theme,
                 entity,
+                output_scrolls,
             ));
         }
         item.into_any_element()
@@ -247,6 +318,7 @@ impl Chat {
         theme: &Theme,
         bezel_theme: &bezel::theme::Theme,
         entity: Entity<Chat>,
+        output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
         let typography = theme.typography;
         // F-CHAT-31: the same projection `Entry::plain_text` contributes to
@@ -279,17 +351,32 @@ impl Chat {
         for item in &content {
             match item {
                 ToolCallContentInfo::Text(text) => {
-                    body = body.child(
-                        bezel_theme
-                            .step_output(
-                                SharedString::from(format!("{output_base}-{output_ordinal}")),
-                                text.clone(),
-                            )
-                            .debug_selector({
-                                let output_base = output_base.clone();
-                                move || format!("{output_base}-{output_ordinal}")
-                            }),
-                    );
+                    let output_id = format!("{output_base}-{output_ordinal}");
+                    let debug_id = output_id.clone();
+                    let mut well = bezel_theme
+                        .step_output(SharedString::from(output_id.clone()), text.clone());
+                    // La well interna deve isolare la wheel dalla lista
+                    // esterna: GPUI fa ribollire lo stesso evento a tutti gli
+                    // hitbox sotto il mouse, quindi senza stop entrambi
+                    // scrollano (il bug). Con handle persistente + stop
+                    // edge-aware: trattiene solo finché ha corsa, ai bordi
+                    // lascia passare (chaining nativo).
+                    if let Some(handle) = output_scrolls.get(&output_id) {
+                        let scroll_handle = handle.clone();
+                        well = well.track_scroll(&scroll_handle).on_scroll_wheel(
+                            move |event, _, cx| {
+                                let delta_y = event.delta.pixel_delta(px(20.0)).y;
+                                if tool_output_consumes_scroll(
+                                    scroll_handle.offset().y,
+                                    scroll_handle.max_offset().y,
+                                    delta_y,
+                                ) {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        );
+                    }
+                    body = body.child(well.debug_selector(move || debug_id.clone()));
                     output_ordinal += 1;
                 }
                 ToolCallContentInfo::Diff(diff) => {
@@ -418,6 +505,7 @@ impl Chat {
             theme,
             bezel_theme,
             entity,
+            &self.tool_output_scroll,
         )
     }
 
@@ -434,6 +522,7 @@ impl Chat {
         theme: &Theme,
         bezel_theme: &bezel::theme::Theme,
         entity: Entity<Chat>,
+        output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
         let failed = is_failed_status(&status);
         let toggle_entity = entity.clone();
@@ -488,6 +577,7 @@ impl Chat {
                     theme,
                     bezel_theme,
                     entity.clone(),
+                    output_scrolls,
                 ));
             }
             run = run.child(members);
@@ -678,5 +768,29 @@ mod tests {
             verb_folds(&["Read", "Read", "read", "Execute", "Read"]),
             vec![(0, 3), (3, 1), (4, 1)]
         );
+    }
+
+    #[test]
+    fn inner_output_consumes_wheel_until_its_edge() {
+        // GPUI: offset negativo verso il basso, max_overflow >= 0.
+        // delta_y negativo = giù, positivo = su.
+        // Senza overflow l'inner non deve mai trattenere la wheel.
+        assert!(!tool_output_consumes_scroll(px(0.0), px(0.0), px(-10.0)));
+        assert!(!tool_output_consumes_scroll(px(0.0), px(0.0), px(10.0)));
+        // In mezzo: trattiene in entrambe le direzioni.
+        assert!(tool_output_consumes_scroll(px(-50.0), px(100.0), px(-10.0)));
+        assert!(tool_output_consumes_scroll(px(-50.0), px(100.0), px(10.0)));
+        // In cima: solo giù.
+        assert!(tool_output_consumes_scroll(px(0.0), px(100.0), px(-10.0)));
+        assert!(!tool_output_consumes_scroll(px(0.0), px(100.0), px(10.0)));
+        // In fondo: solo su.
+        assert!(!tool_output_consumes_scroll(
+            px(-100.0),
+            px(100.0),
+            px(-10.0)
+        ));
+        assert!(tool_output_consumes_scroll(px(-100.0), px(100.0), px(10.0)));
+        // Delta nullo: mai.
+        assert!(!tool_output_consumes_scroll(px(-50.0), px(100.0), px(0.0)));
     }
 }

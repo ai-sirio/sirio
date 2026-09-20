@@ -19,7 +19,7 @@ use sirio_theme::Theme;
 
 use crate::loading;
 
-use super::{Chat, Entry, TranscriptInteraction};
+use super::{Chat, Entry, TranscriptInteraction, tool_calls::tool_output_consumes_scroll};
 
 /// The header's word: `Thinking` while the thought streams, then
 /// `Thought for Ns` when this process measured it, or a bare `Thought` for a
@@ -211,6 +211,19 @@ impl Chat {
                             .max_h(px(BOX_MAX))
                             .overflow_y_scroll()
                             .track_scroll(&scroll.scroll)
+                            .on_scroll_wheel({
+                                let handle = scroll.scroll.clone();
+                                move |event, _, cx| {
+                                    let delta_y = event.delta.pixel_delta(px(20.0)).y;
+                                    if tool_output_consumes_scroll(
+                                        handle.offset().y,
+                                        handle.max_offset().y,
+                                        delta_y,
+                                    ) {
+                                        cx.stop_propagation();
+                                    }
+                                }
+                            })
                             .pr(px(14.0))
                             .text_size(typography.callout)
                             .line_height(px(19.0))
