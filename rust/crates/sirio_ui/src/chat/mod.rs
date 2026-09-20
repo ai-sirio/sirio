@@ -15590,7 +15590,7 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -15657,7 +15657,9 @@ let answer = 42;
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
                 std::env::temp_dir(),
                 cx,
             );
