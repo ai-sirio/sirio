@@ -207,6 +207,20 @@ impl StatusBar {
         cx.notify();
     }
 
+    /// Swaps the worktree context the right-edge label reads. This is the
+    /// only part of the bar a worktree switch owns: the fetched provider
+    /// states, the update facts, the armed refresh task and the callbacks all
+    /// outlive a switch, so the host updates this entity in place rather than
+    /// installing a fresh one — a rebuilt bar would draw no segment at all
+    /// until the new fetch returned, and re-arm its refresh task.
+    pub fn apply_data(&mut self, data: UsageBarData, cx: &mut Context<Self>) {
+        if self.data == data {
+            return;
+        }
+        self.data = data;
+        cx.notify();
+    }
+
     /// The preferences the bar currently consumes (F-SET-10), as last
     /// routed by the host through [`Self::apply_preferences`] or set at
     /// construction.
@@ -1238,6 +1252,35 @@ mod tests {
             Some("12% used 5h".to_string()),
             "stale keeps showing the last good numbers — dimming is what marks it stale, not absence"
         );
+    }
+
+    /// The bar's right-edge label is the only thing a worktree switch owns:
+    /// the fetched numbers are the session's, not a worktree's, so switching
+    /// must relabel without resetting them.
+    #[gpui::test]
+    async fn apply_data_relabels_without_resetting_the_fetched_states(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        window
+            .update(cx, |bar, _window, cx| {
+                bar.codex = ProviderUsageState::Stale(ProviderUsage::default());
+                bar.apply_data(
+                    UsageBarData {
+                        branch: "branch-1".into(),
+                        path: "/tmp/wt-1".into(),
+                    },
+                    cx,
+                );
+                assert_eq!(bar.data.branch, "branch-1");
+                assert_eq!(bar.data.path, "/tmp/wt-1");
+                assert!(
+                    matches!(bar.codex, ProviderUsageState::Stale(_)),
+                    "the fetched numbers are not a worktree's to reset"
+                );
+            })
+            .expect("update the bar");
     }
 
     /// F-SET-11: only a fresh `Loaded` reads at full opacity — `Loading`,
