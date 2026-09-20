@@ -298,6 +298,8 @@ impl Sidebar {
             Icon::Undo => "undo",
             Icon::GitGraph => "git-graph",
             Icon::MagnifyingGlass => "magnifying-glass",
+            Icon::Eye => "eye",
+            Icon::Code => "code",
             Icon::FileType(_) => "file-type",
         }
     }
