@@ -30,9 +30,12 @@ impl std::error::Error for ProjectCreationError {}
 
 /// Creates one new project directory beneath `parent` and returns its path.
 ///
-/// The operation intentionally creates only the requested directory. Git
-/// initialization, discovery, and sidebar registration belong to the host
-/// that consumes the returned path.
+/// Missing ancestors of `parent` are created as needed (a fresh install has
+/// no `~/Sirio/projects` yet, and the create form proposes exactly that as
+/// the default parent), while the destination itself is still created with
+/// `create_dir` so an already-existing project remains a visible failure.
+/// Git initialization, discovery, and sidebar registration belong to the
+/// host that consumes the returned path.
 pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf, ProjectCreationError> {
     let name = name.trim();
     if name.is_empty() {
@@ -48,6 +51,12 @@ pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf, ProjectCreat
         return Err(ProjectCreationError::InvalidName);
     }
 
+    if !parent.as_os_str().is_empty() {
+        std::fs::create_dir_all(parent).map_err(|error| ProjectCreationError::Io {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    }
     let destination = parent.join(name);
     std::fs::create_dir(&destination).map_err(|error| ProjectCreationError::Io {
         path: destination.clone(),
@@ -112,6 +121,18 @@ mod tests {
             Err(ProjectCreationError::InvalidName)
         );
         assert!(!parent.0.join("nested").exists());
+    }
+
+    #[test]
+    fn missing_parent_is_created_alongside_project() {
+        let parent = TempDir::new();
+        let missing_parent = parent.0.join("not-yet-there").join("nested");
+        assert!(!missing_parent.exists());
+
+        let created = create_project(&missing_parent, "new-project").expect("create project");
+
+        assert_eq!(created, missing_parent.join("new-project"));
+        assert!(created.is_dir());
     }
 
     #[test]
