@@ -220,6 +220,84 @@ pub fn describe(tool_use: &ToolUse) -> ToolInfo {
             locations: Vec::new(),
             content: Vec::new(),
         },
+        "EnterPlanMode" => ToolInfo {
+            title: "Enter plan mode".into(),
+            kind: ToolKind::SwitchMode,
+            locations: Vec::new(),
+            content: Vec::new(),
+        },
+        "ToolSearch" => ToolInfo {
+            title: string(input, "query").unwrap_or_else(|| "Search tools".into()),
+            kind: ToolKind::Search,
+            locations: Vec::new(),
+            content: Vec::new(),
+        },
+        "LSP" => {
+            let path = string(input, "filePath");
+            let operation = string(input, "operation");
+            let title = match (&operation, &path) {
+                (Some(operation), Some(path)) => format!("{operation} {path}"),
+                (Some(only), None) | (None, Some(only)) => only.clone(),
+                (None, None) => "LSP".into(),
+            };
+            ToolInfo {
+                title,
+                kind: ToolKind::Read,
+                // The one row here that earns a location: the position the
+                // operation ran at is a place the surface can follow to,
+                // exactly as a `Read`'s offset is.
+                locations: path
+                    .map(|path| ToolLocation {
+                        path,
+                        line: number(input, "line").map(|line| line as u32),
+                    })
+                    .into_iter()
+                    .collect(),
+                content: Vec::new(),
+            }
+        }
+        "Monitor" => ToolInfo {
+            title: string(input, "description").unwrap_or_else(|| "Monitor".into()),
+            kind: ToolKind::Execute,
+            locations: Vec::new(),
+            content: string(input, "command")
+                .map(ToolContent::Text)
+                .into_iter()
+                .collect(),
+        },
+        "TaskStop" => ToolInfo {
+            title: string(input, "task_id")
+                .or_else(|| string(input, "shell_id"))
+                .map_or_else(|| "Stop the task".into(), |id| format!("Stop {id}")),
+            kind: ToolKind::Execute,
+            locations: Vec::new(),
+            content: Vec::new(),
+        },
+        "SendMessage" => ToolInfo {
+            title: string(input, "to").unwrap_or_else(|| "Message".into()),
+            kind: ToolKind::Other,
+            locations: Vec::new(),
+            content: string(input, "message")
+                .map(ToolContent::Text)
+                .into_iter()
+                .collect(),
+        },
+        "Artifact" => {
+            let path = string(input, "file_path");
+            ToolInfo {
+                // A named artifact says *which* one; failing that, the
+                // action is what tells publishing apart from reading.
+                title: string(input, "title")
+                    .or_else(|| string(input, "action"))
+                    .unwrap_or_else(|| "Artifact".into()),
+                kind: ToolKind::Other,
+                locations: path
+                    .map(|path| ToolLocation { path, line: None })
+                    .into_iter()
+                    .collect(),
+                content: Vec::new(),
+            }
+        }
         name if name.starts_with("mcp__") => ToolInfo {
             title: mcp_title(name),
             kind: ToolKind::Other,
@@ -682,5 +760,103 @@ mod tests {
             }]
         });
         assert_eq!(diff_from_result("Edit", &drifted), None);
+    }
+
+    #[test]
+    fn entering_plan_mode_is_named_the_way_leaving_it_is() {
+        // `ExitPlanMode` has had a row since the table was ported from the
+        // wrapper; its sibling never did, so a chat that entered plan mode
+        // drew the bare wire name under the generic icon.
+        let info = describe(&tool("EnterPlanMode", json!({})));
+        assert_eq!(info.title, "Enter plan mode");
+        assert_eq!(info.kind, ToolKind::SwitchMode);
+    }
+
+    #[test]
+    fn a_tool_search_titles_itself_with_the_query_the_way_grep_does() {
+        let info = describe(&tool("ToolSearch", json!({"query": "select:Read,Edit"})));
+        assert_eq!(info.title, "select:Read,Edit");
+        assert_eq!(info.kind, ToolKind::Search);
+    }
+
+    #[test]
+    fn an_lsp_call_points_at_the_file_and_line_it_asked_about() {
+        // The only row here that earns a location: the surface can follow
+        // along to the position the operation ran at, as it does for `Read`.
+        let info = describe(&tool(
+            "LSP",
+            json!({"operation": "findReferences", "filePath": "/repo/src/main.rs",
+                   "line": 42, "character": 7}),
+        ));
+        assert_eq!(info.title, "findReferences /repo/src/main.rs");
+        assert_eq!(info.kind, ToolKind::Read);
+        assert_eq!(
+            info.locations,
+            [ToolLocation {
+                path: "/repo/src/main.rs".into(),
+                line: Some(42)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_monitor_shows_the_command_behind_its_description() {
+        let info = describe(&tool(
+            "Monitor",
+            json!({"description": "errors in deploy.log",
+                   "command": "tail -f deploy.log | grep --line-buffered ERROR"}),
+        ));
+        assert_eq!(info.title, "errors in deploy.log");
+        assert_eq!(info.kind, ToolKind::Execute);
+        assert_eq!(
+            info.content,
+            [ToolContent::Text(
+                "tail -f deploy.log | grep --line-buffered ERROR".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn stopping_a_task_names_the_task_it_stops() {
+        let info = describe(&tool("TaskStop", json!({"task_id": "wf_abc123"})));
+        assert_eq!(info.title, "Stop wf_abc123");
+        assert_eq!(info.kind, ToolKind::Execute);
+    }
+
+    #[test]
+    fn a_message_to_another_agent_names_the_recipient_and_shows_the_text() {
+        let info = describe(&tool(
+            "SendMessage",
+            json!({"to": "reviewer@team", "message": "the diff is ready"}),
+        ));
+        assert_eq!(info.title, "reviewer@team");
+        assert_eq!(
+            info.content,
+            [ToolContent::Text("the diff is ready".into())]
+        );
+    }
+
+    #[test]
+    fn an_artifact_call_says_which_action_it_took() {
+        // `action` is what distinguishes publishing a page from reading one,
+        // and it is the field most calls carry; a named `title` wins because
+        // it says *which* artifact.
+        let published = describe(&tool(
+            "Artifact",
+            json!({"action": "publish", "file_path": "/repo/page.html",
+                   "title": "Sirio Tier A"}),
+        ));
+        assert_eq!(published.title, "Sirio Tier A");
+        assert_eq!(
+            published.locations,
+            [ToolLocation {
+                path: "/repo/page.html".into(),
+                line: None
+            }]
+        );
+
+        let read = describe(&tool("Artifact", json!({"action": "read"})));
+        assert_eq!(read.title, "read");
+        assert!(read.locations.is_empty());
     }
 }
