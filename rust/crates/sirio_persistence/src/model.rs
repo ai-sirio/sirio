@@ -329,6 +329,12 @@ pub enum ChatEntry {
     Plan { entries: Vec<ChatPlanEntry> },
     /// The rendered footer that closes a completed turn.
     TurnFooter { text: String },
+    /// A note about the session itself at the point it happened: a
+    /// compaction, or a background task reaching its end. `kind` is the
+    /// stored spelling of how it draws, kept as a string so a build that
+    /// does not know a newer one restores it as a plain note instead of
+    /// refusing the whole transcript.
+    Notice { text: String, kind: String },
     /// A permanent error that belongs in the restored transcript.
     Error { message: String, retryable: bool },
 }
