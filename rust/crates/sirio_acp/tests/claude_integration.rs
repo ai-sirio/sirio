@@ -800,7 +800,11 @@ fn a_fresh_session_is_named_before_the_cli_says_anything() {
     let id = client
         .session_id()
         .expect("a fresh session is named at launch");
-    assert_eq!(id.len(), 36, "a v4-shaped id, got {id}");
+    // Shape, not just length: the name of this test promises v4. The id
+    // itself stays out of the message — it is clock and pid, not a
+    // secret, but nothing is learned by printing it either.
+    let shaped = id.len() == 36 && id.split('-').map(str::len).eq([8, 4, 4, 4, 12]);
+    assert!(shaped, "a fresh session must be named with a v4-shaped id");
     client.shutdown().expect("clean shutdown");
 }
 
