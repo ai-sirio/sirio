@@ -7409,6 +7409,10 @@ impl Chat {
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
+                        // The knob is 14px centred on the track ends, so it
+                        // overhangs 7px each side: without this inset it runs
+                        // into the card's 4px padding and clips.
+                        .px(px(8.0))
                         .child(track)
                         .child(ends)
                 });
