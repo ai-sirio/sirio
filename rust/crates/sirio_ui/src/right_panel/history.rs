@@ -1103,7 +1103,7 @@ impl Render for CommitTooltip {
             .flex_col()
             .gap(px(3.0))
             .px(px(8.0))
-            .py(px(5.0))
+            .py(px(6.0))
             .rounded(self.theme.radii.control)
             .bg(self.theme.surface_raised)
             .border_1()
