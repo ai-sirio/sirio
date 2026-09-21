@@ -74,6 +74,22 @@ pub struct CommandInfo {
     pub argument_hint: Option<String>,
 }
 
+/// The reason a session gives before any client has asked for fast mode.
+/// It is the starting state, not a refusal — the asking *is* the opt-in —
+/// so it must never reach the surface as a reason the toggle is dead.
+const FAST_MODE_OPT_IN: &str = "sdk_opt_in_required";
+
+/// What the handshake said about fast mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FastMode {
+    /// Whether the session starts with it on.
+    pub enabled: bool,
+    /// The CLI's own words for why the toggle cannot be used, when there
+    /// are any. `sdk_opt_in_required` is not one of them: that is simply
+    /// the state before a client has asked, and asking is the opt-in.
+    pub blocked_by: Option<String>,
+}
+
 /// One model the session can switch to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelInfo {
@@ -150,6 +166,7 @@ pub struct Catalog {
     models: Vec<ModelInfo>,
     current_mode_id: String,
     account: AccountInfo,
+    fast_mode: Option<FastMode>,
 }
 
 impl Catalog {
@@ -211,6 +228,13 @@ impl Catalog {
                 .unwrap_or("default")
                 .to_string(),
             account,
+            // Present only when the session mentioned it at all: the field
+            // is newer than the floor this build accepts.
+            fast_mode: payload.get("fast_mode_state").map(|state| FastMode {
+                enabled: state.as_str() == Some("on"),
+                blocked_by: string_field(payload, "fast_mode_disabled_reason")
+                    .filter(|reason| reason != FAST_MODE_OPT_IN),
+            }),
         }
     }
 
@@ -222,6 +246,14 @@ impl Catalog {
     /// filter it feeds has to outlive every later list.
     pub fn replace_commands(&mut self, commands: &Value) {
         self.commands = parse_commands(commands);
+    }
+
+    /// What the session said about fast mode, or `None` when it said
+    /// nothing — which is how a CLI too old to know the feature reads, and
+    /// how the surface is told to offer no toggle rather than a dead one.
+    #[must_use]
+    pub fn fast_mode(&self) -> Option<FastMode> {
+        self.fast_mode.clone()
     }
 
     /// The commands a chat tab can offer: everything the session advertised,
@@ -483,6 +515,46 @@ mod tests {
             .collect();
         assert_eq!(names, ["deep-research"]);
         assert_eq!(commands[0].argument_hint.as_deref(), Some("<question>"));
+    }
+
+    #[test]
+    fn the_opt_in_notice_is_not_a_reason_the_toggle_is_dead() {
+        let fast = catalog()
+            .fast_mode()
+            .expect("the handshake reports fast mode");
+        assert!(!fast.enabled);
+        // The captured handshake says `sdk_opt_in_required`, which is the
+        // state before any client asked. Reading it as a block would hide
+        // the toggle that performs the opt-in.
+        assert_eq!(fast.blocked_by, None);
+    }
+
+    #[test]
+    fn a_real_reason_blocks_the_toggle_and_a_silent_handshake_offers_none() {
+        let blocked = Catalog::from_initialize(&serde_json::json!({
+            "fast_mode_state": "off",
+            "fast_mode_disabled_reason": "not_entitled"
+        }));
+        assert_eq!(
+            blocked
+                .fast_mode()
+                .and_then(|fast| fast.blocked_by)
+                .as_deref(),
+            Some("not_entitled")
+        );
+        let on = Catalog::from_initialize(&serde_json::json!({"fast_mode_state": "on"}));
+        assert_eq!(
+            on.fast_mode(),
+            Some(FastMode {
+                enabled: true,
+                blocked_by: None
+            })
+        );
+        // Silence is how an older CLI says it has never heard of this.
+        assert_eq!(
+            Catalog::from_initialize(&serde_json::json!({})).fast_mode(),
+            None
+        );
     }
 
     #[test]

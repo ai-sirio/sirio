@@ -20,7 +20,7 @@ pub mod version;
 
 pub use catalog::{
     AccountInfo, Catalog, CommandInfo, EFFORT_DEFAULT, EFFORT_ULTRACODE, Effort, EffortChoice,
-    ModeInfo, ModelInfo, Modes,
+    FastMode, ModeInfo, ModelInfo, Modes,
 };
 pub use control::{CanUseTool, ControlEnvelope, ControlRequest, PermissionResult};
 pub use launch::{ChatSession, LaunchLine};

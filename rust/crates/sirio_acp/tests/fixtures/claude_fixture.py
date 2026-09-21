@@ -58,6 +58,8 @@ def initialize_payload():
         "output_style": "default",
         "available_output_styles": ["default"],
         "current_permission_mode": "default",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
         "account": account,
         "hooks_applied": True,
     }
@@ -255,6 +257,18 @@ def main():
                     "session_id": SESSION_ID,
                     "uuid": "status-uuid",
                 })
+            elif subtype == "apply_flag_settings":
+                if MODE == "no_fast_mode":
+                    send({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "Unknown setting: fastMode",
+                        },
+                    })
+                else:
+                    control_response(request_id, {})
             elif subtype == "get_context_usage":
                 if MODE == "no_context_usage":
                     # Answers nothing: the turn still has to end, on the

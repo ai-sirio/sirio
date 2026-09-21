@@ -268,6 +268,24 @@ impl ChatClient {
         }
     }
 
+    /// What the session says about fast mode. Only the native transport
+    /// has it: ACP has no equivalent, and says so with `None`.
+    #[must_use]
+    pub fn fast_mode(&self) -> Option<FastMode> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Claude(client) => client.fast_mode(),
+        }
+    }
+
+    /// Turn fast mode on or off, where the transport has it.
+    pub fn set_fast_mode(&self, enabled: bool) -> Result<()> {
+        match self {
+            Self::Acp(_) => Ok(()),
+            Self::Claude(client) => client.set_fast_mode(enabled),
+        }
+    }
+
     /// MCP-configuration-flavored lines observed on the agent's stderr.
     #[must_use]
     pub fn mcp_warnings(&self) -> Vec<String> {
@@ -456,6 +474,10 @@ pub struct ImageAttachment {
     /// Base64-encoded media payload.
     pub base64_data: String,
 }
+
+/// What a session says about fast mode. Re-exported because `sirio_ui`
+/// reads it and does not depend on `sirio_claude`.
+pub use sirio_claude::FastMode;
 
 /// One slash command advertised by the agent.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -108,7 +108,9 @@
         "subscriptionType": "max",
         "apiProvider": "firstParty"
       },
-      "hooks_applied": true
+      "hooks_applied": true,
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
     }
   }
 }

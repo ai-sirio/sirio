@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use futures::future::Either;
 use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch};
+use sirio_claude::FastMode;
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -41,6 +42,35 @@ fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
             Either::Right((_, _)) => panic!("fixture did not emit an event within sixty seconds"),
         }
     })
+}
+
+/// The first re-read signal whose name starts with `prefix`, on a short
+/// budget. It reads the stream once, so a test can say *which* signal
+/// arrived rather than draining the stream asking after each in turn.
+fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let receive = events.recv();
+        let timer = async_io::Timer::after(remaining);
+        let got = futures::executor::block_on(async move {
+            futures::pin_mut!(receive, timer);
+            match futures::future::select(receive, timer).await {
+                Either::Left((event, _)) => event.ok(),
+                Either::Right((_, _)) => None,
+            }
+        });
+        match got {
+            Some(AcpEvent::OtherSessionUpdate { kind }) if kind.starts_with(prefix) => {
+                return Some(kind);
+            }
+            Some(_) => continue,
+            None => return None,
+        }
+    }
 }
 
 fn drain_until_turn_end(events: &sirio_acp::EventStream) -> Vec<AcpEvent> {
@@ -280,6 +310,49 @@ fn process_exists(pid: &str) -> bool {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains(pid)
         })
         .unwrap_or(false)
+}
+
+#[test]
+fn fast_mode_starts_off_and_moves_only_once_the_cli_agrees() {
+    let (mut client, events) = launch("normal");
+    assert_eq!(
+        client.fast_mode(),
+        Some(FastMode {
+            enabled: false,
+            blocked_by: None
+        }),
+        "the handshake reports it off, and its opt-in notice is not a block"
+    );
+
+    client.set_fast_mode(true).expect("the toggle is accepted");
+    assert_eq!(
+        first_signal(&events, "FastModeUpdate", Duration::from_secs(5)).as_deref(),
+        Some("FastModeUpdate(on)"),
+        "the change is announced as a re-read signal, the way a mode change is"
+    );
+    assert_eq!(client.fast_mode().map(|fast| fast.enabled), Some(true));
+
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_cli_that_refuses_fast_mode_leaves_the_chip_where_it_was() {
+    let (mut client, events) = launch("no_fast_mode");
+    client.set_fast_mode(true).expect("the toggle is accepted");
+    // Announced, so the chip redraws — but never as a change that happened.
+    assert_eq!(
+        first_signal(&events, "FastModeUpdate", Duration::from_secs(5)).as_deref(),
+        Some("FastModeUpdate(blocked)"),
+    );
+    assert_eq!(
+        client.fast_mode(),
+        Some(FastMode {
+            enabled: false,
+            blocked_by: Some("Unknown setting: fastMode".into())
+        }),
+        "the chip stays where the session is and carries the CLI's own reason"
+    );
+    client.shutdown().expect("clean shutdown");
 }
 
 #[test]

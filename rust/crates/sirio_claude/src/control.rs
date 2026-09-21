@@ -51,13 +51,16 @@ impl ControlRequest {
     /// its own default.
     ///
     /// Ultracode is a level in the picker and in the CLI's own `/effort`
-    /// menu, but never on the wire: `apply_flag_settings` takes exactly two
-    /// keys — `effortLevel` and a separate `ultracode` boolean — and a
-    /// session with `ultracode` standing runs at xhigh whatever
-    /// `effortLevel` says. So the pseudo-level is translated here, at the
-    /// one place that owns the wire format, and *both* keys are always
-    /// written: leaving `ultracode` out is what would let it stand through
-    /// a switch to another level.
+    /// menu, but never on the wire: `apply_flag_settings` carries
+    /// `effortLevel` and a separate `ultracode` boolean, and a session with
+    /// `ultracode` standing runs at xhigh whatever `effortLevel` says. So
+    /// the pseudo-level is translated here, at the one place that owns the
+    /// wire format, and *both* keys are always written: the settings
+    /// **merge** rather than replace, so leaving `ultracode` out is what
+    /// would let it stand through a switch to another level.
+    ///
+    /// That merge is also why this request may leave the rest of the
+    /// session's flag settings — `fastMode` among them — alone.
     #[must_use]
     pub fn set_effort(request_id: &str, level: Option<&str>) -> Value {
         let ultracode = level == Some(crate::catalog::EFFORT_ULTRACODE);
@@ -67,6 +70,22 @@ impl ControlRequest {
             json!({
                 "subtype": "apply_flag_settings",
                 "settings": {"effortLevel": level, "ultracode": ultracode}
+            }),
+        )
+    }
+
+    /// Turns fast mode on or off for this session.
+    ///
+    /// `off` is written rather than omitted, for the reason [`Self::set_effort`]
+    /// gives: the settings merge, so a key left out keeps the value the last
+    /// call left standing.
+    #[must_use]
+    pub fn set_fast_mode(request_id: &str, enabled: bool) -> Value {
+        Self::envelope(
+            request_id,
+            json!({
+                "subtype": "apply_flag_settings",
+                "settings": {"fastMode": enabled}
             }),
         )
     }
@@ -335,6 +354,26 @@ mod tests {
                 "user_message_id": "uuid-1",
                 "dry_run": true
             })
+        );
+    }
+
+    #[test]
+    fn fast_mode_is_one_key_and_off_is_written_rather_than_omitted() {
+        // Verified against claude 2.1.278: `apply_flag_settings` merges
+        // into the session's flag settings instead of replacing them —
+        // sending `{fastMode}` then `{effortLevel, ultracode}` leaves all
+        // three standing. So this request carries nothing but its own key,
+        // and `false` has to be written, because an omitted key keeps
+        // whatever the last call left there.
+        assert_eq!(
+            ControlRequest::set_fast_mode("req-fm", true)["request"],
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"fastMode": true}})
+        );
+        assert_eq!(
+            ControlRequest::set_fast_mode("req-fm-off", false)["request"],
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"fastMode": false}})
         );
     }
 

@@ -17,7 +17,7 @@ use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use sirio_claude::{
     Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, EFFORT_DEFAULT,
-    ChatSession, LaunchLine, RewindOutcome,
+    ChatSession, FastMode, LaunchLine, RewindOutcome,
 };
 
 use super::ClaudeLaunch;
@@ -43,6 +43,8 @@ pub(super) enum Command {
     SetMode(String),
     /// Set the effort level; `None` resets to the settings' own value.
     SetEffort(Option<String>),
+    /// Turn fast mode on or off.
+    SetFastMode(bool),
     /// End the turn in flight.
     Cancel,
     /// Stop: close the CLI's stdin, wait for it, acknowledge.
@@ -113,6 +115,7 @@ pub(super) struct Shared {
     claude_version: Mutex<Option<String>>,
     model_catalog: Mutex<Option<ModelCatalog>>,
     mode_catalog: Mutex<Option<ModeCatalog>>,
+    fast_mode: Mutex<Option<FastMode>>,
     mcp_warnings: Mutex<Vec<String>>,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
@@ -133,6 +136,10 @@ impl Shared {
 
     pub(super) fn mode_catalog(&self) -> Option<ModeCatalog> {
         self.mode_catalog.lock().ok().and_then(|c| c.clone())
+    }
+
+    pub(super) fn fast_mode(&self) -> Option<FastMode> {
+        self.fast_mode.lock().ok().and_then(|f| f.clone())
     }
 
     pub(super) fn mcp_warnings(&self) -> Vec<String> {
@@ -437,6 +444,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let next_request_id = || format!("sirio-{}", request_ids.fetch_add(1, Ordering::Relaxed));
     let mut turn_in_flight = false;
     let mut pending_model: HashMap<String, String> = HashMap::new();
+    let mut pending_fast_mode: HashMap<String, bool> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
@@ -544,6 +552,36 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         if let CliMessage::ControlResponse(value) = &message
                             && let Some(envelope) = ControlEnvelope::parse(value)
                         {
+                            if let Some(enabled) =
+                                pending_fast_mode.remove(&envelope.request_id)
+                            {
+                                if let Ok(mut held) = shared.fast_mode.lock()
+                                    && let Some(fast) = held.as_mut()
+                                {
+                                    match &envelope.error {
+                                        // The cell moves on the CLI's word,
+                                        // never on the click.
+                                        None => fast.enabled = enabled,
+                                        // A refusal degrades this one
+                                        // feature and says why in the CLI's
+                                        // own words, the way a missing
+                                        // language server names the program
+                                        // rather than raising a banner.
+                                        Some(error) => {
+                                            fast.blocked_by = Some(error.clone());
+                                        }
+                                    }
+                                }
+                                let _ = event_tx
+                                    .send(AcpEvent::OtherSessionUpdate {
+                                        kind: match (&envelope.error, enabled) {
+                                            (Some(_), _) => "FastModeUpdate(blocked)".to_string(),
+                                            (None, true) => "FastModeUpdate(on)".to_string(),
+                                            (None, false) => "FastModeUpdate(off)".to_string(),
+                                        },
+                                    })
+                                    .await;
+                            }
                             if let Some(model) = pending_model.remove(&envelope.request_id) {
                                 match &envelope.error {
                                     // The wire confirms by echoing; a refusal
@@ -793,6 +831,19 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             );
                         }
                     }
+                    Ok(Command::SetFastMode(enabled)) => {
+                        let id = next_request_id();
+                        pending_fast_mode.insert(id.clone(), enabled);
+                        if write_line(&mut stdin, &ControlRequest::set_fast_mode(&id, enabled))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the fast mode change".into(),
+                            );
+                        }
+                    }
                     Ok(Command::SetEffort(level)) => {
                         selected_effort =
                             level.clone().unwrap_or_else(|| EFFORT_DEFAULT.to_string());
@@ -1036,6 +1087,9 @@ async fn write_line(
 }
 
 fn publish_catalogues(shared: &Shared, catalog: &Catalog) {
+    if let Ok(mut fast) = shared.fast_mode.lock() {
+        *fast = catalog.fast_mode();
+    }
     if let Ok(mut models) = shared.model_catalog.lock() {
         let options: Vec<ModelOption> = catalog
             .models()

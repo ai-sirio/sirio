@@ -15,7 +15,7 @@ use gpui::{
     quad, relative, rgb, transparent_black,
 };
 use sirio_acp::{
-    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
+    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, FastMode,
     EffortChoice, EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
     ModelOption, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
@@ -1882,6 +1882,10 @@ pub struct Chat {
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
     /// Slash commands advertised by the agent over ACP.
     available_commands: Vec<AvailableCommandInfo>,
+    /// What the session says about fast mode, re-read from the client after
+    /// every event the way `mode_catalog` is. `None` on a transport that
+    /// has no such thing, which is how the chip is told not to draw.
+    fast_mode: Option<FastMode>,
     /// The slash popup was dismissed for the current `/token`.
     slash_dismissed: bool,
     /// The `/token` the popup state (dismissal, selection) belongs to; any
@@ -2151,6 +2155,7 @@ impl Chat {
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
+            fast_mode: None,
             slash_dismissed: false,
             last_slash_token: None,
             slash_filter: popover::Filter::new(Vec::new()),
@@ -2898,6 +2903,9 @@ impl Chat {
         // event variant.
         if let Some(client) = &self.client {
             self.mode_catalog = client.mode_catalog();
+            // `FastModeUpdate(...)` arrives the same way and for the same
+            // reason: a re-read signal rather than an event variant.
+            self.fast_mode = client.fast_mode();
         }
         sirio_perf::event(perf_notification, cx.entity_id().as_u64());
         cx.notify();
@@ -3646,6 +3654,21 @@ impl Chat {
     fn accept_slash_command(&mut self, name: &str, cx: &mut Context<Self>) {
         self.slash_dismissed = true;
         self.set_composer_text(format!("/{name} "), cx);
+    }
+
+    /// Flips fast mode. The chip does not move here — it moves when the
+    /// client's cell does, which is when the CLI has agreed.
+    fn toggle_fast_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(fast) = self.fast_mode.clone() else {
+            return;
+        };
+        if fast.blocked_by.is_some() {
+            return;
+        }
+        if let Some(client) = &self.client {
+            let _ = client.set_fast_mode(!fast.enabled);
+        }
+        cx.notify();
     }
 
     // --- @ file mentions (F-CHAT-10) ---
@@ -6663,6 +6686,59 @@ impl Chat {
                     )
             });
 
+        // Fast mode: a toggle, not a picker, so it is a chip that shows its
+        // own state rather than one that opens a list. Drawn only when the
+        // session reported the feature at all — an older CLI says nothing
+        // and gets no chip, rather than a dead one. When the CLI has
+        // refused it, the chip stays and carries the CLI's own sentence,
+        // the way a missing language server names the program.
+        let fast_control = self
+            .fast_mode
+            .clone()
+            .filter(|_| self.model_control_visible())
+            .map(|fast| {
+                let blocked = fast.blocked_by.clone();
+                let fast_entity = entity.clone();
+                let selector = if blocked.is_some() {
+                    "fast-mode-chip-blocked"
+                } else {
+                    "fast-mode-chip"
+                };
+                let label_colour: gpui::Hsla = match (&blocked, fast.enabled) {
+                    (Some(_), _) => theme.text_faint.into(),
+                    // On, the chip is filled with the theme's own accent
+                    // pair rather than a colour of Sirio's: the palette is
+                    // bezel's, all of it.
+                    (None, true) => bezel_theme.on_solid,
+                    (None, false) => theme.text.into(),
+                };
+                div()
+                    .id("fast-mode-chip")
+                    .debug_selector(move || selector.into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(theme.radii.control)
+                    .text_size(typography.ui_size)
+                    .when(fast.enabled && blocked.is_none(), |chip| {
+                        chip.bg(bezel_theme.solid)
+                    })
+                    .when(blocked.is_none(), |chip| {
+                        chip.hover(|style| style.bg(bezel_theme.element_hover))
+                            .on_click(move |_, _, cx| {
+                                fast_entity.update(cx, |chat, cx| chat.toggle_fast_mode(cx));
+                            })
+                    })
+                    .when_some(blocked, |chip, reason| {
+                        let reason = SharedString::from(reason);
+                        chip.tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+                    })
+                    .child(div().text_color(label_colour).child("Fast"))
+            });
+
         // The effort selector, anchored to the chip above. A slider rather
         // than a row per level: effort is a scale, and the levels are the
         // session's own — `supportedEffortLevels` differs per model, so the
@@ -8083,6 +8159,7 @@ impl Chat {
                                 .children(effort_control)
                                 .children(effort_picker),
                         )
+                        .child(div().relative().flex_none().children(fast_control))
                         .child(
                             div()
                                 .relative()
@@ -17404,6 +17481,45 @@ let answer = 42;
     }
 
     /// The effort control is reachable as a peer, and it names itself.
+    #[gpui::test]
+    async fn the_fast_mode_chip_draws_only_when_the_session_reports_it(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        // An ACP session has no fast mode, and `None` is how it says so.
+        // An older `claude` says the same by leaving the field out.
+        assert!(cx.debug_bounds("fast-mode-chip").is_none());
+        assert!(cx.debug_bounds("fast-mode-chip-blocked").is_none());
+
+        chat.update(cx, |chat, cx| {
+            chat.fast_mode = Some(FastMode {
+                enabled: false,
+                blocked_by: None,
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("fast-mode-chip").is_some());
+
+        // Refused: the chip stays, under its own selector, because the
+        // CLI's reason needs somewhere to live. Hiding it would leave the
+        // user with no answer to "where did Fast go".
+        chat.update(cx, |chat, cx| {
+            chat.fast_mode = Some(FastMode {
+                enabled: false,
+                blocked_by: Some("Unknown setting: fastMode".into()),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("fast-mode-chip-blocked").is_some());
+        assert!(
+            cx.debug_bounds("fast-mode-chip").is_none(),
+            "a blocked chip is not also a live one"
+        );
+    }
+
     #[gpui::test]
     async fn the_effort_control_is_a_peer_of_the_model_not_a_caption(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
