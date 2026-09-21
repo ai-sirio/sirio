@@ -7,8 +7,8 @@
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    DragMoveEvent, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
+    Focusable, FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
     SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
@@ -46,6 +46,7 @@ mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
+use bezel::ui::widgets::{SliderDrag, slider_fraction};
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
@@ -6308,69 +6309,12 @@ impl Chat {
                                     if effort.choices.is_empty() {
                                         return this;
                                     }
-                                    let effort_entity = picker_entity.clone();
-                                    let effort_name =
-                                        effort.name.clone().unwrap_or_else(|| "Effort".to_string());
-                                    let current = effort.current_value.clone();
-                                    let choices: Vec<AnyElement> = effort
-                                        .choices
-                                        .iter()
-                                        .map(|choice| {
-                                            let choice_value = choice.value.clone();
-                                            let choice_name = choice.name.clone();
-                                            let is_selected =
-                                                current.as_deref() == Some(choice_value.as_str());
-                                            let row_entity = effort_entity.clone();
-                                            let choice_value_for_id = choice_value.clone();
-                                            div()
-                                                .id(format!("effort-option-{}", choice_value))
-                                                .debug_selector(move || {
-                                                    format!("effort-option-{}", choice_value_for_id)
-                                                })
-                                                .h(px(22.0))
-                                                .px(px(8.0))
-                                                .rounded(theme.radii.control)
-                                                .flex()
-                                                .items_center()
-                                                .text_size(typography.caption2)
-                                                .text_color(theme.text)
-                                                .when(is_selected, |this| {
-                                                    this.bg(theme.element_active)
-                                                })
-                                                .hover(|style| style.bg(theme.overlay))
-                                                .on_click(move |_, _, cx| {
-                                                    row_entity.update(cx, |chat, cx| {
-                                                        chat.select_effort(
-                                                            choice_value.clone(),
-                                                            cx,
-                                                        );
-                                                    });
-                                                })
-                                                .child(choice_name)
-                                                .into_any_element()
-                                        })
-                                        .collect::<Vec<_>>();
                                     this.child(div().h(px(1.0)).w_full().bg(theme.border))
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .pt(px(4.0))
-                                                .text_size(typography.caption2)
-                                                .text_color(theme.text_faint)
-                                                .child(effort_name),
-                                        )
-                                        .child(
-                                            // #233: the choice count is agent-reported
-                                            // and not under the picker's control (Claude
-                                            // Code advertises six, whose chips plus gaps
-                                            // exceed the popup's usable width), so the
-                                            // row wraps onto a second line instead of
-                                            // painting chips outside the picker border —
-                                            // same shape as the colour swatch row's
-                                            // `flex_wrap` in `controls::color_picker`
-                                            // (F-PRJ-13).
-                                            div().flex().flex_wrap().gap(px(4.0)).children(choices),
-                                        )
+                                        .child(effort_slider(
+                                            &effort,
+                                            theme,
+                                            &picker_entity,
+                                        ))
                                 }),
                         ),
                     )
@@ -8452,6 +8396,192 @@ fn split_diff_lines(text: &str) -> Vec<String> {
         lines.pop();
     }
     lines
+}
+
+/// The effort picker's stepped slider.
+///
+/// The levels an agent advertises are one ordered scale, weakest to
+/// strongest, not six unrelated choices — so they are picked by position on
+/// a track rather than by reading six chip labels. #233's chip row only fit
+/// by wrapping onto a second line; here the track carries one dot per level
+/// and only the current one is named.
+///
+/// The paint is hand-rolled because bezel's `Controls::slider` is a
+/// continuous 4px rail with a round knob — this is a discrete track with one
+/// dot per level and a thumb the width of a level. The *gesture* is still
+/// bezel's (`SliderDrag` + `slider_fraction`), and every level also keeps a
+/// click target of its own, so a level one step away is one click, not a drag.
+fn effort_slider(effort: &EffortOption, theme: &Theme, chat: &Entity<Chat>) -> impl IntoElement {
+    let typography = theme.typography;
+    let count = effort.choices.len().max(1);
+    // An agent that reports a value outside its own list leaves the thumb at
+    // the weakest level rather than off the track.
+    let index = effort
+        .current_value
+        .as_deref()
+        .and_then(|current| {
+            effort
+                .choices
+                .iter()
+                .position(|choice| choice.value == current)
+        })
+        .unwrap_or(0);
+    let slot = 1.0 / count as f32;
+    let option_label = effort.name.clone().unwrap_or_else(|| "Effort".to_string());
+    let current_label = effort
+        .choices
+        .get(index)
+        .map(|choice| choice.name.clone())
+        .unwrap_or_default();
+    // The fill is the same white the thumb is, held back to a tone that reads
+    // as "track behind the thumb" and not as a second thumb; the dots sit one
+    // step above whichever of the two they land on.
+    let fill = theme.solid.opacity(0.45);
+    let dot_below = theme.solid.opacity(0.62);
+    let dot_above = theme.solid.opacity(0.28);
+    let drag_entity = chat.clone();
+    let drag_values: Vec<String> = effort
+        .choices
+        .iter()
+        .map(|choice| choice.value.clone())
+        .collect();
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap(px(6.0))
+        .pt(px(6.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(typography.caption2)
+                .child(div().text_color(theme.text_faint).child(option_label))
+                .child(
+                    // The level reads a step above its own label: it is the
+                    // value the row is about, the label only says of what.
+                    div()
+                        .id("effort-current-value")
+                        .debug_selector(|| "effort-current-value".into())
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_size(typography.footnote)
+                        .text_color(theme.text)
+                        .child(current_label),
+                ),
+        )
+        .child(
+            div()
+                .id("effort-slider")
+                .debug_selector(|| "effort-slider".into())
+                .relative()
+                .w_full()
+                .h(px(26.0))
+                .rounded_full()
+                .bg(theme.overlay_strong)
+                .cursor_pointer()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .h_full()
+                        .w(gpui::relative(slot * (index + 1) as f32))
+                        .rounded_full()
+                        .bg(fill),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .children((0..count).map(|step| {
+                            div().flex_1().flex().items_center().justify_center().child(
+                                div().size(px(4.0)).rounded_full().bg(if step <= index {
+                                    dot_below
+                                } else {
+                                    dot_above
+                                }),
+                            )
+                        })),
+                )
+                .child(
+                    // The thumb covers its level's whole slot, inset by the
+                    // track's own edge so it never overhangs the pill.
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(gpui::relative(slot * index as f32))
+                        .w(gpui::relative(slot))
+                        .h_full()
+                        .p(px(2.0))
+                        .child(
+                            div()
+                                .id("effort-slider-thumb")
+                                .debug_selector(|| "effort-slider-thumb".into())
+                                .size_full()
+                                .rounded(px(8.0))
+                                .bg(theme.solid),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .children(effort.choices.iter().map(|choice| {
+                            let value = choice.value.clone();
+                            let selector_value = choice.value.clone();
+                            let step_entity = chat.clone();
+                            div()
+                                .id(SharedString::from(format!(
+                                    "effort-option-{}",
+                                    choice.value
+                                )))
+                                .debug_selector(move || format!("effort-option-{selector_value}"))
+                                .flex_1()
+                                .h_full()
+                                .on_click(move |_, _, cx| {
+                                    step_entity.update(cx, |chat, cx| {
+                                        chat.select_effort(value.clone(), cx);
+                                    });
+                                })
+                        })),
+                )
+                .on_drag(SliderDrag("effort-slider".into()), |_, _, _, cx| {
+                    cx.new(|_| gpui::Empty)
+                })
+                .on_drag_move(move |event: &DragMoveEvent<SliderDrag>, _, cx| {
+                    let Some(fraction) = slider_fraction(event, "effort-slider", cx) else {
+                        return;
+                    };
+                    let step = ((fraction * count as f32) as usize).min(count - 1);
+                    let Some(value) = drag_values.get(step).cloned() else {
+                        return;
+                    };
+                    drag_entity.update(cx, |chat, cx| {
+                        // A drag crosses a level once, but reports many moves
+                        // inside it: without this the agent would be sent the
+                        // level it is already on, once per frame.
+                        let already_there = chat
+                            .effort
+                            .as_ref()
+                            .and_then(|effort| effort.current_value.as_deref())
+                            == Some(value.as_str());
+                        if already_there {
+                            return;
+                        }
+                        chat.select_effort(value, cx);
+                    });
+                }),
+        )
 }
 
 /// The chevron for the composer's picker chips (mode, model, effort).
@@ -15952,6 +16082,85 @@ let answer = 42;
             "the effort pill shows the selected effort"
         );
         assert_effort_is_a_peer_of_the_model(cx);
+    }
+
+    /// F-CHAT-17 / #233: the effort levels are picked on a stepped slider,
+    /// not on a row of chips that only ever fit by wrapping onto a second
+    /// line. One dot per advertised level, a thumb over the current one,
+    /// and only that one named.
+    #[gpui::test]
+    async fn the_effort_slider_marks_the_current_level_and_labels_its_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "hi");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        refresh_frame(cx);
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("the model chip is drawn");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        let picker = cx.debug_bounds("model-picker").expect("the picker opens");
+        let track = cx
+            .debug_bounds("effort-slider")
+            .expect("the effort slider is drawn");
+        let thumb = cx
+            .debug_bounds("effort-slider-thumb")
+            .expect("the slider's thumb is drawn");
+        assert!(
+            track.left() >= picker.left() && track.right() <= picker.right(),
+            "the track stays inside the picker border: track {track:?} picker {picker:?}"
+        );
+
+        // The fixture advertises low/medium/high and reports medium, so the
+        // thumb covers the middle third of the track.
+        let step = f32::from(track.size.width) / 3.0;
+        let middle = f32::from(track.left()) + step * 1.5;
+        assert!(
+            (f32::from(thumb.center().x) - middle).abs() <= 2.0,
+            "the thumb sits over the current level: thumb centre {}px vs middle step {middle}px",
+            f32::from(thumb.center().x)
+        );
+
+        // The current level is named once, beside the option's own label.
+        assert!(
+            cx.debug_bounds("effort-current-value").is_some(),
+            "the current level is named beside the option label"
+        );
+
+        // Every level keeps a hit target of its own: clicking the last one
+        // commits it and carries the thumb there.
+        let last = cx
+            .debug_bounds("effort-option-high")
+            .expect("the last level is a hit target on the track");
+        cx.simulate_click(last.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.effort.as_ref().and_then(|e| e.current_value.clone())
+            }),
+            Some("high".to_string()),
+            "clicking a step on the track selects that level"
+        );
+        refresh_frame(cx);
+        let moved = cx
+            .debug_bounds("effort-slider-thumb")
+            .expect("the thumb is still drawn");
+        assert!(
+            f32::from(moved.center().x) > f32::from(thumb.center().x),
+            "the thumb follows the selection to the right: {}px then {}px",
+            f32::from(thumb.center().x),
+            f32::from(moved.center().x)
+        );
     }
 
     /// The effort pill sits beside the model pill, not inside it.
