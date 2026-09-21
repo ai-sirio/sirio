@@ -17512,7 +17512,7 @@ let answer = 42;
     async fn partial_context_usage_without_a_window_size_is_not_zero(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
                 std::env::temp_dir(),
