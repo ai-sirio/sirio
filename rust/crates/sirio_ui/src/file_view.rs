@@ -2064,11 +2064,43 @@ struct EditableLine {
     caret_offset: Option<usize>,
     /// Colour of the caret bar (the theme's accent).
     caret_color: Rgba,
+    /// The line's own font and size, kept so an empty selected line can ask
+    /// the font for a character's advance — there is no glyph to measure.
+    font: gpui::Font,
+    font_size: Pixels,
     /// Set on mouse-down, consumed on mouse-up: the down position and
     /// whether the platform modifier was held, so a same-position mouse-up
     /// on a link (not a drag) can open it (F-CORE-FILE-04) while a plain
     /// click still only places the caret.
     pressed: std::rc::Rc<std::cell::Cell<Option<(usize, bool)>>>,
+}
+
+/// What one line shows of a selection, as byte offsets local to it, or
+/// `None` when the selection does not reach it.
+///
+/// An empty line the selection passes through answers `Some(0..0)` — a
+/// real answer meaning "selected, but with no text to measure". It used
+/// to be indistinguishable from "not selected", so dragging across a
+/// paragraph break left the blank lines looking untouched; the painter
+/// gives that case a character's width instead of a rectangle of nothing.
+///
+/// A selection that stops exactly where an empty line begins has consumed
+/// the previous line's newline and none of this one, so it does not claim
+/// it.
+fn selected_run_on_line(
+    selection: Selection,
+    line_start: usize,
+    line_len: usize,
+) -> Option<Range<usize>> {
+    if selection.is_collapsed() {
+        return None;
+    }
+    if line_len == 0 {
+        return (selection.start <= line_start && line_start < selection.end).then_some(0..0);
+    }
+    let start = selection.start.max(line_start);
+    let end = selection.end.min(line_start + line_len);
+    (start < end).then(|| start - line_start..end - line_start)
 }
 
 impl EditableLine {
@@ -2112,9 +2144,24 @@ impl EditableLine {
             selection_fill: theme.element_active,
             caret_offset,
             caret_color: theme.text,
+            font: gpui::font(theme.typography.code_family),
+            font_size: theme.typography.code_size,
             links,
             pressed: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
+    }
+
+    /// One character's advance in this line's font.
+    ///
+    /// `em_advance` rather than a shaped space: the code surface is
+    /// monospace, so every glyph shares the advance, and this asks the
+    /// font instead of laying out text that is not in the buffer.
+    fn character_width(&self, window: &Window) -> Pixels {
+        let font_id = window.text_system().resolve_font(&self.font);
+        window
+            .text_system()
+            .em_advance(font_id, self.font_size)
+            .unwrap_or(self.font_size / 2.0)
     }
 
     /// Paints the part of `self.selection` that falls on this line, clipped
@@ -2127,20 +2174,24 @@ impl EditableLine {
         let Some(selection) = self.selection.filter(|selection| !selection.is_collapsed()) else {
             return;
         };
-        let line_end = self.line_start + self.line_len;
-        let start = selection.start.max(self.line_start);
-        let end = selection.end.min(line_end);
-        if start >= end {
+        let Some(run) = selected_run_on_line(selection, self.line_start, self.line_len) else {
             return;
-        }
+        };
         let layout = self.text.layout();
         let line_height = layout.line_height();
-        let start_position = layout
-            .position_for_index(start - self.line_start)
-            .unwrap_or(bounds.origin);
-        let end_position = layout
-            .position_for_index(end - self.line_start)
-            .unwrap_or(gpui::point(bounds.right(), bounds.origin.y));
+        let start_position = layout.position_for_index(run.start).unwrap_or(bounds.origin);
+        let end_position = if run.is_empty() {
+            // An empty line has no glyph to measure, so a band drawn
+            // between its own two ends is a rectangle of nothing. Give it
+            // one character — the band a blank line inside a selection is
+            // expected to show — rather than the row's whole width, which
+            // would make the emptiest lines the loudest.
+            gpui::point(start_position.x + self.character_width(window), bounds.origin.y)
+        } else {
+            layout
+                .position_for_index(run.end)
+                .unwrap_or(gpui::point(bounds.right(), bounds.origin.y))
+        };
         if end_position.x <= start_position.x {
             return;
         }
@@ -2170,6 +2221,21 @@ impl Element for EditableLine {
         None
     }
 
+    /// The text node, wrapped in one that grows to fill the row.
+    ///
+    /// `StyledText` measures a line exactly as wide as its glyphs, and
+    /// `prepaint` below hangs this line's hitbox on those bounds — so
+    /// without the wrapper an empty line gets an empty hitbox,
+    /// `is_hovered` is never true for it, and every mouse handler on the
+    /// line is gated behind a rectangle nothing can be inside. The same
+    /// arithmetic made the space to the right of any short line dead;
+    /// the empty line was only the case where that space was the whole
+    /// line.
+    ///
+    /// `flex_grow` claims the row's leftover width, never more: growth
+    /// consumes free space, and an intrinsic measure — which is what
+    /// `with_width_from_item` performs to size the list from its longest
+    /// line — offers none, so the measured width is still the text's.
     fn request_layout(
         &mut self,
         id: Option<&GlobalElementId>,
@@ -2177,7 +2243,12 @@ impl Element for EditableLine {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        self.text.request_layout(id, inspector_id, window, cx)
+        let (text, ()) = self.text.request_layout(id, inspector_id, window, cx);
+        let style = gpui::Style {
+            flex_grow: 1.0,
+            ..Default::default()
+        };
+        (window.request_layout(style, [text], cx), ())
     }
 
     fn prepaint(
@@ -3598,6 +3669,74 @@ mod tests {
         );
     }
 
+    /// Typing is the other half of the same failure: with no hitbox there is
+    /// no click, with no click the caret never arrives, and the keystroke
+    /// lands wherever the caret was left.
+    #[gpui::test]
+    async fn an_empty_line_accepts_typed_text(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alpha\n\nbeta\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx
+            .debug_bounds("file-source-line-1")
+            .expect("the empty line is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_input("x");
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view
+                .editor()
+                .expect("loaded")
+                .buffer()
+                .to_owned()),
+            "alpha\nx\nbeta\n",
+            "the character belongs on the empty line, not wherever the caret was"
+        );
+    }
+
+    /// The empty line was only the extreme case. The dead space to the right
+    /// of every short line came from the same measurement, and an editor is
+    /// expected to take a click there as "the end of this line".
+    #[gpui::test]
+    async fn a_click_past_the_end_of_a_line_lands_at_its_end(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alpha\n\nbeta\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(
+            point(row.origin.x + row.size.width - px(8.), row.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.caret),
+            5,
+            "a click in the empty space right of `alpha` belongs at its end"
+        );
+    }
+
+    /// An empty line is still a line: it can be clicked into, typed on, and
+    /// it carries the caret. "alpha\n\nbeta\n" puts the empty one at byte 6.
+    #[gpui::test]
+    async fn an_empty_line_can_be_clicked_into(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alpha\n\nbeta\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx
+            .debug_bounds("file-source-line-1")
+            .expect("the empty line is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.caret),
+            6,
+            "a click on the empty line must put the caret on it"
+        );
+    }
+
     #[gpui::test]
     async fn a_modifier_click_asks_for_the_definition(cx: &mut gpui::TestAppContext) {
         let file = TempFile::with_extension("rs", "fn main() { helper(); }\n");
@@ -3721,6 +3860,63 @@ mod tests {
             .is_empty(),
             "and the line it marked underlines nothing"
         );
+    }
+
+    /// Tests for `selected_run_on_line` — which part of a line a selection
+    /// covers, and the empty-line case that used to come out as "nothing".
+    mod selection_spans {
+        use super::*;
+
+        // "alpha\n\nbeta\n": line 0 is 0..5, the empty line sits at 6, and
+        // line 2 is 7..11.
+        const BUFFER: &str = "alpha\n\nbeta\n";
+
+        fn span(from: usize, to: usize) -> Selection {
+            Selection::new(BUFFER, from, to).expect("valid range")
+        }
+
+        #[test]
+        fn an_empty_line_the_selection_passes_through_is_selected() {
+            assert_eq!(
+                selected_run_on_line(span(0, 11), 6, 0),
+                Some(0..0),
+                "a real answer: selected, with no text to measure"
+            );
+        }
+
+        #[test]
+        fn an_empty_line_the_selection_never_reaches_is_not_selected() {
+            assert_eq!(selected_run_on_line(span(0, 3), 6, 0), None);
+        }
+
+        /// The selection stops exactly where the empty line begins, so it
+        /// has consumed the previous line's newline and nothing of this one.
+        #[test]
+        fn a_selection_ending_where_an_empty_line_begins_does_not_claim_it() {
+            assert_eq!(selected_run_on_line(span(0, 6), 6, 0), None);
+        }
+
+        #[test]
+        fn an_empty_line_that_anchors_the_selection_is_selected() {
+            assert_eq!(selected_run_on_line(span(6, 11), 6, 0), Some(0..0));
+        }
+
+        #[test]
+        fn a_partly_selected_line_reports_only_the_selected_run() {
+            // Bytes 2..5 of "alpha" — "pha".
+            assert_eq!(selected_run_on_line(span(2, 5), 0, 5), Some(2..5));
+        }
+
+        #[test]
+        fn a_line_fully_inside_the_selection_reports_all_of_it() {
+            assert_eq!(selected_run_on_line(span(0, 11), 0, 5), Some(0..5));
+        }
+
+        #[test]
+        fn a_collapsed_selection_is_a_caret_and_selects_nothing() {
+            assert_eq!(selected_run_on_line(Selection::point(6), 6, 0), None);
+            assert_eq!(selected_run_on_line(Selection::point(2), 0, 5), None);
+        }
     }
 
     /// Tests for `diagnostic_underlines` — the span arithmetic that decides
