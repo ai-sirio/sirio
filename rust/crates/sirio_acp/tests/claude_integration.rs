@@ -9,6 +9,7 @@ use std::time::Duration;
 use futures::future::Either;
 use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch};
 use sirio_claude::FastMode;
+use sirio_acp::ThinkingDisplay;
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -351,6 +352,52 @@ fn a_cli_that_refuses_fast_mode_leaves_the_chip_where_it_was() {
             blocked_by: Some("Unknown setting: fastMode".into())
         }),
         "the chip stays where the session is and carries the CLI's own reason"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn the_thinking_display_is_unset_until_chosen_and_then_reports_the_choice() {
+    let (mut client, events) = launch("normal");
+    // Nothing reads the session's own value back, so before a choice the
+    // only honest answer is that none was made.
+    assert_eq!(client.thinking_display(), ThinkingDisplay::default());
+
+    client
+        .set_thinking_display(Some("omitted".into()))
+        .expect("the choice is accepted");
+    assert_eq!(
+        first_signal(&events, "ThinkingDisplayUpdate", Duration::from_secs(5)).as_deref(),
+        Some("ThinkingDisplayUpdate(omitted)")
+    );
+    assert_eq!(
+        client.thinking_display(),
+        ThinkingDisplay {
+            chosen: Some("omitted".into()),
+            unsupported: false
+        }
+    );
+
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_cli_that_does_not_know_the_thinking_verb_retires_the_control() {
+    let (mut client, events) = launch("no_thinking");
+    client
+        .set_thinking_display(Some("omitted".into()))
+        .expect("the choice is accepted");
+    assert_eq!(
+        first_signal(&events, "ThinkingDisplayUpdate", Duration::from_secs(5)).as_deref(),
+        Some("ThinkingDisplayUpdate(unsupported)")
+    );
+    assert_eq!(
+        client.thinking_display(),
+        ThinkingDisplay {
+            chosen: None,
+            unsupported: true
+        },
+        "the refusal retires the control rather than showing a choice that did not take"
     );
     client.shutdown().expect("clean shutdown");
 }

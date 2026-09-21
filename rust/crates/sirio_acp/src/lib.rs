@@ -278,6 +278,25 @@ impl ChatClient {
         }
     }
 
+    /// How much of the model's reasoning this session sends, where the
+    /// transport has such a thing.
+    #[must_use]
+    pub fn thinking_display(&self) -> Option<ThinkingDisplay> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Claude(client) => Some(client.thinking_display()),
+        }
+    }
+
+    /// Choose how much of the reasoning to receive; `None` leaves the
+    /// agent on its own answer.
+    pub fn set_thinking_display(&self, display: Option<String>) -> Result<()> {
+        match self {
+            Self::Acp(_) => Ok(()),
+            Self::Claude(client) => client.set_thinking_display(display),
+        }
+    }
+
     /// Turn fast mode on or off, where the transport has it.
     pub fn set_fast_mode(&self, enabled: bool) -> Result<()> {
         match self {
@@ -477,7 +496,22 @@ pub struct ImageAttachment {
 
 /// What a session says about fast mode. Re-exported because `sirio_ui`
 /// reads it and does not depend on `sirio_claude`.
-pub use sirio_claude::FastMode;
+pub use sirio_claude::{FastMode, THINKING_DISPLAYS};
+
+/// How much of the model's reasoning the session sends.
+///
+/// Unlike every other picker's state this is not read from the agent:
+/// neither the handshake nor `get_settings` reports the session's current
+/// thinking display, so all a surface can honestly know is what it has
+/// itself chosen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThinkingDisplay {
+    /// What this session chose, or `None` while nothing has been chosen.
+    pub chosen: Option<String>,
+    /// The agent refused the request — an older CLI — so the control is
+    /// not worth offering again.
+    pub unsupported: bool,
+}
 
 /// One slash command advertised by the agent.
 #[derive(Clone, Debug, Eq, PartialEq)]

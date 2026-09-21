@@ -45,6 +45,8 @@ pub(super) enum Command {
     SetEffort(Option<String>),
     /// Turn fast mode on or off.
     SetFastMode(bool),
+    /// Choose how much of the model's reasoning to receive.
+    SetThinkingDisplay(Option<String>),
     /// End the turn in flight.
     Cancel,
     /// Stop: close the CLI's stdin, wait for it, acknowledge.
@@ -116,6 +118,7 @@ pub(super) struct Shared {
     model_catalog: Mutex<Option<ModelCatalog>>,
     mode_catalog: Mutex<Option<ModeCatalog>>,
     fast_mode: Mutex<Option<FastMode>>,
+    thinking_display: Mutex<crate::ThinkingDisplay>,
     mcp_warnings: Mutex<Vec<String>>,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
@@ -140,6 +143,13 @@ impl Shared {
 
     pub(super) fn fast_mode(&self) -> Option<FastMode> {
         self.fast_mode.lock().ok().and_then(|f| f.clone())
+    }
+
+    pub(super) fn thinking_display(&self) -> crate::ThinkingDisplay {
+        self.thinking_display
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn mcp_warnings(&self) -> Vec<String> {
@@ -445,6 +455,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut turn_in_flight = false;
     let mut pending_model: HashMap<String, String> = HashMap::new();
     let mut pending_fast_mode: HashMap<String, bool> = HashMap::new();
+    let mut pending_thinking: HashMap<String, Option<String>> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
@@ -552,6 +563,35 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         if let CliMessage::ControlResponse(value) = &message
                             && let Some(envelope) = ControlEnvelope::parse(value)
                         {
+                            if let Some(display) =
+                                pending_thinking.remove(&envelope.request_id)
+                            {
+                                if let Ok(mut held) = shared.thinking_display.lock() {
+                                    match &envelope.error {
+                                        None => held.chosen = display.clone(),
+                                        // An older CLI does not know the
+                                        // verb. Retire the control rather
+                                        // than leave a button that does
+                                        // nothing.
+                                        Some(_) => held.unsupported = true,
+                                    }
+                                }
+                                let _ = event_tx
+                                    .send(AcpEvent::OtherSessionUpdate {
+                                        kind: match (&envelope.error, &display) {
+                                            (Some(_), _) => {
+                                                "ThinkingDisplayUpdate(unsupported)".to_string()
+                                            }
+                                            (None, Some(value)) => {
+                                                format!("ThinkingDisplayUpdate({value})")
+                                            }
+                                            (None, None) => {
+                                                "ThinkingDisplayUpdate(default)".to_string()
+                                            }
+                                        },
+                                    })
+                                    .await;
+                            }
                             if let Some(enabled) =
                                 pending_fast_mode.remove(&envelope.request_id)
                             {
@@ -841,6 +881,22 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the fast mode change".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::SetThinkingDisplay(display)) => {
+                        let id = next_request_id();
+                        pending_thinking.insert(id.clone(), display.clone());
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::set_thinking_display(&id, display.as_deref()),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the thinking display change".into(),
                             );
                         }
                     }

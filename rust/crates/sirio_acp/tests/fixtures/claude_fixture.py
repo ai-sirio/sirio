@@ -257,6 +257,18 @@ def main():
                     "session_id": SESSION_ID,
                     "uuid": "status-uuid",
                 })
+            elif subtype == "set_max_thinking_tokens":
+                if MODE == "no_thinking":
+                    send({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "Unknown control request subtype",
+                        },
+                    })
+                else:
+                    control_response(request_id, {})
             elif subtype == "apply_flag_settings":
                 if MODE == "no_fast_mode":
                     send({

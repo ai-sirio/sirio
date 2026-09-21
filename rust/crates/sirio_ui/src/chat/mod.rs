@@ -16,6 +16,7 @@ use gpui::{
 };
 use sirio_acp::{
     AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, FastMode,
+    THINKING_DISPLAYS, ThinkingDisplay,
     EffortChoice, EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
     ModelOption, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
@@ -1886,6 +1887,12 @@ pub struct Chat {
     /// every event the way `mode_catalog` is. `None` on a transport that
     /// has no such thing, which is how the chip is told not to draw.
     fast_mode: Option<FastMode>,
+    /// How much of the model's reasoning this session receives. Unlike
+    /// every other picker's state this is never read back from the agent —
+    /// nothing reports it — so it holds only what this chat has chosen.
+    thinking_display: Option<ThinkingDisplay>,
+    thinking_picker_open: bool,
+    thinking_picker_focus: FocusHandle,
     /// The slash popup was dismissed for the current `/token`.
     slash_dismissed: bool,
     /// The `/token` the popup state (dismissal, selection) belongs to; any
@@ -2156,6 +2163,9 @@ impl Chat {
             _event_task: None,
             available_commands: Vec::new(),
             fast_mode: None,
+            thinking_display: None,
+            thinking_picker_open: false,
+            thinking_picker_focus: cx.focus_handle().tab_stop(true),
             slash_dismissed: false,
             last_slash_token: None,
             slash_filter: popover::Filter::new(Vec::new()),
@@ -2906,6 +2916,7 @@ impl Chat {
             // `FastModeUpdate(...)` arrives the same way and for the same
             // reason: a re-read signal rather than an event variant.
             self.fast_mode = client.fast_mode();
+            self.thinking_display = client.thinking_display();
         }
         sirio_perf::event(perf_notification, cx.entity_id().as_u64());
         cx.notify();
@@ -3654,6 +3665,34 @@ impl Chat {
     fn accept_slash_command(&mut self, name: &str, cx: &mut Context<Self>) {
         self.slash_dismissed = true;
         self.set_composer_text(format!("/{name} "), cx);
+    }
+
+    /// Opens the thinking picker anchored to its chip.
+    fn toggle_thinking_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_picker_open = false;
+        self.mode_picker_open = false;
+        self.effort_picker_open = false;
+        self.context_popover_open = false;
+        self.thinking_picker_open = !self.thinking_picker_open;
+        if self.thinking_picker_open {
+            let focus = self.thinking_picker_focus.clone();
+            window.focus(&focus, cx);
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+            });
+        }
+        cx.notify();
+    }
+
+    /// Chooses how much reasoning to receive. `None` hands the question
+    /// back to the agent. The chip follows the client's cell, which moves
+    /// when the CLI agrees, not here.
+    fn select_thinking_display(&mut self, display: Option<String>, cx: &mut Context<Self>) {
+        self.thinking_picker_open = false;
+        if let Some(client) = &self.client {
+            let _ = client.set_thinking_display(display);
+        }
+        cx.notify();
     }
 
     /// Flips fast mode. The chip does not move here — it moves when the
@@ -6739,6 +6778,107 @@ impl Chat {
                     .child(div().text_color(label_colour).child("Fast"))
             });
 
+        // The thinking display. Drawn only while the transport has it and
+        // the CLI has not refused the verb; unset shows no value at all,
+        // because nothing reports the session's own and a word here would
+        // be one nobody read (F-CHAT-18's rule, as the effort track already
+        // applies it).
+        let thinking = self
+            .thinking_display
+            .clone()
+            .filter(|state| !state.unsupported)
+            .filter(|_| self.model_control_visible());
+        let thinking_control = thinking.clone().map(|state| {
+            let thinking_entity = entity.clone();
+            let chosen = state.chosen.clone();
+            div()
+                .id("thinking-chip")
+                .debug_selector(|| "thinking-chip".into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(24.0))
+                .px(px(7.0))
+                .rounded(theme.radii.control)
+                .text_size(typography.ui_size)
+                .hover(|style| style.bg(bezel_theme.element_hover))
+                .on_click(move |_, window, cx| {
+                    thinking_entity
+                        .update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
+                })
+                .child(div().text_color(theme.text_faint).child("Thinking"))
+                .when_some(chosen, |chip, chosen| {
+                    chip.child(
+                        div()
+                            .debug_selector(|| "thinking-chip-value".into())
+                            .text_color(theme.text)
+                            .child(thinking_display_name(&chosen).to_string()),
+                    )
+                })
+        });
+
+        let thinking_picker = self.thinking_picker_open.then(|| {
+            // The shared painter is bound further down, past this chip.
+            let view = bezel::motion::Painter::of(cx);
+            let chosen = thinking.and_then(|state| state.chosen);
+            popover::anchored_menu_above(
+                "thinking-picker-menu",
+                div()
+                    .id("thinking-picker")
+                    .debug_selector(|| "thinking-picker".into())
+                    .key_context("ChatThinkingPicker")
+                    .track_focus(&self.thinking_picker_focus)
+                    .on_action(cx.listener(Self::cancel))
+                    .w(px(200.0))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.thinking_picker_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        popover::popover_card(&bezel_theme).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                // The agent's own answer is a row, not the
+                                // absence of one: choosing it is how a user
+                                // undoes a choice they made.
+                                .children(thinking_rows().map(|value| {
+                                    let id = value.unwrap_or("default");
+                                    let row_entity = entity.clone();
+                                    let is_selected = chosen.as_deref() == value;
+                                    popover::menu_row_nav(
+                                        &bezel_theme,
+                                        is_selected,
+                                        false,
+                                        bezel::motion::Fade::new(
+                                            view,
+                                            format!("thinking-option-{id}"),
+                                        ),
+                                    )
+                                    .id(format!("thinking-option-{id}"))
+                                    .debug_selector(move || format!("thinking-option-{id}"))
+                                    .on_click(move |_, _, cx| {
+                                        row_entity.update(cx, |chat, cx| {
+                                            chat.select_thinking_display(
+                                                value.map(str::to_string),
+                                                cx,
+                                            );
+                                        });
+                                    })
+                                    .child(
+                                        value
+                                            .map_or("Agent's own", thinking_display_name)
+                                            .to_string(),
+                                    )
+                                })),
+                        ),
+                    )
+                    .into_any_element(),
+                None,
+            )
+        });
+
         // The effort selector, anchored to the chip above. A slider rather
         // than a row per level: effort is a scale, and the levels are the
         // session's own — `supportedEffortLevels` differs per model, so the
@@ -8163,6 +8303,13 @@ impl Chat {
                         .child(
                             div()
                                 .relative()
+                                .flex_none()
+                                .children(thinking_control)
+                                .children(thinking_picker),
+                        )
+                        .child(
+                            div()
+                                .relative()
                                 .flex()
                                 .flex_none()
                                 .items_center()
@@ -8313,6 +8460,25 @@ impl Focusable for Chat {
 /// The tooltip a command row carries: its description, trimmed, or nothing
 /// when the agent published none — an empty tooltip is a blank card that
 /// pops up for no reason.
+/// The rows the thinking picker offers: the agent's own answer first, then
+/// the CLI's own three, in the order it names them. The list is
+/// [`THINKING_DISPLAYS`] rather than a copy of it, so a CLI that grows a
+/// fourth grows a row here and not a silent gap.
+fn thinking_rows() -> impl Iterator<Item = Option<&'static str>> {
+    std::iter::once(None).chain(THINKING_DISPLAYS.iter().map(|value| Some(*value)))
+}
+
+/// A wire value as the picker spells it. A value this build has not met is
+/// shown as the CLI spells it rather than dropped: an odd row beats a gap.
+fn thinking_display_name(value: &str) -> &str {
+    match value {
+        "summarized" => "Summarized",
+        "highlights" => "Highlights",
+        "omitted" => "Hidden",
+        other => other,
+    }
+}
+
 fn slash_option_tooltip(description: &str) -> Option<SharedString> {
     let description = description.trim();
     (!description.is_empty()).then(|| SharedString::from(description.to_owned()))
@@ -17481,6 +17647,50 @@ let answer = 42;
     }
 
     /// The effort control is reachable as a peer, and it names itself.
+    #[gpui::test]
+    async fn the_thinking_chip_names_no_display_until_one_is_chosen(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        // ACP has no such control, and says so with `None`.
+        assert!(cx.debug_bounds("thinking-chip").is_none());
+
+        chat.update(cx, |chat, cx| {
+            chat.thinking_display = Some(ThinkingDisplay::default());
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("thinking-chip").is_some());
+        assert!(
+            cx.debug_bounds("thinking-chip-value").is_none(),
+            "neither the handshake nor get_settings reports the session's own \
+             display, so an unset chip names none rather than guessing one"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.thinking_display = Some(ThinkingDisplay {
+                chosen: Some("omitted".into()),
+                unsupported: false,
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("thinking-chip-value").is_some());
+
+        // Refused by the CLI: the control is retired, not left as a button
+        // that does nothing.
+        chat.update(cx, |chat, cx| {
+            chat.thinking_display = Some(ThinkingDisplay {
+                chosen: None,
+                unsupported: true,
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("thinking-chip").is_none());
+    }
+
     #[gpui::test]
     async fn the_fast_mode_chip_draws_only_when_the_session_reports_it(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);

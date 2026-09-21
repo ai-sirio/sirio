@@ -8,6 +8,11 @@
 
 use serde_json::{Value, json};
 
+/// How much of the model's reasoning the CLI sends, in the CLI's own
+/// spelling. Verified against claude 2.1.278 by being refused: anything
+/// outside this set and `null` comes back as an error naming the three.
+pub const THINKING_DISPLAYS: [&str; 3] = ["summarized", "highlights", "omitted"];
+
 /// The requests Sirio sends to the CLI, one constructor per verb. Each
 /// returns the complete line to write, including the envelope.
 pub struct ControlRequest;
@@ -86,6 +91,28 @@ impl ControlRequest {
             json!({
                 "subtype": "apply_flag_settings",
                 "settings": {"fastMode": enabled}
+            }),
+        )
+    }
+
+    /// Sets how much of the model's reasoning the CLI sends — one of
+    /// [`THINKING_DISPLAYS`], or `None` to leave the CLI on its own answer.
+    ///
+    /// The budget half of this request is always `null`. The effort picker
+    /// already governs how hard the model works; a second number beside it
+    /// would be two controls over one thing, disagreeing in public.
+    ///
+    /// Nothing reads this back: neither the handshake nor `get_settings`
+    /// reports the session's current display, so the surface knows only
+    /// what it has itself chosen.
+    #[must_use]
+    pub fn set_thinking_display(request_id: &str, display: Option<&str>) -> Value {
+        Self::envelope(
+            request_id,
+            json!({
+                "subtype": "set_max_thinking_tokens",
+                "max_thinking_tokens": Value::Null,
+                "thinking_display": display
             }),
         )
     }
@@ -374,6 +401,35 @@ mod tests {
             ControlRequest::set_fast_mode("req-fm-off", false)["request"],
             serde_json::json!({"subtype": "apply_flag_settings",
                 "settings": {"fastMode": false}})
+        );
+    }
+
+    #[test]
+    fn the_thinking_display_sends_the_three_words_the_cli_named_and_no_budget() {
+        // The accepted set is not documented anywhere; it came from the
+        // CLI's own refusal, verbatim on 2.1.278: "max_thinking_tokens
+        // must be an integer or null and thinking_display must be
+        // \"summarized\", \"omitted\", \"highlights\", or null".
+        for display in THINKING_DISPLAYS {
+            assert_eq!(
+                ControlRequest::set_thinking_display("req-t", Some(display))["request"],
+                serde_json::json!({
+                    "subtype": "set_max_thinking_tokens",
+                    "max_thinking_tokens": null,
+                    "thinking_display": display
+                })
+            );
+        }
+        // No budget of Sirio's: the effort picker already governs how hard
+        // the model works, and a second number beside it would be two
+        // controls over one thing.
+        assert_eq!(
+            ControlRequest::set_thinking_display("req-t-none", None)["request"],
+            serde_json::json!({
+                "subtype": "set_max_thinking_tokens",
+                "max_thinking_tokens": null,
+                "thinking_display": null
+            })
         );
     }
 
