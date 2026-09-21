@@ -23,6 +23,7 @@ than from elsewhere, so this directory stays one provenance.
 
 `eye.svg` and `code.svg` were added on 2026-09-20 under the same rule, from
 that same commit: the file editor's Markdown row names its two modes with
-them once Preview and Code stopped being text labels. `code.svg` carries
+them once Preview and Code stopped being text labels. `eye_off.svg` followed
+from that commit for the Files hidden-entry switch. `code.svg` carries
 width and height but no `viewBox`, exactly as upstream serves it — the same
 shape `public.svg`, `rotate_cw.svg` and `sparkle.svg` already have here.

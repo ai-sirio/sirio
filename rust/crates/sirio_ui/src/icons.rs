@@ -156,6 +156,8 @@ pub enum Icon {
     /// [`Icon::Code`]: the two are the whole Markdown mode switch, which
     /// carries no text label of its own.
     Eye,
+    /// Hide hidden entries in the Files tree (`zed/eye_off.svg`).
+    EyeOff,
     /// The file editor's Markdown Code mode (`zed/code.svg`), the other
     /// half of that pair.
     Code,
@@ -234,6 +236,7 @@ impl Icon {
             Icon::SquareMinus => "icons/zed/square_minus.svg",
             Icon::Undo => "icons/zed/undo.svg",
             Icon::Eye => "icons/zed/eye.svg",
+            Icon::EyeOff => "icons/zed/eye_off.svg",
             Icon::Code => "icons/zed/code.svg",
             Icon::FileType(name) => match name {
                 "audio" => "icons/file-types/audio.svg",
@@ -318,7 +321,9 @@ impl Icon {
             Icon::Thread => include_bytes!("../../../assets/icons/zed/thread.svg"),
             Icon::Diff => include_bytes!("../../../assets/icons/zed/diff.svg"),
             Icon::GitGraph => include_bytes!("../../../assets/icons/zed/git_graph.svg"),
-            Icon::MagnifyingGlass => include_bytes!("../../../assets/icons/zed/magnifying_glass.svg"),
+            Icon::MagnifyingGlass => {
+                include_bytes!("../../../assets/icons/zed/magnifying_glass.svg")
+            }
             Icon::DiffUnified => include_bytes!("../../../assets/icons/zed/diff_unified.svg"),
             Icon::DiffSplit => include_bytes!("../../../assets/icons/zed/diff_split.svg"),
             Icon::ExpandVertical => include_bytes!("../../../assets/icons/zed/expand_vertical.svg"),
@@ -327,6 +332,7 @@ impl Icon {
             Icon::SquareMinus => include_bytes!("../../../assets/icons/zed/square_minus.svg"),
             Icon::Undo => include_bytes!("../../../assets/icons/zed/undo.svg"),
             Icon::Eye => include_bytes!("../../../assets/icons/zed/eye.svg"),
+            Icon::EyeOff => include_bytes!("../../../assets/icons/zed/eye_off.svg"),
             Icon::Code => include_bytes!("../../../assets/icons/zed/code.svg"),
             Icon::FileType(name) => match name {
                 "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
@@ -699,7 +705,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 39] = [
+pub const ALL_ICONS: [Icon; 40] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -738,6 +744,7 @@ pub const ALL_ICONS: [Icon; 39] = [
     Icon::SquareMinus,
     Icon::Undo,
     Icon::Eye,
+    Icon::EyeOff,
     Icon::Code,
 ];
 
@@ -775,7 +782,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 29, "expected the zed icons to be walked, saw {checked}");
+        assert!(
+            checked >= 29,
+            "expected the zed icons to be walked, saw {checked}"
+        );
     }
 
     #[test]
@@ -850,6 +860,7 @@ mod tests {
             (Icon::SquareMinus, "icons/zed/square_minus.svg"),
             (Icon::Undo, "icons/zed/undo.svg"),
             (Icon::Eye, "icons/zed/eye.svg"),
+            (Icon::EyeOff, "icons/zed/eye_off.svg"),
             (Icon::Code, "icons/zed/code.svg"),
             (Icon::FolderOpen, "icons/zed/folder_open.svg"),
         ];
@@ -967,9 +978,9 @@ mod tests {
         assert_eq!(Icon::for_agent_id("gemini-acp"), Some(Icon::Gemini));
         assert_eq!(Icon::for_agent_id("grok"), Some(Icon::Grok));
         assert!(
-            !sirio_agents::ALL.iter().any(|adapter| {
-                matches!(adapter.id(), "gemini" | "grok")
-            }),
+            !sirio_agents::ALL
+                .iter()
+                .any(|adapter| { matches!(adapter.id(), "gemini" | "grok") }),
             "these marks are dormant: an adapter would need its own brand colour too"
         );
     }
@@ -1141,7 +1152,11 @@ mod tests {
                 icon.has_own_colours(),
                 is_chromatic,
                 "{icon:?} paints itself {} but is flagged {}",
-                if is_chromatic { "in colour" } else { "monochrome" },
+                if is_chromatic {
+                    "in colour"
+                } else {
+                    "monochrome"
+                },
                 icon.has_own_colours(),
             );
         }

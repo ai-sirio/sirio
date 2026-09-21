@@ -4,7 +4,7 @@
 
 use super::*;
 use bezel::motion::{Fade, Painter};
-use bezel::ui::popover;
+use bezel::ui::{popover, tooltip::Tooltip};
 use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, uniform_list,
 };
@@ -259,7 +259,10 @@ impl RightPanel {
                     panel.refresh_retry_task = None;
                 }
                 panel.updating = false;
-                sirio_perf::event("notify.RightPanel.refresh_complete", cx.entity_id().as_u64());
+                sirio_perf::event(
+                    "notify.RightPanel.refresh_complete",
+                    cx.entity_id().as_u64(),
+                );
                 if panel.refresh_dirty {
                     panel.request_refresh(cx);
                 }
@@ -455,11 +458,7 @@ impl RightPanel {
         for (label, selector) in entries {
             let action_entity = entity.clone();
             let action_path = path.clone();
-            let mut row = popover::menu_row(
-                &bezel_theme,
-                false,
-                Fade::new(painter, selector),
-            )
+            let mut row = popover::menu_row(&bezel_theme, false, Fade::new(painter, selector))
                 .id(selector)
                 .debug_selector(move || selector.to_owned())
                 .w_full()
@@ -525,8 +524,27 @@ impl RightPanel {
         cx.emit(RightPanelActionEvent::OpenDiff(relative_path));
     }
 
-    fn file_rows(&self) -> Vec<FileRow> {
-        self.flattened_file_rows.clone()
+    fn file_rows(&self, show_hidden: bool) -> Vec<FileRow> {
+        self.flattened_file_rows
+            .iter()
+            .filter(|row| {
+                show_hidden
+                    || !row
+                        .node
+                        .path
+                        .strip_prefix(&self.repo_root)
+                        .unwrap_or(&row.node.path)
+                        .components()
+                        .any(|component| {
+                            matches!(
+                                component,
+                                Component::Normal(name)
+                                    if name.to_string_lossy().starts_with('.')
+                            )
+                        })
+            })
+            .cloned()
+            .collect()
     }
 
     fn rebuild_file_rows(&mut self) {
@@ -718,7 +736,7 @@ impl RightPanel {
             self.close_file_context_menu(cx);
             return;
         }
-        let rows = self.file_rows();
+        let rows = self.file_rows(ShowHiddenFilesSetting::get(cx));
         if rows.is_empty() {
             return;
         }
@@ -766,7 +784,8 @@ impl RightPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows = self.file_rows();
+        let show_hidden = ShowHiddenFilesSetting::get(cx);
+        let rows = self.file_rows(show_hidden);
         let row_entity = entity.clone();
         let file_focus = self
             .file_focus
@@ -907,8 +926,74 @@ impl RightPanel {
                 this.child(files_refresh_indicator(window, cx))
             })
             .child(body)
+            .child(hidden_files_switch(show_hidden, entity, theme))
             .into_any_element()
     }
+}
+
+fn hidden_files_switch(
+    show_hidden: bool,
+    entity: gpui::Entity<RightPanel>,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .id("files-hidden-switch")
+        .debug_selector(|| "files-hidden-switch".to_owned())
+        .w_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap(px(2.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .child(hidden_files_option(
+            Icon::EyeOff,
+            "Hide hidden files",
+            "files-hide-hidden",
+            !show_hidden,
+            false,
+            entity.clone(),
+            theme,
+        ))
+        .child(hidden_files_option(
+            Icon::Eye,
+            "Show hidden files",
+            "files-show-hidden",
+            show_hidden,
+            true,
+            entity,
+            theme,
+        ))
+}
+
+fn hidden_files_option(
+    icon: Icon,
+    tooltip: &'static str,
+    id: &'static str,
+    active: bool,
+    show_hidden: bool,
+    entity: gpui::Entity<RightPanel>,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .w(px(28.0))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme.radii.chip)
+        .text_color(if active { theme.text } else { theme.text_faint })
+        .when(active, |this| this.bg(theme.element_active))
+        .hover(|style| style.bg(theme.element_hover))
+        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .on_click(move |_, _, cx| {
+            ShowHiddenFilesSetting::set(show_hidden, cx);
+            entity.update(cx, |_, cx| cx.notify());
+        })
+        .child(IconElement::new(icon, IconSize::Small))
 }
 
 fn files_refresh_indicator(window: &mut Window, cx: &mut App) -> AnyElement {
@@ -2156,10 +2241,8 @@ mod tests {
 
     #[test]
     fn the_files_tree_does_not_read_a_sibling_outside_its_root() {
-        let fixture = std::env::temp_dir().join(format!(
-            "sirio-files-roots-{}",
-            std::process::id()
-        ));
+        let fixture =
+            std::env::temp_dir().join(format!("sirio-files-roots-{}", std::process::id()));
         let root = fixture.join("project");
         let sibling = fixture.join("sibling");
         let _ = std::fs::remove_dir_all(&fixture);
@@ -2538,7 +2621,7 @@ mod tests {
         pump_until(&cx.cx, || {
             panel.read_with(&cx.cx, |panel, _| {
                 panel
-                    .file_rows()
+                    .file_rows(false)
                     .iter()
                     .any(|row| row.node.name == "from" && row.depth == 1)
             })
@@ -2565,7 +2648,10 @@ mod tests {
             pump_until(&cx.cx, || {
                 panel.read_with(&cx.cx, |panel, _| {
                     let wanted = panel.repo_root.join(opened);
-                    panel.file_rows().iter().any(|row| row.node.path == wanted)
+                    panel
+                        .file_rows(false)
+                        .iter()
+                        .any(|row| row.node.path == wanted)
                 })
             });
             cx.cx.run_until_parked();
@@ -2600,7 +2686,7 @@ mod tests {
         pump_until(&cx.cx, || {
             panel.read_with(&cx.cx, |panel, _| {
                 panel
-                    .file_rows()
+                    .file_rows(false)
                     .iter()
                     .any(|row| row.node.name == "also_mod.txt")
             })
@@ -2788,6 +2874,65 @@ mod tests {
         pump_until(&cx.cx, || panel.read_with(&cx.cx, |panel, _| panel.settled));
         cx.cx.run_until_parked();
         (cx, panel)
+    }
+
+    #[gpui::test]
+    async fn hidden_files_and_directories_are_omitted_by_default(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join(".secret"), "secret").expect("write hidden file");
+        std::fs::create_dir(dir.0.join(".config")).expect("create hidden directory");
+
+        let (mut cx, _panel) = settled_panel(cx, dir.0.clone());
+
+        assert!(
+            cx.debug_bounds("file-row").is_none(),
+            "a dotfile is hidden by default"
+        );
+        assert!(
+            cx.debug_bounds("file-directory-row").is_none(),
+            "a dot-directory is hidden by default"
+        );
+    }
+
+    #[gpui::test]
+    async fn files_footer_switches_hidden_entries_on_and_off(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join(".secret"), "secret").expect("write hidden file");
+        std::fs::create_dir(dir.0.join(".config")).expect("create hidden directory");
+
+        let (mut cx, _panel) = settled_panel(cx, dir.0.clone());
+        let show = cx
+            .debug_bounds("files-show-hidden")
+            .expect("the footer draws the show-hidden icon");
+        assert!(
+            cx.debug_bounds("files-hide-hidden").is_some(),
+            "the footer draws the hide-hidden icon"
+        );
+
+        cx.simulate_click(show.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-row").is_some(),
+            "showing hidden entries reveals dotfiles"
+        );
+        assert!(
+            cx.debug_bounds("file-directory-row").is_some(),
+            "showing hidden entries reveals dot-directories"
+        );
+
+        let hide = cx
+            .debug_bounds("files-hide-hidden")
+            .expect("the hide-hidden icon remains available");
+        cx.simulate_click(hide.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-row").is_none(),
+            "hiding hidden entries removes dotfiles again"
+        );
+        assert!(
+            cx.debug_bounds("file-directory-row").is_none(),
+            "hiding hidden entries removes dot-directories again"
+        );
     }
 
     /// The two events a real secondary click delivers, in order — gpui

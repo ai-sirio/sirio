@@ -299,6 +299,7 @@ impl Sidebar {
             Icon::GitGraph => "git-graph",
             Icon::MagnifyingGlass => "magnifying-glass",
             Icon::Eye => "eye",
+            Icon::EyeOff => "eye-off",
             Icon::Code => "code",
             Icon::FileType(_) => "file-type",
         }
