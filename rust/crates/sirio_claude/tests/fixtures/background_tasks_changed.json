@@ -1,0 +1,13 @@
+{
+  "type": "system",
+  "subtype": "background_tasks_changed",
+  "tasks": [
+    {
+      "task_id": "bm0k5s6eo",
+      "task_type": "local_bash",
+      "description": "Sleep 25 seconds then echo FINISHED"
+    }
+  ],
+  "uuid": "8d3ce355-2c3f-4b79-8488-013ce31ee36f",
+  "session_id": "5b1f1769-a18a-4205-8f44-fd3bd3c98b12"
+}

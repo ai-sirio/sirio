@@ -1,0 +1,11 @@
+{
+  "type": "system",
+  "subtype": "task_started",
+  "task_id": "bco2bmvux",
+  "tool_use_id": "toolu_011eUvQKr2fHYQbnd21omenv",
+  "description": "Print 8 lines with 2s pauses",
+  "is_backgrounded": false,
+  "task_type": "local_bash",
+  "uuid": "6edb34c7-f929-4091-883e-1e8d6b28fc89",
+  "session_id": "3438d4ec-c606-4a20-ab31-1dfc25d53cb2"
+}

@@ -1,0 +1,42 @@
+{
+  "type": "system",
+  "subtype": "compact_boundary",
+  "session_id": "3438d4ec-c606-4a20-ab31-1dfc25d53cb2",
+  "uuid": "fe5fcbd9-8267-4177-bbb9-8d935096fb15",
+  "compact_metadata": {
+    "trigger": "manual",
+    "pre_tokens": 43134,
+    "post_tokens": 11574,
+    "cumulative_dropped_tokens": 31560,
+    "duration_ms": 14026,
+    "pre_compact_discovered_tools": [
+      "mcp__claude_ai_Claude_Docs__batch",
+      "mcp__claude_ai_Claude_Docs__guide",
+      "mcp__claude_ai_Claude_Docs__update"
+    ],
+    "preserved_segment": {
+      "head_uuid": "3037b9e8-4602-466f-ac7f-17f54872c0fa",
+      "anchor_uuid": "60ff5b4b-4d44-4452-bc05-83f2a3ba2911",
+      "tail_uuid": "086f639a-91dc-4f71-97cf-4084115ea128"
+    },
+    "preserved_messages": {
+      "anchor_uuid": "60ff5b4b-4d44-4452-bc05-83f2a3ba2911",
+      "uuids": [
+        "3037b9e8-4602-466f-ac7f-17f54872c0fa",
+        "2cd0bbb8-d307-4b9d-8edb-49015f5c6288",
+        "b7fdc255-b466-43c5-9a4a-5ba679a4c630",
+        "f81ef8da-3d44-455d-814b-c71c0ecd1259",
+        "086f639a-91dc-4f71-97cf-4084115ea128"
+      ],
+      "all_uuids": [
+        "3037b9e8-4602-466f-ac7f-17f54872c0fa",
+        "2cd0bbb8-d307-4b9d-8edb-49015f5c6288",
+        "b7fdc255-b466-43c5-9a4a-5ba679a4c630",
+        "94f511ac-ee05-4688-8e9d-fc1f7730cb11",
+        "f81ef8da-3d44-455d-814b-c71c0ecd1259",
+        "086f639a-91dc-4f71-97cf-4084115ea128"
+      ]
+    }
+  },
+  "logical_parent_uuid": "086f639a-91dc-4f71-97cf-4084115ea128"
+}

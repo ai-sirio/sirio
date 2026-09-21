@@ -2257,6 +2257,13 @@ fn chat_entry_row(entry: &sirio_persistence::ChatEntry) -> BTreeMap<String, Stri
             row.insert("kind".into(), "turn".into());
             row.insert("text".into(), text.clone());
         }
+        // `kind` is already the stored spelling the chat wrote, so it is
+        // reported as-is: a socket reader learns what the transcript holds
+        // even for a notice kind this build predates.
+        sirio_persistence::ChatEntry::Notice { text, kind } => {
+            row.insert("kind".into(), kind.clone());
+            row.insert("text".into(), text.clone());
+        }
         sirio_persistence::ChatEntry::Error { message, .. } => {
             row.insert("kind".into(), "error".into());
             row.insert("text".into(), message.clone());

@@ -278,6 +278,25 @@ impl ChatClient {
         }
     }
 
+    /// Notices posted since the last read, draining them. Read on an
+    /// [`AcpEvent::OtherSessionUpdate`] named `SessionNotice`. The ACP
+    /// transport reports none: the protocol carries no equivalent.
+    pub fn take_notices(&self) -> Vec<SessionNotice> {
+        match self {
+            Self::Acp(_) => Vec::new(),
+            Self::Claude(client) => client.take_notices(),
+        }
+    }
+
+    /// How many background tasks are running, where the transport says.
+    #[must_use]
+    pub fn background_task_count(&self) -> usize {
+        match self {
+            Self::Acp(_) => 0,
+            Self::Claude(client) => client.background_task_count(),
+        }
+    }
+
     /// How much of the model's reasoning this session sends, where the
     /// transport has such a thing.
     #[must_use]
@@ -779,6 +798,43 @@ pub enum AcpEvent {
         operation: TimeoutOperation,
         /// The configured deadline.
         duration: Duration,
+    },
+}
+
+/// Something that happened to the session and belongs in the transcript at
+/// the point it happened, rather than in a corner of the chrome.
+///
+/// These ride a drainable queue rather than an [`AcpEvent`] variant on
+/// purpose: that enum is matched exhaustively by every consumer in the
+/// workspace, so widening it is a breaking change across crates. The
+/// signal is an [`AcpEvent::OtherSessionUpdate`] named `SessionNotice`,
+/// and the surface drains the queue when it sees one — which keeps the
+/// notices in stream order with the rows around them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionNotice {
+    /// The context window was compacted and part of the conversation is
+    /// no longer in it.
+    Compacted {
+        /// `manual` when the user asked for it, `auto` when the window
+        /// forced it. The second is the one worth reading.
+        trigger: Option<String>,
+        /// Context size in tokens before and after.
+        pre_tokens: Option<u64>,
+        post_tokens: Option<u64>,
+    },
+    /// A task that had been sent to the background reached its end.
+    BackgroundTaskEnded {
+        /// The CLI's own sentence, already written for a reader.
+        summary: String,
+    },
+    /// The plan stopped allowing turns.
+    RateLimited {
+        /// The CLI's own word for the refusal.
+        status: String,
+        /// Which window ran out, when it named one.
+        window: Option<String>,
+        /// When that window resets, in unix seconds.
+        resets_at: Option<i64>,
     },
 }
 

@@ -1,0 +1,11 @@
+{
+  "type": "system",
+  "subtype": "task_notification",
+  "task_id": "bm0k5s6eo",
+  "tool_use_id": "toolu_01HLZe3VKxzUomQUbAV53oTe",
+  "status": "completed",
+  "output_file": "/tmp/claude/session/tasks/bm0k5s6eo.output",
+  "summary": "Background command \"Sleep 25 seconds then echo FINISHED\" completed (exit code 0)",
+  "uuid": "a1179839-9eb2-4c89-924b-db1a9b851f94",
+  "session_id": "5b1f1769-a18a-4205-8f44-fd3bd3c98b12"
+}

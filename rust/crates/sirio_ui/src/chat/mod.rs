@@ -18,7 +18,7 @@ use sirio_acp::{
     AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, FastMode,
     THINKING_DISPLAYS, ThinkingDisplay,
     EffortChoice, EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
-    ModelOption, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    ModelOption, SessionNotice, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -827,6 +827,11 @@ enum Entry {
     },
     /// The muted timestamp/rule footer closing out one completed turn.
     TurnFooter(String),
+    /// A note about the session itself, placed where it happened: the
+    /// context was compacted, a background task ended, the plan ran out.
+    /// Sentence already written at ingestion, the way `TurnFooter` stores
+    /// its own rendered text.
+    Notice { text: String, kind: NoticeKind },
     /// A file-restore preview for one user turn: the dry-run answer, or
     /// the agent's refusal sentence when it cannot rewind. Never
     /// persisted — it describes a filesystem state, not a conversation.
@@ -915,6 +920,7 @@ impl Entry {
                 .collect::<Vec<_>>()
                 .join("\n"),
             Self::TurnFooter(text) => text.clone(),
+            Self::Notice { text, .. } => text.clone(),
             Self::RewindPreview {
                 files,
                 insertions,
@@ -1108,6 +1114,18 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                 .collect(),
         }),
         Entry::TurnFooter(text) => Some(ChatEntry::TurnFooter { text: text.clone() }),
+        // A warning describes the account as it is right now, not the
+        // conversation. Restoring "the plan ran out" into a transcript
+        // reopened tomorrow would state something that is no longer true —
+        // the same reason a rewind card is not persisted either.
+        Entry::Notice {
+            kind: NoticeKind::Warning,
+            ..
+        } => None,
+        Entry::Notice { text, kind } => Some(ChatEntry::Notice {
+            text: text.clone(),
+            kind: kind.stored().to_string(),
+        }),
         // A rewind card describes a filesystem state at a moment in time,
         // not the conversation: restoring it later would present a stale
         // restore as a live one.
@@ -1119,6 +1137,17 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             retryable: *retryable,
         }),
     }
+}
+
+/// Token counts, short enough to sit in a one-line rule. Rounded rather
+/// than truncated: the number is context to a reader, not an accounting.
+fn thousands(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let thousands = (tokens as f64 / 1_000.0).round() as u64;
+    format!("{thousands}k")
 }
 
 fn is_terminal_tool_status(status: &str) -> bool {
@@ -1256,11 +1285,55 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             approval: None,
         },
         ChatEntry::TurnFooter { text } => Entry::TurnFooter(text),
+        ChatEntry::Notice { text, kind } => Entry::Notice {
+            text,
+            // A kind written by a newer build restores as the plainest of
+            // the three rather than refusing the transcript around it.
+            kind: match kind.as_str() {
+                "compaction" => NoticeKind::Compaction,
+                "warning" => NoticeKind::Warning,
+                _ => NoticeKind::BackgroundTask,
+            },
+        },
         ChatEntry::Error { message, retryable } => Entry::Error {
             message,
             retryable,
             kind: ErrorKind::Connection,
         },
+    }
+}
+
+/// How a [`Entry::Notice`] draws, and whether it is worth keeping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoticeKind {
+    /// The context window was compacted: a rule across the transcript,
+    /// because everything above it is no longer fully in the session.
+    Compaction,
+    /// A background task reached its end: a muted line.
+    BackgroundTask,
+    /// Something is wrong right now — the plan ran out of room. Drawn in
+    /// the warning colour and, unlike the other two, never persisted.
+    Warning,
+}
+
+impl NoticeKind {
+    /// The stored spelling. Round-trips through
+    /// [`sirio_persistence::ChatEntry::Notice`].
+    fn stored(self) -> &'static str {
+        match self {
+            Self::Compaction => "compaction",
+            Self::BackgroundTask => "task",
+            Self::Warning => "warning",
+        }
+    }
+
+    /// The selector half naming this kind, for tests and for the row.
+    fn selector(self) -> &'static str {
+        match self {
+            Self::Compaction => "notice-compaction",
+            Self::BackgroundTask => "notice-task",
+            Self::Warning => "notice-warning",
+        }
     }
 }
 
@@ -1915,6 +1988,11 @@ pub struct Chat {
     /// every event the way `mode_catalog` is. `None` on a transport that
     /// has no such thing, which is how the chip is told not to draw.
     fast_mode: Option<FastMode>,
+    /// How many background tasks the session says are running, re-read the
+    /// same way. The list the CLI sends drains as each task ends — and it
+    /// drains *before* the notice announcing the end — so this counts what
+    /// is still running and says nothing about what finished.
+    background_tasks: usize,
     /// How much of the model's reasoning this session receives. Unlike
     /// every other picker's state this is never read back from the agent —
     /// nothing reports it — so it holds only what this chat has chosen.
@@ -2196,6 +2274,7 @@ impl Chat {
             _event_task: None,
             available_commands: Vec::new(),
             fast_mode: None,
+            background_tasks: 0,
             thinking_display: None,
             thinking_picker_open: false,
             thinking_picker_focus: cx.focus_handle().tab_stop(true),
@@ -2248,6 +2327,53 @@ impl Chat {
     }
 
     /// Add one transcript row and keep the virtualizer's index tree in sync.
+    /// Turns one notice into the row it belongs in, at the point in the
+    /// transcript where it arrived.
+    fn apply_notice(&mut self, notice: SessionNotice) {
+        let entry = match notice {
+            SessionNotice::Compacted {
+                trigger,
+                pre_tokens,
+                post_tokens,
+            } => {
+                let headline = if trigger.as_deref() == Some("manual") {
+                    "Context compacted"
+                } else {
+                    // An automatic compaction is something that happened
+                    // *to* the conversation, so it is worth naming as such.
+                    "Context compacted automatically"
+                };
+                let text = match (pre_tokens, post_tokens) {
+                    (Some(before), Some(after)) => {
+                        format!("{headline} · {} → {}", thousands(before), thousands(after))
+                    }
+                    _ => headline.to_string(),
+                };
+                Entry::Notice {
+                    text,
+                    kind: NoticeKind::Compaction,
+                }
+            }
+            // Already a sentence written for a reader. Rewording it could
+            // only make it say something the task did not do.
+            SessionNotice::BackgroundTaskEnded { summary } => Entry::Notice {
+                text: summary,
+                kind: NoticeKind::BackgroundTask,
+            },
+            SessionNotice::RateLimited { window, .. } => {
+                let text = match window {
+                    Some(window) => format!("Usage limit reached ({window})"),
+                    None => "Usage limit reached".to_string(),
+                };
+                Entry::Notice {
+                    text,
+                    kind: NoticeKind::Warning,
+                }
+            }
+        };
+        self.push_entry(entry);
+    }
+
     fn push_entry(&mut self, entry: Entry) {
         let index = self.entries.len();
         self.turn_message_ids.push(None);
@@ -2937,6 +3063,18 @@ impl Chat {
                     _ => {}
                 }
             }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "SessionNotice" => {
+                // Drained here rather than re-read as a snapshot: these are
+                // rows, and where they land in the transcript is the point.
+                let notices = self
+                    .client
+                    .as_ref()
+                    .map(ChatClient::take_notices)
+                    .unwrap_or_default();
+                for notice in notices {
+                    self.apply_notice(notice);
+                }
+            }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
@@ -2950,6 +3088,8 @@ impl Chat {
             // `FastModeUpdate(...)` arrives the same way and for the same
             // reason: a re-read signal rather than an event variant.
             self.fast_mode = client.fast_mode();
+            // As does `BackgroundTasksUpdate(n)`.
+            self.background_tasks = client.background_task_count();
             self.thinking_display = client.thinking_display();
         }
         sirio_perf::event(perf_notification, cx.entity_id().as_u64());
@@ -6217,6 +6357,43 @@ impl Chat {
                 )
                 .child(div().h(px(1.0)).flex_1().bg(theme.border))
                 .into_any_element(),
+            Entry::Notice { text, kind } => {
+                let selector = kind.selector();
+                match kind {
+                    // A compaction is drawn across the whole width, like a
+                    // turn footer: what it says applies to everything above
+                    // it, not to the row beside it.
+                    NoticeKind::Compaction => div()
+                        .w_full()
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .debug_selector(move || selector.into())
+                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
+                        .child(
+                            div()
+                                .text_size(typography.footnote)
+                                .text_color(theme.text_faint)
+                                .child(text.clone()),
+                        )
+                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
+                        .into_any_element(),
+                    NoticeKind::BackgroundTask | NoticeKind::Warning => div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .debug_selector(move || selector.into())
+                        .text_size(typography.footnote)
+                        .text_color(if kind == NoticeKind::Warning {
+                            theme.warning
+                        } else {
+                            theme.text_faint
+                        })
+                        .child(text.clone())
+                        .into_any_element(),
+                }
+            }
             Entry::Error {
                 message,
                 retryable,
@@ -6917,6 +7094,39 @@ impl Chat {
                     })
                     .child(div().text_color(label_colour).child("Fast"))
             });
+
+        // Background tasks: a count, not a list. The CLI sends the whole
+        // running set on every change and drains it as each task ends, so
+        // this is only ever "how many are still going" — what *finished*
+        // arrives separately, as a notice in the transcript, because the
+        // list is already empty by the time that is known.
+        let background_tasks = (self.background_tasks > 0).then(|| {
+            let running = self.background_tasks;
+            div()
+                .id("background-tasks-chip")
+                .debug_selector(|| "background-tasks-chip".into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(24.0))
+                .px(px(7.0))
+                .rounded(theme.radii.control)
+                .text_size(typography.ui_size)
+                .text_color(theme.text_faint)
+                .tooltip(move |window, cx| {
+                    Tooltip::text(
+                        SharedString::from(if running == 1 {
+                            "1 background task running".to_string()
+                        } else {
+                            format!("{running} background tasks running")
+                        }),
+                        window,
+                        cx,
+                    )
+                })
+                .child(format!("⌁ {running}"))
+        });
 
         // The thinking display. Drawn only while the transport has it and
         // the CLI has not refused the verb; unset shows no value at all,
@@ -8440,6 +8650,7 @@ impl Chat {
                                 .children(effort_picker),
                         )
                         .child(div().relative().flex_none().children(fast_control))
+                        .child(div().relative().flex_none().children(background_tasks))
                         .child(
                             div()
                                 .relative()
@@ -8557,6 +8768,10 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
         }
         Entry::TurnFooter(text) => {
             row.insert("kind".into(), "turn".into());
+            row.insert("text".into(), text.clone());
+        }
+        Entry::Notice { text, kind } => {
+            row.insert("kind".into(), kind.stored().into());
             row.insert("text".into(), text.clone());
         }
         Entry::RewindPreview { .. } => {
@@ -17841,6 +18056,135 @@ let answer = 42;
         });
         refresh_frame(cx);
         assert!(cx.debug_bounds("thinking-chip").is_none());
+    }
+
+    #[gpui::test]
+    async fn a_compaction_is_drawn_where_it_happened(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("notice-compaction").is_none());
+
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(SessionNotice::Compacted {
+                trigger: Some("auto".into()),
+                pre_tokens: Some(43_134),
+                post_tokens: Some(11_574),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("notice-compaction").is_some(),
+            "a compaction dropped part of the conversation and must leave a mark"
+        );
+        let text = chat.read_with(cx, |chat, _| match chat.entries.last() {
+            Some(Entry::Notice { text, .. }) => text.clone(),
+            other => panic!("expected a notice entry, got {other:?}"),
+        });
+        // Both sizes, so the reader can see how much went.
+        assert!(text.contains("43k"), "{text}");
+        assert!(text.contains("12k"), "{text}");
+    }
+
+    #[gpui::test]
+    async fn a_finished_background_task_repeats_the_clis_own_sentence(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded {
+                summary: "Background command \"build\" completed (exit code 0)".into(),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("notice-task").is_some());
+        let text = chat.read_with(cx, |chat, _| match chat.entries.last() {
+            Some(Entry::Notice { text, .. }) => text.clone(),
+            other => panic!("expected a notice entry, got {other:?}"),
+        });
+        // The CLI already wrote this for a reader; rewording it would only
+        // risk saying something the task did not do.
+        assert_eq!(text, "Background command \"build\" completed (exit code 0)");
+    }
+
+    #[gpui::test]
+    async fn a_rate_limit_warns_and_names_the_window(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(SessionNotice::RateLimited {
+                status: "rejected".into(),
+                window: Some("five_hour".into()),
+                resets_at: None,
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("notice-warning").is_some());
+    }
+
+    #[gpui::test]
+    async fn only_what_happened_to_the_conversation_survives_a_reopen(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        chat.update(cx, |chat, _| {
+            chat.apply_notice(SessionNotice::Compacted {
+                trigger: Some("auto".into()),
+                pre_tokens: Some(1_000),
+                post_tokens: Some(100),
+            });
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded {
+                summary: "done".into(),
+            });
+            chat.apply_notice(SessionNotice::RateLimited {
+                status: "rejected".into(),
+                window: None,
+                resets_at: None,
+            });
+        });
+        let kept: Vec<bool> = chat.read_with(cx, |chat, _| {
+            chat.entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Notice { .. }))
+                .map(|entry| persisted_entry(entry).is_some())
+                .collect()
+        });
+        // A compaction and a finished task are things that happened to the
+        // conversation. A rate limit is a fact about the account right now,
+        // and reopening the tab tomorrow under it would be a lie — the same
+        // reason a rewind card is not persisted either.
+        assert_eq!(kept, vec![true, true, false]);
+    }
+
+    #[gpui::test]
+    async fn the_toolbar_counts_only_the_tasks_still_running(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("background-tasks-chip").is_none());
+
+        chat.update(cx, |chat, cx| {
+            chat.background_tasks = 2;
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("background-tasks-chip").is_some());
+
+        chat.update(cx, |chat, cx| {
+            chat.background_tasks = 0;
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("background-tasks-chip").is_none(),
+            "nothing is running, so there is nothing to count"
+        );
     }
 
     #[gpui::test]
