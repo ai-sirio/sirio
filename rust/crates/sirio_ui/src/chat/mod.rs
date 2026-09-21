@@ -1391,6 +1391,34 @@ impl ComposerContextItem {
     }
 }
 
+/// The transcript's secondary-click menu, in display order: Copy reads the
+/// current transcript selection (a no-op when nothing is selected), Select
+/// All selects the whole transcript so a following Copy always has
+/// something to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptContextItem {
+    Copy,
+    SelectAll,
+}
+
+impl TranscriptContextItem {
+    const ALL: [Self; 2] = [Self::Copy, Self::SelectAll];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::SelectAll => "Select All",
+        }
+    }
+
+    fn selector(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::SelectAll => "select-all",
+        }
+    }
+}
+
 /// A host-owned action requested by an edit-summary card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
@@ -1915,6 +1943,11 @@ pub struct Chat {
     /// The composer's secondary-click Cut / Copy / Paste menu, at the
     /// window point it was opened from.
     composer_context_menu: popover::Popup<gpui::Point<Pixels>>,
+    /// The transcript's secondary-click Copy / Select All menu, at the
+    /// window point it was opened from. The transcript previously had no
+    /// secondary-click handling at all, so agent output could only be
+    /// copied through the hover Copy control or the Ctrl/Cmd-C chord.
+    transcript_context_menu: popover::Popup<gpui::Point<Pixels>>,
     /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
     overflow_focus: FocusHandle,
@@ -2176,6 +2209,7 @@ impl Chat {
             attach_error: None,
             attach_task: None,
             composer_context_menu: popover::Popup::default(),
+            transcript_context_menu: popover::Popup::default(),
             overflow_open: false,
             history_open: false,
             history_sessions: Vec::new(),
@@ -3905,6 +3939,7 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_transcript_context_menu(cx);
         self.composer_field
             .read(cx)
             .focus_handle(cx)
@@ -3989,6 +4024,111 @@ impl Chat {
         });
         popover::menu_at(
             "composer-context-menu-layer",
+            position,
+            card.into_any_element(),
+            closing,
+        )
+    }
+
+    // --- Transcript context menu (right-click Copy / Select All) ---
+
+    /// Secondary click on the transcript: the Copy / Select All menu at the
+    /// pointer. The transcript takes focus so the Ctrl/Cmd-C chord keeps
+    /// working after the click, and whatever is already selected is kept —
+    /// a right-click must never clear a drag selection the menu is about
+    /// to copy.
+    fn open_transcript_context_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_composer_context_menu(cx);
+        self.transcript_focus.focus(window, cx);
+        self.transcript_context_menu.open(position);
+        cx.notify();
+    }
+
+    fn close_transcript_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.transcript_context_menu.begin_close() {
+            popover::reap_popup(cx, |chat| &mut chat.transcript_context_menu);
+            cx.notify();
+        }
+    }
+
+    /// Selects the whole transcript, so a following Copy always has
+    /// something to read even when the drag never started one.
+    fn select_all_transcript(&mut self, cx: &mut Context<Self>) {
+        let len = self.transcript_text().len();
+        if len > 0 {
+            self.transcript_selection = Some(TranscriptSelection {
+                anchor: 0,
+                head: len,
+            });
+        }
+        cx.notify();
+    }
+
+    /// One chosen item: Copy reads the current transcript selection through
+    /// the same path as the Ctrl/Cmd-C chord; Select All selects everything.
+    fn transcript_context_action(
+        &mut self,
+        item: TranscriptContextItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_transcript_context_menu(cx);
+        self.transcript_focus.focus(window, cx);
+        match item {
+            TranscriptContextItem::Copy => self.copy_transcript(&CopyTranscript, window, cx),
+            TranscriptContextItem::SelectAll => self.select_all_transcript(cx),
+        }
+    }
+
+    fn render_transcript_context_menu(
+        &self,
+        bezel_theme: &bezel::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let position = *self
+            .transcript_context_menu
+            .get()
+            .expect("mounted transcript context menu");
+        let closing = self.transcript_context_menu.closing_since();
+        let painter = bezel::motion::Painter::of(cx);
+        let entity = cx.entity();
+        let mut card = popover::popover_card(bezel_theme)
+            .id("transcript-context-menu")
+            .debug_selector(|| "transcript-context-menu".into())
+            .w(px(160.0));
+        for item in TranscriptContextItem::ALL {
+            let selector = format!("transcript-context-{}", item.selector());
+            let row_entity = entity.clone();
+            let row_selector = selector.clone();
+            card = card.child(
+                popover::menu_row(
+                    bezel_theme,
+                    false,
+                    bezel::motion::Fade::new(painter, selector.clone()),
+                )
+                .id(SharedString::from(selector))
+                .debug_selector(move || row_selector.clone())
+                .w_full()
+                .min_h(px(29.0))
+                .text_color(bezel_theme.text)
+                .on_click(move |_, window, cx| {
+                    row_entity.update(cx, |chat, cx| {
+                        chat.transcript_context_action(item, window, cx)
+                    });
+                })
+                .child(item.label()),
+            );
+        }
+        let card = card.on_mouse_down_out(move |_, _, cx| {
+            entity.update(cx, |chat, cx| chat.close_transcript_context_menu(cx));
+        });
+        popover::menu_at(
+            "transcript-context-menu-layer",
             position,
             card.into_any_element(),
             closing,
@@ -8526,6 +8666,10 @@ impl Render for Chat {
         // render (the composer disabling itself already forces one) stops
         // offering the drop target.
         let can_accept_drop = self.can_accept_drop();
+        let transcript_context_menu = self
+            .transcript_context_menu
+            .get()
+            .map(|_| self.render_transcript_context_menu(&bezel_theme, cx));
 
         div()
             .id("chat-root")
@@ -8565,6 +8709,13 @@ impl Render for Chat {
                     .track_focus(&self.transcript_focus)
                     .on_action(cx.listener(Self::copy_transcript))
                     .on_key_down(cx.listener(Self::on_transcript_key))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_transcript_context_menu(event.position, window, cx);
+                        }),
+                    )
                     .child(
                         list(
                             self.list_state.clone(),
@@ -8946,6 +9097,7 @@ impl Render for Chat {
             // The turn rail, over the root's left margin; last, so it sits
             // above everything it is laid over.
             .child(self.render_turn_rail(&bezel_theme, cx))
+            .children(transcript_context_menu)
     }
 }
 
@@ -18808,6 +18960,81 @@ let answer = 42;
             cx.cx.read_from_clipboard().and_then(|item| item.text()),
             Some("hello bold world".into()),
             "Cmd+C copies what the drag selected"
+        );
+    }
+
+    /// Right-click on the transcript draws its Copy / Select All menu, and
+    /// each acts on the transcript selection: Copy reads it through the
+    /// same path as the chord, Select All selects everything.
+    #[gpui::test]
+    async fn transcript_right_click_menu_copies_and_selects_all(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Assistant {
+                text: "hello **bold** world".into(),
+                document: parse_chat_markdown("hello **bold** world"),
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the response is drawn");
+        let y = response.top() + px(8.0);
+        let start = point(response.left() + px(1.0), y);
+        let end = point(response.left() + px(250.0), y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text()),
+            Some("hello bold world".into()),
+            "the drag selects before the menu is opened"
+        );
+
+        right_click(cx, end);
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("transcript-context-menu").is_some(),
+            "right-click on the transcript draws its context menu"
+        );
+        assert!(cx.debug_bounds("transcript-context-copy").is_some());
+        assert!(cx.debug_bounds("transcript-context-select-all").is_some());
+
+        choose_composer_context_item(cx, "transcript-context-copy");
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello bold world".into()),
+            "Copy writes the transcript selection"
+        );
+        assert!(
+            cx.debug_bounds("transcript-context-menu").is_none(),
+            "choosing an item closes the menu"
+        );
+
+        // Select All path: clear the selection, then let the menu rebuild it.
+        chat.update(cx, |chat, _| {
+            chat.transcript_selection = None;
+        });
+        right_click(cx, end);
+        refresh_frame(cx);
+        choose_composer_context_item(cx, "transcript-context-select-all");
+        let full = chat.read_with(&cx.cx, |chat, _| chat.transcript_text());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text()),
+            Some(full),
+            "Select All selects the whole transcript"
         );
     }
 }
