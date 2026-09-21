@@ -196,9 +196,12 @@ impl ClaudeClient {
             .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
     }
 
-    /// The Claude session id, once a turn has named it. `None` before the
-    /// first turn: unlike ACP, this protocol has no session to create, so
-    /// the id does not exist until the CLI opens one.
+    /// The Claude session id, named at launch rather than by the first
+    /// turn: Sirio mints it before the child exists and passes it as
+    /// `--session-id`, which is what makes a tab resumable even if the CLI
+    /// dies before writing an `init` line. The CLI stays the authority —
+    /// an `init` naming another session overwrites it. `None` only before
+    /// the first launch attempt.
     #[must_use]
     pub fn session_id(&self) -> Option<String> {
         self.shared.session_id()
