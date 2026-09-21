@@ -5845,6 +5845,27 @@ impl SirioWorkspace {
                 .map(PathBuf::from),
         );
         paths.retain(|path| !is_excluded(path));
+        // A worktree is never actually unmounted: `mounted` is monotonic
+        // (`ControlState::preserve_runtime_state_from` only ever ORs it in),
+        // so a checkout opened once stays "mounted" for the life of the
+        // process. `refresh_project_with_mounted_worktrees` reads that as a
+        // reason to keep a row git no longer reports -- which turns a
+        // worktree removed from a shell into a catalog row that the next
+        // `schedule_catalog` persists and nothing ever prunes.
+        //
+        // So a path counts as mounted only while it still is one: the
+        // checkout is on disk, or something of ours is still live in it --
+        // which is the guarantee the retention rule was written for, and
+        // keeps an agent's row reachable even after its checkout is deleted
+        // from under it. Both consumers see this: the catalog refresh, which
+        // is where the ghost grew, and `precache_files_snapshots`, which
+        // cannot walk a directory that is gone anyway.
+        paths.retain(|path| {
+            path.is_dir()
+                || self
+                    .terminal_pane_cache
+                    .has_in_worktree(&path.to_string_lossy())
+        });
         paths
     }
 
@@ -32143,6 +32164,191 @@ done
                     .current_workspace()
                     .map(|workspace| workspace.path.clone()),
                 Some(repo.to_string_lossy().into_owned())
+            );
+        });
+    }
+
+    /// The user's own database carried a worktree row whose checkout was
+    /// gone from disk and which `git worktree list` no longer reported, and
+    /// the sidebar kept drawing it. This is the shape that produces it: a
+    /// worktree is opened once (mount is sticky), removed from a shell
+    /// behind Sirio's back, and the next refresh keeps it as a "mounted"
+    /// row -- then persists it.
+    #[gpui::test]
+    async fn a_worktree_removed_behind_sirios_back_leaves_the_sidebar(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("external-remove-ghost");
+        let branch = "ghost-external";
+        let removed_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-external-remove-ghost-worktree");
+        let _ = std::fs::remove_dir_all(&removed_path);
+        sirio_git::create_worktree(&repo, branch, &removed_path, None)
+            .expect("create the fixture worktree");
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: branch.into(),
+                        path: removed_path.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            // An agent run: the worktree is visited, then the user goes back
+            // to the primary checkout.
+            workspace
+                .select_worktree(removed_path.clone(), None, cx)
+                .expect("select the worktree");
+            workspace
+                .select_worktree(repo.clone(), None, cx)
+                .expect("select the primary checkout back");
+        });
+
+        // herdr -- or any shell -- removes the checkout.
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                removed_path.to_str().expect("fixture path is utf-8"),
+            ],
+        );
+
+        // What window-focus regain does.
+        workspace.update(cx, |workspace, cx| {
+            workspace.refresh_project_for_path(&repo, cx);
+        });
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace.sidebar_projects().iter().any(|project| project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == removed_path)),
+                "a checkout git no longer reports must not stay in the sidebar"
+            );
+        });
+    }
+
+    /// And once such a row exists, removing it *through Sirio* must clear
+    /// it: git has nothing left to remove, so the removal fails, and the
+    /// catalog refresh is the only thing that can drop the row.
+    #[gpui::test]
+    async fn removing_an_already_gone_worktree_clears_its_sidebar_row(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("stale-remove-ghost");
+        let branch = "ghost-stale";
+        let removed_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-stale-remove-ghost-worktree");
+        let _ = std::fs::remove_dir_all(&removed_path);
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    // The stale row restored from the database.
+                    session::CatalogWorktree {
+                        branch: branch.into(),
+                        path: removed_path.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.handle_sidebar_event(
+                &SidebarEvent::WorktreeRemoved {
+                    project_id: "worktree-state-project".into(),
+                    path: removed_path.clone(),
+                },
+                cx,
+            );
+        });
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace.sidebar_projects().iter().any(|project| project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == removed_path)),
+                "removing a stale row must clear it from the sidebar"
+            );
+        });
+    }
+
+    /// And the row already sitting in the database heals itself: no removal
+    /// action, just the ordinary refresh a selection or a window-focus
+    /// regain runs. This is the state a user is left in by the bug above --
+    /// a persisted worktree whose checkout git never reports again.
+    #[gpui::test]
+    async fn a_stale_worktree_restored_from_the_database_is_pruned_by_a_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("stale-restore-prune");
+        let stale_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-stale-restore-prune-worktree");
+        let _ = std::fs::remove_dir_all(&stale_path);
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: "task/silenced".into(),
+                        path: stale_path.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.refresh_project_for_path(&repo, cx);
+        });
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace.sidebar_projects().iter().any(|project| project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == stale_path)),
+                "a stale persisted row must not survive an ordinary refresh"
             );
         });
     }
