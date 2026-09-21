@@ -142,7 +142,11 @@ def advertise():
         {
             "sessionUpdate": "available_commands_update",
             "availableCommands": [
-                {"name": "cr", "description": "Code review the diff"},
+                {
+                    "name": "cr",
+                    "description": "Code review the diff",
+                    "input": {"hint": "<pr#>|<branch>"},
+                },
                 {"name": "create-plan", "description": "Draft an implementation plan"},
                 {"name": "research", "description": "Research a topic"},
             ],

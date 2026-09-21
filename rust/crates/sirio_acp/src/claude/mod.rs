@@ -216,6 +216,33 @@ impl ClaudeClient {
         self.shared.model_catalog()
     }
 
+    /// What the session says about fast mode, or `None` when it never
+    /// mentioned it — an older CLI, or a build that has no such feature.
+    #[must_use]
+    pub fn fast_mode(&self) -> Option<sirio_claude::FastMode> {
+        self.shared.fast_mode()
+    }
+
+    /// Turn fast mode on or off. The cell only moves once the CLI agrees.
+    pub fn set_fast_mode(&self, enabled: bool) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::SetFastMode(enabled))
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// What this session chose for the reasoning it receives.
+    #[must_use]
+    pub fn thinking_display(&self) -> crate::ThinkingDisplay {
+        self.shared.thinking_display()
+    }
+
+    /// Choose it. The cell only moves once the CLI agrees.
+    pub fn set_thinking_display(&self, display: Option<String>) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::SetThinkingDisplay(display))
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
     /// The mode selector, re-read live: `set_permission_mode` and the CLI's
     /// own `system/status` both land here.
     #[must_use]

@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::future::Either;
-use sirio_acp::{AcpEvent, ClaudeClient, ClaudeLaunch};
+use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch};
+use sirio_claude::FastMode;
+use sirio_acp::ThinkingDisplay;
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -41,6 +43,35 @@ fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
             Either::Right((_, _)) => panic!("fixture did not emit an event within sixty seconds"),
         }
     })
+}
+
+/// The first re-read signal whose name starts with `prefix`, on a short
+/// budget. It reads the stream once, so a test can say *which* signal
+/// arrived rather than draining the stream asking after each in turn.
+fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let receive = events.recv();
+        let timer = async_io::Timer::after(remaining);
+        let got = futures::executor::block_on(async move {
+            futures::pin_mut!(receive, timer);
+            match futures::future::select(receive, timer).await {
+                Either::Left((event, _)) => event.ok(),
+                Either::Right((_, _)) => None,
+            }
+        });
+        match got {
+            Some(AcpEvent::OtherSessionUpdate { kind }) if kind.starts_with(prefix) => {
+                return Some(kind);
+            }
+            Some(_) => continue,
+            None => return None,
+        }
+    }
 }
 
 fn drain_until_turn_end(events: &sirio_acp::EventStream) -> Vec<AcpEvent> {
@@ -84,6 +115,37 @@ fn the_handshake_yields_the_catalogues_before_anything_is_typed() {
 }
 
 #[test]
+fn a_command_list_that_changes_mid_session_reaches_the_picker() {
+    let (mut client, events) = launch("commands_changed");
+    // The handshake publishes its own list first; the change follows it.
+    let mut lists: Vec<Vec<AvailableCommandInfo>> = Vec::new();
+    let changed = loop {
+        match next_event(&events) {
+            AcpEvent::AvailableCommands(commands) => {
+                lists.push(commands);
+                if lists.len() == 2 {
+                    break lists.pop().expect("the second list");
+                }
+            }
+            AcpEvent::OtherSessionUpdate { kind } if kind == "system/commands_changed" => {
+                panic!("the change was named but the new list was never published");
+            }
+            _ => {}
+        }
+    };
+    let names: Vec<&str> = changed
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    // `terminal_slash_commands` came with the handshake and is not resent,
+    // so the filter it feeds has to survive every later list.
+    assert_eq!(names, ["deep-research"]);
+    assert_eq!(changed[0].argument_hint.as_deref(), Some("<question>"));
+
+    client.shutdown().expect("fixture should shut down cleanly");
+}
+
+#[test]
 fn a_turn_streams_its_text_and_ends_with_usage() {
     let (mut client, events) = launch("normal");
     client.prompt("hello").expect("prompt is accepted");
@@ -114,9 +176,12 @@ fn a_turn_streams_its_text_and_ends_with_usage() {
 }
 
 #[test]
-fn the_session_id_becomes_readable_and_is_announced_once() {
+fn the_session_id_is_named_at_launch_and_the_clis_own_replaces_it() {
     let (mut client, events) = launch("normal");
-    assert_eq!(client.session_id(), None, "no id before the first turn");
+    // Named before anything is typed — that is what `--session-id` buys.
+    let chosen = client
+        .session_id()
+        .expect("a fresh session is named at launch");
     client.prompt("hello").expect("prompt is accepted");
     let seen = drain_until_turn_end(&events);
     assert_eq!(
@@ -128,7 +193,11 @@ fn the_session_id_becomes_readable_and_is_announced_once() {
             .count(),
         1
     );
+    // The CLI stays the authority on which session exists: this fixture
+    // opens one under its own name, and that is the id a later `--resume`
+    // has to use.
     assert_eq!(client.session_id().as_deref(), Some("fixture-session-1"));
+    assert_ne!(chosen, "fixture-session-1");
     assert_eq!(client.claude_version().as_deref(), Some("2.1.273"));
     client.shutdown().expect("fixture should shut down cleanly");
 }
@@ -242,6 +311,95 @@ fn process_exists(pid: &str) -> bool {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains(pid)
         })
         .unwrap_or(false)
+}
+
+#[test]
+fn fast_mode_starts_off_and_moves_only_once_the_cli_agrees() {
+    let (mut client, events) = launch("normal");
+    assert_eq!(
+        client.fast_mode(),
+        Some(FastMode {
+            enabled: false,
+            blocked_by: None
+        }),
+        "the handshake reports it off, and its opt-in notice is not a block"
+    );
+
+    client.set_fast_mode(true).expect("the toggle is accepted");
+    assert_eq!(
+        first_signal(&events, "FastModeUpdate", Duration::from_secs(5)).as_deref(),
+        Some("FastModeUpdate(on)"),
+        "the change is announced as a re-read signal, the way a mode change is"
+    );
+    assert_eq!(client.fast_mode().map(|fast| fast.enabled), Some(true));
+
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_cli_that_refuses_fast_mode_leaves_the_chip_where_it_was() {
+    let (mut client, events) = launch("no_fast_mode");
+    client.set_fast_mode(true).expect("the toggle is accepted");
+    // Announced, so the chip redraws — but never as a change that happened.
+    assert_eq!(
+        first_signal(&events, "FastModeUpdate", Duration::from_secs(5)).as_deref(),
+        Some("FastModeUpdate(blocked)"),
+    );
+    assert_eq!(
+        client.fast_mode(),
+        Some(FastMode {
+            enabled: false,
+            blocked_by: Some("Unknown setting: fastMode".into())
+        }),
+        "the chip stays where the session is and carries the CLI's own reason"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn the_thinking_display_is_unset_until_chosen_and_then_reports_the_choice() {
+    let (mut client, events) = launch("normal");
+    // Nothing reads the session's own value back, so before a choice the
+    // only honest answer is that none was made.
+    assert_eq!(client.thinking_display(), ThinkingDisplay::default());
+
+    client
+        .set_thinking_display(Some("omitted".into()))
+        .expect("the choice is accepted");
+    assert_eq!(
+        first_signal(&events, "ThinkingDisplayUpdate", Duration::from_secs(5)).as_deref(),
+        Some("ThinkingDisplayUpdate(omitted)")
+    );
+    assert_eq!(
+        client.thinking_display(),
+        ThinkingDisplay {
+            chosen: Some("omitted".into()),
+            unsupported: false
+        }
+    );
+
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_cli_that_does_not_know_the_thinking_verb_retires_the_control() {
+    let (mut client, events) = launch("no_thinking");
+    client
+        .set_thinking_display(Some("omitted".into()))
+        .expect("the choice is accepted");
+    assert_eq!(
+        first_signal(&events, "ThinkingDisplayUpdate", Duration::from_secs(5)).as_deref(),
+        Some("ThinkingDisplayUpdate(unsupported)")
+    );
+    assert_eq!(
+        client.thinking_display(),
+        ThinkingDisplay {
+            chosen: None,
+            unsupported: true
+        },
+        "the refusal retires the control rather than showing a choice that did not take"
+    );
+    client.shutdown().expect("clean shutdown");
 }
 
 #[test]
@@ -630,6 +788,28 @@ fn a_resumed_launch_passes_the_session_id_to_the_cli() {
     // through the public API without a new accessor.
     let argv = client.claude_version().unwrap_or_default();
     assert!(argv.contains("--resume sess-42"), "argv was {argv}");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_fresh_session_is_named_before_the_cli_says_anything() {
+    // No turn and no `init` line yet, so nothing has told Sirio an id —
+    // and it still has one, because it chose it and passed it as
+    // `--session-id`. A tab that dies here is still resumable.
+    let (mut client, _events) = launch("normal");
+    let id = client
+        .session_id()
+        .expect("a fresh session is named at launch");
+    assert_eq!(id.len(), 36, "a v4-shaped id, got {id}");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_fresh_launch_passes_its_chosen_session_id_and_resumes_nothing() {
+    let (mut client, _events) = launch("echo_argv");
+    let argv = client.claude_version().unwrap_or_default();
+    assert!(argv.contains("--session-id "), "argv was {argv}");
+    assert!(!argv.contains("--resume"), "argv was {argv}");
     client.shutdown().expect("clean shutdown");
 }
 

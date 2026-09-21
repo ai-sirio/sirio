@@ -25,10 +25,25 @@ const STREAM_JSON: [&str; 6] = [
     "--verbose",
 ];
 
+/// Which session a chat launch is about.
+///
+/// The two are mutually exclusive on the wire — `--resume` already names a
+/// session, and `--session-id` beside it would be two answers to one
+/// question — so they are one enum rather than two options.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChatSession<'a> {
+    /// A session that does not exist yet, under an id the caller chose.
+    /// Naming it up front is what lets a tab be resumed even if the CLI
+    /// dies before it ever writes an `init` line.
+    New(&'a str),
+    /// A session the CLI already wrote, to be continued.
+    Resume(&'a str),
+}
+
 impl LaunchLine {
-    /// The chat session. `resume` names a Claude session id to continue.
+    /// The chat session.
     #[must_use]
-    pub fn chat(resume: Option<&str>) -> Self {
+    pub fn chat(session: ChatSession<'_>) -> Self {
         let mut args: Vec<String> = STREAM_JSON.iter().map(|arg| (*arg).to_string()).collect();
         // Route every permission decision to this process over stdio,
         // rather than to a terminal prompt nobody is watching.
@@ -37,9 +52,19 @@ impl LaunchLine {
         // Token-level deltas: without this the reply arrives in one lump at
         // the end of the turn.
         args.push("--include-partial-messages".into());
-        if let Some(session_id) = resume {
-            args.push("--resume".into());
-            args.push(session_id.to_string());
+        match session {
+            ChatSession::Resume(session_id) => {
+                args.push("--resume".into());
+                args.push(session_id.to_string());
+            }
+            // Naming the session before it exists is what makes a tab
+            // resumable from the first keystroke: without it the id is
+            // only learned from the `init` line, and a CLI that dies
+            // before writing one takes the conversation with it.
+            ChatSession::New(session_id) => {
+                args.push("--session-id".into());
+                args.push(session_id.to_string());
+            }
         }
         Self {
             args,
@@ -74,9 +99,11 @@ impl LaunchLine {
 mod tests {
     use super::*;
 
+    const SESSION: &str = "5bbcaeb8-e523-4087-b33c-559163f2dc07";
+
     #[test]
     fn a_chat_launch_is_the_six_flags_and_one_environment_variable() {
-        let line = LaunchLine::chat(None);
+        let line = LaunchLine::chat(ChatSession::New(SESSION));
         assert_eq!(
             line.args,
             [
@@ -89,6 +116,8 @@ mod tests {
                 "--permission-prompt-tool",
                 "stdio",
                 "--include-partial-messages",
+                "--session-id",
+                SESSION,
             ]
         );
         assert_eq!(
@@ -102,11 +131,14 @@ mod tests {
 
     #[test]
     fn a_resumed_chat_appends_the_session_id() {
-        let line = LaunchLine::chat(Some("5bbcaeb8-e523-4087-b33c-559163f2dc07"));
+        let line = LaunchLine::chat(ChatSession::Resume("5bbcaeb8-e523-4087-b33c-559163f2dc07"));
         assert_eq!(
             &line.args[line.args.len() - 2..],
             ["--resume", "5bbcaeb8-e523-4087-b33c-559163f2dc07"]
         );
+        // `--resume` is the whole answer: a `--session-id` beside it would
+        // name a second session the CLI has to choose between.
+        assert!(!line.args.iter().any(|arg| arg == "--session-id"));
     }
 
     #[test]

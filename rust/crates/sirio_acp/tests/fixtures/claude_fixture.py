@@ -58,6 +58,8 @@ def initialize_payload():
         "output_style": "default",
         "available_output_styles": ["default"],
         "current_permission_mode": "default",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
         "account": account,
         "hooks_applied": True,
     }
@@ -222,6 +224,24 @@ def main():
                     sys.stdout.write("not-json\n")
                     sys.stdout.flush()
                 control_response(request_id, initialize_payload())
+                if MODE == "commands_changed":
+                    # A plugin or skill loaded mid-session. The CLI resends
+                    # the whole list — terminal-bound commands included,
+                    # because it does not resend the terminal filter.
+                    send({
+                        "type": "system",
+                        "subtype": "commands_changed",
+                        "session_id": SESSION_ID,
+                        "uuid": "commands-changed-uuid",
+                        "commands": [
+                            {"name": "statusline",
+                             "description": "Configure the status line",
+                             "argumentHint": ""},
+                            {"name": "deep-research",
+                             "description": "Fan out web searches",
+                             "argumentHint": "<question>"},
+                        ],
+                    })
             elif subtype == "interrupt":
                 control_response(request_id, {"still_queued": 0})
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):
@@ -237,6 +257,30 @@ def main():
                     "session_id": SESSION_ID,
                     "uuid": "status-uuid",
                 })
+            elif subtype == "set_max_thinking_tokens":
+                if MODE == "no_thinking":
+                    send({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "Unknown control request subtype",
+                        },
+                    })
+                else:
+                    control_response(request_id, {})
+            elif subtype == "apply_flag_settings":
+                if MODE == "no_fast_mode":
+                    send({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "Unknown setting: fastMode",
+                        },
+                    })
+                else:
+                    control_response(request_id, {})
             elif subtype == "get_context_usage":
                 if MODE == "no_context_usage":
                     # Answers nothing: the turn still has to end, on the

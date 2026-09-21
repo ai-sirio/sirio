@@ -268,6 +268,43 @@ impl ChatClient {
         }
     }
 
+    /// What the session says about fast mode. Only the native transport
+    /// has it: ACP has no equivalent, and says so with `None`.
+    #[must_use]
+    pub fn fast_mode(&self) -> Option<FastMode> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Claude(client) => client.fast_mode(),
+        }
+    }
+
+    /// How much of the model's reasoning this session sends, where the
+    /// transport has such a thing.
+    #[must_use]
+    pub fn thinking_display(&self) -> Option<ThinkingDisplay> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Claude(client) => Some(client.thinking_display()),
+        }
+    }
+
+    /// Choose how much of the reasoning to receive; `None` leaves the
+    /// agent on its own answer.
+    pub fn set_thinking_display(&self, display: Option<String>) -> Result<()> {
+        match self {
+            Self::Acp(_) => Ok(()),
+            Self::Claude(client) => client.set_thinking_display(display),
+        }
+    }
+
+    /// Turn fast mode on or off, where the transport has it.
+    pub fn set_fast_mode(&self, enabled: bool) -> Result<()> {
+        match self {
+            Self::Acp(_) => Ok(()),
+            Self::Claude(client) => client.set_fast_mode(enabled),
+        }
+    }
+
     /// MCP-configuration-flavored lines observed on the agent's stderr.
     #[must_use]
     pub fn mcp_warnings(&self) -> Vec<String> {
@@ -457,6 +494,25 @@ pub struct ImageAttachment {
     pub base64_data: String,
 }
 
+/// What a session says about fast mode. Re-exported because `sirio_ui`
+/// reads it and does not depend on `sirio_claude`.
+pub use sirio_claude::{FastMode, THINKING_DISPLAYS};
+
+/// How much of the model's reasoning the session sends.
+///
+/// Unlike every other picker's state this is not read from the agent:
+/// neither the handshake nor `get_settings` reports the session's current
+/// thinking display, so all a surface can honestly know is what it has
+/// itself chosen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThinkingDisplay {
+    /// What this session chose, or `None` while nothing has been chosen.
+    pub chosen: Option<String>,
+    /// The agent refused the request — an older CLI — so the control is
+    /// not worth offering again.
+    pub unsupported: bool,
+}
+
 /// One slash command advertised by the agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AvailableCommandInfo {
@@ -464,6 +520,10 @@ pub struct AvailableCommandInfo {
     pub name: String,
     /// Human-readable description of what the command does.
     pub description: String,
+    /// The arguments it takes, as the agent spells them for its own help.
+    /// `None` when it takes none — which is how both transports say it:
+    /// Claude Code sends an empty `argumentHint`, ACP sends no `input`.
+    pub argument_hint: Option<String>,
 }
 
 /// One choice in an effort-level selector.
@@ -2289,6 +2349,15 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                     .map(|command| AvailableCommandInfo {
                         name: command.name,
                         description: command.description,
+                        // ACP carries the same thing under a different
+                        // name, and spells "no arguments" as no `input`.
+                        argument_hint: command.input.and_then(|input| match input {
+                            agent_client_protocol::schema::v1::AvailableCommandInput::
+                                Unstructured(text) => {
+                                (!text.hint.trim().is_empty()).then_some(text.hint)
+                            }
+                            _ => None,
+                        }),
                     })
                     .collect(),
             )]
@@ -2829,10 +2898,56 @@ mod tests {
                 AvailableCommandInfo {
                     name: "cr".into(),
                     description: "Code review the diff".into(),
+                    argument_hint: None,
                 },
                 AvailableCommandInfo {
                     name: "research".into(),
                     description: "Research a topic".into(),
+                    argument_hint: None,
+                },
+            ])]
+        );
+    }
+
+    #[test]
+    fn an_acp_commands_text_input_hint_reaches_the_picker() {
+        // ACP spells the same thing a different way: an `input` of
+        // `text` carries the hint, and no `input` at all is a command
+        // that takes no arguments.
+        let update = SessionNotification::new(
+            "session",
+            SessionUpdate::AvailableCommandsUpdate(
+                agent_client_protocol::schema::v1::AvailableCommandsUpdate::new(vec![
+                    agent_client_protocol::schema::v1::AvailableCommand::new(
+                        "cr",
+                        "Code review the diff",
+                    )
+                    .input(
+                        agent_client_protocol::schema::v1::AvailableCommandInput::Unstructured(
+                            agent_client_protocol::schema::v1::UnstructuredCommandInput::new(
+                                "<pr#>|<branch>",
+                            ),
+                        ),
+                    ),
+                    agent_client_protocol::schema::v1::AvailableCommand::new(
+                        "research",
+                        "Research a topic",
+                    ),
+                ]),
+            ),
+        );
+        assert_eq!(
+            notification_to_events(update),
+            vec![AcpEvent::AvailableCommands(vec![
+                AvailableCommandInfo {
+                    name: "cr".into(),
+                    description: "Code review the diff".into(),
+                    argument_hint: Some("<pr#>|<branch>".into()),
+                },
+                AvailableCommandInfo {
+                    name: "research".into(),
+                    description: "Research a topic".into(),
+                    argument_hint: None,
                 },
             ])]
         );

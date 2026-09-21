@@ -68,6 +68,26 @@ pub struct CommandInfo {
     pub name: String,
     /// What it does.
     pub description: String,
+    /// The arguments it takes, as the CLI spells them for its own help —
+    /// `[issue description]`, `<pr#>|<branch>`. `None` when it takes none:
+    /// the CLI says so with an empty string, and three commands in five do.
+    pub argument_hint: Option<String>,
+}
+
+/// The reason a session gives before any client has asked for fast mode.
+/// It is the starting state, not a refusal — the asking *is* the opt-in —
+/// so it must never reach the surface as a reason the toggle is dead.
+const FAST_MODE_OPT_IN: &str = "sdk_opt_in_required";
+
+/// What the handshake said about fast mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FastMode {
+    /// Whether the session starts with it on.
+    pub enabled: bool,
+    /// The CLI's own words for why the toggle cannot be used, when there
+    /// are any. `sdk_opt_in_required` is not one of them: that is simply
+    /// the state before a client has asked, and asking is the opt-in.
+    pub blocked_by: Option<String>,
 }
 
 /// One model the session can switch to.
@@ -146,6 +166,7 @@ pub struct Catalog {
     models: Vec<ModelInfo>,
     current_mode_id: String,
     account: AccountInfo,
+    fast_mode: Option<FastMode>,
 }
 
 impl Catalog {
@@ -162,25 +183,7 @@ impl Catalog {
                     .collect()
             })
             .unwrap_or_default();
-        let commands = payload
-            .get("commands")
-            .and_then(|value| value.as_array())
-            .map(|commands| {
-                commands
-                    .iter()
-                    .filter_map(|command| {
-                        Some(CommandInfo {
-                            name: command.get("name")?.as_str()?.to_string(),
-                            description: command
-                                .get("description")
-                                .and_then(|text| text.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let commands = payload.get("commands").map(parse_commands).unwrap_or_default();
         let models = payload
             .get("models")
             .and_then(|value| value.as_array())
@@ -225,7 +228,32 @@ impl Catalog {
                 .unwrap_or("default")
                 .to_string(),
             account,
+            // Present only when the session mentioned it at all: the field
+            // is newer than the floor this build accepts.
+            fast_mode: payload.get("fast_mode_state").map(|state| FastMode {
+                enabled: state.as_str() == Some("on"),
+                blocked_by: string_field(payload, "fast_mode_disabled_reason")
+                    .filter(|reason| reason != FAST_MODE_OPT_IN),
+            }),
         }
+    }
+
+    /// Replaces the command list from a `commands_changed` line.
+    ///
+    /// A replacement, not a merge: the CLI resends the whole list, which is
+    /// how its own SDK reader treats it. `terminal_slash_commands` is left
+    /// alone — it came with the handshake and is never resent, so the
+    /// filter it feeds has to outlive every later list.
+    pub fn replace_commands(&mut self, commands: &Value) {
+        self.commands = parse_commands(commands);
+    }
+
+    /// What the session said about fast mode, or `None` when it said
+    /// nothing — which is how a CLI too old to know the feature reads, and
+    /// how the surface is told to offer no toggle rather than a dead one.
+    #[must_use]
+    pub fn fast_mode(&self) -> Option<FastMode> {
+        self.fast_mode.clone()
     }
 
     /// The commands a chat tab can offer: everything the session advertised,
@@ -363,6 +391,34 @@ fn effort_level_name(level: &str) -> String {
         .map_or_else(|| level.to_string(), |(_, name)| (*name).to_string())
 }
 
+/// Reads a `commands` array. The handshake's and `commands_changed`'s
+/// carry the same rows, so they are read by the same function.
+fn parse_commands(value: &Value) -> Vec<CommandInfo> {
+    value
+        .as_array()
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some(CommandInfo {
+                        name: command.get("name")?.as_str()?.to_string(),
+                        description: command
+                            .get("description")
+                            .and_then(|text| text.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        argument_hint: command
+                            .get("argumentHint")
+                            .and_then(|hint| hint.as_str())
+                            .filter(|hint| !hint.trim().is_empty())
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -414,6 +470,91 @@ mod tests {
         for hidden in ["statusline", "login", "clear", "todos"] {
             assert!(!names.contains(&hidden), "{hidden} must not be offered");
         }
+    }
+
+    #[test]
+    fn an_argument_hint_reaches_the_picker_and_an_empty_one_does_not() {
+        let commands = catalog().commands();
+        let hint = |name: &str| {
+            commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| panic!("{name} is offered"))
+                .argument_hint
+                .clone()
+        };
+        assert_eq!(
+            hint("compact").as_deref(),
+            Some("<optional custom summarization instructions>")
+        );
+        // Thirty-two of the CLI's fifty-three commands send
+        // `argumentHint: ""`. An empty string is the absence of a hint, not
+        // a blank one, or three commands in five would reserve a gap for
+        // something they never say.
+        assert_eq!(hint("usage"), None);
+    }
+
+    #[test]
+    fn a_changed_command_list_replaces_the_old_one_and_keeps_the_terminal_filter() {
+        // `commands_changed` carries the whole list again — the SDK's own
+        // reader assigns it wholesale rather than merging — but it does not
+        // resend `terminal_slash_commands`, which arrived once at the
+        // handshake. Forgetting that filter would put `/statusline` back in
+        // a picker that cannot honour it.
+        let mut catalog = catalog();
+        catalog.replace_commands(&serde_json::json!([
+            {"name": "statusline", "description": "Configure the status line",
+             "argumentHint": ""},
+            {"name": "deep-research", "description": "Fan out web searches",
+             "argumentHint": "<question>"}
+        ]));
+        let commands = catalog.commands();
+        let names: Vec<&str> = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, ["deep-research"]);
+        assert_eq!(commands[0].argument_hint.as_deref(), Some("<question>"));
+    }
+
+    #[test]
+    fn the_opt_in_notice_is_not_a_reason_the_toggle_is_dead() {
+        let fast = catalog()
+            .fast_mode()
+            .expect("the handshake reports fast mode");
+        assert!(!fast.enabled);
+        // The captured handshake says `sdk_opt_in_required`, which is the
+        // state before any client asked. Reading it as a block would hide
+        // the toggle that performs the opt-in.
+        assert_eq!(fast.blocked_by, None);
+    }
+
+    #[test]
+    fn a_real_reason_blocks_the_toggle_and_a_silent_handshake_offers_none() {
+        let blocked = Catalog::from_initialize(&serde_json::json!({
+            "fast_mode_state": "off",
+            "fast_mode_disabled_reason": "not_entitled"
+        }));
+        assert_eq!(
+            blocked
+                .fast_mode()
+                .and_then(|fast| fast.blocked_by)
+                .as_deref(),
+            Some("not_entitled")
+        );
+        let on = Catalog::from_initialize(&serde_json::json!({"fast_mode_state": "on"}));
+        assert_eq!(
+            on.fast_mode(),
+            Some(FastMode {
+                enabled: true,
+                blocked_by: None
+            })
+        );
+        // Silence is how an older CLI says it has never heard of this.
+        assert_eq!(
+            Catalog::from_initialize(&serde_json::json!({})).fast_mode(),
+            None
+        );
     }
 
     #[test]

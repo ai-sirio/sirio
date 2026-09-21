@@ -1,1 +1,116 @@
-{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"commands":[{"name":"usage","description":"Show plan usage","argumentHint":""},{"name":"context","description":"Show context usage","argumentHint":""},{"name":"statusline","description":"Configure the status line","argumentHint":""},{"name":"login","description":"Sign in","argumentHint":""},{"name":"clear","description":"Clear the conversation","argumentHint":""},{"name":"todos","description":"Show todos","argumentHint":""}],"terminal_slash_commands":["statusline"],"models":[{"value":"default","displayName":"Default (recommended)","description":"Default (recommended)","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},{"value":"claude-fable-5-1","displayName":"Fable","description":"Most capable","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},{"value":"sonnet","displayName":"Sonnet","description":"Balanced","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},{"value":"haiku","displayName":"Haiku","description":"Fastest"}],"agents":[],"output_style":"default","available_output_styles":["default","Explanatory"],"current_permission_mode":"default","account":{"email":"dev@example.com","organization":"Example","subscriptionType":"max","apiProvider":"firstParty"},"hooks_applied":true}}}
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "req-1",
+    "response": {
+      "commands": [
+        {
+          "name": "usage",
+          "description": "Show plan usage",
+          "argumentHint": ""
+        },
+        {
+          "name": "context",
+          "description": "Show context usage",
+          "argumentHint": ""
+        },
+        {
+          "name": "statusline",
+          "description": "Configure the status line",
+          "argumentHint": ""
+        },
+        {
+          "name": "login",
+          "description": "Sign in",
+          "argumentHint": ""
+        },
+        {
+          "name": "clear",
+          "description": "Clear the conversation",
+          "argumentHint": ""
+        },
+        {
+          "name": "todos",
+          "description": "Show todos",
+          "argumentHint": ""
+        },
+        {
+          "name": "compact",
+          "description": "Free up context by summarizing the conversation so far",
+          "argumentHint": "<optional custom summarization instructions>"
+        },
+        {
+          "name": "code-review",
+          "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+          "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>]"
+        }
+      ],
+      "terminal_slash_commands": [
+        "statusline"
+      ],
+      "models": [
+        {
+          "value": "default",
+          "displayName": "Default (recommended)",
+          "description": "Default (recommended)",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "value": "claude-fable-5-1",
+          "displayName": "Fable",
+          "description": "Most capable",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet",
+          "description": "Balanced",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "value": "haiku",
+          "displayName": "Haiku",
+          "description": "Fastest"
+        }
+      ],
+      "agents": [],
+      "output_style": "default",
+      "available_output_styles": [
+        "default",
+        "Explanatory"
+      ],
+      "current_permission_mode": "default",
+      "account": {
+        "email": "dev@example.com",
+        "organization": "Example",
+        "subscriptionType": "max",
+        "apiProvider": "firstParty"
+      },
+      "hooks_applied": true,
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    }
+  }
+}

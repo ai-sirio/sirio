@@ -411,10 +411,12 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
             sirio_acp::AvailableCommandInfo {
                 name: "cr".into(),
                 description: "Code review the diff".into(),
+                argument_hint: None,
             },
             sirio_acp::AvailableCommandInfo {
                 name: "research".into(),
                 description: "Research a topic".into(),
+                argument_hint: None,
             },
         ]
     );

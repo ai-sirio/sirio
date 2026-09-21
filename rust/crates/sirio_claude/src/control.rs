@@ -8,6 +8,11 @@
 
 use serde_json::{Value, json};
 
+/// How much of the model's reasoning the CLI sends, in the CLI's own
+/// spelling. Verified against claude 2.1.278 by being refused: anything
+/// outside this set and `null` comes back as an error naming the three.
+pub const THINKING_DISPLAYS: [&str; 3] = ["summarized", "highlights", "omitted"];
+
 /// The requests Sirio sends to the CLI, one constructor per verb. Each
 /// returns the complete line to write, including the envelope.
 pub struct ControlRequest;
@@ -51,13 +56,16 @@ impl ControlRequest {
     /// its own default.
     ///
     /// Ultracode is a level in the picker and in the CLI's own `/effort`
-    /// menu, but never on the wire: `apply_flag_settings` takes exactly two
-    /// keys — `effortLevel` and a separate `ultracode` boolean — and a
-    /// session with `ultracode` standing runs at xhigh whatever
-    /// `effortLevel` says. So the pseudo-level is translated here, at the
-    /// one place that owns the wire format, and *both* keys are always
-    /// written: leaving `ultracode` out is what would let it stand through
-    /// a switch to another level.
+    /// menu, but never on the wire: `apply_flag_settings` carries
+    /// `effortLevel` and a separate `ultracode` boolean, and a session with
+    /// `ultracode` standing runs at xhigh whatever `effortLevel` says. So
+    /// the pseudo-level is translated here, at the one place that owns the
+    /// wire format, and *both* keys are always written: the settings
+    /// **merge** rather than replace, so leaving `ultracode` out is what
+    /// would let it stand through a switch to another level.
+    ///
+    /// That merge is also why this request may leave the rest of the
+    /// session's flag settings — `fastMode` among them — alone.
     #[must_use]
     pub fn set_effort(request_id: &str, level: Option<&str>) -> Value {
         let ultracode = level == Some(crate::catalog::EFFORT_ULTRACODE);
@@ -67,6 +75,44 @@ impl ControlRequest {
             json!({
                 "subtype": "apply_flag_settings",
                 "settings": {"effortLevel": level, "ultracode": ultracode}
+            }),
+        )
+    }
+
+    /// Turns fast mode on or off for this session.
+    ///
+    /// `off` is written rather than omitted, for the reason [`Self::set_effort`]
+    /// gives: the settings merge, so a key left out keeps the value the last
+    /// call left standing.
+    #[must_use]
+    pub fn set_fast_mode(request_id: &str, enabled: bool) -> Value {
+        Self::envelope(
+            request_id,
+            json!({
+                "subtype": "apply_flag_settings",
+                "settings": {"fastMode": enabled}
+            }),
+        )
+    }
+
+    /// Sets how much of the model's reasoning the CLI sends — one of
+    /// [`THINKING_DISPLAYS`], or `None` to leave the CLI on its own answer.
+    ///
+    /// The budget half of this request is always `null`. The effort picker
+    /// already governs how hard the model works; a second number beside it
+    /// would be two controls over one thing, disagreeing in public.
+    ///
+    /// Nothing reads this back: neither the handshake nor `get_settings`
+    /// reports the session's current display, so the surface knows only
+    /// what it has itself chosen.
+    #[must_use]
+    pub fn set_thinking_display(request_id: &str, display: Option<&str>) -> Value {
+        Self::envelope(
+            request_id,
+            json!({
+                "subtype": "set_max_thinking_tokens",
+                "max_thinking_tokens": Value::Null,
+                "thinking_display": display
             }),
         )
     }
@@ -334,6 +380,55 @@ mod tests {
                 "subtype": "rewind_files",
                 "user_message_id": "uuid-1",
                 "dry_run": true
+            })
+        );
+    }
+
+    #[test]
+    fn fast_mode_is_one_key_and_off_is_written_rather_than_omitted() {
+        // Verified against claude 2.1.278: `apply_flag_settings` merges
+        // into the session's flag settings instead of replacing them —
+        // sending `{fastMode}` then `{effortLevel, ultracode}` leaves all
+        // three standing. So this request carries nothing but its own key,
+        // and `false` has to be written, because an omitted key keeps
+        // whatever the last call left there.
+        assert_eq!(
+            ControlRequest::set_fast_mode("req-fm", true)["request"],
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"fastMode": true}})
+        );
+        assert_eq!(
+            ControlRequest::set_fast_mode("req-fm-off", false)["request"],
+            serde_json::json!({"subtype": "apply_flag_settings",
+                "settings": {"fastMode": false}})
+        );
+    }
+
+    #[test]
+    fn the_thinking_display_sends_the_three_words_the_cli_named_and_no_budget() {
+        // The accepted set is not documented anywhere; it came from the
+        // CLI's own refusal, verbatim on 2.1.278: "max_thinking_tokens
+        // must be an integer or null and thinking_display must be
+        // \"summarized\", \"omitted\", \"highlights\", or null".
+        for display in THINKING_DISPLAYS {
+            assert_eq!(
+                ControlRequest::set_thinking_display("req-t", Some(display))["request"],
+                serde_json::json!({
+                    "subtype": "set_max_thinking_tokens",
+                    "max_thinking_tokens": null,
+                    "thinking_display": display
+                })
+            );
+        }
+        // No budget of Sirio's: the effort picker already governs how hard
+        // the model works, and a second number beside it would be two
+        // controls over one thing.
+        assert_eq!(
+            ControlRequest::set_thinking_display("req-t-none", None)["request"],
+            serde_json::json!({
+                "subtype": "set_max_thinking_tokens",
+                "max_thinking_tokens": null,
+                "thinking_display": null
             })
         );
     }

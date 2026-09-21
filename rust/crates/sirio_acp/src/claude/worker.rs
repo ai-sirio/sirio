@@ -17,7 +17,7 @@ use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use sirio_claude::{
     Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, EFFORT_DEFAULT,
-    LaunchLine, RewindOutcome,
+    ChatSession, FastMode, LaunchLine, RewindOutcome,
 };
 
 use super::ClaudeLaunch;
@@ -43,6 +43,10 @@ pub(super) enum Command {
     SetMode(String),
     /// Set the effort level; `None` resets to the settings' own value.
     SetEffort(Option<String>),
+    /// Turn fast mode on or off.
+    SetFastMode(bool),
+    /// Choose how much of the model's reasoning to receive.
+    SetThinkingDisplay(Option<String>),
     /// End the turn in flight.
     Cancel,
     /// Stop: close the CLI's stdin, wait for it, acknowledge.
@@ -113,6 +117,8 @@ pub(super) struct Shared {
     claude_version: Mutex<Option<String>>,
     model_catalog: Mutex<Option<ModelCatalog>>,
     mode_catalog: Mutex<Option<ModeCatalog>>,
+    fast_mode: Mutex<Option<FastMode>>,
+    thinking_display: Mutex<crate::ThinkingDisplay>,
     mcp_warnings: Mutex<Vec<String>>,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
@@ -133,6 +139,17 @@ impl Shared {
 
     pub(super) fn mode_catalog(&self) -> Option<ModeCatalog> {
         self.mode_catalog.lock().ok().and_then(|c| c.clone())
+    }
+
+    pub(super) fn fast_mode(&self) -> Option<FastMode> {
+        self.fast_mode.lock().ok().and_then(|f| f.clone())
+    }
+
+    pub(super) fn thinking_display(&self) -> crate::ThinkingDisplay {
+        self.thinking_display
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn mcp_warnings(&self) -> Vec<String> {
@@ -274,7 +291,22 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         retryable: _,
     } = attempt;
 
-    let line = LaunchLine::chat(launch.resume.as_deref());
+    // The id this attempt is about, known before the child exists. A
+    // resume already has one; a fresh session gets Sirio's own, passed as
+    // `--session-id`, so the tab can be resumed even if the CLI dies
+    // before it writes an `init` line. The CLI stays the authority: if its
+    // `init` names a different session, the fold overwrites this.
+    let session_id = launch
+        .resume
+        .clone()
+        .unwrap_or_else(super::new_uuid);
+    let line = LaunchLine::chat(match launch.resume.as_deref() {
+        Some(resume) => ChatSession::Resume(resume),
+        None => ChatSession::New(&session_id),
+    });
+    if let Ok(mut held) = shared.session_id.lock() {
+        *held = Some(session_id.clone());
+    }
     let mut std_command = std::process::Command::new(&launch.program);
     std_command
         .args(&launch.prefix_args)
@@ -422,6 +454,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let next_request_id = || format!("sirio-{}", request_ids.fetch_add(1, Ordering::Relaxed));
     let mut turn_in_flight = false;
     let mut pending_model: HashMap<String, String> = HashMap::new();
+    let mut pending_fast_mode: HashMap<String, bool> = HashMap::new();
+    let mut pending_thinking: HashMap<String, Option<String>> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
@@ -440,7 +474,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
         return SessionOutcome::HandshakeFailed("could not write the Claude handshake".into());
     }
 
-    let catalog = loop {
+    let mut catalog = loop {
         let Some(Ok(line)) = lines.next().await else {
             return SessionOutcome::HandshakeFailed(
                 "the Claude agent closed its output before answering the handshake".into(),
@@ -529,6 +563,65 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         if let CliMessage::ControlResponse(value) = &message
                             && let Some(envelope) = ControlEnvelope::parse(value)
                         {
+                            if let Some(display) =
+                                pending_thinking.remove(&envelope.request_id)
+                            {
+                                if let Ok(mut held) = shared.thinking_display.lock() {
+                                    match &envelope.error {
+                                        None => held.chosen = display.clone(),
+                                        // An older CLI does not know the
+                                        // verb. Retire the control rather
+                                        // than leave a button that does
+                                        // nothing.
+                                        Some(_) => held.unsupported = true,
+                                    }
+                                }
+                                let _ = event_tx
+                                    .send(AcpEvent::OtherSessionUpdate {
+                                        kind: match (&envelope.error, &display) {
+                                            (Some(_), _) => {
+                                                "ThinkingDisplayUpdate(unsupported)".to_string()
+                                            }
+                                            (None, Some(value)) => {
+                                                format!("ThinkingDisplayUpdate({value})")
+                                            }
+                                            (None, None) => {
+                                                "ThinkingDisplayUpdate(default)".to_string()
+                                            }
+                                        },
+                                    })
+                                    .await;
+                            }
+                            if let Some(enabled) =
+                                pending_fast_mode.remove(&envelope.request_id)
+                            {
+                                if let Ok(mut held) = shared.fast_mode.lock()
+                                    && let Some(fast) = held.as_mut()
+                                {
+                                    match &envelope.error {
+                                        // The cell moves on the CLI's word,
+                                        // never on the click.
+                                        None => fast.enabled = enabled,
+                                        // A refusal degrades this one
+                                        // feature and says why in the CLI's
+                                        // own words, the way a missing
+                                        // language server names the program
+                                        // rather than raising a banner.
+                                        Some(error) => {
+                                            fast.blocked_by = Some(error.clone());
+                                        }
+                                    }
+                                }
+                                let _ = event_tx
+                                    .send(AcpEvent::OtherSessionUpdate {
+                                        kind: match (&envelope.error, enabled) {
+                                            (Some(_), _) => "FastModeUpdate(blocked)".to_string(),
+                                            (None, true) => "FastModeUpdate(on)".to_string(),
+                                            (None, false) => "FastModeUpdate(off)".to_string(),
+                                        },
+                                    })
+                                    .await;
+                            }
                             if let Some(model) = pending_model.remove(&envelope.request_id) {
                                 match &envelope.error {
                                     // The wire confirms by echoing; a refusal
@@ -668,6 +761,20 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         {
                             apply_current_mode(&shared, &mode);
                         }
+                        // A plugin or skill loaded mid-session. The list is
+                        // republished even when it came back empty: this is
+                        // a replacement, and a picker still offering the
+                        // handshake's commands would be stale for the rest
+                        // of the session.
+                        if let CliMessage::System(system) = &message
+                            && system.subtype == "commands_changed"
+                            && let Some(commands) = &system.commands
+                        {
+                            catalog.replace_commands(commands);
+                            let _ = event_tx
+                                .send(AcpEvent::AvailableCommands(command_list(&catalog)))
+                                .await;
+                        }
                         let mut events = fold.apply(message);
                         shared.push_mcp_warnings(fold.take_mcp_warnings());
                         if let Some(id) = fold.session_id()
@@ -761,6 +868,35 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(
                                 ": could not write the mode change".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::SetFastMode(enabled)) => {
+                        let id = next_request_id();
+                        pending_fast_mode.insert(id.clone(), enabled);
+                        if write_line(&mut stdin, &ControlRequest::set_fast_mode(&id, enabled))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the fast mode change".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::SetThinkingDisplay(display)) => {
+                        let id = next_request_id();
+                        pending_thinking.insert(id.clone(), display.clone());
+                        if write_line(
+                            &mut stdin,
+                            &ControlRequest::set_thinking_display(&id, display.as_deref()),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the thinking display change".into(),
                             );
                         }
                     }
@@ -1007,6 +1143,9 @@ async fn write_line(
 }
 
 fn publish_catalogues(shared: &Shared, catalog: &Catalog) {
+    if let Ok(mut fast) = shared.fast_mode.lock() {
+        *fast = catalog.fast_mode();
+    }
     if let Ok(mut models) = shared.model_catalog.lock() {
         let options: Vec<ModelOption> = catalog
             .models()
@@ -1052,19 +1191,26 @@ fn catalogue_events(
     selected_effort: &mut String,
 ) -> Vec<AcpEvent> {
     let mut events = Vec::new();
-    let commands: Vec<crate::AvailableCommandInfo> = catalog
-        .commands()
-        .into_iter()
-        .map(|command| crate::AvailableCommandInfo {
-            name: command.name,
-            description: command.description,
-        })
-        .collect();
+    let commands = command_list(catalog);
     if !commands.is_empty() {
         events.push(AcpEvent::AvailableCommands(commands));
     }
     events.push(effort_event(catalog, model_id, selected_effort));
     events
+}
+
+/// The command list as the surface takes it. Two callers: the handshake,
+/// and a `commands_changed` line later in the session.
+fn command_list(catalog: &Catalog) -> Vec<crate::AvailableCommandInfo> {
+    catalog
+        .commands()
+        .into_iter()
+        .map(|command| crate::AvailableCommandInfo {
+            name: command.name,
+            description: command.description,
+            argument_hint: command.argument_hint,
+        })
+        .collect()
 }
 
 /// The effort selector for `model_id`, with `selected` moved to whatever
@@ -1181,6 +1327,27 @@ mod tests {
             .iter()
             .map(|choice| choice.value.as_str())
             .collect()
+    }
+
+    #[test]
+    fn the_command_list_carries_the_hint_and_drops_the_empty_one() {
+        let catalog = Catalog::from_initialize(&serde_json::json!({
+            "commands": [
+                {"name": "compact", "description": "Compact",
+                 "argumentHint": "<optional custom summarization instructions>"},
+                {"name": "usage", "description": "Show plan usage", "argumentHint": ""}
+            ]
+        }));
+        let mut selected = EFFORT_DEFAULT.to_string();
+        let events = catalogue_events(&catalog, "opus", &mut selected);
+        let Some(AcpEvent::AvailableCommands(commands)) = events.into_iter().next() else {
+            panic!("the handshake publishes the command list first");
+        };
+        assert_eq!(
+            commands[0].argument_hint.as_deref(),
+            Some("<optional custom summarization instructions>")
+        );
+        assert_eq!(commands[1].argument_hint, None);
     }
 
     #[test]

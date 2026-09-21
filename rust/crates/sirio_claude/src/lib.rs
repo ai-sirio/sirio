@@ -20,10 +20,12 @@ pub mod version;
 
 pub use catalog::{
     AccountInfo, Catalog, CommandInfo, EFFORT_DEFAULT, EFFORT_ULTRACODE, Effort, EffortChoice,
-    ModeInfo, ModelInfo, Modes,
+    FastMode, ModeInfo, ModelInfo, Modes,
 };
-pub use control::{CanUseTool, ControlEnvelope, ControlRequest, PermissionResult};
-pub use launch::LaunchLine;
+pub use control::{
+    CanUseTool, ControlEnvelope, ControlRequest, PermissionResult, THINKING_DISPLAYS,
+};
+pub use launch::{ChatSession, LaunchLine};
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
     ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
