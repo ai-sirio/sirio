@@ -440,7 +440,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
         return SessionOutcome::HandshakeFailed("could not write the Claude handshake".into());
     }
 
-    let catalog = loop {
+    let mut catalog = loop {
         let Some(Ok(line)) = lines.next().await else {
             return SessionOutcome::HandshakeFailed(
                 "the Claude agent closed its output before answering the handshake".into(),
@@ -667,6 +667,20 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             && let Some(mode) = system.permission_mode.clone()
                         {
                             apply_current_mode(&shared, &mode);
+                        }
+                        // A plugin or skill loaded mid-session. The list is
+                        // republished even when it came back empty: this is
+                        // a replacement, and a picker still offering the
+                        // handshake's commands would be stale for the rest
+                        // of the session.
+                        if let CliMessage::System(system) = &message
+                            && system.subtype == "commands_changed"
+                            && let Some(commands) = &system.commands
+                        {
+                            catalog.replace_commands(commands);
+                            let _ = event_tx
+                                .send(AcpEvent::AvailableCommands(command_list(&catalog)))
+                                .await;
                         }
                         let mut events = fold.apply(message);
                         shared.push_mcp_warnings(fold.take_mcp_warnings());
@@ -1052,7 +1066,18 @@ fn catalogue_events(
     selected_effort: &mut String,
 ) -> Vec<AcpEvent> {
     let mut events = Vec::new();
-    let commands: Vec<crate::AvailableCommandInfo> = catalog
+    let commands = command_list(catalog);
+    if !commands.is_empty() {
+        events.push(AcpEvent::AvailableCommands(commands));
+    }
+    events.push(effort_event(catalog, model_id, selected_effort));
+    events
+}
+
+/// The command list as the surface takes it. Two callers: the handshake,
+/// and a `commands_changed` line later in the session.
+fn command_list(catalog: &Catalog) -> Vec<crate::AvailableCommandInfo> {
+    catalog
         .commands()
         .into_iter()
         .map(|command| crate::AvailableCommandInfo {
@@ -1060,12 +1085,7 @@ fn catalogue_events(
             description: command.description,
             argument_hint: command.argument_hint,
         })
-        .collect();
-    if !commands.is_empty() {
-        events.push(AcpEvent::AvailableCommands(commands));
-    }
-    events.push(effort_event(catalog, model_id, selected_effort));
-    events
+        .collect()
 }
 
 /// The effort selector for `model_id`, with `selected` moved to whatever

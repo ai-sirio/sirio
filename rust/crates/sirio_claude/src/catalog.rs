@@ -166,30 +166,7 @@ impl Catalog {
                     .collect()
             })
             .unwrap_or_default();
-        let commands = payload
-            .get("commands")
-            .and_then(|value| value.as_array())
-            .map(|commands| {
-                commands
-                    .iter()
-                    .filter_map(|command| {
-                        Some(CommandInfo {
-                            name: command.get("name")?.as_str()?.to_string(),
-                            description: command
-                                .get("description")
-                                .and_then(|text| text.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            argument_hint: command
-                                .get("argumentHint")
-                                .and_then(|hint| hint.as_str())
-                                .filter(|hint| !hint.trim().is_empty())
-                                .map(str::to_string),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let commands = payload.get("commands").map(parse_commands).unwrap_or_default();
         let models = payload
             .get("models")
             .and_then(|value| value.as_array())
@@ -235,6 +212,16 @@ impl Catalog {
                 .to_string(),
             account,
         }
+    }
+
+    /// Replaces the command list from a `commands_changed` line.
+    ///
+    /// A replacement, not a merge: the CLI resends the whole list, which is
+    /// how its own SDK reader treats it. `terminal_slash_commands` is left
+    /// alone — it came with the handshake and is never resent, so the
+    /// filter it feeds has to outlive every later list.
+    pub fn replace_commands(&mut self, commands: &Value) {
+        self.commands = parse_commands(commands);
     }
 
     /// The commands a chat tab can offer: everything the session advertised,
@@ -372,6 +359,34 @@ fn effort_level_name(level: &str) -> String {
         .map_or_else(|| level.to_string(), |(_, name)| (*name).to_string())
 }
 
+/// Reads a `commands` array. The handshake's and `commands_changed`'s
+/// carry the same rows, so they are read by the same function.
+fn parse_commands(value: &Value) -> Vec<CommandInfo> {
+    value
+        .as_array()
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some(CommandInfo {
+                        name: command.get("name")?.as_str()?.to_string(),
+                        description: command
+                            .get("description")
+                            .and_then(|text| text.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        argument_hint: command
+                            .get("argumentHint")
+                            .and_then(|hint| hint.as_str())
+                            .filter(|hint| !hint.trim().is_empty())
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -445,6 +460,29 @@ mod tests {
         // a blank one, or three commands in five would reserve a gap for
         // something they never say.
         assert_eq!(hint("usage"), None);
+    }
+
+    #[test]
+    fn a_changed_command_list_replaces_the_old_one_and_keeps_the_terminal_filter() {
+        // `commands_changed` carries the whole list again — the SDK's own
+        // reader assigns it wholesale rather than merging — but it does not
+        // resend `terminal_slash_commands`, which arrived once at the
+        // handshake. Forgetting that filter would put `/statusline` back in
+        // a picker that cannot honour it.
+        let mut catalog = catalog();
+        catalog.replace_commands(&serde_json::json!([
+            {"name": "statusline", "description": "Configure the status line",
+             "argumentHint": ""},
+            {"name": "deep-research", "description": "Fan out web searches",
+             "argumentHint": "<question>"}
+        ]));
+        let commands = catalog.commands();
+        let names: Vec<&str> = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, ["deep-research"]);
+        assert_eq!(commands[0].argument_hint.as_deref(), Some("<question>"));
     }
 
     #[test]

@@ -222,6 +222,24 @@ def main():
                     sys.stdout.write("not-json\n")
                     sys.stdout.flush()
                 control_response(request_id, initialize_payload())
+                if MODE == "commands_changed":
+                    # A plugin or skill loaded mid-session. The CLI resends
+                    # the whole list — terminal-bound commands included,
+                    # because it does not resend the terminal filter.
+                    send({
+                        "type": "system",
+                        "subtype": "commands_changed",
+                        "session_id": SESSION_ID,
+                        "uuid": "commands-changed-uuid",
+                        "commands": [
+                            {"name": "statusline",
+                             "description": "Configure the status line",
+                             "argumentHint": ""},
+                            {"name": "deep-research",
+                             "description": "Fan out web searches",
+                             "argumentHint": "<question>"},
+                        ],
+                    })
             elif subtype == "interrupt":
                 control_response(request_id, {"still_queued": 0})
                 if MODE in ("slow_turn", "silent_turn", "chatty_slow_turn"):

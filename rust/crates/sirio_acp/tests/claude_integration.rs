@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::future::Either;
-use sirio_acp::{AcpEvent, ClaudeClient, ClaudeLaunch};
+use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch};
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -79,6 +79,37 @@ fn the_handshake_yields_the_catalogues_before_anything_is_typed() {
             .iter()
             .any(|mode| mode.id == "bypassPermissions")
     );
+
+    client.shutdown().expect("fixture should shut down cleanly");
+}
+
+#[test]
+fn a_command_list_that_changes_mid_session_reaches_the_picker() {
+    let (mut client, events) = launch("commands_changed");
+    // The handshake publishes its own list first; the change follows it.
+    let mut lists: Vec<Vec<AvailableCommandInfo>> = Vec::new();
+    let changed = loop {
+        match next_event(&events) {
+            AcpEvent::AvailableCommands(commands) => {
+                lists.push(commands);
+                if lists.len() == 2 {
+                    break lists.pop().expect("the second list");
+                }
+            }
+            AcpEvent::OtherSessionUpdate { kind } if kind == "system/commands_changed" => {
+                panic!("the change was named but the new list was never published");
+            }
+            _ => {}
+        }
+    };
+    let names: Vec<&str> = changed
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    // `terminal_slash_commands` came with the handshake and is not resent,
+    // so the filter it feeds has to survive every later list.
+    assert_eq!(names, ["deep-research"]);
+    assert_eq!(changed[0].argument_hint.as_deref(), Some("<question>"));
 
     client.shutdown().expect("fixture should shut down cleanly");
 }
