@@ -17,7 +17,7 @@ use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use sirio_claude::{
     Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, EFFORT_DEFAULT,
-    LaunchLine, RewindOutcome,
+    ChatSession, LaunchLine, RewindOutcome,
 };
 
 use super::ClaudeLaunch;
@@ -274,7 +274,22 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         retryable: _,
     } = attempt;
 
-    let line = LaunchLine::chat(launch.resume.as_deref());
+    // The id this attempt is about, known before the child exists. A
+    // resume already has one; a fresh session gets Sirio's own, passed as
+    // `--session-id`, so the tab can be resumed even if the CLI dies
+    // before it writes an `init` line. The CLI stays the authority: if its
+    // `init` names a different session, the fold overwrites this.
+    let session_id = launch
+        .resume
+        .clone()
+        .unwrap_or_else(super::new_uuid);
+    let line = LaunchLine::chat(match launch.resume.as_deref() {
+        Some(resume) => ChatSession::Resume(resume),
+        None => ChatSession::New(&session_id),
+    });
+    if let Ok(mut held) = shared.session_id.lock() {
+        *held = Some(session_id.clone());
+    }
     let mut std_command = std::process::Command::new(&launch.program);
     std_command
         .args(&launch.prefix_args)

@@ -145,9 +145,12 @@ fn a_turn_streams_its_text_and_ends_with_usage() {
 }
 
 #[test]
-fn the_session_id_becomes_readable_and_is_announced_once() {
+fn the_session_id_is_named_at_launch_and_the_clis_own_replaces_it() {
     let (mut client, events) = launch("normal");
-    assert_eq!(client.session_id(), None, "no id before the first turn");
+    // Named before anything is typed — that is what `--session-id` buys.
+    let chosen = client
+        .session_id()
+        .expect("a fresh session is named at launch");
     client.prompt("hello").expect("prompt is accepted");
     let seen = drain_until_turn_end(&events);
     assert_eq!(
@@ -159,7 +162,11 @@ fn the_session_id_becomes_readable_and_is_announced_once() {
             .count(),
         1
     );
+    // The CLI stays the authority on which session exists: this fixture
+    // opens one under its own name, and that is the id a later `--resume`
+    // has to use.
     assert_eq!(client.session_id().as_deref(), Some("fixture-session-1"));
+    assert_ne!(chosen, "fixture-session-1");
     assert_eq!(client.claude_version().as_deref(), Some("2.1.273"));
     client.shutdown().expect("fixture should shut down cleanly");
 }
@@ -661,6 +668,28 @@ fn a_resumed_launch_passes_the_session_id_to_the_cli() {
     // through the public API without a new accessor.
     let argv = client.claude_version().unwrap_or_default();
     assert!(argv.contains("--resume sess-42"), "argv was {argv}");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_fresh_session_is_named_before_the_cli_says_anything() {
+    // No turn and no `init` line yet, so nothing has told Sirio an id —
+    // and it still has one, because it chose it and passed it as
+    // `--session-id`. A tab that dies here is still resumable.
+    let (mut client, _events) = launch("normal");
+    let id = client
+        .session_id()
+        .expect("a fresh session is named at launch");
+    assert_eq!(id.len(), 36, "a v4-shaped id, got {id}");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_fresh_launch_passes_its_chosen_session_id_and_resumes_nothing() {
+    let (mut client, _events) = launch("echo_argv");
+    let argv = client.claude_version().unwrap_or_default();
+    assert!(argv.contains("--session-id "), "argv was {argv}");
+    assert!(!argv.contains("--resume"), "argv was {argv}");
     client.shutdown().expect("clean shutdown");
 }
 

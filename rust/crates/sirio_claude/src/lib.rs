@@ -23,7 +23,7 @@ pub use catalog::{
     ModeInfo, ModelInfo, Modes,
 };
 pub use control::{CanUseTool, ControlEnvelope, ControlRequest, PermissionResult};
-pub use launch::LaunchLine;
+pub use launch::{ChatSession, LaunchLine};
 pub use message::{
     AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
     ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
