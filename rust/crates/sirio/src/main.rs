@@ -498,14 +498,33 @@ fn window_command_availability(
     }
 }
 
+/// The bare `ctrl-<letter>` chords belong to whatever the terminal is
+/// hosting, not to the shell: `ctrl-o` toggles Claude Code's expanded
+/// output, `ctrl-l` clears the screen, `ctrl-t` transposes characters and
+/// `ctrl-s` is XOFF. GPUI stops propagation the moment a binding matches
+/// (see `handle_close_settings_surface`, which only survives by calling
+/// `cx.propagate()`), so an unscoped binding means the keystroke never
+/// reaches `TerminalView::on_key_down` and never reaches the PTY at all.
+///
+/// Same resolution #226 reached for `ctrl-w` vs readline delete-word. The
+/// `ctrl-shift-` family stays global on purpose -- it is the half that is
+/// meant to survive inside a terminal, exactly like `ctrl-shift-w`.
+const YIELDS_TO_TERMINAL: Option<&str> = Some("!Terminal");
+
 fn bind_window_keys(cx: &mut App) {
     cx.bind_keys(
         linux_window_shortcuts()
             .into_iter()
             .map(|(command, shortcut)| match command {
-                WindowCommand::NewTerminalTab => KeyBinding::new(shortcut, NewTerminalTab, None),
-                WindowCommand::OpenFile => KeyBinding::new(shortcut, OpenFile, None),
-                WindowCommand::SaveFile => KeyBinding::new(shortcut, SaveFile, None),
+                WindowCommand::NewTerminalTab => {
+                    KeyBinding::new(shortcut, NewTerminalTab, YIELDS_TO_TERMINAL)
+                }
+                WindowCommand::OpenFile => {
+                    KeyBinding::new(shortcut, OpenFile, YIELDS_TO_TERMINAL)
+                }
+                WindowCommand::SaveFile => {
+                    KeyBinding::new(shortcut, SaveFile, YIELDS_TO_TERMINAL)
+                }
                 WindowCommand::ToggleSidebar => KeyBinding::new(shortcut, ToggleSidebar, None),
                 WindowCommand::ToggleRightPanel => {
                     KeyBinding::new(shortcut, ToggleRightPanel, None)
@@ -517,7 +536,9 @@ fn bind_window_keys(cx: &mut App) {
                     KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
                 }
                 WindowCommand::NewBrowser => KeyBinding::new(shortcut, NewBrowser, None),
-                WindowCommand::FocusAddressBar => KeyBinding::new(shortcut, FocusAddressBar, None),
+                WindowCommand::FocusAddressBar => {
+                    KeyBinding::new(shortcut, FocusAddressBar, YIELDS_TO_TERMINAL)
+                }
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
             // context) on purpose — it must fire even when the surface
@@ -21762,14 +21783,31 @@ done
     struct WindowCommandFixture {
         fired: Rc<RefCell<Vec<WindowCommand>>>,
         focus_handle: FocusHandle,
+        key_context: &'static str,
     }
 
     impl WindowCommandFixture {
         fn new(fired: Rc<RefCell<Vec<WindowCommand>>>, cx: &mut Context<Self>) -> Self {
+            Self::with_key_context("WindowCommandFixture", fired, cx)
+        }
+
+        /// The same bindings with the focused element carrying the terminal's
+        /// own key context (`sirio_terminal`'s `key_context("Terminal")`), so
+        /// a `!Terminal`-scoped chord must not resolve here.
+        fn in_terminal(fired: Rc<RefCell<Vec<WindowCommand>>>, cx: &mut Context<Self>) -> Self {
+            Self::with_key_context("Terminal", fired, cx)
+        }
+
+        fn with_key_context(
+            key_context: &'static str,
+            fired: Rc<RefCell<Vec<WindowCommand>>>,
+            cx: &mut Context<Self>,
+        ) -> Self {
             bind_window_keys(cx);
             Self {
                 fired,
                 focus_handle: cx.focus_handle(),
+                key_context,
             }
         }
     }
@@ -21786,7 +21824,7 @@ done
             let new_browser = self.fired.clone();
             let focus_address_bar = self.fired.clone();
             div()
-                .key_context("WindowCommandFixture")
+                .key_context(self.key_context)
                 .track_focus(&self.focus_handle)
                 .on_action(cx.listener(move |_, _: &NewTerminalTab, _, _| {
                     new_terminal
@@ -29897,6 +29935,80 @@ done
                 WindowCommand::FocusAddressBar,
             ],
             "Linux primary and secondary chords must reach typed shell actions"
+        );
+    }
+
+    /// A focused terminal owns the bare `ctrl-` letters: they are the
+    /// hosted program's own keys (`ctrl-o` toggles Claude Code's expanded
+    /// output, `ctrl-l` clears the screen, `ctrl-t` transposes, `ctrl-s` is
+    /// XOFF), and a matched binding *consumes* the keystroke -- it never
+    /// reaches `TerminalView::on_key_down` and so never reaches the PTY.
+    /// Same shape as #226's `ctrl-w`, which had to yield for readline
+    /// delete-word.
+    #[gpui::test]
+    async fn a_focused_terminal_keeps_the_bare_ctrl_chords(cx: &mut TestAppContext) {
+        let fired = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window(|_window, cx| WindowCommandFixture::in_terminal(fired.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<WindowCommandFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let focus_handle = fixture.read_with(&cx.cx, |fixture, _| fixture.focus_handle.clone());
+        cx.update(|window, app| focus_handle.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-t ctrl-o ctrl-s ctrl-l");
+        cx.run_until_parked();
+
+        assert_eq!(
+            fired.borrow().as_slice(),
+            &[],
+            "bare ctrl chords must pass through a focused terminal to the PTY"
+        );
+    }
+
+    /// The `ctrl-shift-` family is the half that survives inside a terminal
+    /// by design -- the same split #226 drew between `ctrl-w` (yields) and
+    /// `ctrl-shift-w` (closes the tab from inside a terminal). Scoping the
+    /// bare chords must not take these with it.
+    #[gpui::test]
+    async fn a_focused_terminal_still_answers_the_ctrl_shift_family(cx: &mut TestAppContext) {
+        let fired = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window(|_window, cx| WindowCommandFixture::in_terminal(fired.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<WindowCommandFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let focus_handle = fixture.read_with(&cx.cx, |fixture, _| fixture.focus_handle.clone());
+        cx.update(|window, app| focus_handle.focus(window, app));
+        cx.run_until_parked();
+
+        // #374: Windows binds the sidebar toggle as `ctrl-shift-d`.
+        let sidebar = if cfg!(target_os = "windows") {
+            "ctrl-shift-d"
+        } else {
+            "ctrl-shift-s"
+        };
+        cx.simulate_keystrokes(&format!("{sidebar} ctrl-shift-b"));
+        cx.run_until_parked();
+
+        assert_eq!(
+            fired.borrow().as_slice(),
+            &[
+                WindowCommand::ToggleSidebar,
+                WindowCommand::ToggleSecondaryPane,
+            ],
+            "the ctrl-shift family must keep reaching the shell from inside a terminal"
         );
     }
 
