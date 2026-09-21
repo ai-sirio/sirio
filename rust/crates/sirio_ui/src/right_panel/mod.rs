@@ -237,6 +237,22 @@ struct PanelViewSetting(PanelView);
 
 impl gpui::Global for PanelViewSetting {}
 
+/// Session-wide Files preference. It deliberately stays out of persisted
+/// settings: a new app launch starts with dotfiles hidden again.
+struct ShowHiddenFilesSetting(bool);
+
+impl gpui::Global for ShowHiddenFilesSetting {}
+
+impl ShowHiddenFilesSetting {
+    fn get(cx: &App) -> bool {
+        cx.try_global::<Self>().is_some_and(|setting| setting.0)
+    }
+
+    fn set(show: bool, cx: &mut App) {
+        cx.set_global(Self(show));
+    }
+}
+
 impl PanelView {
     /// Rail order, left to right.
     const ORDER: [PanelView; 5] = [
@@ -813,12 +829,7 @@ impl RightPanel {
 
     fn render_references(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let list = self.ensure_references(cx);
-        div()
-            .flex_1()
-            .min_h(px(0.0))
-            .flex()
-            .flex_col()
-            .child(list)
+        div().flex_1().min_h(px(0.0)).flex().flex_col().child(list)
     }
 
     /// The host's way in. Building the list if it does not exist yet is
