@@ -464,6 +464,10 @@ pub struct AvailableCommandInfo {
     pub name: String,
     /// Human-readable description of what the command does.
     pub description: String,
+    /// The arguments it takes, as the agent spells them for its own help.
+    /// `None` when it takes none — which is how both transports say it:
+    /// Claude Code sends an empty `argumentHint`, ACP sends no `input`.
+    pub argument_hint: Option<String>,
 }
 
 /// One choice in an effort-level selector.
@@ -2289,6 +2293,15 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                     .map(|command| AvailableCommandInfo {
                         name: command.name,
                         description: command.description,
+                        // ACP carries the same thing under a different
+                        // name, and spells "no arguments" as no `input`.
+                        argument_hint: command.input.and_then(|input| match input {
+                            agent_client_protocol::schema::v1::AvailableCommandInput::
+                                Unstructured(text) => {
+                                (!text.hint.trim().is_empty()).then_some(text.hint)
+                            }
+                            _ => None,
+                        }),
                     })
                     .collect(),
             )]
@@ -2829,10 +2842,56 @@ mod tests {
                 AvailableCommandInfo {
                     name: "cr".into(),
                     description: "Code review the diff".into(),
+                    argument_hint: None,
                 },
                 AvailableCommandInfo {
                     name: "research".into(),
                     description: "Research a topic".into(),
+                    argument_hint: None,
+                },
+            ])]
+        );
+    }
+
+    #[test]
+    fn an_acp_commands_text_input_hint_reaches_the_picker() {
+        // ACP spells the same thing a different way: an `input` of
+        // `text` carries the hint, and no `input` at all is a command
+        // that takes no arguments.
+        let update = SessionNotification::new(
+            "session",
+            SessionUpdate::AvailableCommandsUpdate(
+                agent_client_protocol::schema::v1::AvailableCommandsUpdate::new(vec![
+                    agent_client_protocol::schema::v1::AvailableCommand::new(
+                        "cr",
+                        "Code review the diff",
+                    )
+                    .input(
+                        agent_client_protocol::schema::v1::AvailableCommandInput::Unstructured(
+                            agent_client_protocol::schema::v1::UnstructuredCommandInput::new(
+                                "<pr#>|<branch>",
+                            ),
+                        ),
+                    ),
+                    agent_client_protocol::schema::v1::AvailableCommand::new(
+                        "research",
+                        "Research a topic",
+                    ),
+                ]),
+            ),
+        );
+        assert_eq!(
+            notification_to_events(update),
+            vec![AcpEvent::AvailableCommands(vec![
+                AvailableCommandInfo {
+                    name: "cr".into(),
+                    description: "Code review the diff".into(),
+                    argument_hint: Some("<pr#>|<branch>".into()),
+                },
+                AvailableCommandInfo {
+                    name: "research".into(),
+                    description: "Research a topic".into(),
+                    argument_hint: None,
                 },
             ])]
         );

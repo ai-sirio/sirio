@@ -7431,10 +7431,12 @@ impl Chat {
                     .map(|(position, command)| {
                         let name = command.name.clone();
                         let tooltip = slash_option_tooltip(&command.description);
+                        let hint = command.argument_hint.clone();
                         let row_entity = entity.clone();
                         let accept_name = name.clone();
                         let name_for_id = name.clone();
                         let name_for_label_id = name.clone();
+                        let name_for_hint_id = name.clone();
                         // One line per row: the name. The description is
                         // the row's tooltip, so ten rows stay ten lines
                         // and the list does not fill the pane.
@@ -7458,10 +7460,36 @@ impl Chat {
                                 .debug_selector(move || {
                                     format!("slash-option-name-{name_for_label_id}")
                                 })
+                                .flex_none()
                                 .text_size(typography.footnote)
                                 .text_color(bezel_theme.text)
                                 .child(format!("/{name}")),
                         )
+                        // The hint rides beside the name rather than under
+                        // it: the row is one line by design (the
+                        // description is the tooltip), and a second line
+                        // per row would fill the pane. A command that
+                        // takes no arguments draws nothing — the CLI says
+                        // so with an empty `argumentHint`, and three in
+                        // five of its commands do.
+                        .when_some(hint, |row, hint| {
+                            row.child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("slash-option-hint-{name_for_hint_id}")
+                                    })
+                                    .min_w_0()
+                                    .truncate()
+                                    // The name's own size, not a smaller
+                                    // one: a second size on a 12px row is
+                                    // noise, colour already says which of
+                                    // the two is secondary, and a taller
+                                    // line box here would grow the row.
+                                    .text_size(typography.footnote)
+                                    .text_color(bezel_theme.text_faint)
+                                    .child(hint),
+                            )
+                        })
                         .into_any_element()
                     })
                     .collect();
@@ -11080,6 +11108,7 @@ two"
             chat.available_commands.push(AvailableCommandInfo {
                 name: "help".into(),
                 description: "Show help".into(),
+                argument_hint: None,
             });
             cx.notify();
         });
@@ -13666,6 +13695,7 @@ let answer = 42;
             chat.available_commands.push(AvailableCommandInfo {
                 name: "help".into(),
                 description: "Show help".into(),
+                argument_hint: None,
             });
             chat
         });
@@ -16423,6 +16453,25 @@ let answer = 42;
         assert!(cx.debug_bounds("slash-option-cr").is_some());
         assert!(cx.debug_bounds("slash-option-create-plan").is_some());
         assert!(cx.debug_bounds("slash-option-research").is_some());
+
+        // The hint rides beside the name, on the row's single line: the
+        // description is already the tooltip, and a second line per row
+        // would fill the pane (see `..._with_single_line_rows`). A command
+        // that takes no arguments draws no hint rather than an empty slot.
+        let hint = cx
+            .debug_bounds("slash-option-hint-cr")
+            .expect("a command with an argument hint shows it");
+        let name = cx
+            .debug_bounds("slash-option-name-cr")
+            .expect("the name is drawn");
+        assert!(
+            hint.left() >= name.right(),
+            "the hint follows the name on the same line: name {name:?}, hint {hint:?}"
+        );
+        assert!(
+            cx.debug_bounds("slash-option-hint-research").is_none(),
+            "a command with no argument hint reserves no room for one"
+        );
 
         // A filter prefix narrows the list; a prefix that matches nothing
         // hides the popup entirely.

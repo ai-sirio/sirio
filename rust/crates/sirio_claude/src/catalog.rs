@@ -68,6 +68,10 @@ pub struct CommandInfo {
     pub name: String,
     /// What it does.
     pub description: String,
+    /// The arguments it takes, as the CLI spells them for its own help —
+    /// `[issue description]`, `<pr#>|<branch>`. `None` when it takes none:
+    /// the CLI says so with an empty string, and three commands in five do.
+    pub argument_hint: Option<String>,
 }
 
 /// One model the session can switch to.
@@ -176,6 +180,11 @@ impl Catalog {
                                 .and_then(|text| text.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            argument_hint: command
+                                .get("argumentHint")
+                                .and_then(|hint| hint.as_str())
+                                .filter(|hint| !hint.trim().is_empty())
+                                .map(str::to_string),
                         })
                     })
                     .collect()
@@ -414,6 +423,28 @@ mod tests {
         for hidden in ["statusline", "login", "clear", "todos"] {
             assert!(!names.contains(&hidden), "{hidden} must not be offered");
         }
+    }
+
+    #[test]
+    fn an_argument_hint_reaches_the_picker_and_an_empty_one_does_not() {
+        let commands = catalog().commands();
+        let hint = |name: &str| {
+            commands
+                .iter()
+                .find(|command| command.name == name)
+                .unwrap_or_else(|| panic!("{name} is offered"))
+                .argument_hint
+                .clone()
+        };
+        assert_eq!(
+            hint("compact").as_deref(),
+            Some("<optional custom summarization instructions>")
+        );
+        // Thirty-two of the CLI's fifty-three commands send
+        // `argumentHint: ""`. An empty string is the absence of a hint, not
+        // a blank one, or three commands in five would reserve a gap for
+        // something they never say.
+        assert_eq!(hint("usage"), None);
     }
 
     #[test]

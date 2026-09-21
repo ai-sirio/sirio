@@ -1058,6 +1058,7 @@ fn catalogue_events(
         .map(|command| crate::AvailableCommandInfo {
             name: command.name,
             description: command.description,
+            argument_hint: command.argument_hint,
         })
         .collect();
     if !commands.is_empty() {
@@ -1181,6 +1182,27 @@ mod tests {
             .iter()
             .map(|choice| choice.value.as_str())
             .collect()
+    }
+
+    #[test]
+    fn the_command_list_carries_the_hint_and_drops_the_empty_one() {
+        let catalog = Catalog::from_initialize(&serde_json::json!({
+            "commands": [
+                {"name": "compact", "description": "Compact",
+                 "argumentHint": "<optional custom summarization instructions>"},
+                {"name": "usage", "description": "Show plan usage", "argumentHint": ""}
+            ]
+        }));
+        let mut selected = EFFORT_DEFAULT.to_string();
+        let events = catalogue_events(&catalog, "opus", &mut selected);
+        let Some(AcpEvent::AvailableCommands(commands)) = events.into_iter().next() else {
+            panic!("the handshake publishes the command list first");
+        };
+        assert_eq!(
+            commands[0].argument_hint.as_deref(),
+            Some("<optional custom summarization instructions>")
+        );
+        assert_eq!(commands[1].argument_hint, None);
     }
 
     #[test]
