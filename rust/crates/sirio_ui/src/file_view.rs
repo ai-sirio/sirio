@@ -913,17 +913,43 @@ impl FileView {
         }
     }
 
-    fn on_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_hover(cx);
-        if event.keystroke.modifiers.control && event.keystroke.key == "a" {
+        // Both spellings of the chord: Ctrl-A everywhere, ⌘A on macOS. The
+        // platform half was missing, which cost the select-all-then-copy
+        // flow its keyboard route on the reference release platform.
+        if (event.keystroke.modifiers.control || event.keystroke.modifiers.platform)
+            && event.keystroke.key == "a"
+        {
             self.select_all();
             cx.notify();
             return;
+        }
+        // The clipboard chords. Copy, Cut and Paste reached the buffer only
+        // from the right-click menu: nothing binds the `FileEditor` key
+        // context, and the command-chord guard below returned before any of
+        // them could be read, so the keyboard route into the clipboard did
+        // not exist. They dispatch through `handle_context_action` so the
+        // two routes cannot answer the same key differently.
+        //
+        // Unlike the terminal's `ctrl-shift-c`/`v` (which leaves plain
+        // Ctrl-C to the PTY as the interrupt), a source surface is an
+        // ordinary text field and takes the unshifted chord.
+        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+            let action = match event.keystroke.key.as_str() {
+                "c" => Some(FileContextAction::Copy),
+                "x" => Some(FileContextAction::Cut),
+                "v" => Some(FileContextAction::Paste),
+                _ => None,
+            };
+            // Asked before acting rather than inside each arm: a paste while
+            // the Markdown preview is up would rewrite the buffer at a caret
+            // the reader cannot see, and a copy would take a source range
+            // nothing on screen shows as selected.
+            if let Some(action) = action.filter(|_| self.source_surface_ready()) {
+                self.handle_context_action(action, window, cx);
+                return;
+            }
         }
         if (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
             && event.keystroke.key == "end"
@@ -975,6 +1001,16 @@ impl FileView {
             }
         }
         cx.notify();
+    }
+
+    /// Whether the raw source surface is the thing on screen and holding a
+    /// buffer that can be read and written. The Markdown preview mounts
+    /// under the same focusable element, so a chord that acts on the source
+    /// has to ask, and a file still loading has no buffer to act on at all.
+    fn source_surface_ready(&self) -> bool {
+        self.editor()
+            .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
+            && self.effective_mode() == MarkdownMode::Code
     }
 
     fn current_selection(&self, editor: &Editor) -> Selection {
@@ -4358,6 +4394,173 @@ mod tests {
             copied, "let a = 1;\nlet b = 2;",
             "the indentation every line shares must be dropped"
         );
+    }
+
+    /// The platform's clipboard chord: ⌘ on macOS, Ctrl everywhere else.
+    /// The source surface is not a terminal, so plain Ctrl-C is copy here
+    /// rather than the interrupt `TerminalView` keeps `ctrl-shift-c` clear
+    /// of.
+    fn clipboard_chord(key: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("cmd-{key}")
+        } else {
+            format!("ctrl-{key}")
+        }
+    }
+
+    /// The editor's clipboard chords. Copy, Cut and Paste existed only on
+    /// the right-click menu: `on_editor_key` returned on every command
+    /// chord, and no binding anywhere claimed the `FileEditor` context, so
+    /// the keyboard route into the clipboard did not exist at all.
+    #[gpui::test]
+    async fn the_clipboard_chords_copy_cut_and_paste_the_source_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "alpha beta\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            window.simulate_next_frame(cx);
+        });
+
+        // Copy: the selection reaches the clipboard, the buffer is untouched.
+        view.update(&mut cx.cx, |view, cx| {
+            view.source_selection = Some(Selection { start: 0, end: 5 });
+            view.caret = 5;
+            cx.notify();
+        });
+        cx.simulate_keystrokes(&clipboard_chord("c"));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard())
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("alpha"),
+            "the copy chord must write the selection to the clipboard"
+        );
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "alpha beta\n",
+            "copying must leave the buffer alone"
+        );
+
+        // Cut: the same clipboard write, and the selection leaves the buffer.
+        cx.simulate_keystrokes(&clipboard_chord("x"));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard())
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("alpha"),
+            "the cut chord must write the selection to the clipboard"
+        );
+        assert_eq!(
+            buffer_of(&view, &cx),
+            " beta\n",
+            "the cut chord must remove the selection from the buffer"
+        );
+
+        // Paste: the clipboard lands at the caret the cut left behind.
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("gamma".to_string()));
+        });
+        cx.simulate_keystrokes(&clipboard_chord("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "gamma beta\n",
+            "the paste chord must insert the clipboard at the caret"
+        );
+    }
+
+    /// Select-all answered `ctrl-a` alone, so on macOS — the reference
+    /// release platform — ⌘A did nothing, and the select-all-then-copy
+    /// flow had no keyboard route into the clipboard however well the
+    /// copy chord itself worked.
+    #[gpui::test]
+    async fn select_all_answers_both_the_control_and_the_platform_chord(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        const SOURCE: &str = "alpha beta\n";
+        let file = TempFile::with_extension("rs", SOURCE);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            window.simulate_next_frame(cx);
+        });
+        let whole = Some(Selection {
+            start: 0,
+            end: SOURCE.len(),
+        });
+
+        cx.simulate_keystrokes("cmd-a");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.source_selection),
+            whole,
+            "the platform chord must select the whole buffer"
+        );
+
+        // And the chord that already worked still has to.
+        view.update(&mut cx.cx, |view, cx| {
+            view.source_selection = None;
+            view.caret = 0;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("ctrl-a");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.source_selection),
+            whole,
+            "the control chord must keep selecting the whole buffer"
+        );
+    }
+
+    /// The Markdown preview mounts under the same focusable element as the
+    /// source surface, so the paste chord reaches this view while the
+    /// reader is looking at rendered text and no caret. Rewriting the
+    /// buffer there is an edit nothing on screen accounts for.
+    #[gpui::test]
+    async fn the_paste_chord_leaves_the_buffer_alone_under_the_markdown_preview(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("md", "# Title\n\nHello.\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_markdown_mode(MarkdownMode::Preview, cx);
+                view.editor_focus.focus(window, cx);
+            });
+            window.simulate_next_frame(cx);
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.effective_mode()),
+            MarkdownMode::Preview,
+            "the fixture must actually be showing the preview"
+        );
+
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("intruder".to_string()));
+        });
+        cx.simulate_keystrokes(&clipboard_chord("v"));
+        cx.run_until_parked();
+
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "# Title\n\nHello.\n",
+            "a paste under the preview must not reach the source buffer"
+        );
+        assert!(
+            !view.read_with(&cx.cx, |view, _| view.is_dirty()),
+            "and must not leave the file dirty"
+        );
+    }
+
+    /// The source buffer as the view currently holds it.
+    fn buffer_of(view: &gpui::Entity<FileView>, cx: &gpui::VisualTestContext) -> String {
+        view.read_with(&cx.cx, |view, _| {
+            view.editor().expect("editor").buffer().to_owned()
+        })
     }
 
     #[gpui::test]
