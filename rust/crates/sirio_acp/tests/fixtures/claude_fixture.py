@@ -395,6 +395,43 @@ def main():
                 assistant_tool_use("toolu_plan_1", "ExitPlanMode", tool_input)
                 ask_permission("cli-plan-1", "ExitPlanMode", "toolu_plan_1", tool_input)
                 continue
+            if MODE == "notices":
+                init_line()
+                # A foreground call and a backgrounded one raise the same
+                # pair of messages; only the start says which is which.
+                for task_id, backgrounded in (("fg1", False), ("bg1", True)):
+                    send({"type": "system", "subtype": "task_started",
+                          "session_id": SESSION_ID, "uuid": f"start-{task_id}",
+                          "task_id": task_id, "is_backgrounded": backgrounded,
+                          "task_type": "local_bash", "description": "work"})
+                send({"type": "system", "subtype": "background_tasks_changed",
+                      "session_id": SESSION_ID, "uuid": "tasks-1",
+                      "tasks": [{"task_id": "bg1", "task_type": "local_bash",
+                                 "description": "work"}]})
+                send({"type": "system", "subtype": "task_notification",
+                      "session_id": SESSION_ID, "uuid": "note-fg",
+                      "task_id": "fg1", "status": "completed",
+                      "summary": "a foreground call nobody asked about"})
+                send({"type": "system", "subtype": "background_tasks_changed",
+                      "session_id": SESSION_ID, "uuid": "tasks-2", "tasks": []})
+                send({"type": "system", "subtype": "task_notification",
+                      "session_id": SESSION_ID, "uuid": "note-bg",
+                      "task_id": "bg1", "status": "completed",
+                      "summary": "Background command \"work\" completed (exit code 0)"})
+                send({"type": "system", "subtype": "compact_boundary",
+                      "session_id": SESSION_ID, "uuid": "compact-1",
+                      "compact_metadata": {"trigger": "auto",
+                                           "pre_tokens": 43134,
+                                           "post_tokens": 11574}})
+                send({"type": "rate_limit_event", "session_id": SESSION_ID,
+                      "uuid": "limit-1",
+                      "rate_limit_info": {"status": "rejected",
+                                          "rateLimitType": "five_hour",
+                                          "resetsAt": 1789990800,
+                                          "unifiedWindows": {
+                                              "five_hour": {"utilization": 1.0}}}})
+                result()
+                continue
             # Stay up serving turns until stdin closes: the worker owns our
             # lifetime, and exiting after one turn would read as a death.
             normal_turn()

@@ -28,6 +28,8 @@ pub enum CliMessage {
     StreamEvent(StreamEventPayload),
     /// The end of a turn.
     Result(ResultPayload),
+    /// The plan's rate-limit windows, pushed once per turn.
+    RateLimit(RateLimitPush),
     /// A request the CLI makes of this client, e.g. `can_use_tool`.
     ControlRequest(serde_json::Value),
     /// The answer to a request this client made.
@@ -66,6 +68,7 @@ impl CliMessage {
                 .ok()
                 .map(Self::StreamEvent),
             "result" => serde_json::from_value(value.clone()).ok().map(Self::Result),
+            "rate_limit_event" => RateLimitPush::parse(&value).map(Self::RateLimit),
             "control_request" => Some(Self::ControlRequest(value.clone())),
             "control_response" => Some(Self::ControlResponse(value.clone())),
             _ => None,
@@ -109,6 +112,110 @@ pub struct SystemPayload {
     pub terminal_slash_commands: Vec<String>,
     /// Present on `commands_changed`.
     pub commands: Option<serde_json::Value>,
+    /// Present on `compact_boundary`.
+    pub compact_metadata: Option<CompactMetadata>,
+    /// Present on `background_tasks_changed`: the whole list every time,
+    /// a replacement rather than a delta. It drains as each task ends —
+    /// and it drains *before* the matching `task_notification` arrives, so
+    /// a surface driven by this alone reports a task vanishing, never a
+    /// task finishing.
+    pub tasks: Option<Vec<BackgroundTask>>,
+    /// Present on `task_started`, `task_updated` and `task_notification`.
+    pub task_id: Option<String>,
+    /// Present on `task_started` and `background_tasks_changed`'s entries.
+    pub description: Option<String>,
+    /// Present on `task_started` **only**. Foreground `Bash` calls raise
+    /// the same task messages as backgrounded ones, and this is the single
+    /// field that tells them apart — a `task_notification` does not repeat
+    /// it, so a caller that wants only background tasks has to remember
+    /// the start keyed by `task_id`.
+    pub is_backgrounded: Option<bool>,
+    /// Present on `task_notification`, e.g. `completed`.
+    pub status: Option<String>,
+    /// Present on `task_notification`: the CLI's own sentence about the
+    /// task, already written for a reader.
+    pub summary: Option<String>,
+}
+
+/// What a `compact_boundary` says about the compaction it announces.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CompactMetadata {
+    /// `manual` when the user asked for it, `auto` when the context
+    /// window forced it. The distinction is the whole point of showing
+    /// the boundary: an automatic compaction is something that happened
+    /// *to* the conversation.
+    pub trigger: Option<String>,
+    /// Context size in tokens before the compaction, and after it.
+    pub pre_tokens: Option<u64>,
+    pub post_tokens: Option<u64>,
+}
+
+/// One row of `background_tasks_changed`'s list.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BackgroundTask {
+    pub task_id: String,
+    /// The CLI's own word for what runs it, e.g. `local_bash`.
+    pub task_type: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A `rate_limit_event`: the plan's windows, pushed mid-session.
+///
+/// These are the same numbers [`crate::PlanUsage`] pulls from `get_usage`,
+/// in a different shape **and a different scale**. Both were captured from
+/// one session seconds apart: the pull reported `five_hour.utilization: 54`
+/// where the push reported `0.53`, and the pull's ISO 8601 `resets_at`
+/// matched the push's epoch `resetsAt` to the second. The rescale happens
+/// here so that only one convention — percent — ever leaves this crate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RateLimitPush {
+    /// `allowed` while the plan has room. Anything else is the CLI
+    /// reporting that it does not, and is the only field worth a warning.
+    pub status: Option<String>,
+    /// Which window `status` is about, e.g. `five_hour`.
+    pub rate_limit_type: Option<String>,
+    /// When that window resets, in unix seconds. This crate carries no
+    /// date library by design, so the epoch stays an integer and the
+    /// caller formats it.
+    pub resets_at: Option<i64>,
+    /// Five-hour window utilization on the **0–100 scale**.
+    pub five_hour: Option<f64>,
+    /// Seven-day window utilization on the **0–100 scale**.
+    pub seven_day: Option<f64>,
+}
+
+impl RateLimitPush {
+    /// Reads a `rate_limit_event` line. `None` only when it carries no
+    /// `rate_limit_info` at all — every field inside it is optional, so a
+    /// push that reports less than this one still parses.
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        let info = value.get("rate_limit_info")?;
+        let window = |name: &str| {
+            info.get("unifiedWindows")?
+                .get(name)?
+                .get("utilization")?
+                .as_f64()
+                .map(to_percent)
+        };
+        Some(Self {
+            status: string(info, "status"),
+            rate_limit_type: string(info, "rateLimitType"),
+            resets_at: info.get("resetsAt").and_then(serde_json::Value::as_i64),
+            five_hour: window("five_hour"),
+            seven_day: window("seven_day"),
+        })
+    }
+}
+
+/// The push sends a fraction where the pull sends a percent.
+fn to_percent(fraction: f64) -> f64 {
+    fraction * 100.0
+}
+
+fn string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
 /// One content block of an assistant message.
@@ -322,6 +429,15 @@ mod tests {
     const INIT: &str = include_str!("../tests/fixtures/init.json");
     const ASSISTANT_TOOL_USE: &str = include_str!("../tests/fixtures/assistant_tool_use.json");
     const RESULT_SUCCESS: &str = include_str!("../tests/fixtures/result_success.json");
+    const COMPACT_BOUNDARY: &str = include_str!("../tests/fixtures/compact_boundary.json");
+    const RATE_LIMIT_EVENT: &str = include_str!("../tests/fixtures/rate_limit_event.json");
+    const TASK_STARTED_BACKGROUND: &str =
+        include_str!("../tests/fixtures/task_started_background.json");
+    const TASK_STARTED_FOREGROUND: &str =
+        include_str!("../tests/fixtures/task_started_foreground.json");
+    const TASK_NOTIFICATION: &str = include_str!("../tests/fixtures/task_notification.json");
+    const BACKGROUND_TASKS_CHANGED: &str =
+        include_str!("../tests/fixtures/background_tasks_changed.json");
 
     #[test]
     fn system_init_carries_the_session_and_the_version() {
@@ -385,7 +501,7 @@ mod tests {
     #[test]
     fn an_unknown_type_and_unknown_fields_never_fail() {
         assert!(matches!(
-            CliMessage::parse(r#"{"type":"rate_limit_event","kind":"five_hour","brand_new":1}"#),
+            CliMessage::parse(r#"{"type":"tool_progress","tool_use_id":"t","brand_new":1}"#),
             Some(CliMessage::Other { .. })
         ));
         // A field the CLI added after this build shipped must not reject the
@@ -397,6 +513,85 @@ mod tests {
             CliMessage::parse(&widened),
             Some(CliMessage::System(_))
         ));
+    }
+
+    #[test]
+    fn a_compaction_reports_what_it_dropped() {
+        let Some(CliMessage::System(system)) = CliMessage::parse(COMPACT_BOUNDARY) else {
+            panic!("the compact_boundary capture should parse as a system message");
+        };
+        assert_eq!(system.subtype, "compact_boundary");
+        let compaction = system.compact_metadata.expect("compaction metadata");
+        assert_eq!(compaction.trigger.as_deref(), Some("manual"));
+        assert_eq!(compaction.pre_tokens, Some(43_134));
+        assert_eq!(compaction.post_tokens, Some(11_574));
+    }
+
+    #[test]
+    fn the_pushed_rate_limit_is_rescaled_to_the_percent_the_pull_speaks() {
+        let Some(CliMessage::RateLimit(limit)) = CliMessage::parse(RATE_LIMIT_EVENT) else {
+            panic!("the rate_limit_event capture should parse as a rate limit");
+        };
+        assert_eq!(limit.status.as_deref(), Some("allowed"));
+        assert_eq!(limit.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(limit.resets_at, Some(1_789_990_800));
+        // Captured seconds apart in one session, `get_usage` answered 54
+        // and 10 for the windows this push reports as 0.53 and 0.1. Both
+        // conventions reaching one program is how a half-full window ends
+        // up drawn at half a percent.
+        assert_eq!(limit.five_hour, Some(53.0));
+        assert_eq!(limit.seven_day, Some(10.0));
+    }
+
+    #[test]
+    fn a_task_says_whether_it_went_to_the_background() {
+        let Some(CliMessage::System(background)) = CliMessage::parse(TASK_STARTED_BACKGROUND)
+        else {
+            panic!("the backgrounded task_started capture should parse");
+        };
+        assert_eq!(background.task_id.as_deref(), Some("bm0k5s6eo"));
+        assert_eq!(background.is_backgrounded, Some(true));
+
+        let Some(CliMessage::System(foreground)) = CliMessage::parse(TASK_STARTED_FOREGROUND)
+        else {
+            panic!("the foreground task_started capture should parse");
+        };
+        assert_eq!(foreground.is_backgrounded, Some(false));
+    }
+
+    #[test]
+    fn a_finished_task_carries_the_clis_own_sentence() {
+        let Some(CliMessage::System(system)) = CliMessage::parse(TASK_NOTIFICATION) else {
+            panic!("the task_notification capture should parse as a system message");
+        };
+        assert_eq!(system.task_id.as_deref(), Some("bm0k5s6eo"));
+        assert_eq!(system.status.as_deref(), Some("completed"));
+        assert!(
+            system
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("exit code 0")),
+            "the notification's own summary is what the row shows: {:?}",
+            system.summary
+        );
+        // The discriminator lives on `task_started` alone; a notification
+        // read on its own cannot tell a background task from a foreground
+        // one, which is why the caller correlates by id.
+        assert_eq!(system.is_backgrounded, None);
+    }
+
+    #[test]
+    fn the_background_task_list_arrives_whole() {
+        let Some(CliMessage::System(system)) = CliMessage::parse(BACKGROUND_TASKS_CHANGED) else {
+            panic!("the background_tasks_changed capture should parse");
+        };
+        let tasks = system.tasks.expect("a task list");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "bm0k5s6eo");
+        assert_eq!(
+            tasks[0].description.as_deref(),
+            Some("Sleep 25 seconds then echo FINISHED")
+        );
     }
 
     #[test]

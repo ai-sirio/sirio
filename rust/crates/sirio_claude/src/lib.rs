@@ -27,9 +27,9 @@ pub use control::{
 };
 pub use launch::{ChatSession, LaunchLine};
 pub use message::{
-    AssistantMessage, AssistantPayload, CliMessage, ContentBlock, Delta, McpServerStatus,
-    ModelUsage, ResultPayload, StreamEventPayload, SystemPayload, ToolResult, ToolUse, UserMessage,
-    UserPayload,
+    AssistantMessage, AssistantPayload, BackgroundTask, CliMessage, CompactMetadata, ContentBlock,
+    Delta, McpServerStatus, ModelUsage, RateLimitPush, ResultPayload, StreamEventPayload,
+    SystemPayload, ToolResult, ToolUse, UserMessage, UserPayload,
 };
 pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
 pub use usage::{ContextUsageReport, PlanUsage, RateLimitWindow, RewindOutcome};

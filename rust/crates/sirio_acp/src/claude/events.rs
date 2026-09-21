@@ -5,13 +5,16 @@
 //! what the session id turned out to be — so every case can be a unit test
 //! with a JSON literal instead of a subprocess.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
-use crate::{AcpEvent, PlanEntryInfo, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo};
+use crate::{
+    AcpEvent, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo,
+};
 
 /// What a finished turn reported, kept for the caller that asks after the
 /// fact — the context meter, and the death report.
@@ -57,6 +60,18 @@ pub(crate) struct Fold {
     model: Option<String>,
     mcp_warnings: Vec<String>,
     last_result: Option<ResultSummary>,
+    notices: Vec<SessionNotice>,
+    /// Ids of tasks whose `task_started` said they were backgrounded.
+    /// The ending `task_notification` does not repeat the flag, and a
+    /// foreground `Bash` call raises the very same pair — so without this
+    /// every tool call in the session would post a "finished" row.
+    backgrounded: BTreeSet<String>,
+    /// How many background tasks the CLI last said were running.
+    background_tasks: usize,
+    /// The last rate-limit status announced. The push repeats every turn,
+    /// and re-announcing an unchanged refusal would stack one banner per
+    /// turn until the window resets.
+    rate_limit_status: Option<String>,
 }
 
 impl Fold {
@@ -91,6 +106,17 @@ impl Fold {
     /// ACP side's `mcp_warnings_shown` cursor exists to prevent.
     pub(crate) fn take_mcp_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.mcp_warnings)
+    }
+
+    /// Notices seen so far, draining them. The surface posts each one
+    /// once, in the order it arrived, into the transcript.
+    pub(crate) fn take_notices(&mut self) -> Vec<SessionNotice> {
+        std::mem::take(&mut self.notices)
+    }
+
+    /// How many background tasks are running, as the CLI last reported.
+    pub(crate) fn background_task_count(&self) -> usize {
+        self.background_tasks
     }
 
     /// What the last `result` reported.
@@ -191,6 +217,28 @@ impl Fold {
             CliMessage::Result(result) => self.apply_result(result),
             // Control traffic is the worker's business, not the fold's.
             CliMessage::ControlRequest(_) | CliMessage::ControlResponse(_) => Vec::new(),
+            CliMessage::RateLimit(limit) => {
+                // The push arrives every turn and almost always says the
+                // plan has room, which is not news. Only a change to a
+                // status that is not `allowed` is.
+                let status = limit.status.clone().unwrap_or_default();
+                if status.is_empty() || status == "allowed" {
+                    self.rate_limit_status = Some(status);
+                    return Vec::new();
+                }
+                if self.rate_limit_status.as_deref() == Some(status.as_str()) {
+                    return Vec::new();
+                }
+                self.rate_limit_status = Some(status.clone());
+                self.notices.push(SessionNotice::RateLimited {
+                    status,
+                    window: limit.rate_limit_type.clone(),
+                    resets_at: limit.resets_at,
+                });
+                vec![AcpEvent::OtherSessionUpdate {
+                    kind: "SessionNotice".into(),
+                }]
+            }
             CliMessage::Other { kind, subtype } => {
                 vec![AcpEvent::OtherSessionUpdate {
                     kind: match subtype {
@@ -295,6 +343,47 @@ impl Fold {
                 // a broken server would otherwise banner every chat.
             }
             "status" => {}
+            "compact_boundary" => {
+                let metadata = system.compact_metadata.clone().unwrap_or_default();
+                self.notices.push(SessionNotice::Compacted {
+                    trigger: metadata.trigger,
+                    pre_tokens: metadata.pre_tokens,
+                    post_tokens: metadata.post_tokens,
+                });
+                events.push(AcpEvent::OtherSessionUpdate {
+                    kind: "SessionNotice".into(),
+                });
+            }
+            "task_started" => {
+                if let Some(task_id) = system.task_id.clone()
+                    && system.is_backgrounded == Some(true)
+                {
+                    self.backgrounded.insert(task_id);
+                }
+            }
+            "task_notification" => {
+                // `is_backgrounded` is not repeated here, so the start is
+                // the only place that ever said so.
+                if let Some(task_id) = system.task_id.as_deref()
+                    && self.backgrounded.remove(task_id)
+                    && let Some(summary) = system.summary.clone().filter(|s| !s.trim().is_empty())
+                {
+                    self.notices
+                        .push(SessionNotice::BackgroundTaskEnded { summary });
+                    events.push(AcpEvent::OtherSessionUpdate {
+                        kind: "SessionNotice".into(),
+                    });
+                }
+            }
+            "background_tasks_changed" => {
+                let count = system.tasks.as_ref().map_or(0, Vec::len);
+                if count != self.background_tasks {
+                    self.background_tasks = count;
+                    events.push(AcpEvent::OtherSessionUpdate {
+                        kind: format!("BackgroundTasksUpdate({count})"),
+                    });
+                }
+            }
             other => events.push(AcpEvent::OtherSessionUpdate {
                 kind: format!("system/{other}"),
             }),
@@ -786,17 +875,157 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_says_how_much_context_it_dropped() {
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(json!({
+            "type": "system", "subtype": "compact_boundary",
+            "compact_metadata": {"trigger": "auto", "pre_tokens": 43134, "post_tokens": 11574}
+        })));
+        assert_eq!(
+            events,
+            vec![AcpEvent::OtherSessionUpdate {
+                kind: "SessionNotice".into()
+            }]
+        );
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::Compacted {
+                trigger: Some("auto".into()),
+                pre_tokens: Some(43_134),
+                post_tokens: Some(11_574),
+            }]
+        );
+    }
+
+    #[test]
+    fn only_a_task_that_went_to_the_background_is_announced_when_it_ends() {
+        let mut fold = Fold::new();
+        // Foreground and background calls raise the same messages, and the
+        // notification that ends them does not repeat `is_backgrounded`.
+        for (task_id, backgrounded) in [("bg1", true), ("fg1", false)] {
+            fold.apply(parse(json!({
+                "type": "system", "subtype": "task_started",
+                "task_id": task_id, "is_backgrounded": backgrounded,
+                "description": "something"
+            })));
+        }
+        let foreground = fold.apply(parse(json!({
+            "type": "system", "subtype": "task_notification",
+            "task_id": "fg1", "status": "completed", "summary": "ran in front"
+        })));
+        assert!(
+            foreground.is_empty(),
+            "a foreground Bash call must not post a notice: {foreground:?}"
+        );
+        assert!(fold.take_notices().is_empty());
+
+        let background = fold.apply(parse(json!({
+            "type": "system", "subtype": "task_notification",
+            "task_id": "bg1", "status": "completed",
+            "summary": "Background command \"sleep\" completed (exit code 0)"
+        })));
+        assert_eq!(
+            background,
+            vec![AcpEvent::OtherSessionUpdate {
+                kind: "SessionNotice".into()
+            }]
+        );
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::BackgroundTaskEnded {
+                summary: "Background command \"sleep\" completed (exit code 0)".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_is_silent_while_it_still_allows_the_turn() {
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour",
+                                "resetsAt": 1789990800,
+                                "unifiedWindows": {"five_hour": {"utilization": 0.53}}}
+        })));
+        assert!(
+            events.is_empty(),
+            "the usual push says the plan has room and is not news: {events:?}"
+        );
+        assert!(fold.take_notices().is_empty());
+    }
+
+    #[test]
+    fn a_rate_limit_that_stops_the_plan_is_announced_once() {
+        let mut fold = Fold::new();
+        let line = json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "rejected", "rateLimitType": "seven_day",
+                                "resetsAt": 1790496000,
+                                "unifiedWindows": {"seven_day": {"utilization": 1.0}}}
+        });
+        assert_eq!(
+            fold.apply(parse(line.clone())),
+            vec![AcpEvent::OtherSessionUpdate {
+                kind: "SessionNotice".into()
+            }]
+        );
+        assert_eq!(
+            fold.take_notices(),
+            vec![SessionNotice::RateLimited {
+                status: "rejected".into(),
+                window: Some("seven_day".into()),
+                resets_at: Some(1_790_496_000),
+            }]
+        );
+        // The push repeats every turn. Saying it again while nothing has
+        // changed would stack one banner per turn for the rest of the day.
+        assert!(fold.apply(parse(line)).is_empty());
+        assert!(fold.take_notices().is_empty());
+    }
+
+    #[test]
+    fn the_running_task_count_follows_the_list_the_cli_replaces() {
+        let mut fold = Fold::new();
+        let events = fold.apply(parse(json!({
+            "type": "system", "subtype": "background_tasks_changed",
+            "tasks": [{"task_id": "a", "description": "one"},
+                      {"task_id": "b", "description": "two"}]
+        })));
+        assert_eq!(
+            events,
+            vec![AcpEvent::OtherSessionUpdate {
+                kind: "BackgroundTasksUpdate(2)".into()
+            }]
+        );
+        assert_eq!(fold.background_task_count(), 2);
+        // The list is a replacement, and it empties before the matching
+        // notification arrives — which is why the count and the notice are
+        // two separate things.
+        fold.apply(parse(json!({
+            "type": "system", "subtype": "background_tasks_changed", "tasks": []
+        })));
+        assert_eq!(fold.background_task_count(), 0);
+    }
+
+    #[test]
     fn traffic_this_build_has_no_model_for_is_named_not_dropped() {
         let mut fold = Fold::new();
+        // Each of these was seen on the wire from claude 2.1.278 and has
+        // no model in this build. They are the current list, not a fixed
+        // one: an entry earns a row here until it earns a real one.
         for (line, expected) in [
             (
                 json!({"type": "tool_progress", "tool_use_id": "t"}),
                 "tool_progress",
             ),
-            (json!({"type": "rate_limit_event"}), "rate_limit_event"),
             (
-                json!({"type": "system", "subtype": "compact_boundary"}),
-                "system/compact_boundary",
+                json!({"type": "system", "subtype": "thinking_tokens",
+                       "estimated_tokens": 210}),
+                "system/thinking_tokens",
+            ),
+            (
+                json!({"type": "system", "subtype": "hook_started"}),
+                "system/hook_started",
             ),
         ] {
             let events = fold.apply(parse(line));

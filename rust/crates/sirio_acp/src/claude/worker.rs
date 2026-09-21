@@ -7,7 +7,7 @@
 //! that names one cause here and another there would be worse than none.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -120,6 +120,8 @@ pub(super) struct Shared {
     fast_mode: Mutex<Option<FastMode>>,
     thinking_display: Mutex<crate::ThinkingDisplay>,
     mcp_warnings: Mutex<Vec<String>>,
+    notices: Mutex<Vec<crate::SessionNotice>>,
+    background_tasks: AtomicUsize,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
 }
@@ -157,6 +159,29 @@ impl Shared {
             .lock()
             .map(|w| w.clone())
             .unwrap_or_default()
+    }
+
+    /// The notices posted since the last read, draining them. The surface
+    /// puts each one into the transcript once, in this order.
+    pub(super) fn take_notices(&self) -> Vec<crate::SessionNotice> {
+        self.notices
+            .lock()
+            .map(|mut held| std::mem::take(&mut *held))
+            .unwrap_or_default()
+    }
+
+    /// How many background tasks are running, as the CLI last reported.
+    pub(super) fn background_task_count(&self) -> usize {
+        self.background_tasks.load(Ordering::Acquire)
+    }
+
+    fn push_notices(&self, notices: Vec<crate::SessionNotice>) {
+        if notices.is_empty() {
+            return;
+        }
+        if let Ok(mut held) = self.notices.lock() {
+            held.extend(notices);
+        }
     }
 
     pub(super) fn last_user_message_id(&self) -> Option<String> {
@@ -777,6 +802,13 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         }
                         let mut events = fold.apply(message);
                         shared.push_mcp_warnings(fold.take_mcp_warnings());
+                        // Drained before the events are forwarded, so the
+                        // `SessionNotice` signal a surface is about to see
+                        // always has its notice waiting behind it.
+                        shared.push_notices(fold.take_notices());
+                        shared
+                            .background_tasks
+                            .store(fold.background_task_count(), Ordering::Release);
                         if let Some(id) = fold.session_id()
                             && let Ok(mut held) = shared.session_id.lock()
                         {

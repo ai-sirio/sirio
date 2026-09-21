@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::future::Either;
-use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch};
+use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch, SessionNotice};
 use sirio_claude::FastMode;
 use sirio_acp::ThinkingDisplay;
 
@@ -840,4 +840,52 @@ fn a_refused_resume_starts_a_fresh_session_instead_of_a_dead_tab() {
         "the surface has to know the id it held is stale"
     );
     client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn the_notices_a_turn_produces_reach_the_client_in_order() {
+    let (mut client, events) = launch("notices");
+    client.prompt("hello").expect("prompt is accepted");
+    // Drain until the turn ends, collecting notices at each signal so the
+    // order they were posted in is the order they are read in.
+    let mut notices = Vec::new();
+    let mut task_counts = Vec::new();
+    loop {
+        match next_event(&events) {
+            AcpEvent::OtherSessionUpdate { kind } if kind == "SessionNotice" => {
+                notices.extend(client.take_notices());
+            }
+            AcpEvent::OtherSessionUpdate { kind }
+                if kind.starts_with("BackgroundTasksUpdate") =>
+            {
+                task_counts.push(client.background_task_count());
+            }
+            AcpEvent::TurnEnded { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        notices,
+        vec![
+            // The foreground task's notification produced nothing: its
+            // `task_started` said `is_backgrounded: false`, and that flag
+            // is the only place the difference is ever stated.
+            SessionNotice::BackgroundTaskEnded {
+                summary: "Background command \"work\" completed (exit code 0)".into()
+            },
+            SessionNotice::Compacted {
+                trigger: Some("auto".into()),
+                pre_tokens: Some(43_134),
+                post_tokens: Some(11_574),
+            },
+            SessionNotice::RateLimited {
+                status: "rejected".into(),
+                window: Some("five_hour".into()),
+                resets_at: Some(1_789_990_800),
+            },
+        ]
+    );
+    assert_eq!(task_counts, vec![1, 0]);
+    // Draining is draining: a second read after the turn returns nothing.
+    assert!(client.take_notices().is_empty());
 }

@@ -267,6 +267,19 @@ impl ClaudeClient {
         self.shared.mcp_warnings()
     }
 
+    /// The notices posted since the last read, draining them. Read when an
+    /// `OtherSessionUpdate` named `SessionNotice` arrives: the queue is
+    /// what keeps them in step with the rows around them.
+    pub fn take_notices(&self) -> Vec<crate::SessionNotice> {
+        self.shared.take_notices()
+    }
+
+    /// How many background tasks the CLI last reported running.
+    #[must_use]
+    pub fn background_task_count(&self) -> usize {
+        self.shared.background_task_count()
+    }
+
     /// Stops the agent and waits for the worker to finish.
     pub fn shutdown(&mut self) -> Result<()> {
         let Some(worker) = self.worker.take() else {
