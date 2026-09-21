@@ -710,7 +710,7 @@ impl Render for StatusBarTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px(px(8.0))
-            .py(px(4.0))
+            .py(px(6.0))
             .rounded(self.theme.radii.control)
             .bg(self.theme.surface_raised)
             .border_1()
