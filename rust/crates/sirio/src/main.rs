@@ -8929,12 +8929,14 @@ impl SirioWorkspace {
             self.next_tab_id = self.tabs.len();
             self.next_pane_id = next_pane_id(&self.tabs);
             self.active_tab = active.min(self.tabs.len().saturating_sub(1));
-            self.restore_project_settings_tabs(&restored, cx);
-            // `rebuild_center_split` can reveal a restored Secondary tab.
-            // Point the workspace at the destination before that side effect
-            // so its persisted flag is written to the right worktree.
+            // The restored-settings tagging and `rebuild_center_split`
+            // need the destination set first: the former tags each
+            // restored tab with the destination worktree, the latter can
+            // reveal a restored Secondary tab whose persisted flag must
+            // be written to the right worktree.
             self.working_directory = selected_path.clone();
             self.secondary_pane_hidden = self.session.secondary_pane_hidden_for(&selected_path);
+            self.restore_project_settings_tabs(&restored, cx);
             seed_shown_tabs(&mut self.center_split, &self.tabs);
             self.rebuild_center_split();
             restored_secondary_pane_hidden = Some(self.secondary_pane_hidden);
@@ -11880,6 +11882,13 @@ impl SirioWorkspace {
     /// Opens a project's settings as a tab in the Secondary pane, reusing
     /// the existing tab for that project when there is one (and opening
     /// the pane when it was hidden), like every other Secondary surface.
+    fn project_settings_title(seed: &ProjectSettingsSeed) -> String {
+        format!(
+            "Project Settings · {}",
+            ProjectSettingsView::title_name(seed)
+        )
+    }
+
     fn add_project_settings_tab(&mut self, project_id: &str, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| {
             let mut matches_project = false;
@@ -11900,10 +11909,7 @@ impl SirioWorkspace {
         let Some(seed) = self.sidebar.read(cx).project_settings_seed(project_id) else {
             return;
         };
-        let title = format!(
-            "Project Settings · {}",
-            ProjectSettingsView::title_name(&seed)
-        );
+        let title = Self::project_settings_title(&seed);
         let seed_title = title.clone();
         let view = cx.new(|cx| ProjectSettingsView::new(seed, cx));
         Self::subscribe_project_settings_tab(&view, cx);
@@ -11970,6 +11976,7 @@ impl SirioWorkspace {
                 .iter()
                 .filter(|tab| listed_before.contains(tab.persistence_id.as_str()))
                 .count();
+            let title = Self::project_settings_title(&seed);
             let view = cx.new(|cx| ProjectSettingsView::new(seed, cx));
             Self::subscribe_project_settings_tab(&view, cx);
             let tab_id = self.next_tab_id;
@@ -11981,7 +11988,7 @@ impl SirioWorkspace {
                 OpenTab {
                     id: tab_id,
                     persistence_id: saved.id.clone(),
-                    title: saved.title.clone(),
+                    title,
                     kind: TabKind::ProjectSettings,
                     agent_icon: None,
                     agent_id: None,
@@ -37917,6 +37924,78 @@ browser  profile  "
             assert_eq!(workspace.tabs.len(), before);
             workspace
         });
+    }
+
+    #[gpui::test]
+    async fn a_settings_tab_restored_on_a_worktree_switch_belongs_to_that_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("settings-switch-owner");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt_a = worktrees[0].clone();
+        let wt_b = worktrees[1].clone();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt_b.clone(), None, cx)
+                .expect("select worktree B");
+            workspace.add_project_settings_tab("urgency-project", cx);
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.kind == TabKind::ProjectSettings),
+                "the settings tab opens on worktree B"
+            );
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt_a.clone(), None, cx)
+                .expect("select worktree A");
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt_b.clone(), None, cx)
+                .expect("select worktree B again");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, cx| {
+            let settings = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.kind == TabKind::ProjectSettings)
+                .expect("the settings tab exists on B");
+            assert!(
+                paths_name_the_same_document(&workspace.tab_worktree_path(settings.id), &wt_b),
+                "the restored settings tab belongs to B"
+            );
+            assert!(
+                workspace
+                    .layout(cx)
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.kind == "settings"),
+                "the layout still contains the settings tab"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #125 (spec R6.5), the save half: a browser tab's live address is read
