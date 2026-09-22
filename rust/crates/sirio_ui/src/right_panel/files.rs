@@ -936,6 +936,14 @@ fn hidden_files_switch(
     entity: gpui::Entity<RightPanel>,
     theme: Theme,
 ) -> impl IntoElement {
+    // Singola icona toggle: mostra Eye (mostra nascosti) quando sono nascosti,
+    // EyeOff (nascondi nascosti) quando sono visibili. L'icona rappresenta
+    // l'azione disponibile al click, non due opzioni affiancate.
+    let (icon, tooltip, id) = if show_hidden {
+        (Icon::EyeOff, "Hide hidden files", "files-hide-hidden")
+    } else {
+        (Icon::Eye, "Show hidden files", "files-show-hidden")
+    };
     div()
         .id("files-hidden-switch")
         .debug_selector(|| "files-hidden-switch".to_owned())
@@ -948,20 +956,11 @@ fn hidden_files_switch(
         .px(px(8.0))
         .py(px(4.0))
         .child(hidden_files_option(
-            Icon::EyeOff,
-            "Hide hidden files",
-            "files-hide-hidden",
-            !show_hidden,
-            false,
-            entity.clone(),
-            theme,
-        ))
-        .child(hidden_files_option(
-            Icon::Eye,
-            "Show hidden files",
-            "files-show-hidden",
+            icon,
+            tooltip,
+            id,
             show_hidden,
-            true,
+            !show_hidden,
             entity,
             theme,
         ))
@@ -2905,8 +2904,8 @@ mod tests {
             .debug_bounds("files-show-hidden")
             .expect("the footer draws the show-hidden icon");
         assert!(
-            cx.debug_bounds("files-hide-hidden").is_some(),
-            "the footer draws the hide-hidden icon"
+            cx.debug_bounds("files-hide-hidden").is_none(),
+            "single toggle: only the show-hidden icon is drawn while hidden"
         );
 
         cx.simulate_click(show.center(), Modifiers::none());
@@ -2919,10 +2918,14 @@ mod tests {
             cx.debug_bounds("file-directory-row").is_some(),
             "showing hidden entries reveals dot-directories"
         );
+        assert!(
+            cx.debug_bounds("files-show-hidden").is_none(),
+            "single toggle: the show icon is replaced by the hide icon"
+        );
 
         let hide = cx
             .debug_bounds("files-hide-hidden")
-            .expect("the hide-hidden icon remains available");
+            .expect("toggling shows the hide-hidden icon");
         cx.simulate_click(hide.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -2932,6 +2935,10 @@ mod tests {
         assert!(
             cx.debug_bounds("file-directory-row").is_none(),
             "hiding hidden entries removes dot-directories again"
+        );
+        assert!(
+            cx.debug_bounds("files-show-hidden").is_some(),
+            "single toggle: the show icon returns after hiding again"
         );
     }
 
