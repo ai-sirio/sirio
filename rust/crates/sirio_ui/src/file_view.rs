@@ -142,6 +142,17 @@ pub struct FileView {
     caret: usize,
     /// The anchor for a shift-extended selection, if one is being built.
     selection_anchor: Option<usize>,
+    /// The column a vertical move is trying to hold, paired with the caret
+    /// offset it was computed for. Walking down through a short line and
+    /// back up returns to the column the caret started from rather than to
+    /// where the short line clipped it.
+    ///
+    /// The pairing is what retires it, from both ends: `move_caret` clears
+    /// it for every keyboard move, and every other writer of `caret` -- a
+    /// click, a word select, an edit -- leaves the paired offset behind, so
+    /// a stale column cannot be read back even from a path that has never
+    /// heard of this field.
+    goal_column: Option<(usize, usize)>,
     /// Focus target for the source surface. GPUI sends raw key events to the
     /// focused element, so this is the missing input tier over `Editor`.
     editor_focus: FocusHandle,
@@ -337,6 +348,7 @@ impl FileView {
             source_selection: None,
             caret: 0,
             selection_anchor: None,
+            goal_column: None,
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
             dragging: false,
@@ -984,6 +996,10 @@ impl FileView {
         match key {
             "home" => self.move_to_line_edge(true, extend),
             "end" => self.move_to_line_edge(false, extend),
+            "up" => self.move_vertical(false, 1, extend),
+            "down" => self.move_vertical(true, 1, extend),
+            "pageup" => self.move_vertical(false, self.page_lines(), extend),
+            "pagedown" => self.move_vertical(true, self.page_lines(), extend),
             "left" => self.move_horizontal(false, extend),
             "right" => self.move_horizontal(true, extend),
             "backspace" => self.delete_backward(),
@@ -1063,7 +1079,96 @@ impl FileView {
         self.move_caret(position, extend, &buffer);
     }
 
+    /// Vertical movement is the only caret move that has to invent a
+    /// column, because the line it lands on may be shorter than the one it
+    /// left. `goal_column` is what lets the caret walk down through a short
+    /// line and come back up to where it started.
+    ///
+    /// The document edge is not a dead end: a `down` already on the last
+    /// line lands at that line's end. Deliberately its end and not
+    /// `buffer.len()`, which a trailing newline puts one byte past the last
+    /// row the list draws -- `render_source_line` would find no row willing
+    /// to carry the caret, and it would simply stop being painted.
+    fn move_vertical(&mut self, down: bool, lines: usize, extend: bool) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let buffer = editor.buffer().to_owned();
+        let caret = self.caret.min(buffer.len());
+        let column = match self.goal_column {
+            Some((offset, column)) if offset == caret => column,
+            _ => column_at(&buffer, caret),
+        };
+
+        let mut line_start = line_start_at(&buffer, caret);
+        let mut moved = 0;
+        for _ in 0..lines {
+            let next = if down {
+                next_line_start(&buffer, line_start)
+            } else {
+                previous_line_start(&buffer, line_start)
+            };
+            let Some(next) = next else {
+                break;
+            };
+            line_start = next;
+            moved += 1;
+        }
+
+        let position = if moved == 0 {
+            // Already against the edge. The key still means something, and
+            // what it means there is the very start or the very end.
+            if down {
+                line_end_at(&buffer, line_start)
+            } else {
+                0
+            }
+        } else {
+            offset_at_column(&buffer, line_start, column)
+        };
+
+        self.move_caret(position, extend, &buffer);
+        // `move_caret` just cleared the column; a vertical move is the one
+        // caller that means to carry it forward.
+        self.goal_column = Some((self.caret, column));
+        // Non-strict, so a line already on screen scrolls nothing. Without
+        // this a `pagedown` would move the caret exactly one viewport away
+        // from the only place it is drawn.
+        self.scroll.source.scroll_to_item(
+            line_index_at(&buffer, line_start_at(&buffer, self.caret)),
+            gpui::ScrollStrategy::Nearest,
+        );
+    }
+
+    /// How many whole lines the source list is showing, which is what a
+    /// page means to `pageup` and `pagedown`.
+    ///
+    /// The answer comes from the list's own last layout, and `ItemSize` is
+    /// worth reading twice: despite the name, `item` is the list's padded
+    /// viewport, not a row. A row's height only appears in `contents`,
+    /// which gpui fills with `row_height * item_count` -- so the row is
+    /// recovered by dividing by the same line count the list was given.
+    /// Before the first paint there is nothing to read at all, and a page
+    /// is one line rather than a guess.
+    fn page_lines(&self) -> usize {
+        let Some(size) = self.scroll.source.0.borrow().last_item_size else {
+            return 1;
+        };
+        let Some(editor) = self.editor() else {
+            return 1;
+        };
+        let line_count = line_count_of(editor.buffer());
+        let row_height = size.contents.height / line_count as f32;
+        if row_height <= px(0.0) {
+            return 1;
+        }
+        ((size.item.height / row_height) as usize).max(1)
+    }
+
     fn move_caret(&mut self, position: usize, extend: bool, buffer: &str) {
+        // Every keyboard move but the vertical one abandons the remembered
+        // column; `move_vertical` puts its own back afterwards.
+        self.goal_column = None;
         let position = position.min(buffer.len());
         if extend {
             let anchor = self.selection_anchor.unwrap_or(self.caret);
@@ -2588,6 +2693,67 @@ fn markdown_document(path: &Path, text: &str) -> Option<Document> {
     }
 }
 
+/// Where the line holding `offset` begins: just past the newline before
+/// it, or the start of the buffer.
+fn line_start_at(buffer: &str, offset: usize) -> usize {
+    buffer[..offset].rfind('\n').map_or(0, |newline| newline + 1)
+}
+
+/// Where the line holding `offset` ends. The newline that closes a line is
+/// not part of it, matching the ranges the rows are cut from.
+fn line_end_at(buffer: &str, offset: usize) -> usize {
+    buffer[offset..]
+        .find('\n')
+        .map_or(buffer.len(), |newline| offset + newline)
+}
+
+/// The start of the line below the one beginning at `line_start`, when
+/// there is one.
+///
+/// A trailing newline does not open a line. The rows are cut with
+/// `split_inclusive('\n')`, which ends `"alpha\ngamma\n"` with `gamma\n` as
+/// a single chunk and draws two rows, not three -- so the byte past that
+/// final newline belongs to no row, and a caret sent there is painted by
+/// nobody.
+fn next_line_start(buffer: &str, line_start: usize) -> Option<usize> {
+    let line_end = line_end_at(buffer, line_start);
+    (line_end + 1 < buffer.len()).then_some(line_end + 1)
+}
+
+/// The start of the line above the one beginning at `line_start`, when
+/// there is one.
+fn previous_line_start(buffer: &str, line_start: usize) -> Option<usize> {
+    (line_start > 0).then(|| line_start_at(buffer, line_start - 1))
+}
+
+/// How many characters into its own line `offset` sits. Characters rather
+/// than bytes: the surface draws a monospace grid, so a line of accented
+/// text has to carry the caret exactly as far as a line of ASCII.
+fn column_at(buffer: &str, offset: usize) -> usize {
+    buffer[line_start_at(buffer, offset)..offset].chars().count()
+}
+
+/// The offset `column` characters into the line beginning at `line_start`,
+/// clamped to that line's end when the line is too short to reach it.
+fn offset_at_column(buffer: &str, line_start: usize, column: usize) -> usize {
+    let line_end = line_end_at(buffer, line_start);
+    buffer[line_start..line_end]
+        .char_indices()
+        .nth(column)
+        .map_or(line_end, |(offset, _)| line_start + offset)
+}
+
+/// Which row the line beginning at `line_start` is drawn as.
+fn line_index_at(buffer: &str, line_start: usize) -> usize {
+    buffer[..line_start].matches('\n').count()
+}
+
+/// How many rows the list draws for this buffer -- the same count
+/// `render_source` hands `uniform_list`, empty buffer and all.
+fn line_count_of(buffer: &str) -> usize {
+    buffer.split_inclusive('\n').count().max(1)
+}
+
 fn previous_char_boundary(buffer: &str, position: usize) -> usize {
     buffer[..position.min(buffer.len())]
         .char_indices()
@@ -3773,6 +3939,155 @@ mod tests {
         );
     }
 
+    /// `up` and `down` are the two keys an editor is expected to answer and
+    /// this one never did: they fall past every arm of the match, and an
+    /// arrow carries no `key_char`, so the handler returns without moving
+    /// anything. "alpha\nbeta\ngamma\n" puts `beta` at byte 6.
+    #[gpui::test]
+    async fn the_arrow_keys_walk_the_caret_between_lines(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alpha\nbeta\ngamma\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("home down");
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.caret),
+            6,
+            "down from the start of `alpha` belongs at the start of `beta`"
+        );
+    }
+
+    /// The column the caret came from has to survive a short line, which is
+    /// the whole difference between vertical movement here and in an editor
+    /// that recomputes the column every press.
+    /// "alphabet\nab\nalphabet\n": 0..8, 9..11, 12..20.
+    #[gpui::test]
+    async fn a_short_line_does_not_swallow_the_column(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alphabet\nab\nalphabet\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("end down");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.caret),
+            11,
+            "`ab` is too short for column 8, so the caret stops at its end"
+        );
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.caret),
+            20,
+            "the third line is long enough again, so column 8 comes back"
+        );
+    }
+
+    /// The remembered column belongs to vertical movement alone. Anything
+    /// else that moves the caret retires it, or the next `down` would aim at
+    /// a column the caret left two presses ago.
+    #[gpui::test]
+    async fn a_horizontal_move_retires_the_remembered_column(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alphabet\nab\nalphabet\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("end down left down");
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.caret),
+            13,
+            "column 1, where `left` left the caret -- not the remembered 8"
+        );
+    }
+
+    /// `down` on the last line is neither a no-op nor a leap to
+    /// `buffer.len()`. The trailing newline makes that byte belong to no
+    /// drawn row, and `render_source_line` paints a caret only on a row it
+    /// can place it on -- so the caret would silently stop being drawn.
+    #[gpui::test]
+    async fn down_on_the_last_line_stops_where_the_line_does(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alpha\nbeta\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-1").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("home down");
+        cx.run_until_parked();
+
+        let (caret, len) = view.read_with(&cx.cx, |view, _| {
+            (view.caret, view.editor().expect("loaded").buffer().len())
+        });
+        assert_eq!(len, 11, "`alpha\nbeta\n` is eleven bytes");
+        assert_eq!(
+            caret, 10,
+            "the end of `beta`, not the byte after the newline that closes it"
+        );
+    }
+
+    /// Symmetrically, `up` against the top is how the caret reaches byte 0.
+    #[gpui::test]
+    async fn up_on_the_first_line_reaches_the_start_of_the_document(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "alpha\nbeta\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("end up");
+        cx.run_until_parked();
+
+        assert_eq!(view.read_with(&cx.cx, |view, _| view.caret), 0);
+    }
+
+    /// Shift makes the same movement extend rather than jump, which is the
+    /// only reason `move_vertical` routes through `move_caret` at all.
+    #[gpui::test]
+    async fn shift_down_extends_the_selection_a_line_at_a_time(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "alpha\nbeta\ngamma\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("home shift-down");
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.selected_text()),
+            Some("alpha\n".to_owned()),
+            "shift-down takes the line and the newline that ends it"
+        );
+    }
+
+    /// A page is however many lines the list is showing, so this only means
+    /// anything on a file taller than the window.
+    #[gpui::test]
+    async fn pagedown_moves_further_than_a_single_line(cx: &mut gpui::TestAppContext) {
+        let body: String = (0..400).map(|n| format!("line {n}\n")).collect();
+        let file = TempFile::with_extension("rs", &body);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("home pagedown");
+        cx.run_until_parked();
+
+        let caret = view.read_with(&cx.cx, |view, _| view.caret);
+        let landed = body[..caret].matches('\n').count();
+        assert!(
+            landed > 1,
+            "a page is more than one line; the caret landed on line {landed}"
+        );
+    }
+
     #[gpui::test]
     async fn a_modifier_click_asks_for_the_definition(cx: &mut gpui::TestAppContext) {
         let file = TempFile::with_extension("rs", "fn main() { helper(); }\n");
@@ -3900,6 +4215,75 @@ mod tests {
 
     /// Tests for `selected_run_on_line` — which part of a line a selection
     /// covers, and the empty-line case that used to come out as "nothing".
+    /// Vertical movement has to agree with how the rows were cut, and the
+    /// rows are cut with `split_inclusive('\n')`. Disagreeing here walks the
+    /// caret to a byte no row is willing to draw.
+    mod line_walk {
+        use super::*;
+
+        #[test]
+        fn a_trailing_newline_does_not_open_a_line() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            assert_eq!(next_line_start(buffer, 0), Some(6), "alpha -> beta");
+            assert_eq!(next_line_start(buffer, 6), Some(11), "beta -> gamma");
+            assert_eq!(
+                next_line_start(buffer, 11),
+                None,
+                "the byte past the closing newline is not a line of its own"
+            );
+        }
+
+        #[test]
+        fn a_buffer_that_does_not_end_in_a_newline_ends_on_its_last_line() {
+            assert_eq!(next_line_start("alpha\nbeta", 6), None);
+        }
+
+        #[test]
+        fn an_empty_line_is_walked_like_any_other() {
+            let buffer = "alpha\n\nbeta\n";
+            assert_eq!(next_line_start(buffer, 0), Some(6), "alpha -> the empty line");
+            assert_eq!(next_line_start(buffer, 6), Some(7), "the empty line -> beta");
+            assert_eq!(previous_line_start(buffer, 7), Some(6));
+            assert_eq!(previous_line_start(buffer, 0), None, "nothing above the first");
+        }
+
+        #[test]
+        fn a_line_index_counts_the_rows_above_it() {
+            let buffer = "alpha\nbeta\ngamma\n";
+            assert_eq!(line_index_at(buffer, 0), 0);
+            assert_eq!(line_index_at(buffer, 6), 1);
+            assert_eq!(line_index_at(buffer, 11), 2);
+        }
+    }
+
+    /// A column is a position on a monospace grid, so it is counted in
+    /// characters. Counting bytes would make an accented line move the
+    /// caret twice as far as an ASCII one.
+    mod columns {
+        use super::*;
+
+        // Five two-byte characters, so the first line is ten bytes wide but
+        // only five columns wide. `abcde` starts at 11.
+        const BUFFER: &str = "\u{e0}\u{e8}\u{ec}\u{f2}\u{f9}\nabcde\n";
+
+        #[test]
+        fn a_column_is_counted_in_characters_not_bytes() {
+            assert_eq!(column_at(BUFFER, 10), 5, "five characters in, not ten");
+        }
+
+        #[test]
+        fn the_same_column_lands_on_the_same_character_of_an_ascii_line() {
+            assert_eq!(offset_at_column(BUFFER, 11, 2), 13, "the third character");
+            assert_eq!(offset_at_column(BUFFER, 0, 2), 4, "and two characters in is four bytes in");
+        }
+
+        #[test]
+        fn a_line_too_short_to_reach_the_column_clamps_to_its_end() {
+            let buffer = "alphabet\nab\n";
+            assert_eq!(offset_at_column(buffer, 9, 6), 11, "`ab` has no column 6");
+        }
+    }
+
     mod selection_spans {
         use super::*;
 
