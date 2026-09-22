@@ -69,6 +69,7 @@ use sirio_ui::{
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
+use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
@@ -4042,6 +4043,22 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
     }
 }
 
+/// Every worktree of every project, in catalog (= sidebar) order, as the
+/// centre's worktree picker lists them.
+fn worktree_choices(catalog: &ProjectCatalog) -> Vec<WorktreeChoice> {
+    catalog
+        .projects()
+        .iter()
+        .flat_map(|project| {
+            project.worktrees.iter().map(move |worktree| WorktreeChoice {
+                project: project.name.clone().into(),
+                branch: worktree.branch.clone().into(),
+                path: worktree.path.clone(),
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 struct DraggedPaneDivider {
     tab_index: usize,
@@ -4477,6 +4494,10 @@ struct SirioWorkspace {
     /// the moment it gets one back, so `render_group_surfaces` can just
     /// look one up instead of deciding whether to build one mid-render.
     empty_pane_prompts: BTreeMap<usize, Entity<TerminalView>>,
+    /// The select the no-worktree state draws. Kept alive across frames so
+    /// an open menu survives a re-render; `sync_worktree_picker` keeps its
+    /// list in step with the catalog.
+    worktree_picker: Entity<WorktreePicker>,
     /// F-TERM-PTY-08: records where every live terminal pane in this
     /// worktree currently sits, keyed by the same `terminal-{pane_id}`
     /// content id `bind_terminal` gives its `TerminalIdentity`. Kept in step
@@ -5155,6 +5176,19 @@ impl SirioWorkspace {
             // state survive the next restart as well.
             session.save_secondary_pane_hidden(&working_directory, false);
         }
+        let worktree_picker =
+            cx.new(|cx| WorktreePicker::new(worktree_choices(&project_catalog), cx));
+        cx.subscribe(
+            &worktree_picker,
+            |workspace, _, event: &WorktreePickerEvent, cx| match event {
+                // The sidebar's own selection path, so a failed selection
+                // restores the sidebar highlight the same way.
+                WorktreePickerEvent::Selected(path) => {
+                    workspace.select_worktree_from_sidebar(path.clone(), cx)
+                }
+            },
+        )
+        .detach();
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -5247,6 +5281,7 @@ impl SirioWorkspace {
             last_verified: None,
             auto_naming_throttle: BTreeMap::new(),
             empty_pane_prompts: BTreeMap::new(),
+            worktree_picker,
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
             retained_worktree_chats: BTreeMap::new(),
@@ -10291,6 +10326,15 @@ impl SirioWorkspace {
         )
         .detach();
         self.empty_pane_prompts.insert(0, prompt);
+    }
+
+    /// Keeps the no-worktree picker's list equal to the catalog. Called every
+    /// render like `sync_empty_pane_prompts`; `set_choices` is a no-op when
+    /// nothing changed, so an open menu is not rebuilt under the pointer.
+    fn sync_worktree_picker(&mut self, cx: &mut Context<Self>) {
+        let choices = worktree_choices(&self.project_catalog);
+        self.worktree_picker
+            .update(cx, |picker, cx| picker.set_choices(choices, cx));
     }
 
     fn set_focused_pane(&mut self, role: PaneRole) {
@@ -15718,7 +15762,7 @@ impl SirioWorkspace {
                 .child(self.render_group_surfaces(PaneRole::Primary, *theme, entity.clone(), cx))
                 .into_any_element()
         } else {
-            div()
+            let mut no_worktree = div()
                 .id("no-worktree-selected")
                 .debug_selector(|| "no-worktree-selected".to_owned())
                 // The same P117 trap the sibling branch above documents: this
@@ -15738,16 +15782,50 @@ impl SirioWorkspace {
                     "no-worktree-selected-orbit",
                     EMPTY_SURFACE_MARK,
                     theme.text_faint,
-                ))
-                .child(
-                    div()
-                        .text_size(theme.typography.headline)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("No worktree selected"),
-                )
-                .child("Add a project, then select a worktree.")
-                .into_any_element()
+                ));
+            if self.project_catalog.projects().is_empty() {
+                let add_project_entity = entity.clone();
+                no_worktree = no_worktree
+                    .child(
+                        div()
+                            .text_size(theme.typography.headline)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("No projects yet"),
+                    )
+                    .child("Add a project, then select a worktree.")
+                    .child(
+                        div()
+                            .id("no-worktree-add-project")
+                            .debug_selector(|| "no-worktree-add-project".to_owned())
+                            .px(theme.spacing.card_gap)
+                            .py(theme.spacing.titlebar_control_spacing)
+                            .rounded(theme.radii.control)
+                            .bg(theme.solid)
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.on_solid)
+                            .hover(|style| style.opacity(0.9))
+                            .on_click(move |_, window, cx| {
+                                add_project_entity.update(cx, |workspace, cx| {
+                                    workspace.sidebar.update(cx, |sidebar, cx| {
+                                        sidebar.start_open_project(window, cx)
+                                    });
+                                });
+                            })
+                            .child("Add Project"),
+                    );
+            } else {
+                no_worktree = no_worktree
+                    .child(
+                        div()
+                            .text_size(theme.typography.headline)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Select a worktree"),
+                    )
+                    .child(self.worktree_picker.clone());
+            }
+            no_worktree.into_any_element()
         };
 
         let primary_surface = div()
@@ -17581,6 +17659,7 @@ impl Render for SirioWorkspace {
         self.frames_rendered = self.frames_rendered.wrapping_add(1);
         self.sync_activity(cx);
         self.sync_empty_pane_prompts(cx);
+        self.sync_worktree_picker(cx);
         self.hide_offscreen_browsers(self.show_settings, cx);
         self.sync_browser_overlay_obscured(cx);
 
@@ -19581,6 +19660,7 @@ fn main() {
         Theme::init(cx);
         init_motion(cx);
         bezel::ui::input::init(cx);
+        bezel::ui::combobox::init(cx);
         bezel::ui::tree::init(cx);
         sirio_ui::chat::init(cx);
         sirio_ui::file_view::init(cx);
@@ -22575,6 +22655,7 @@ done
         translucency_enabled: bool,
     ) -> SirioWorkspace {
         bezel::ui::input::init(cx);
+        bezel::ui::combobox::init(cx);
         sirio_ui::file_view::init(cx);
         if let Some(theme) = cx.try_global::<Theme>().copied() {
             theme.install_into_bezel(cx);
@@ -36729,6 +36810,61 @@ done
             cx.debug_bounds("pane-0").is_none(),
             "retained terminal output must not remain visible without a worktree"
         );
+    }
+
+    /// With no worktree selected the left pane offers every worktree, and
+    /// choosing one selects it through the sidebar's own path.
+    #[gpui::test]
+    async fn a_deselected_worktree_can_be_picked_again_from_the_centre(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let path = workspace.update(&mut cx, |workspace, cx| {
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            cx.notify();
+            path
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("worktree-picker").is_some(),
+            "the no-worktree state offers the picker"
+        );
+
+        let picker = workspace.read_with(&cx.cx, |workspace, _| workspace.worktree_picker.clone());
+        picker.update(&mut cx, |_, cx| cx.emit(WorktreePickerEvent::Selected(path)));
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.has_current_worktree()),
+            "picking a worktree selects it"
+        );
+        assert!(cx.debug_bounds("no-worktree-selected").is_none());
+    }
+
+    /// With no project at all there is nothing to pick; the centre offers
+    /// the sidebar's Add Project flow instead.
+    #[gpui::test]
+    async fn an_empty_catalog_offers_add_project_instead_of_the_picker(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| empty_catalog_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("no-worktree-add-project").is_some());
+        assert!(cx.debug_bounds("worktree-picker").is_none());
     }
 
     /// F-CHG-02: closing the selected worktree must clear the panel's bound
