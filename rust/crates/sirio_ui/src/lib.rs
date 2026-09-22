@@ -37,6 +37,7 @@ pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod titlebar;
+pub mod worktree_picker;
 
 // P32: visual-bar conformance suite — test-only module, no rendering code.
 #[cfg(test)]
