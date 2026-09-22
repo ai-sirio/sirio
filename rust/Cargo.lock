@@ -7293,6 +7293,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_icons"
+version = "0.23.3"
+
+[[package]]
 name = "sirio_lsp"
 version = "0.1.0"
 dependencies = [
