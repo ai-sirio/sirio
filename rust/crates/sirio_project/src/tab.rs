@@ -37,8 +37,8 @@ pub enum TabKind {
 pub enum PaneRole {
     /// Always shown; takes the whole work area when Secondary is not.
     Primary,
-    /// Absent by default; opens with the first Secondary tab and auto-
-    /// closes with the last.
+    /// Drawn from the first frame, even empty (it then shows a launcher);
+    /// the keyboard toggle hides it and the choice is stored per worktree.
     Secondary,
 }
 
