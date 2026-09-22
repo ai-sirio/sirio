@@ -6271,6 +6271,9 @@ impl SirioWorkspace {
     /// conflated: if `×` merely hid the pane it would duplicate this and
     /// should not exist.
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
+        if !self.has_current_worktree() {
+            return;
+        }
         self.secondary_pane_hidden = !self.secondary_pane_hidden;
         self.session
             .save_secondary_pane_hidden(&self.working_directory, self.secondary_pane_hidden);
@@ -6278,6 +6281,12 @@ impl SirioWorkspace {
         // on a half that is no longer drawn.
         if self.secondary_pane_hidden && self.center_split.focused() == PaneRole::Secondary {
             self.set_focused_pane(PaneRole::Primary);
+            if let Some(primary) = self.center_split.active(PaneRole::Primary)
+                && let Some(index) =
+                    self.tabs.iter().position(|tab| tab.id == primary)
+            {
+                self.active_tab = index;
+            }
         }
         cx.notify();
     }
@@ -15537,6 +15546,9 @@ impl SirioWorkspace {
     /// the pane is part of the layout from the first frame, and an empty one
     /// shows its launcher.
     fn secondary_pane_visible(&self) -> bool {
+        if !self.has_current_worktree() {
+            return true;
+        }
         !self.secondary_pane_hidden
     }
 
@@ -37689,6 +37701,62 @@ browser  profile  "
                 workspace.secondary_pane_visible(),
                 "the same chord brings it back, tabs intact"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn hiding_the_secondary_pane_moves_the_active_tab_to_the_primary_one(
+        cx: &mut TestAppContext,
+    ) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.rebuild_center_split();
+            let browser_id = workspace.tabs[1].id;
+            workspace.select_tab(browser_id, None, cx);
+            workspace.toggle_secondary_pane(cx);
+            assert_eq!(
+                workspace.active_tab, 0,
+                "hiding must leave the active tab on the Primary pane"
+            );
+            let layout = workspace.layout(cx);
+            assert!(
+                layout.tabs[0].active,
+                "the layout must mark the Terminal tab active"
+            );
+            workspace
+        });
+    }
+
+    #[gpui::test]
+    fn toggling_the_secondary_pane_without_a_worktree_changes_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            assert!(
+                !workspace.has_current_worktree(),
+                "the fixture must have no worktree selected"
+            );
+            let before = workspace.secondary_pane_hidden;
+            workspace.toggle_secondary_pane(cx);
+            assert_eq!(
+                workspace.secondary_pane_hidden, before,
+                "toggling with no worktree must not flip the flag"
+            );
+            assert!(
+                workspace.secondary_pane_visible(),
+                "the pane shows by default with no worktree selected"
+            );
+            workspace
         });
     }
 
