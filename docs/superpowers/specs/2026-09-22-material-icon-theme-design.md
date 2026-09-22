@@ -1,7 +1,7 @@
 # The Material icon set, whole — design
 
 **Date:** 2026-09-22
-**Status:** approved — implementation not started
+**Status:** implemented on `feat/material-icon-set`; the raster-cache figure in §7 still awaits a manual check
 **Parent work:** F-CORE-FILE-08 (`FileIconKey`, ported from the Swift app's
 `FileIconKey.swift`), `9ce7abd2 feat: restore polychrome file type icons`
 **Scope of this document:** replacing the 54-asset Material *subset* and the
@@ -284,9 +284,9 @@ In `sirio_ui`:
 - **The first diff is a vendor drop of ~1113 files.** It lands as its own
   commit (`chore(icons): vendor material-icon-theme@<sha>`), separate from
   the code, so review reads two files rather than a thousand.
-- **Binary size grows by roughly 1.4 MB** (~1.06 MB of SVG, ~0.35 MB of
-  tables). Estimated here; measured before the branch is finished, and the
-  measurement goes in the PR.
+- **Binary size grew by 1,757,200 bytes (~1.68 MiB):** release `sirio`
+  measured 121,849,176 bytes at the fork point (`93af416a`) and 123,606,376
+  bytes with the theme, both via `cargo build --release -p sirio`.
 - **Raster cache growth.** The cache is unbounded and was written for seven
   marks. Its real ceiling is *distinct types on screen × sizes in use*, and
   a 15px icon rasterises to about 3.6 KB, so 200 entries ≈ 0.7 MB. To be
