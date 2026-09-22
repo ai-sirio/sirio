@@ -171,4 +171,100 @@ mod tests {
         assert_eq!(light_variant("rust"), None);
         assert!(asset("toml_light").is_some(), "the companion is vendored too");
     }
+
+    /// The precondition of every lookup in this crate. Binary search on an
+    /// unsorted table does not fail loudly — it answers the wrong icon, or
+    /// no icon, for a fraction of the keys, which looks exactly like an
+    /// upstream gap.
+    #[test]
+    fn tables_are_sorted_and_deduplicated() {
+        fn check_pairs(label: &str, table: &[(&str, &str)]) {
+            for window in table.windows(2) {
+                assert!(
+                    window[0].0 < window[1].0,
+                    "{label}: {:?} and {:?} are out of order or duplicated",
+                    window[0].0,
+                    window[1].0
+                );
+            }
+        }
+        check_pairs("STEMS", STEMS);
+        check_pairs("SUFFIXES", SUFFIXES);
+        check_pairs("LIGHT_VARIANTS", LIGHT_VARIANTS);
+        for window in DIRECTORIES.windows(2) {
+            assert!(window[0].0 < window[1].0, "DIRECTORIES: {:?}", window[0].0);
+        }
+        for window in ASSETS.windows(2) {
+            assert!(window[0].0 < window[1].0, "ASSETS: {:?}", window[0].0);
+        }
+    }
+
+    /// A mapping entry that names an asset we did not vendor draws nothing,
+    /// and nothing is indistinguishable from a name the theme never covered.
+    #[test]
+    fn every_table_entry_names_a_vendored_asset() {
+        let mut checked = 0;
+        for (name, stem) in STEMS.iter().chain(SUFFIXES) {
+            assert!(asset(stem).is_some(), "{name:?} names missing asset {stem:?}");
+            checked += 1;
+        }
+        for (name, collapsed, expanded) in DIRECTORIES {
+            assert!(asset(collapsed).is_some(), "{name:?} names {collapsed:?}");
+            assert!(asset(expanded).is_some(), "{name:?} names {expanded:?}");
+            checked += 2;
+        }
+        for stem in [DEFAULT_FILE, DEFAULT_FOLDER, DEFAULT_FOLDER_OPEN] {
+            assert!(asset(stem).is_some(), "the fallback {stem:?} is vendored");
+        }
+        assert_eq!(checked, 10_176, "the whole table is walked");
+    }
+
+    /// The other direction: bytes nobody can reach are weight in the binary
+    /// and a sign the drop went wrong.
+    #[test]
+    fn every_vendored_asset_is_reachable() {
+        let reachable: std::collections::HashSet<&str> = STEMS
+            .iter()
+            .chain(SUFFIXES)
+            .map(|(_, stem)| *stem)
+            .chain(DIRECTORIES.iter().flat_map(|(_, a, b)| [*a, *b]))
+            .chain([DEFAULT_FILE, DEFAULT_FOLDER, DEFAULT_FOLDER_OPEN])
+            .chain(LIGHT_VARIANTS.iter().map(|(_, light)| *light))
+            .collect();
+        for (stem, _, _) in ASSETS {
+            assert!(reachable.contains(stem), "{stem:?} is vendored but unreachable");
+        }
+    }
+
+    #[test]
+    fn every_light_variant_has_a_base_and_its_own_asset() {
+        for (base, light) in LIGHT_VARIANTS {
+            assert!(asset(base).is_some(), "{light:?} has no base asset {base:?}");
+            assert!(asset(light).is_some(), "{light:?} is not vendored");
+        }
+    }
+
+    /// `generated.rs` and `assets/` are written by one script in one pass.
+    /// If they disagree, someone edited one of them by hand.
+    #[test]
+    fn generated_tables_match_the_assets_on_disk() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("assets/ is vendored")
+            .map(|entry| entry.expect("readable").file_name().to_string_lossy().into_owned())
+            .filter_map(|name| name.strip_suffix(".svg").map(str::to_owned))
+            .collect();
+        on_disk.sort();
+        let embedded: Vec<String> = ASSETS.iter().map(|(stem, _, _)| (*stem).to_owned()).collect();
+        assert_eq!(embedded, on_disk, "ASSETS and assets/ disagree");
+    }
+
+    #[test]
+    fn every_asset_is_utf8_and_opens_with_an_svg_root() {
+        for (stem, path, bytes) in ASSETS {
+            assert_eq!(*path, format!("icons/material/{stem}.svg"), "{stem:?} path");
+            let text = std::str::from_utf8(bytes).unwrap_or_else(|_| panic!("{stem:?} is utf-8"));
+            assert!(text.starts_with("<svg"), "{stem:?} opens with an svg root");
+        }
+    }
 }
