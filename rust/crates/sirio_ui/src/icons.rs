@@ -1208,7 +1208,7 @@ mod tests {
         }
     }
 
-    /// 52 assets ship a light companion because their dark form paints a
+    /// 49 vendored assets ship a light companion because their dark form paints a
     /// near-white glyph: `toml` is #cfd8dc, invisible on a light background,
     /// and `toml` is every Cargo.toml. Everything else serves both.
     #[test]
@@ -1251,5 +1251,44 @@ mod tests {
                 Icon::file_type("toml")
             );
         });
+    }
+
+    /// The render path itself, not just the helper above: draw a real
+    /// `IconElement` for `toml` under a light theme and read which asset
+    /// the full-colour raster cache was filled with. If `render` ever goes
+    /// back to painting `self.icon`, or resolves against `Theme::mode`,
+    /// the cache holds `toml` and this fails — the helper's own test would
+    /// stay green. Each nextest test is its own process, so the
+    /// process-wide cache starts empty.
+    #[gpui::test]
+    async fn a_light_theme_rasterises_the_light_companion(cx: &mut TestAppContext) {
+        struct TomlIcon;
+        impl gpui::Render for TomlIcon {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                use gpui::ParentElement as _;
+                gpui::div().child(Icon::file_type("toml").element(IconSize::Small))
+            }
+        }
+        cx.update(sirio_theme::Theme::init);
+        cx.update(|cx| sirio_theme::Theme::install(sirio_theme::ThemeMode::Light, cx));
+        let window = cx.add_window(|_, _| TomlIcon);
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let painted: Vec<Icon> = agent_mark_cache()
+            .0
+            .lock()
+            .expect("the raster cache lock is not poisoned")
+            .keys()
+            .map(|(icon, _)| *icon)
+            .collect();
+        assert!(
+            painted.contains(&Icon::file_type("toml_light")),
+            "a light theme must paint the light companion, painted {painted:?}"
+        );
+        assert!(
+            !painted.contains(&Icon::file_type("toml")),
+            "the near-white dark asset must not be painted on a light theme: {painted:?}"
+        );
     }
 }

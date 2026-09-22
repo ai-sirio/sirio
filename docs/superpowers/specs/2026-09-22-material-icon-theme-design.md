@@ -269,8 +269,12 @@ In `sirio_icons`, all of them windowless:
 
 In `sirio_ui`:
 
-8. `light_appearance_picks_the_light_variant` (`TestAppContext`), which is
-   the only place the `appearance`-not-`mode` decision is enforced.
+8. `a_light_theme_rasterises_the_light_companion` (`TestAppContext`), which
+   draws a real `IconElement` under a light theme and reads the raster cache.
+   It is the only place the `appearance`-not-`mode` decision is enforced on
+   the render path: the helper test `for_appearance` has beside it stays
+   green if `render` stops calling the helper at all, which a deliberate
+   mutation confirmed.
 9. The folder-row tests, rewritten for the pair-by-name.
 10. The existing tab/tree parity test, unchanged in intent: the same name
     draws the same mark in both places.
