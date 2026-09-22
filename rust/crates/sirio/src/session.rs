@@ -1057,7 +1057,7 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     // A layout flush runs on every debounced save, worktree switch and
     // quit: rebuilding the row from scratch would reset the hidden flag,
     // comment, primary flag and order the catalog writer maintains.
-    let mut record = db
+    let record = db
         .worktrees()?
         .into_iter()
         .find(|worktree| worktree.id == worktree_id)
