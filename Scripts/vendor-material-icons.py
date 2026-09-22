@@ -22,6 +22,14 @@ Two things this script does that reading the JSON does not suggest:
    only safe while no two keys differing in case name different icons,
    so the script checks that and refuses rather than picking a winner.
 
+3. It carries two licences, because two projects are involved. The
+   artwork is PKief's, published under MIT; the flattened mapping the
+   tables are generated from is the Zed packaging repo's own work, under
+   Apache-2.0. MIT requires its notice to travel with every copy, and the
+   Zed tarball does not contain it, so the script reads which artwork
+   release the pinned commit packaged (its package-lock.json) and fetches
+   that release's LICENSE.
+
 Usage:  Scripts/vendor-material-icons.py <commit-sha>
 """
 
@@ -37,6 +45,7 @@ from datetime import date
 from pathlib import Path
 
 REPO = "zed-extensions/material-icon-theme"
+ARTWORK_REPO = "material-extensions/vscode-material-icon-theme"
 CRATE = Path(__file__).resolve().parent.parent / "rust" / "crates" / "sirio_icons"
 ASSET_DIR = CRATE / "assets"
 ASSET_PREFIX = "icons/material"
@@ -75,6 +84,22 @@ def fetch(sha):
         name = member.name[len(root) + 1 :]
         members[name] = archive.extractfile(member).read()
     return members
+
+
+def artwork_version(members):
+    """The artwork release the pinned commit packaged, from its own lockfile."""
+    lock = json.loads(members["package-lock.json"])
+    return lock["packages"]["node_modules/material-icon-theme"]["version"]
+
+
+def fetch_artwork_licence(version):
+    url = f"https://raw.githubusercontent.com/{ARTWORK_REPO}/v{version}/LICENSE"
+    print(f"fetching {url}")
+    with urllib.request.urlopen(url, timeout=60) as response:
+        text = response.read()
+    if b"MIT License" not in text:
+        die(f"{url} is not the MIT licence the artwork is published under")
+    return text
 
 
 def stem_of(path):
@@ -189,7 +214,10 @@ def main():
     (CRATE / "src").mkdir(parents=True, exist_ok=True)
     (CRATE / "src" / "generated.rs").write_text("\n".join(generated) + "\n")
 
-    (CRATE / "LICENSE").write_bytes(members["LICENSE"])
+    artwork = artwork_version(members)
+    (CRATE / "LICENSE").unlink(missing_ok=True)
+    (CRATE / "LICENSE-APACHE").write_bytes(members["LICENSE"])
+    (CRATE / "LICENSE-MIT").write_bytes(fetch_artwork_licence(artwork))
     (CRATE / "UPSTREAM.md").write_text(
         f"""# Upstream
 
@@ -198,6 +226,7 @@ on {date.today().isoformat()} by `Scripts/vendor-material-icons.py`, which is
 the only writer of `assets/` and `src/generated.rs`. Re-run it with a newer
 commit to update; never hand-edit either.
 
+- artwork: [{ARTWORK_REPO}](https://github.com/{ARTWORK_REPO}) v{artwork}
 - mapping entries: {len(stems)} names, {len(suffixes)} suffixes, {len(directories)} directories
 - assets: {len(vendored)} ({len(referenced)} referenced, {len(light)} light companions)
 """
@@ -205,10 +234,18 @@ commit to update; never hand-edit either.
     (CRATE / "ATTRIBUTION.md").write_text(
         f"""# Attribution
 
-The SVGs in `assets/` are [PKief/vscode-material-icon-theme](https://github.com/PKief/vscode-material-icon-theme),
-packaged for Zed as [{REPO}](https://github.com/{REPO}) and vendored from it
-unchanged; see `UPSTREAM.md` for the pinned commit. Upstream is MIT licensed
-and its licence travels with the assets in `LICENSE`.
+Two projects, two licences:
+
+- **The SVGs in `assets/`** are the artwork of
+  [{ARTWORK_REPO}](https://github.com/{ARTWORK_REPO}) (formerly
+  PKief/vscode-material-icon-theme), release v{artwork}, vendored unchanged.
+  MIT licensed; its notice is `LICENSE-MIT`.
+- **The mapping in `src/generated.rs`** is generated from
+  [{REPO}](https://github.com/{REPO})'s `icon_themes/material-icon-theme.json`,
+  which that project derives from the artwork's manifest. Apache-2.0
+  licensed; its licence is `LICENSE-APACHE`.
+
+`UPSTREAM.md` records the pinned commit of both.
 """
     )
 

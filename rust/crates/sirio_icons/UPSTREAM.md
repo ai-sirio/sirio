@@ -5,5 +5,6 @@ on 2026-09-22 by `Scripts/vendor-material-icons.py`, which is
 the only writer of `assets/` and `src/generated.rs`. Re-run it with a newer
 commit to update; never hand-edit either.
 
+- artwork: [material-extensions/vscode-material-icon-theme](https://github.com/material-extensions/vscode-material-icon-theme) v5.29.0
 - mapping entries: 2020 names, 1158 suffixes, 3499 directories
 - assets: 1112 (1063 referenced, 49 light companions)
