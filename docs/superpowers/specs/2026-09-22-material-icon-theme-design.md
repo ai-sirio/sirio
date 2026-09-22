@@ -99,7 +99,8 @@ assets/           1112 SVGs, byte-identical to upstream
 src/generated.rs  STEMS, SUFFIXES, DIRECTORIES, ASSETS, LIGHT_VARIANTS
 src/lib.rs        the resolver
 UPSTREAM.md       the pinned commit, the date, the script that produced this
-LICENSE           upstream MIT
+LICENSE-MIT       the artwork's licence (material-icon-theme 5.29.0)
+LICENSE-APACHE    the mapping's licence (the Zed packaging repo)
 ```
 
 The public surface is four functions over `&'static str` slugs:
@@ -214,7 +215,7 @@ their current marks (`project_identity.rs`, `Icon::FolderFill`,
 
 ## §5 Generation and vendoring
 
-`Scripts/vendor-material-icons.sh <commit-sha>` is the only writer of
+`Scripts/vendor-material-icons.py <commit-sha>` is the only writer of
 `crates/sirio_icons/assets/` and `src/generated.rs`. It fetches that commit's
 tarball, takes `icon_themes/material-icon-theme.json`, the referenced SVGs
 and `LICENSE`, lowercases and de-duplicates the three dictionaries,
@@ -226,6 +227,17 @@ The generated file is committed. The build stays offline and reproducible,
 no build script or `serde_json` enters a leaf crate's build-dependencies, and
 the table is readable in review — the same reasoning `rust/vendor/README.md`
 already records for `libghostty-vt-sys`.
+
+**Two licences travel with the crate, because two projects are involved.**
+The artwork is material-extensions/vscode-material-icon-theme (formerly
+PKief's), MIT; the mapping is the Zed packaging repo's own work, derived from
+the artwork's manifest, Apache-2.0. The Zed tarball carries only its own
+Apache `LICENSE`, and MIT requires its notice to accompany every copy of the
+SVGs — so the script reads which artwork release the pinned commit packaged
+from its `package-lock.json` (5.29.0) and fetches that tag's `LICENSE` too,
+writing `LICENSE-MIT` and `LICENSE-APACHE`. (The first drop got this wrong —
+it shipped only the Apache file and called it MIT — which is why the rule is
+written down here.)
 
 The old subset goes: `rust/assets/icons/file-types/` and its `SOURCE.md` are
 deleted, `Icon::FileType`'s thirty-seven-arm path/`svg()` match is replaced by a
