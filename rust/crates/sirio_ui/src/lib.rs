@@ -27,6 +27,7 @@ pub mod loading;
 pub mod modal;
 pub mod orbit;
 pub mod outline;
+pub mod pane_launcher;
 pub mod project_forms;
 pub mod project_identity;
 pub mod right_panel;
