@@ -5312,6 +5312,11 @@ impl SirioWorkspace {
         for (path, view) in restored_files {
             workspace.adopt_file_view(&path, &view, cx);
         }
+        // Settings tabs wait for the sidebar their seed comes from.
+        let launch_snapshot = workspace.launch_snapshot.clone();
+        if workspace.restore_project_settings_tabs(&launch_snapshot, cx) {
+            workspace.rebuild_center_split();
+        }
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
         // so intercept this one chord before GPUI dispatches to the focused
@@ -5682,12 +5687,10 @@ impl SirioWorkspace {
             .tabs
             .iter()
             .filter(|tab| {
-                // Project-settings tabs are ephemeral scratch: their edits
-                // persist live to the catalog on every keystroke, so there
-                // is nothing to restore, and the restore path rejects
-                // unknown kinds outright.
-                tab.kind != TabKind::ProjectSettings
-                    && paths_name_the_same_document(
+                // Every kind is saved, Project Settings included: its edits
+                // already persist live to the catalog, so only the tab itself
+                // -- which project, where in the strip -- is restored.
+                paths_name_the_same_document(
                         &self.tab_worktree_path(tab.id),
                         &self.working_directory,
                     )
@@ -5768,7 +5771,9 @@ impl SirioWorkspace {
                                     .map(|path| path.to_string_lossy().into_owned())
                                     .unwrap_or_default();
                             }
-                            TabContent::ProjectSettings(_) => {}
+                            TabContent::ProjectSettings(view) => {
+                                state.settings_project_id = view.read(cx).project_id().to_string();
+                            }
                         }
                     });
                     state
@@ -8924,6 +8929,7 @@ impl SirioWorkspace {
             self.next_tab_id = self.tabs.len();
             self.next_pane_id = next_pane_id(&self.tabs);
             self.active_tab = active.min(self.tabs.len().saturating_sub(1));
+            self.restore_project_settings_tabs(&restored, cx);
             // `rebuild_center_split` can reveal a restored Secondary tab.
             // Point the workspace at the destination before that side effect
             // so its persisted flag is written to the right worktree.
@@ -11927,6 +11933,83 @@ impl SirioWorkspace {
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
+    }
+
+    /// Project Settings tabs are the one kind the free `restore_tabs*`
+    /// functions cannot build: the seed comes from the sidebar, which does
+    /// not exist yet at boot. They are rebuilt here once it does, each at
+    /// the strip position the session gave it -- the number of tabs already
+    /// rebuilt that the session listed before it. A project that no longer
+    /// exists drops its tab, the way a missing file drops an Editor tab.
+    /// Returns whether a tab was inserted; the caller rebuilds the split.
+    fn restore_project_settings_tabs(
+        &mut self,
+        restored: &RestoredSession,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let mut inserted = false;
+        for (index, saved) in restored.tabs.iter().enumerate() {
+            if session::kind_from_persisted(&saved.kind) != Some(TabKind::ProjectSettings) {
+                continue;
+            }
+            let mut state = restored.tab_states.get(index).cloned().unwrap_or_default();
+            let Some(seed) = self
+                .sidebar
+                .read(cx)
+                .project_settings_seed(&state.settings_project_id)
+            else {
+                continue;
+            };
+            let listed_before: HashSet<&str> = restored.tabs[..index]
+                .iter()
+                .map(|tab| tab.id.as_str())
+                .collect();
+            let position = self
+                .tabs
+                .iter()
+                .filter(|tab| listed_before.contains(tab.persistence_id.as_str()))
+                .count();
+            let view = cx.new(|cx| ProjectSettingsView::new(seed, cx));
+            Self::subscribe_project_settings_tab(&view, cx);
+            let tab_id = self.next_tab_id;
+            let pane_id = self.next_pane_id;
+            state.root_id = Some(pane_id);
+            let shown = state.shown_in_pane;
+            self.tabs.insert(
+                position,
+                OpenTab {
+                    id: tab_id,
+                    persistence_id: saved.id.clone(),
+                    title: saved.title.clone(),
+                    kind: TabKind::ProjectSettings,
+                    agent_icon: None,
+                    agent_id: None,
+                    session_state: state,
+                    panes: PaneNode::leaf(pane_id, TabContent::ProjectSettings(view)),
+                    focused_pane: pane_id,
+                    title_is_auto_named: true,
+                },
+            );
+            self.tab_worktree_paths
+                .insert(tab_id, self.working_directory.clone());
+            self.next_tab_id += 1;
+            self.next_pane_id += 1;
+            if shown {
+                self.center_split
+                    .set_active(PaneRole::Secondary, Some(tab_id));
+            }
+            if saved.active {
+                active_id = Some(tab_id);
+            }
+            inserted = true;
+        }
+        if let Some(position) =
+            active_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+        {
+            self.active_tab = position;
+        }
+        inserted
     }
 
     fn subscribe_project_settings_tab(tab: &Entity<ProjectSettingsView>, cx: &mut Context<Self>) {
@@ -37763,6 +37846,75 @@ browser  profile  "
                 "the Secondary pane is back on the tab it showed, not its first"
             );
             assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+            workspace
+        });
+    }
+
+    /// A Project Settings tab is saved with its project and rebuilt at the
+    /// strip position it had, once the workspace (and its sidebar) exists.
+    #[gpui::test]
+    fn a_project_settings_tab_survives_a_restart(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            workspace.add_project_settings_tab("palette-project", cx);
+            let layout = workspace.layout(cx);
+            let saved = layout
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == "settings")
+                .expect("the settings tab is saved");
+            assert_eq!(layout.tab_states[saved].settings_project_id, "palette-project");
+
+            // A restart: the free restore functions skip settings tabs, so
+            // start from the strip without it.
+            workspace
+                .tabs
+                .retain(|tab| tab.kind != TabKind::ProjectSettings);
+            workspace.active_tab = 0;
+            let restored = RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            };
+            assert!(workspace.restore_project_settings_tabs(&restored, cx));
+
+            let index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::ProjectSettings)
+                .expect("the settings tab is back");
+            assert_eq!(index, saved, "at the strip position it was saved at");
+            assert_eq!(workspace.active_tab, index, "and still the active tab");
+            workspace
+        });
+    }
+
+    /// A project that no longer exists drops its settings tab silently, the
+    /// way a deleted file drops its Editor tab.
+    #[gpui::test]
+    fn a_settings_tab_for_a_vanished_project_is_dropped(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let before = workspace.tabs.len();
+            let restored = RestoredSession {
+                working_directory: workspace.working_directory.clone(),
+                tabs: vec![SessionTab {
+                    id: "settings-gone".into(),
+                    title: "Project Settings · Gone".into(),
+                    kind: "settings".into(),
+                    agent_id: None,
+                    agent_session_id: None,
+                    active: false,
+                }],
+                tab_states: vec![SessionTabState {
+                    settings_project_id: "gone".into(),
+                    ..SessionTabState::default()
+                }],
+                diagnostics: Vec::new(),
+            };
+            assert!(!workspace.restore_project_settings_tabs(&restored, cx));
+            assert_eq!(workspace.tabs.len(), before);
             workspace
         });
     }
