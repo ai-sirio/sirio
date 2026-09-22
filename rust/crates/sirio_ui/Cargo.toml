@@ -21,6 +21,10 @@ sirio_acp.workspace = true
 sirio_markdown.workspace = true
 sirio_project.workspace = true
 sirio_agents.workspace = true
+# The Material icon theme as data: 1112 vendored assets and the tables that
+# resolve a file name to one. A leaf crate with no gpui, so none of that
+# weight lands in this crate's rebuilds.
+sirio_icons.workspace = true
 sirio_registry = { workspace = true }
 # The shipped language table. Settings → Language Servers is the page that
 # lists what it names, so the crate that draws the page needs the crate that

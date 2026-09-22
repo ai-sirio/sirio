@@ -161,7 +161,9 @@ pub enum Icon {
     /// The file editor's Markdown Code mode (`zed/code.svg`), the other
     /// half of that pair.
     Code,
-    /// A full-colour Material icon for a file type.
+    /// A full-colour Material file or folder icon, named by its asset stem
+    /// (`rust`, `folder-src-open`). The stems and the bytes both come from
+    /// `sirio_icons`; an unknown stem falls back to the theme's own `file`.
     FileType(&'static str),
 }
 
@@ -238,46 +240,9 @@ impl Icon {
             Icon::Eye => "icons/zed/eye.svg",
             Icon::EyeOff => "icons/zed/eye_off.svg",
             Icon::Code => "icons/zed/code.svg",
-            Icon::FileType(name) => match name {
-                "audio" => "icons/file-types/audio.svg",
-                "c" => "icons/file-types/c.svg",
-                "console" => "icons/file-types/console.svg",
-                "cpp" => "icons/file-types/cpp.svg",
-                "csharp" => "icons/file-types/csharp.svg",
-                "css" => "icons/file-types/css.svg",
-                "database" => "icons/file-types/database.svg",
-                "docker" => "icons/file-types/docker.svg",
-                "document" => "icons/file-types/document.svg",
-                "font" => "icons/file-types/font.svg",
-                "git" => "icons/file-types/git.svg",
-                "go" => "icons/file-types/go.svg",
-                "html" => "icons/file-types/html.svg",
-                "image" => "icons/file-types/image.svg",
-                "java" => "icons/file-types/java.svg",
-                "javascript" => "icons/file-types/javascript.svg",
-                "json" => "icons/file-types/json.svg",
-                "kotlin" => "icons/file-types/kotlin.svg",
-                "lock" => "icons/file-types/lock.svg",
-                "log" => "icons/file-types/log.svg",
-                "makefile" => "icons/file-types/makefile.svg",
-                "markdown" => "icons/file-types/markdown.svg",
-                "pdf" => "icons/file-types/pdf.svg",
-                "python" => "icons/file-types/python.svg",
-                "react" => "icons/file-types/react.svg",
-                "ruby" => "icons/file-types/ruby.svg",
-                "rust" => "icons/file-types/rust.svg",
-                "sass" => "icons/file-types/sass.svg",
-                "settings" => "icons/file-types/settings.svg",
-                "swift" => "icons/file-types/swift.svg",
-                "toml" => "icons/file-types/toml.svg",
-                "typescript" => "icons/file-types/typescript.svg",
-                "video" => "icons/file-types/video.svg",
-                "vue" => "icons/file-types/vue.svg",
-                "xml" => "icons/file-types/xml.svg",
-                "yaml" => "icons/file-types/yaml.svg",
-                "zip" => "icons/file-types/zip.svg",
-                _ => "icons/file-types/document.svg",
-            },
+            Icon::FileType(stem) => sirio_icons::asset_path(stem)
+                .or_else(|| sirio_icons::asset_path(sirio_icons::DEFAULT_FILE))
+                .unwrap_or("icons/material/file.svg"),
         }
     }
 
@@ -334,46 +299,9 @@ impl Icon {
             Icon::Eye => include_bytes!("../../../assets/icons/zed/eye.svg"),
             Icon::EyeOff => include_bytes!("../../../assets/icons/zed/eye_off.svg"),
             Icon::Code => include_bytes!("../../../assets/icons/zed/code.svg"),
-            Icon::FileType(name) => match name {
-                "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
-                "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
-                "console" => include_bytes!("../../../assets/icons/file-types/console.svg"),
-                "cpp" => include_bytes!("../../../assets/icons/file-types/cpp.svg"),
-                "csharp" => include_bytes!("../../../assets/icons/file-types/csharp.svg"),
-                "css" => include_bytes!("../../../assets/icons/file-types/css.svg"),
-                "database" => include_bytes!("../../../assets/icons/file-types/database.svg"),
-                "docker" => include_bytes!("../../../assets/icons/file-types/docker.svg"),
-                "document" => include_bytes!("../../../assets/icons/file-types/document.svg"),
-                "font" => include_bytes!("../../../assets/icons/file-types/font.svg"),
-                "git" => include_bytes!("../../../assets/icons/file-types/git.svg"),
-                "go" => include_bytes!("../../../assets/icons/file-types/go.svg"),
-                "html" => include_bytes!("../../../assets/icons/file-types/html.svg"),
-                "image" => include_bytes!("../../../assets/icons/file-types/image.svg"),
-                "java" => include_bytes!("../../../assets/icons/file-types/java.svg"),
-                "javascript" => include_bytes!("../../../assets/icons/file-types/javascript.svg"),
-                "json" => include_bytes!("../../../assets/icons/file-types/json.svg"),
-                "kotlin" => include_bytes!("../../../assets/icons/file-types/kotlin.svg"),
-                "lock" => include_bytes!("../../../assets/icons/file-types/lock.svg"),
-                "log" => include_bytes!("../../../assets/icons/file-types/log.svg"),
-                "makefile" => include_bytes!("../../../assets/icons/file-types/makefile.svg"),
-                "markdown" => include_bytes!("../../../assets/icons/file-types/markdown.svg"),
-                "pdf" => include_bytes!("../../../assets/icons/file-types/pdf.svg"),
-                "python" => include_bytes!("../../../assets/icons/file-types/python.svg"),
-                "react" => include_bytes!("../../../assets/icons/file-types/react.svg"),
-                "ruby" => include_bytes!("../../../assets/icons/file-types/ruby.svg"),
-                "rust" => include_bytes!("../../../assets/icons/file-types/rust.svg"),
-                "sass" => include_bytes!("../../../assets/icons/file-types/sass.svg"),
-                "settings" => include_bytes!("../../../assets/icons/file-types/settings.svg"),
-                "swift" => include_bytes!("../../../assets/icons/file-types/swift.svg"),
-                "toml" => include_bytes!("../../../assets/icons/file-types/toml.svg"),
-                "typescript" => include_bytes!("../../../assets/icons/file-types/typescript.svg"),
-                "video" => include_bytes!("../../../assets/icons/file-types/video.svg"),
-                "vue" => include_bytes!("../../../assets/icons/file-types/vue.svg"),
-                "xml" => include_bytes!("../../../assets/icons/file-types/xml.svg"),
-                "yaml" => include_bytes!("../../../assets/icons/file-types/yaml.svg"),
-                "zip" => include_bytes!("../../../assets/icons/file-types/zip.svg"),
-                _ => include_bytes!("../../../assets/icons/file-types/document.svg"),
-            },
+            Icon::FileType(stem) => sirio_icons::asset(stem)
+                .or_else(|| sirio_icons::asset(sirio_icons::DEFAULT_FILE))
+                .unwrap_or(b""),
         }
     }
 
@@ -807,17 +735,25 @@ mod tests {
         }
     }
 
+    /// `path()` and `svg()` are independent match arms, and a `FileType`
+    /// stem now comes from a generated table rather than a list somebody
+    /// reads in review. So assert the two agree with the crate that owns
+    /// the bytes, not with each other.
     #[test]
-    fn representative_material_file_icons_are_embedded() {
-        for icon in [
-            Icon::file_type("java"),
-            Icon::file_type("python"),
-            Icon::file_type("rust"),
-        ] {
-            let bytes = icon.svg();
-            assert!(!bytes.is_empty());
-            assert_eq!(bytes[0], b'<');
+    fn file_type_icons_serve_the_vendored_material_asset() {
+        for stem in ["rust", "python", "toml", "folder-src", "folder-src-open"] {
+            let icon = Icon::file_type(stem);
+            assert_eq!(
+                icon.svg(),
+                sirio_icons::asset(stem).expect("vendored"),
+                "{stem:?} embeds the vendored bytes"
+            );
+            assert_eq!(icon.path(), format!("icons/material/{stem}.svg"));
         }
+        // An unknown stem must not panic and must not draw nothing: it
+        // falls back to the theme's own default file mark.
+        let unknown = Icon::file_type("no-such-icon");
+        assert_eq!(unknown.svg(), sirio_icons::asset("file").expect("vendored"));
     }
 
     #[test]
