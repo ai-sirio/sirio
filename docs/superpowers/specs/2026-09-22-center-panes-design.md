@@ -1,7 +1,7 @@
 # Two centre panes from the first frame — design
 
 **Date:** 2026-09-22
-**Status:** approved — implementation not started
+**Status:** implemented
 **Parent work:** the centre split, #319–#325 (landed as #328,
 `53ad9e6c feat: split the centre column into a Primary and a Secondary pane`)
 **Reference:** Zed's workspace — an agent thread on the left, an editor pane
@@ -117,6 +117,17 @@ comments that state it (`PaneRole::Secondary`, `center_pane_width`,
 `drawn_detached_pane_group_offers_the_real_empty_prompt` becomes a real test
 of the Secondary launcher.
 
+### The pane-close modal
+
+`sirio_ui::modal::render_modal` now occludes its backdrop (`.occlude()`), so
+a modal blocks pointer events to what lies beneath it while its own buttons
+stay clickable as its children. With the Secondary pane always drawn, its
+launcher sits under the pane-close modal, and a click on a modal button used
+to reach the tile beneath as well. The two close-confirmation tests
+(`drawn_pane_close_prompt_is_held_for_every_status_including_idle_and_done`,
+`close_anyway_removes_a_tabs_sole_pane_instead_of_silently_no_opping`) are
+the regression tests for it.
+
 ## §3 Empty states
 
 ### `sirio_ui::pane_launcher`
@@ -124,8 +135,9 @@ of the Secondary launcher.
 A pure render function, not an entity:
 
 ```rust
-pub struct LauncherItem {
-    pub id: &'static str,              // debug selector: `launcher-<id>`
+pub struct LauncherItem<A> {
+    pub id: &'static str,              // debug selector, verbatim
+    pub action: A,
     pub icon: Icon,
     pub label: SharedString,
     pub shortcut: Option<SharedString>, // from `window_shortcut_hint`
@@ -139,13 +151,16 @@ pub fn pane_launcher(
 ) -> AnyElement;
 ```
 
+`id` is the debug selector **verbatim** — the Primary tiles keep
+`empty-worktree-new-terminal` / `empty-worktree-new-chat` — and the host's
+`A` is `LauncherAction`, matched exhaustively.
+
 It draws one row of tiles, centred in the pane, wrapping when the pane is
-narrow. Each tile is bezel's `option_card` (the `bezel::ui::widgets::Scaffolding`
-trait on `bezel::theme::Theme`), unselected,
-with the icon in its preview frame, the label under it, and the shortcut
-under that in faint text. bezel returns the card without an id or a click
-handler on purpose, so the behaviour stays with `main.rs`, the only place that
-can create a tab. A disabled tile is dimmed, never calls `on_click`, and
+narrow. bezel has no launcher tile: `option_card` is a fixed 148 px preview frame and
+`row_tile` a 36 px identity mark. The tile is therefore drawn from bezel's
+tokens — `panel_radius`, `border`, `ink(0.03)` — the way
+`settings::agents_page` draws its identity tile: a 64 px square with the icon,
+the label under it, the shortcut under that in faint text. A disabled tile is dimmed, never calls `on_click`, and
 explains itself through a bezel tooltip. There is no headline and no orbit
 mark — the tiles are the whole state, as in Zed.
 
@@ -176,7 +191,8 @@ are kept wherever the element survives, so no test changes without a reason.
 ### No worktree selected
 
 - **Left pane:** "Select a worktree" over a `WorktreePicker` (§4). With an
-  empty catalog the picker is replaced by an **Add Project** button that
+   empty catalog the picker is replaced by a *No projects yet* headline over an
+   **Add Project** button that
   starts the sidebar's existing add-project flow. That flow's entry,
   `Sidebar::start_open_project`, is private today; it gets a public entry
   rather than a copy, so the folder picker, the not-a-git-repository prompt
@@ -251,7 +267,7 @@ editor path):
 |---|---|---|
 | `shown_in_pane: bool` | `center_split.active(role) == Some(tab.id)` | each pane is seeded back to the tab it showed; the existing `active` flag only decides which pane holds focus |
 | `commit_sha: String` | new `ChangesTab::commit() -> Option<&str>`, from `ChangesSource::Commit` | `ChangesTab::for_commit`; a SHA that no longer resolves shows the git error `ChangesTab` already draws |
-| `changes_focus: String` | new getter for the last path given to `ChangesTab::focus_path` | `focus_path(path)`, which already defers when the first snapshot has not landed |
+| `changes_focus: String` | new getter for the file last opened through `ChangesTab::focus_path` or a row expansion in the tab; collapsing that file's last expanded row clears it | `focus_path(path)`, which already defers when the first snapshot has not landed |
 | `settings_project_id: String` | `ProjectSettingsView::project_id()` | built after the free function returns, with `&mut self` and the sidebar's `project_settings_seed`, at its persisted strip position — the same after-pass `bind_file_tabs` is for; a project that no longer exists drops the tab silently, like an editor tab whose file is gone |
 
 `layout()` stops filtering Project Settings tabs out. Their content is already
@@ -286,7 +302,7 @@ Written before the code.
 | `sirio_persistence` | v19 on a database holding `secondary_pane_open` 0 and 1 leaves `secondary_pane_hidden = 0` everywhere; `secondary_pane_hidden` round-trips |
 | `sirio` `session.rs` | the four new fields round-trip; JSON written before them decodes to defaults; the kind map is exhaustive and round-trips; `tabs_for_worktree` keeps `file` and `settings` |
 | `sirio_ui::pane_launcher` | one tile per item (`launcher-<id>`); a disabled item never calls `on_click` |
-| `sirio_ui::worktree_picker` | `Selected(index)` maps to the right path with the list filtered; an empty list does not panic |
+| `sirio_ui::worktree_picker` | `Selected(index)` maps to the right path (bezel reports the index into the original list; the test drives the combobox's event directly, since its rows carry no debug selector); an empty list does not panic |
 | `sirio` `main.rs` (gpui, `VisualTestContext`) | Primary-only worktree draws `pane-secondary` and its launcher; Ctrl+Shift+B hides it and a reload keeps it hidden; `×` closes the tabs and leaves the launcher; no worktree draws the picker left and the placeholder right; picking from the picker selects the worktree; Changes is disabled outside git; after a simulated restart the Editor tab, the commit, the focused Changes file, the Project Settings tab and each pane's shown tab are all back |
 
 Tests that pin the #320 auto-close are updated, not deleted.
