@@ -17335,6 +17335,8 @@ impl SirioWorkspace {
                     workspace.palette_focus.focus(window, cx);
                 });
             })
+            // The always-drawn launcher can sit under it.
+            .occlude()
             .flex()
             .flex_col()
             .absolute()
@@ -36836,6 +36838,49 @@ done
             cx.debug_bounds("secondary-launcher").is_some(),
             "and shows its launcher again"
         );
+    }
+
+    #[gpui::test]
+    async fn a_click_on_the_command_palette_does_not_reach_the_launcher_beneath(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1280.0), px(800.0)));
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert!(
+            cx.debug_bounds("launcher-browser").is_some(),
+            "the Secondary launcher is drawn"
+        );
+
+        open_palette_for_test(&mut cx, &workspace);
+        let launcher_center = cx
+            .debug_bounds("launcher-browser")
+            .expect("the launcher is still drawn under the palette")
+            .center();
+        let palette = cx
+            .debug_bounds("command-palette")
+            .expect("the palette is open");
+        assert!(
+            palette.contains(&launcher_center),
+            "the palette must cover the launcher tile in the test window"
+        );
+        cx.simulate_click(launcher_center, Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                !workspace.tabs.iter().any(|tab| tab.kind == TabKind::Browser),
+                "clicking the palette must not open a Browser tab"
+            );
+        });
     }
 
     /// Changes needs a git repository; outside one the tile says so instead
