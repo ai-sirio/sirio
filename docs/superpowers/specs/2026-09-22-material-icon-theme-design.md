@@ -25,7 +25,7 @@ every name the tables do not list — draws the generic mark.
 | extensions matched | 82 | 1158 |
 | directory names matched | 27 | 3499 |
 | distinct file icons | 34 | 563 |
-| distinct folder icons | 0 | 498 |
+| distinct folder icons | 0 | 500 |
 
 The last row is the one to read twice. Sixteen `folder-*.svg` assets are
 vendored in that directory and **not one of them is used**:
@@ -68,9 +68,22 @@ differing only in case point at different icons. The vendoring script
 re-checks that and fails if it ever stops being true (§5); collapsing a
 genuine conflict would silently pick a winner.
 
-Total mapping after normalisation: **6677 entries** (1158 + 2020 + 3499).
-Assets actually referenced: **1061** (563 file, 498 folder) of the 1192,
-plus **52 `_light` variants**.
+There is one upstream defect the vendoring must repair rather than inherit.
+`theme.ts` renames six icon definition keys (`git`→`vcs`, `template`→`templ`,
+`default`→`file`, `code`→`json`, `coffeescript`→`coffee`,
+`storage`→`database`) **but leaves the values in `file_stems` and
+`file_suffixes` pointing at the old names**. Thirty-nine entries therefore
+name a definition that no longer exists — among them `.gitignore`,
+`.gitattributes` and `.gitmodules`, the whole git family. In Zed those names
+quietly draw the default file icon. The generator applies the same renaming
+to the values, which resolves all thirty-nine, and **fails** if any value is
+still unresolved after it: an entry pointing at nothing must stop the drop,
+not ship as a silent fallback.
+
+Total mapping after normalisation: **6677 entries** (1158 + 2020 + 3499),
+none unresolved. Assets referenced: **1063** (563 file, 500 folder), of which
+**49 have a `_light` companion** — **1112 SVGs vendored**, and every one of
+them present in the pinned tree.
 
 Taking the Zed extension rather than PKief's npm package is deliberate: one
 pinned commit gives the artwork and the already-flattened mapping together,
@@ -82,7 +95,7 @@ A new workspace member, `rust/crates/sirio_icons`, with no local
 dependencies and **no gpui**:
 
 ```
-assets/           ~1113 SVGs, byte-identical to upstream
+assets/           1112 SVGs, byte-identical to upstream
 src/generated.rs  STEMS, SUFFIXES, DIRECTORIES, ASSETS, LIGHT_VARIANTS
 src/lib.rs        the resolver
 UPSTREAM.md       the pinned commit, the date, the script that produced this
@@ -124,6 +137,12 @@ For a file, on the name lowercased once:
 
 For a directory: the whole name in `DIRECTORIES`, which yields the
 collapsed/expanded pair; otherwise `folder` / `folder-open`.
+
+Worked answers from the pinned table, to save the next reader the lookup:
+`main.rs`→`rust`, `Cargo.toml`→`toml` (by suffix, not by name),
+`.gitignore`→`git` (only because the rename above is repaired),
+`deploy.sh`→`console`, `.env`→`tune`, `app.blade.php`→`laravel`,
+`README`→`readme`, `src`→`folder-src`/`folder-src-open`.
 
 `FileIconKey` is **retired**, and `sirio_project` loses its `pub use`. This
 is not opportunistic tidying: 563 icons do not fit in a fifty-seven-variant
