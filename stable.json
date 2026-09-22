@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.23.1",
-  "notes": "This release is small and all repair-and-polish: the Files panel learns to\nkeep a checkout's clutter out of sight, and two things that were painted\nwrong stop being painted wrong.\n\n**Hidden entries are a switch, not a rule**\n\nA checkout's dotfiles — `.env`, `.github`, `.cargo` — sat in the Files tree\nbeside the files you were actually reading. They are hidden now by default,\nand the panel's bottom-right corner carries the two icons that change that:\nan eye and a crossed-out eye, whichever is active filled in. The choice\nbelongs to the session rather than to one worktree, so releasing the dotfiles\nin one checkout releases them everywhere until the app is quit; a fresh\nlaunch starts hidden again.\n\n**The effort slider stays inside its card**\n\nThe 14px knob at the end of the effort slider was centred on the track's\nends, so half of it hung past each one and clipped into the popover's 4px\npadding. The scale is inset by 8px and the knob now clears the border.\n\n**A tooltip stops showing the window through it**\n\nThe commit tooltip in History and the status bar's tooltips were painted on a\nraised surface, which the app's translucency fades — so the rows behind them\nread straight through the card. Both now paint on the same opaque surface the\ncontext menus already use.",
+  "version": "0.23.2",
+  "notes": "Everything here is repair, and most of it lands on the code editor — a\nsurface you could read and click but only half type on, because two of its\nkeyboard routes were declared and then wired to nothing. The Files panel's\nnew hidden-entries switch loses an icon, and creating a project no longer\ndepends on its parent directory already being there.\n\n**Copy, Cut and Paste reach the editor from the keyboard**\n\nCtrl/Cmd-C, -X and -V worked in the chat composer and in the settings fields\nand did nothing in a source file; the right-click menu was the only way to\nmove text in or out. The editor's key handler returned on every command\nchord, on the premise that something above it would answer them — nothing\ndoes, because the keymap context it names carries no binding anywhere in the\napp. The chords now raise the same action the menu raises, so the two routes\ncannot answer one key differently. Select-all answers Cmd-A as well as\nCtrl-A, which is what select-all-then-copy needed on macOS. Under the\nMarkdown preview the chords stay quiet: a paste there would rewrite the\nbuffer at a caret the reader cannot see.\n\n**The arrow keys move the caret up and down**\n\nUp, Down, Page Up and Page Down were no-ops in a source file — not a wrong\nmove, no move at all. They walk the document now, remembering the column you\nstarted in, so descending through a short line and coming back up returns\nthe caret where it began. Down on the last line stops at that line's end\nrather than one byte past it, where nothing would have painted it, and a\nvertical move scrolls the line it lands on into view, so Page Down no longer\ntakes the caret a viewport away from the only place it is drawn.\n\n**The hidden-entries switch is one icon, not two**\n\n0.23.1 put an eye and a crossed-out eye side by side in the Files footer with\nwhichever was active filled in — a pair you had to read before you could use\nit. There is one icon now, and it shows what pressing it will do: an eye\nwhile the dotfiles are hidden, a crossed-out eye while they are shown.\n\n**A project can be created where nothing exists yet**\n\nThe create-project form proposes `~/Sirio/projects` as the parent, which on a\nfresh install does not exist — and creation failed on the missing directory\ninstead of making it. Missing ancestors are created now. The project\ndirectory itself is not: creating one that already exists stays a visible\nfailure rather than a silent adoption of a folder someone else put there.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.23.1/Sirio-0.23.1.dmg",
-      "sha256": "1d5ec717c64610b42bb29eb4c522d2c753a8754ca5da248b43d66092cb282204",
-      "signature": "YNF2hJ7veF6pAjlsUtmWOTZVfX676ogci+0jZ7gUQAqn98T+27dwDJ4Kg6Hk3txxMIDsa1lftSx9vSmz8neqBg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.23.2/Sirio-0.23.2.dmg",
+      "sha256": "c2bc47bc111c8b590ec039641d576b4a03c6f321ce345caebb4b179b25e35487",
+      "signature": "FC+zOhJcsNa4wza2HILzUehY+tYiyb41dmOA23L/NyGRtLQ9MV8dZYDc5d1jVvOkCxyjJhbI5EJEnK207ygUDg=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.23.1/Sirio-0.23.1-x86_64.AppImage",
-      "sha256": "a56af2a44a2b093b3086d349f164b99f056ef5e486803b50d8962c189c009f83",
-      "signature": "UFT4Ddue+4dQqiznKwKyghzzC/VKfBt5cQ4hMsOePMo4kbROXEnLAUGyiSFp0iPPMOXvRr5YeXOcOBf6e+X9Bw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.23.2/Sirio-0.23.2-x86_64.AppImage",
+      "sha256": "19f34431c420ec8db5e21bb2389dae08b33fcc0bd9d0bbb3e15f2c5bec784957",
+      "signature": "nzq7HADsiO0mEWPezI45bQ5b6roZ+AA7OHApKLL/QNuBkcYA9DvdAoxRyTgCjMFEjZqu22Xv/8uEkrmwXbhGAg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.23.1/SirioSetup-0.23.1.exe",
-      "sha256": "65e70324ad6ab44197a9512d991ca5d3dd47bba12ef6e7429f743740b297b0ed",
-      "signature": "fNlelqv12CIGuOPBFpAQhdEMRfFhB58ItDpUNDZuXBqMgZfnVHIec+xjGJ0jaOjzcjwaRfmdKozXWGcopbKwCw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.23.2/SirioSetup-0.23.2.exe",
+      "sha256": "d45f40c9f94030c05624a6bb47cb9a16dfe974158d2d87ec8d8bd34e76718900",
+      "signature": "PFH1CbtqD8dkosxDqwJWnDIc2ooExo95E+wUPRg/ahvZSH4Y3zEex4GWf9qDYR4TbxPdNVaPP7fAQXc6FHGgCA=="
     }
   }
 }
