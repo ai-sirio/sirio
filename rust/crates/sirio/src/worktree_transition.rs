@@ -7,7 +7,7 @@ pub trait WorktreeTransitionStore: Send + Sync + 'static {
     fn save_layout(&self, layout: &SessionLayout);
     fn restore_tabs(&self, repo_root: &PathBuf) -> Result<RestoredSession, String>;
     fn load_session_refs(&self) -> BTreeMap<String, String>;
-    fn secondary_pane_open(&self, repo_root: &PathBuf) -> bool;
+    fn secondary_pane_hidden(&self, repo_root: &PathBuf) -> bool;
 }
 
 pub struct SessionStoreTransitionStore(pub SessionStore);
@@ -25,8 +25,8 @@ impl WorktreeTransitionStore for SessionStoreTransitionStore {
         self.0.load_session_refs()
     }
 
-    fn secondary_pane_open(&self, repo_root: &PathBuf) -> bool {
-        self.0.secondary_pane_open_for(repo_root)
+    fn secondary_pane_hidden(&self, repo_root: &PathBuf) -> bool {
+        self.0.secondary_pane_hidden_for(repo_root)
     }
 }
 
@@ -53,7 +53,7 @@ pub struct ReadyWorktree {
     pub repo_root: PathBuf,
     pub restored: RestoredSession,
     pub session_refs: BTreeMap<String, String>,
-    pub secondary_pane_open: bool,
+    pub secondary_pane_hidden: bool,
     pub recovery: Option<String>,
 }
 
@@ -194,7 +194,7 @@ fn worker(store: Arc<dyn WorktreeTransitionStore>, state: Arc<(Mutex<TransitionS
                     repo_root: queued.target.clone(),
                     restored,
                     session_refs: store.load_session_refs(),
-                    secondary_pane_open: store.secondary_pane_open(&queued.target),
+                    secondary_pane_hidden: store.secondary_pane_hidden(&queued.target),
                     recovery,
                 })
             }
@@ -270,7 +270,7 @@ mod tests {
             BTreeMap::new()
         }
 
-        fn secondary_pane_open(&self, _repo_root: &PathBuf) -> bool {
+        fn secondary_pane_hidden(&self, _repo_root: &PathBuf) -> bool {
             false
         }
     }

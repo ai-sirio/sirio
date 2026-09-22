@@ -4219,10 +4219,10 @@ struct SirioWorkspace {
     /// width: `panel_layout::resolve_center_split` clamps it at render time
     /// and never writes the clamp back.
     center_split_ratio: i64,
-    /// #323: whether this worktree's Secondary pane is open. The one piece of
-    /// the centre split that is stored rather than derived -- see
-    /// `WorktreeRecord::secondary_pane_open` for why it has to be.
-    secondary_pane_open: bool,
+    /// Whether this worktree's Secondary pane is hidden (v19). The one piece
+    /// of the centre split that is stored rather than derived -- see
+    /// `WorktreeRecord::secondary_pane_hidden` for why it has to be.
+    secondary_pane_hidden: bool,
     /// Where the centre divider was grabbed, and the ratio it held then.
     center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
@@ -5133,14 +5133,14 @@ impl SirioWorkspace {
         settings.update(cx, |settings, _| {
             settings.set_lsp_store_root(lsp_store_root.clone())
         });
-        let persisted_secondary_pane_open = session.secondary_pane_open_for(&working_directory);
+        let persisted_secondary_pane_hidden = session.secondary_pane_hidden_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
             .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary);
-        if restored_active_secondary && !persisted_secondary_pane_open {
+        if restored_active_secondary && persisted_secondary_pane_hidden {
             // Keep the restored active surface visible and make the repaired
             // state survive the next restart as well.
-            session.save_secondary_pane_open(&working_directory, true);
+            session.save_secondary_pane_hidden(&working_directory, false);
         }
         let mut workspace = Self {
             titlebar,
@@ -5156,7 +5156,7 @@ impl SirioWorkspace {
             right_panel_width,
             dragging_panel: None,
             center_split_ratio,
-            secondary_pane_open: persisted_secondary_pane_open || restored_active_secondary,
+            secondary_pane_hidden: persisted_secondary_pane_hidden && !restored_active_secondary,
             center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
@@ -6223,12 +6223,12 @@ impl SirioWorkspace {
     /// conflated: if `×` merely hid the pane it would duplicate this and
     /// should not exist.
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
-        self.secondary_pane_open = !self.secondary_pane_open;
+        self.secondary_pane_hidden = !self.secondary_pane_hidden;
         self.session
-            .save_secondary_pane_open(&self.working_directory, self.secondary_pane_open);
+            .save_secondary_pane_hidden(&self.working_directory, self.secondary_pane_hidden);
         // Hiding the pane the user was typing in would otherwise leave focus
         // on a half that is no longer drawn.
-        if !self.secondary_pane_open && self.center_split.focused() == PaneRole::Secondary {
+        if self.secondary_pane_hidden && self.center_split.focused() == PaneRole::Secondary {
             self.set_focused_pane(PaneRole::Primary);
         }
         cx.notify();
@@ -8764,7 +8764,7 @@ impl SirioWorkspace {
         } else {
             None
         };
-        let mut restored_secondary_pane_open = None;
+        let mut restored_secondary_pane_hidden = None;
         self.evict_over_capacity_worktrees(&selected_path, cx);
 
         // CENTER-01: `self.tabs` is this window's single, un-scoped-to-worktree
@@ -8885,9 +8885,9 @@ impl SirioWorkspace {
             // Point the workspace at the destination before that side effect
             // so its persisted flag is written to the right worktree.
             self.working_directory = selected_path.clone();
-            self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
+            self.secondary_pane_hidden = self.session.secondary_pane_hidden_for(&selected_path);
             self.rebuild_center_split();
-            restored_secondary_pane_open = Some(self.secondary_pane_open);
+            restored_secondary_pane_hidden = Some(self.secondary_pane_hidden);
         }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
@@ -8903,9 +8903,9 @@ impl SirioWorkspace {
         // same way the tabs above just did. The safe restore branch above
         // preserves a newly revealed active Secondary tab; an unsafe switch
         // still reads only the selected worktree's persisted flag.
-        let restored_secondary_pane_was_loaded = restored_secondary_pane_open.is_some();
-        self.secondary_pane_open = restored_secondary_pane_open
-            .unwrap_or_else(|| self.session.secondary_pane_open_for(&selected_path));
+        let restored_secondary_pane_was_loaded = restored_secondary_pane_hidden.is_some();
+        self.secondary_pane_hidden = restored_secondary_pane_hidden
+            .unwrap_or_else(|| self.session.secondary_pane_hidden_for(&selected_path));
         if restored_secondary_pane_was_loaded
             || paths_name_the_same_document(&selected_path, &old_path)
         {
@@ -15320,7 +15320,7 @@ impl SirioWorkspace {
     /// to comes from its kind -- but "open" cannot be, because hiding the
     /// pane leaves its tabs in place (#323).
     fn secondary_pane_visible(&self) -> bool {
-        self.secondary_pane_open
+        !self.secondary_pane_hidden
             && self
                 .tabs
                 .iter()
@@ -15330,12 +15330,12 @@ impl SirioWorkspace {
     /// #323: opening any Secondary surface opens the pane, even if it was
     /// hidden -- the alternative is a tab that exists and is drawn nowhere.
     fn open_secondary_pane(&mut self) {
-        if self.secondary_pane_open {
+        if !self.secondary_pane_hidden {
             return;
         }
-        self.secondary_pane_open = true;
+        self.secondary_pane_hidden = false;
         self.session
-            .save_secondary_pane_open(&self.working_directory, true);
+            .save_secondary_pane_hidden(&self.working_directory, false);
     }
 
     fn reveal_secondary_for_active_tab(&mut self) {
@@ -36172,7 +36172,7 @@ done
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
             workspace.tabs[1].kind = TabKind::Editor;
             workspace.active_tab = 1;
-            workspace.secondary_pane_open = false;
+            workspace.secondary_pane_hidden = true;
             workspace.rebuild_center_split();
             workspace
         });

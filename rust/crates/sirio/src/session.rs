@@ -1198,7 +1198,7 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
                 // re-derives the row from a catalog that has no idea a pane
                 // is open, so without carrying it forward every startup
                 // normalization would close it.
-                record.secondary_pane_open = existing.secondary_pane_open;
+                record.secondary_pane_hidden = existing.secondary_pane_hidden;
             }
             db.save_worktree(&record)?;
         }
@@ -1751,11 +1751,11 @@ impl SessionStore {
         }
     }
 
-    /// #323: whether this worktree's Secondary centre pane was open when the
-    /// session was last written. `false` for a worktree with no row yet, and
-    /// for a database in fallback mode -- a closed pane is the safe answer,
-    /// since it is also what a worktree with no Secondary tabs shows.
-    pub fn secondary_pane_open_for(&self, working_directory: &Path) -> bool {
+    /// Whether this worktree's Secondary centre pane was hidden when the
+    /// session was last written (v19). `false` — visible — for a worktree
+    /// with no row yet, for a database in fallback mode, and on a read error:
+    /// the pane is part of the layout, so showing it is the safe answer.
+    pub fn secondary_pane_hidden_for(&self, working_directory: &Path) -> bool {
         let db = self
             .inner
             .db
@@ -1765,19 +1765,19 @@ impl SessionStore {
             return false;
         };
         match db.worktree_by_path(&working_directory.to_string_lossy()) {
-            Ok(record) => record.is_some_and(|record| record.secondary_pane_open),
+            Ok(record) => record.is_some_and(|record| record.secondary_pane_hidden),
             Err(error) => {
-                eprintln!("[session] failed to read the pane flag: {error}; assuming closed");
+                eprintln!("[session] failed to read the pane flag: {error}; assuming visible");
                 false
             }
         }
     }
 
-    /// #323: records that this worktree's Secondary pane is open or closed.
-    /// A no-op for a worktree with no persisted row -- the row is written by
+    /// Records that this worktree's Secondary pane is hidden or shown. A
+    /// no-op for a worktree with no persisted row -- the row is written by
     /// the catalog upsert, and a pane state with no worktree to hang off is
     /// not worth inventing one for.
-    pub fn save_secondary_pane_open(&self, working_directory: &Path, open: bool) {
+    pub fn save_secondary_pane_hidden(&self, working_directory: &Path, hidden: bool) {
         let db = self
             .inner
             .db
@@ -1789,10 +1789,10 @@ impl SessionStore {
         let path = working_directory.to_string_lossy();
         match db.worktree_by_path(&path) {
             Ok(Some(mut record)) => {
-                if record.secondary_pane_open == open {
+                if record.secondary_pane_hidden == hidden {
                     return;
                 }
-                record.secondary_pane_open = open;
+                record.secondary_pane_hidden = hidden;
                 if let Err(error) = db.save_worktree(&record) {
                     eprintln!("[session] failed to persist the pane flag for {path}: {error}");
                 }
@@ -3654,24 +3654,24 @@ mod tests {
         store.schedule_catalog(&catalog);
 
         assert!(
-            !store.secondary_pane_open_for(&root),
-            "a worktree that never opened the pane reads closed"
+            !store.secondary_pane_hidden_for(&root),
+            "a worktree that never hid the pane reads visible"
         );
 
-        store.save_secondary_pane_open(&root, true);
-        assert!(store.secondary_pane_open_for(&root), "the flag round-trips");
+        store.save_secondary_pane_hidden(&root, true);
+        assert!(store.secondary_pane_hidden_for(&root), "the flag round-trips");
 
-        // Any later boot re-runs this; it must not close the pane.
+        // Any later boot re-runs this; it must not un-hide the pane.
         store.schedule_catalog(&catalog);
         assert!(
-            store.secondary_pane_open_for(&root),
+            store.secondary_pane_hidden_for(&root),
             "schedule_catalog must not clobber the pane flag"
         );
 
-        store.save_secondary_pane_open(&root, false);
+        store.save_secondary_pane_hidden(&root, false);
         assert!(
-            !store.secondary_pane_open_for(&root),
-            "closing the pane persists too"
+            !store.secondary_pane_hidden_for(&root),
+            "showing the pane persists too"
         );
     }
 
