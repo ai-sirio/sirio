@@ -119,12 +119,13 @@ pub enum Icon {
     SidebarLeft,
     /// Right-panel toggle (`zed/threads_sidebar_right_open.svg`).
     PanelRight,
-    /// An archive file in the Files tree — zip, tar, 7z, … (`zed/archive.svg`).
-    /// Added for F-CORE-FILE-08 (`FileIconKey::Archive`); no Phosphor predecessor.
+    /// The Zed catalog's archive mark (`zed/archive.svg`). It was the Files
+    /// tree's glyph for zip, tar, 7z, … until that tree moved to the Material
+    /// theme, which draws `zip` instead; nothing draws it today.
     Archive,
-    /// A lock file in the Files tree — `Cargo.lock`, `package-lock.json`, …
-    /// (`zed/lock.svg`). Added for F-CORE-FILE-08 (`FileIconKey::Lock`);
-    /// no Phosphor predecessor.
+    /// The Zed catalog's lock mark (`zed/lock.svg`). It was the Files tree's
+    /// glyph for `Cargo.lock`, `package-lock.json`, … until that tree moved to
+    /// the Material theme, which draws `lock` instead; nothing draws it today.
     Lock,
     /// The Files view in the right panel's rail (`zed/file_tree.svg`).
     FileTree,
