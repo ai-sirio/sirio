@@ -1270,6 +1270,7 @@ impl ChangesTab {
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
         self.expanded_changes.clear();
         self.expanded_bands.clear();
+        self.last_focus = None;
         cx.notify();
     }
 
@@ -3663,6 +3664,47 @@ mod tests {
                 tab.focused_path(),
                 None,
                 "collapsing B's last expanded row clears the saved focus"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn collapse_all_clears_the_saved_focus(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("a.txt"), "a\n").expect("seed a");
+        git(&dir.0, &["add", "a.txt"]);
+        git(
+            &dir.0,
+            &[
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-q",
+                "-m",
+                "seed a",
+            ],
+        );
+        std::fs::write(dir.0.join("a.txt"), "a changed\n").expect("modify a");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.entries.iter().any(|entry| entry.path == *"a.txt")
+            })
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.focus_path(Path::new("a.txt"), cx);
+        });
+        tab.update(cx, |tab, cx| {
+            tab.collapse_all(cx);
+        });
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.focused_path(),
+                None,
+                "collapse all clears the saved focus"
             );
         });
     }
