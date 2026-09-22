@@ -1054,12 +1054,23 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     project.name = name;
     project.root_path = project_path;
     db.save_project(&project)?;
-    db.save_worktree(&WorktreeRecord::new(
-        &worktree_id,
-        &project_id,
-        &branch,
-        &worktree_path,
-    ))?;
+    // A layout flush runs on every debounced save, worktree switch and
+    // quit: rebuilding the row from scratch would reset the hidden flag,
+    // comment, primary flag and order the catalog writer maintains.
+    let mut record = db
+        .worktrees()?
+        .into_iter()
+        .find(|worktree| worktree.id == worktree_id)
+        .map(|mut existing| {
+            existing.project_id = project_id.clone();
+            existing.branch = branch.clone();
+            existing.path = worktree_path.clone();
+            existing
+        })
+        .unwrap_or_else(|| {
+            WorktreeRecord::new(&worktree_id, &project_id, &branch, &worktree_path)
+        });
+    db.save_worktree(&record)?;
 
     let tabs: Vec<TabRecord> = layout
         .tabs
@@ -2596,6 +2607,33 @@ mod tests {
 
         let restored = restore(&db_path, Path::new("/tmp"));
         assert_eq!(restored.tab_states, vec![state]);
+    }
+
+    #[test]
+    fn a_hidden_secondary_pane_survives_a_layout_save_and_a_reopen() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("hidden-pane-survives-layout-save");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&working_directory, three_tabs()));
+        store.flush_now();
+
+        store.save_secondary_pane_hidden(&working_directory, true);
+
+        store.schedule(layout(&working_directory, three_tabs()));
+        store.flush_now();
+        assert!(
+            store.secondary_pane_hidden_for(&working_directory),
+            "a layout save must not un-hide the secondary pane"
+        );
+
+        let reopened = SessionStore::open(&db_path);
+        assert!(
+            reopened.secondary_pane_hidden_for(&working_directory),
+            "the hidden flag must survive a reopen"
+        );
     }
 
     /// A session written before these fields existed still loads, with each
