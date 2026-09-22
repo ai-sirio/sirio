@@ -74,7 +74,8 @@ Settled with the user before this document was written:
 
 `secondary_pane_visible()` becomes `!self.secondary_pane_hidden`. It no longer
 looks at tabs. With no worktree selected the pane follows the default —
-visible — because there is no worktree to own a preference.
+visible — because there is no worktree to own a preference. Ctrl+Shift+B
+does nothing while no worktree is selected.
 
 ### Persistence
 
@@ -144,10 +145,11 @@ pub struct LauncherItem<A> {
     pub disabled: Option<SharedString>, // the reason, shown as a tooltip
 }
 
-pub fn pane_launcher(
-    items: &[LauncherItem],
-    theme: &Theme,
-    on_click: impl Fn(&'static str, &mut Window, &mut App) + 'static,
+pub fn pane_launcher<A: Copy + 'static>(
+    container_id: &'static str,
+    items: &[LauncherItem<A>],
+    theme: Theme,
+    on_click: impl Fn(A, &mut Window, &mut App) + 'static,
 ) -> AnyElement;
 ```
 
@@ -301,7 +303,7 @@ Written before the code.
 |---|---|
 | `sirio_persistence` | v19 on a database holding `secondary_pane_open` 0 and 1 leaves `secondary_pane_hidden = 0` everywhere; `secondary_pane_hidden` round-trips |
 | `sirio` `session.rs` | the four new fields round-trip; JSON written before them decodes to defaults; the kind map is exhaustive and round-trips; `tabs_for_worktree` keeps `file` and `settings` |
-| `sirio_ui::pane_launcher` | one tile per item (`launcher-<id>`); a disabled item never calls `on_click` |
+| `sirio_ui::pane_launcher` | one tile per item (each tile's debug selector is its item's `id`, verbatim); a disabled item never calls `on_click` |
 | `sirio_ui::worktree_picker` | `Selected(index)` maps to the right path (bezel reports the index into the original list; the test drives the combobox's event directly, since its rows carry no debug selector); an empty list does not panic |
 | `sirio` `main.rs` (gpui, `VisualTestContext`) | Primary-only worktree draws `pane-secondary` and its launcher; Ctrl+Shift+B hides it and a reload keeps it hidden; `×` closes the tabs and leaves the launcher; no worktree draws the picker left and the placeholder right; picking from the picker selects the worktree; Changes is disabled outside git; after a simulated restart the Editor tab, the commit, the focused Changes file, the Project Settings tab and each pane's shown tab are all back |
 

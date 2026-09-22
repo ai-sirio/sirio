@@ -4354,7 +4354,7 @@ struct SirioWorkspace {
     /// holds keyboard focus -- so a global keybinding like `ctrl-t` is
     /// silently unreachable, not merely unhandled, the moment focus has
     /// nowhere live to land (e.g. a worktree with zero terminal tabs, whose
-    /// "No Terminals" placeholder has no focusable element of its own).
+    /// empty-pane launcher has no focusable element of its own).
     /// This handle gives the workspace root itself a permanent, always-
     /// mounted focus target so `render` can reclaim focus whenever it goes
     /// missing, keeping every root-level keybinding reachable regardless of
@@ -5691,9 +5691,9 @@ impl SirioWorkspace {
                 // already persist live to the catalog, so only the tab itself
                 // -- which project, where in the strip -- is restored.
                 paths_name_the_same_document(
-                        &self.tab_worktree_path(tab.id),
-                        &self.working_directory,
-                    )
+                    &self.tab_worktree_path(tab.id),
+                    &self.working_directory,
+                )
             })
             .collect();
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -10343,9 +10343,14 @@ impl SirioWorkspace {
     }
 
     /// Keeps the no-worktree picker's list equal to the catalog. Called every
-    /// render like `sync_empty_pane_prompts`; `set_choices` is a no-op when
-    /// nothing changed, so an open menu is not rebuilt under the pointer.
+    /// render like `sync_empty_pane_prompts`, but only with no worktree
+    /// selected — the picker is only drawn then. `set_choices` is a no-op
+    /// when nothing changed, so an open menu is not rebuilt under the
+    /// pointer.
     fn sync_worktree_picker(&mut self, cx: &mut Context<Self>) {
+        if self.has_current_worktree() {
+            return;
+        }
         let choices = worktree_choices(&self.project_catalog);
         self.worktree_picker
             .update(cx, |picker, cx| picker.set_choices(choices, cx));
@@ -12987,7 +12992,10 @@ impl SirioWorkspace {
             LauncherAction::Changes => self.open_action(NewTabAction::NewChanges, window, cx),
             LauncherAction::OpenFile => self.handle_open_file(&OpenFile, window, cx),
             LauncherAction::ProjectSettings => {
-                if let Some(project_id) = self.current_catalog_project().map(|project| project.id.clone()) {
+                if let Some(project_id) = self
+                    .current_catalog_project()
+                    .map(|project| project.id.clone())
+                {
                     self.add_project_settings_tab(&project_id, cx);
                 }
             }
@@ -14194,7 +14202,9 @@ impl SirioWorkspace {
                     .into_any_element()
             })
             .unwrap_or_else(|| {
-                // The Primary half's own empty state: see the launcher above for the Secondary one.
+                // No tab to show: the Secondary launcher and its
+                // no-worktree placeholder are drawn just below, the
+                // Primary launcher further below.
                 if role == PaneRole::Secondary && !self.has_current_worktree() {
                     div()
                         .id("secondary-no-worktree")
@@ -27730,8 +27740,9 @@ done
 
         // `palette_test_workspace_with_tab_count` builds a catalog with one
         // worktree but does not auto-select it -- without this, the centre
-        // surface renders the "No worktree selected" empty state instead of
-        // any pane content, and every `pane-*` id below is silently absent.
+        // surface renders the no-worktree state (`no-worktree-selected`)
+        // with its picker instead of any pane content, and every `pane-*`
+        // id below is silently absent.
         let working_directory =
             workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
         cx.update(|window, cx| {
@@ -36679,8 +36690,8 @@ done
     }
 
     /// F-SID-19: `ctrl-t` (`WindowCommand::NewTerminalTab`) must reach the
-    /// workspace even when the "No Terminals" empty state holds no
-    /// focusable element of its own. GPUI's key dispatch falls back to the
+    /// workspace even when the empty-pane launcher holds no focusable
+    /// element of its own. GPUI's key dispatch falls back to the
     /// true window root -- above every `on_action`/`capture_key_down` this
     /// workspace registers on its own root element -- whenever nothing at
     /// all holds focus, so this reproduces the live-drive finding: land on
