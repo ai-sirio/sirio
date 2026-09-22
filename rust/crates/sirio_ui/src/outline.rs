@@ -359,9 +359,9 @@ impl Render for Outline {
                 MouseButton::Left,
                 cx.listener(|outline, _event, window, cx| outline.focus.focus(window, cx)),
             )
-            // The palette's own geometry, so the two read as siblings.
             // The always-drawn launcher can sit under it.
             .occlude()
+            // The palette's own geometry, so the two read as siblings.
             .flex()
             .flex_col()
             .absolute()

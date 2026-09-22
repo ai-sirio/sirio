@@ -11894,9 +11894,8 @@ impl SirioWorkspace {
             .detach();
     }
 
-    /// Opens a project's settings as a tab in the Secondary pane, reusing
-    /// the existing tab for that project when there is one (and opening
-    /// the pane when it was hidden), like every other Secondary surface.
+    /// A Project Settings tab's title: one spelling for opening the tab
+    /// and for rebuilding it at restore.
     fn project_settings_title(seed: &ProjectSettingsSeed) -> String {
         format!(
             "Project Settings · {}",
@@ -11904,6 +11903,9 @@ impl SirioWorkspace {
         )
     }
 
+    /// Opens a project's settings as a tab in the Secondary pane, reusing
+    /// the existing tab for that project when there is one (and opening
+    /// the pane when it was hidden), like every other Secondary surface.
     fn add_project_settings_tab(&mut self, project_id: &str, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| {
             let mut matches_project = false;
@@ -18592,7 +18594,9 @@ fn restore_tabs_with_terminal_cache(
                 };
                 TabContent::Terminal { view }
             }
-            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
+            Some(TabKind::Diff) => {
+                TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx))
+            }
             Some(TabKind::Browser) => {
                 let Some(window) = window.as_deref_mut() else {
                     continue;
@@ -18962,7 +18966,9 @@ fn restore_tabs_in_workspace(
                 });
                 TabContent::Terminal { view }
             }
-            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
+            Some(TabKind::Diff) => {
+                TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx))
+            }
             Some(TabKind::Browser) => {
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
@@ -37802,6 +37808,9 @@ browser  profile  "
                 !workspace.has_current_worktree(),
                 "the fixture must have no worktree selected"
             );
+            // Hidden in the deselected worktree: the no-worktree state
+            // must still show the pane.
+            workspace.secondary_pane_hidden = true;
             let before = workspace.secondary_pane_hidden;
             workspace.toggle_secondary_pane(cx);
             assert_eq!(
