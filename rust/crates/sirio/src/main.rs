@@ -12805,6 +12805,29 @@ impl SirioWorkspace {
         ]
     }
 
+    /// The Primary pane's launcher. Chat opens the agent picker drawn under
+    /// the row rather than guessing an agent.
+    fn primary_launcher_items() -> Vec<LauncherItem<LauncherAction>> {
+        vec![
+            LauncherItem {
+                id: "empty-worktree-new-terminal",
+                action: LauncherAction::NewTerminal,
+                icon: Icon::SquareTerminal,
+                label: "Terminal".into(),
+                shortcut: Some(window_shortcut_hint(WindowCommand::NewTerminalTab).into()),
+                disabled: None,
+            },
+            LauncherItem {
+                id: "empty-worktree-new-chat",
+                action: LauncherAction::NewChat,
+                icon: Icon::MessageSquare,
+                label: "Chat".into(),
+                shortcut: None,
+                disabled: None,
+            },
+        ]
+    }
+
     /// One door for every launcher tile, in either pane. Each arm is the
     /// path the same surface already opens through elsewhere — the `+`
     /// menu, `ctrl-o`, the sidebar — never a second implementation.
@@ -14066,8 +14089,6 @@ impl SirioWorkspace {
                         ))
                         .into_any_element()
                 } else if role == PaneRole::Primary && self.has_current_worktree() {
-                    let new_terminal_entity = entity.clone();
-                    let new_chat_entity = entity.clone();
                     let dismiss_chat_picker_entity = entity.clone();
                     let picker_open = self.empty_chat_picker_open;
                     // The same resolved-source gate the tab bar's New Chat
@@ -14080,6 +14101,7 @@ impl SirioWorkspace {
                         })
                         .map(|adapter| (adapter.id(), adapter.display_name()))
                         .collect();
+                    let launcher_entity = entity.clone();
                     let mut empty = div()
                         .id("empty-worktree")
                         .debug_selector(|| "empty-worktree".to_owned())
@@ -14090,69 +14112,17 @@ impl SirioWorkspace {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(theme.spacing.card_gap)
-                        .text_color(theme.text_faint)
-                        .child(orbit(
-                            "empty-worktree-orbit",
-                            EMPTY_SURFACE_MARK,
-                            theme.text_faint,
-                        ))
-                        .child(
-                            div()
-                                .text_size(theme.typography.headline)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child("No Terminals or Chats"),
-                        )
-                        .child("Open a new terminal or chat to get started.")
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .gap(theme.spacing.card_gap)
-                                .mt(theme.spacing.titlebar_control_spacing)
-                                .child(
-                                    div()
-                                        .id("empty-worktree-new-terminal")
-                                        .debug_selector(|| "empty-worktree-new-terminal".to_owned())
-                                        .px(theme.spacing.card_gap)
-                                        .py(theme.spacing.titlebar_control_spacing)
-                                        .rounded(theme.radii.control)
-                                        .bg(theme.solid)
-                                        .text_size(theme.typography.footnote)
-                                        .text_color(theme.on_solid)
-                                        .hover(|style| style.opacity(0.9))
-                                        .on_click(move |_, _, cx| {
-                                            new_terminal_entity.update(cx, |workspace, cx| {
-                                                workspace.add_terminal_tab("Terminal", cx);
-                                            });
-                                        })
-                                        .child("New Terminal"),
-                                )
-                                .child(
-                                    div()
-                                        .id("empty-worktree-new-chat")
-                                        .debug_selector(|| "empty-worktree-new-chat".to_owned())
-                                        .px(theme.spacing.card_gap)
-                                        .py(theme.spacing.titlebar_control_spacing)
-                                        .rounded(theme.radii.control)
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .text_size(theme.typography.footnote)
-                                        .text_color(theme.text)
-                                        .hover(|style| style.bg(theme.element_hover))
-                                        .on_click(move |_, _, cx| {
-                                            new_chat_entity.update(cx, |workspace, cx| {
-                                                workspace.empty_chat_picker_open =
-                                                    !workspace.empty_chat_picker_open;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child("New Chat"),
-                                ),
-                        );
+                        .p(theme.spacing.card_gap)
+                        .child(pane_launcher(
+                            "primary-launcher",
+                            &Self::primary_launcher_items(),
+                            theme,
+                            move |action, window, cx| {
+                                launcher_entity.update(cx, |workspace, cx| {
+                                    workspace.handle_launcher_action(action, window, cx)
+                                });
+                            },
+                        ));
                     if picker_open {
                         let mut menu = div()
                             .id("empty-chat-agent-menu")
@@ -36452,6 +36422,33 @@ done
                 .map(|tab| tab.title.clone())),
             Some("Codex".to_string()),
             "the new tab carries the picked agent's identity"
+        );
+    }
+
+    /// The Primary empty state is the launcher both panes share: tiles, no
+    /// headline. The old "No Terminals or Chats" copy is gone.
+    #[gpui::test]
+    async fn drawn_selected_worktree_without_tabs_uses_the_launcher(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_center_split();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("primary-launcher").is_some(), "the launcher row is drawn");
+        assert!(
+            cx.debug_bounds("empty-worktree-orbit").is_none(),
+            "the old headline block is gone"
         );
     }
 
