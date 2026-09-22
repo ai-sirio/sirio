@@ -5127,6 +5127,7 @@ impl SirioWorkspace {
             .collect();
         let active_tab_id = tabs.get(active_tab).map(|tab| tab.id);
         let mut center_split = CenterSplit::new(&tabs);
+        seed_shown_tabs(&mut center_split, &tabs);
         // `CenterSplit::new` takes each role's *first* tab, which is right for
         // a fresh workspace and wrong for a restored one: the session knows
         // which tab was active, and selecting it also focuses the half it
@@ -5728,6 +5729,8 @@ impl SirioWorkspace {
                 .map(|tab| {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
+                    state.shown_in_pane =
+                        self.center_split.active(tab.kind.pane_role()) == Some(tab.id);
                     tab.panes.for_each(&mut |pane_id, content| {
                         match content {
                             TabContent::Terminal { view } => {
@@ -8926,6 +8929,7 @@ impl SirioWorkspace {
             // so its persisted flag is written to the right worktree.
             self.working_directory = selected_path.clone();
             self.secondary_pane_hidden = self.session.secondary_pane_hidden_for(&selected_path);
+            seed_shown_tabs(&mut self.center_split, &self.tabs);
             self.rebuild_center_split();
             restored_secondary_pane_hidden = Some(self.secondary_pane_hidden);
         }
@@ -18657,6 +18661,22 @@ fn restored_changes_tab(
         changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
     }
     changes
+}
+
+/// The tab each pane was showing when the session was written.
+/// `rebuild_center_split` and `CenterSplit::select_tab` keep a role's
+/// remembered tab while it still exists, so seeding it before them brings
+/// the unfocused pane back on that tab instead of its first one. Which pane
+/// has *focus* is still the `active` flag's call.
+fn seed_shown_tabs(center_split: &mut CenterSplit, tabs: &[OpenTab]) {
+    for role in [PaneRole::Primary, PaneRole::Secondary] {
+        if let Some(tab) = tabs
+            .iter()
+            .find(|tab| tab.kind.pane_role() == role && tab.session_state.shown_in_pane)
+        {
+            center_split.set_active(role, Some(tab.id));
+        }
+    }
 }
 
 fn restored_browser_url(state: &SessionTabState) -> &str {
@@ -37690,6 +37710,59 @@ browser  profile  "
                 focuses.contains(&Some(PathBuf::from("README.md"))),
                 "the Changes tab is back on README.md"
             );
+            workspace
+        });
+    }
+
+    /// Both panes' current tabs are saved, not only the focused one.
+    #[gpui::test]
+    fn layout_marks_the_tab_each_pane_shows(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.active_tab = 0;
+            workspace.rebuild_center_split();
+            workspace
+                .center_split
+                .set_active(PaneRole::Secondary, Some(workspace.tabs[2].id));
+
+            let shown: Vec<bool> = workspace
+                .layout(cx)
+                .tab_states
+                .iter()
+                .map(|state| state.shown_in_pane)
+                .collect();
+            assert_eq!(
+                shown,
+                vec![true, false, true],
+                "the focused Primary tab and the Secondary pane's current tab"
+            );
+            workspace
+        });
+    }
+
+    /// Restore seeds the unfocused pane from the saved flag instead of
+    /// falling back to its first tab.
+    #[gpui::test]
+    fn the_unfocused_pane_comes_back_on_its_shown_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[2].session_state.shown_in_pane = true;
+            workspace.active_tab = 0;
+            workspace.center_split = CenterSplit::new(&workspace.tabs);
+
+            seed_shown_tabs(&mut workspace.center_split, &workspace.tabs);
+            workspace.rebuild_center_split();
+
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(workspace.tabs[2].id),
+                "the Secondary pane is back on the tab it showed, not its first"
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
             workspace
         });
     }
