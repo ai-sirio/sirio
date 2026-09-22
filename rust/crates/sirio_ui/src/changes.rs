@@ -577,9 +577,10 @@ pub struct ChangesTab {
     /// and asks it to focus a path in the same tick always races it).
     /// Replayed once the next snapshot lands, then cleared either way.
     pending_focus: Option<PathBuf>,
-    /// The last path `focus_path` was asked for. Kept, unlike
-    /// `pending_focus` — which is consumed once a snapshot lands — so the
-    /// host can save it and replay it after a restart.
+    /// The file last opened through `focus_path` or a row expansion
+    /// (`toggle_change`). Kept, unlike `pending_focus` — which is consumed
+    /// once a snapshot lands — so the host can save it and replay it after
+    /// a restart. Cleared when that file's last expanded row is collapsed.
     last_focus: Option<PathBuf>,
     /// #325: the keyboard-selected file row, keyed like `expanded_changes`
     /// because one path can appear in two sections and Enter has to act on
@@ -679,7 +680,8 @@ impl ChangesTab {
         }
     }
 
-    /// The last path [`Self::focus_path`] was asked for.
+    /// The file last opened through [`Self::focus_path`] or a row
+    /// expansion, cleared when that file's last expanded row is collapsed.
     pub fn focused_path(&self) -> Option<&Path> {
         self.last_focus.as_deref()
     }
@@ -1101,8 +1103,20 @@ impl ChangesTab {
         let key = (section, path.to_path_buf());
         if self.expanded_changes.contains(&key) {
             self.expanded_changes.remove(&key);
+            // A partially-staged file can be expanded in two sections at
+            // once: only forget the file when its last expanded row closes,
+            // and only when it is the saved one.
+            if !self
+                .expanded_changes
+                .iter()
+                .any(|(_, expanded)| expanded.as_path() == path)
+                && self.last_focus.as_deref() == Some(path)
+            {
+                self.last_focus = None;
+            }
         } else {
             self.expanded_changes.insert(key);
+            self.last_focus = Some(path.to_path_buf());
             self.fetch_expanded_diff(path.to_path_buf(), cx);
         }
         cx.notify();
@@ -3581,6 +3595,74 @@ mod tests {
             assert!(
                 tab.is_expanded(ChangeSection::Changed, Path::new("staged.txt")),
                 "the Changed row for the file is expanded"
+            );
+        });
+    }
+
+    /// Clicking file rows inside the tab moves what a restart brings back:
+    /// expanding a row saves that file, collapsing its last expanded row
+    /// clears it again. `select_change` alone (keyboard/mouse highlight)
+    /// does not — only opening the diff, the way `focus_path` does.
+    #[gpui::test]
+    async fn expanding_a_row_moves_the_saved_focus_and_collapsing_it_clears_it(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("a.txt"), "a\n").expect("seed a");
+        std::fs::write(dir.0.join("b.txt"), "b\n").expect("seed b");
+        git(&dir.0, &["add", "a.txt", "b.txt"]);
+        git(
+            &dir.0,
+            &[
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-q",
+                "-m",
+                "seed a and b",
+            ],
+        );
+        std::fs::write(dir.0.join("a.txt"), "a changed\n").expect("modify a");
+        std::fs::write(dir.0.join("b.txt"), "b changed\n").expect("modify b");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.entries.iter().any(|entry| entry.path == *"b.txt")
+            })
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.focus_path(Path::new("a.txt"), cx);
+        });
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.focused_path(),
+                Some(Path::new("a.txt")),
+                "focus_path saves file A"
+            );
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.toggle_change(ChangeSection::Changed, Path::new("b.txt"), cx);
+        });
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.focused_path(),
+                Some(Path::new("b.txt")),
+                "expanding B's row moves the saved focus to B"
+            );
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.toggle_change(ChangeSection::Changed, Path::new("b.txt"), cx);
+        });
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.focused_path(),
+                None,
+                "collapsing B's last expanded row clears the saved focus"
             );
         });
     }
