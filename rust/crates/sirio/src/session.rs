@@ -43,7 +43,7 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord, stable_worktree_id,
 };
-use sirio_project::{DiscoveredProject, discover_project, is_git_repository};
+use sirio_project::{DiscoveredProject, TabKind, discover_project, is_git_repository};
 
 /// How long a burst of changes is held before one write. 500 ms is under the
 /// reaction time between discrete user actions (a click then flushes at the
@@ -443,6 +443,35 @@ impl SessionLayout {
             tab_states: vec![SessionTabState::default(), SessionTabState::default()],
         }
     }
+}
+
+/// The persisted spelling of a surface kind. Exhaustive: a new `TabKind`
+/// must name its spelling here before it can be saved at all.
+pub fn persisted_kind(kind: TabKind) -> &'static str {
+    match kind {
+        TabKind::Terminal => "terminal",
+        TabKind::AgentChat => "chat",
+        TabKind::Browser => "browser",
+        TabKind::Editor => "file",
+        TabKind::Diff => "diff",
+        TabKind::ProjectSettings => "settings",
+    }
+}
+
+/// The surface kind a persisted spelling names, or `None` for one this build
+/// does not know. The inverse of [`persisted_kind`]; the loader skips exactly
+/// the `None`s, so what can be written and what can be read are one list.
+pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
+    let kind = match kind {
+        "terminal" => TabKind::Terminal,
+        "chat" => TabKind::AgentChat,
+        "browser" => TabKind::Browser,
+        "file" => TabKind::Editor,
+        "diff" => TabKind::Diff,
+        "settings" => TabKind::ProjectSettings,
+        _ => return None,
+    };
+    Some(kind)
 }
 
 /// The result of restoring a layout at launch.
@@ -1450,13 +1479,9 @@ fn tabs_for_worktree(
     let mut tabs = Vec::new();
     let mut tab_states = Vec::new();
     for record in records {
-        // Only editor tabs remain unavailable in this shell; browser is a
-        // first-class persisted surface alongside chat, terminal, and diff.
-        if record.kind != "chat"
-            && record.kind != "terminal"
-            && record.kind != "diff"
-            && record.kind != "browser"
-        {
+        // One list with the writer: every kind `persisted_kind` can spell is
+        // loaded, and only a spelling this build does not know is skipped.
+        if kind_from_persisted(&record.kind).is_none() {
             diagnostics.push(format!(
                 "tab {:?} ({}) is not restorable in this build; skipped",
                 record.title, record.kind
@@ -2427,6 +2452,89 @@ mod tests {
             restored.tab_states[0].browser_url,
             "https://example.org/probe"
         );
+    }
+
+    /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
+    /// compile until it is listed here too — and then the round trip below
+    /// covers it.
+    fn every_tab_kind() -> Vec<TabKind> {
+        let all = vec![
+            TabKind::Terminal,
+            TabKind::AgentChat,
+            TabKind::Browser,
+            TabKind::Editor,
+            TabKind::Diff,
+            TabKind::ProjectSettings,
+        ];
+        for kind in &all {
+            match kind {
+                TabKind::Terminal
+                | TabKind::AgentChat
+                | TabKind::Browser
+                | TabKind::Editor
+                | TabKind::Diff
+                | TabKind::ProjectSettings => {}
+            }
+        }
+        all
+    }
+
+    /// Saved and loaded through one map: a kind that can be written can be
+    /// read back. The Editor tab was the one that could not.
+    #[test]
+    fn every_tab_kind_round_trips_through_its_persisted_spelling() {
+        for kind in every_tab_kind() {
+            assert_eq!(
+                kind_from_persisted(persisted_kind(kind)),
+                Some(kind),
+                "{kind:?} is written as {:?} and must read back",
+                persisted_kind(kind)
+            );
+        }
+        assert_eq!(kind_from_persisted("hologram"), None);
+    }
+
+    /// #323 saved an Editor tab's file and the loader still skipped the tab
+    /// as "not restorable in this build".
+    #[test]
+    fn an_editor_tab_survives_the_round_trip_through_the_store() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("editor-tab-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let file = working_directory.join("notes.md");
+        std::fs::write(&file, "# notes\n").expect("fixture file");
+        let state = SessionTabState {
+            editor_path: file.to_string_lossy().into_owned(),
+            ..SessionTabState::with_root(0)
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "file".into(),
+                title: "notes.md".into(),
+                kind: "file".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![state.clone()],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = store.restore_tabs_for(&working_directory);
+        assert_eq!(
+            restored.tabs.len(),
+            1,
+            "the editor tab must not be skipped: {:?}",
+            restored.diagnostics
+        );
+        assert_eq!(restored.tabs[0].kind, "file");
+        assert_eq!(restored.tab_states[0].editor_path, state.editor_path);
     }
 
     #[test]

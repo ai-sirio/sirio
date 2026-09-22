@@ -3914,14 +3914,7 @@ fn activity_rank(status: ActivityStatus) -> u8 {
 /// can never disagree about what a stored "chat" is. Unknown kinds are
 /// terminals, as restore has always treated them.
 fn tab_kind_from_persisted(kind: &str) -> TabKind {
-    match kind {
-        "chat" => TabKind::AgentChat,
-        "diff" => TabKind::Diff,
-        "browser" => TabKind::Browser,
-        "file" => TabKind::Editor,
-        "settings" => TabKind::ProjectSettings,
-        _ => TabKind::Terminal,
-    }
+    session::kind_from_persisted(kind).unwrap_or(TabKind::Terminal)
 }
 
 fn pane_close_needs_confirmation(status: ActivityStatus) -> bool {
@@ -5708,18 +5701,7 @@ impl SirioWorkspace {
                 .map(|tab| SessionTab {
                     id: tab.persistence_id.clone(),
                     title: tab.title.clone(),
-                    kind: match tab.kind {
-                        TabKind::Editor => "file",
-                        TabKind::AgentChat => "chat",
-                        TabKind::Terminal => "terminal",
-                        TabKind::Browser => "browser",
-                        TabKind::Diff => "diff",
-                        // Unreachable while `layout` filters settings tabs
-                        // out of `owned_tabs` above; kept so a future
-                        // persistence change fails at restore, not here.
-                        TabKind::ProjectSettings => "settings",
-                    }
-                    .to_string(),
+                    kind: session::persisted_kind(tab.kind).to_string(),
                     // The live tab holds the bare adapter id it was opened
                     // with; the persisted form is qualified, so wrap it at
                     // the persistence boundary.
@@ -18505,7 +18487,10 @@ fn restore_tabs_with_terminal_cache(
                 let view = cx.new(|cx| FileView::new(path, cx));
                 TabContent::File { view }
             }
-            // restore() only returns chat and terminal tabs.
+            // Built by `restore_project_settings_tabs` once a workspace
+            // exists: the seed comes from the sidebar.
+            "settings" => continue,
+            // tabs_for_worktree loads only kinds kind_from_persisted knows.
             _ => unreachable!("unexpected restored tab kind {}", tab.kind),
         };
         let panes = match content {
@@ -18833,17 +18818,7 @@ fn restore_tabs_in_workspace(
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: if tab.kind == "chat" {
-                TabKind::AgentChat
-            } else if tab.kind == "diff" {
-                TabKind::Diff
-            } else if tab.kind == "browser" {
-                TabKind::Browser
-            } else if tab.kind == "file" {
-                TabKind::Editor
-            } else {
-                TabKind::Terminal
-            },
+            kind: tab_kind_from_persisted(&tab.kind),
             agent_icon,
             agent_id,
             session_state: tab_state,
