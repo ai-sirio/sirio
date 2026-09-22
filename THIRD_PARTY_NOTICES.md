@@ -28,19 +28,31 @@ is copied in `rust/assets/icons/zed/LICENSES`.
 > OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 > CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-## Material Icon Theme (file type icons)
+## Material Icon Theme (file and folder icons)
 
-The 55 polychrome file-type glyphs in `rust/assets/icons/file-types/` are
-from [Material Icon Theme](https://github.com/PKief/vscode-material-icon-theme)
-by Material Extensions, used unchanged under the MIT License. Provenance is
-recorded in `rust/assets/icons/file-types/SOURCE.md`: they reached this repo
-through the retired Swift app's `FileIcons` imagesets at commit `5430d7bf`,
-and were restored to the Rust app on 2026-08-21.
+The 1112 polychrome file and folder icons in `rust/crates/sirio_icons/assets/`
+are the artwork of [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)
+by Material Extensions (formerly PKief/vscode-material-icon-theme), release
+v5.29.0, used unchanged under the MIT License. They were vendored on
+2026-09-22 from [`zed-extensions/material-icon-theme`](https://github.com/zed-extensions/material-icon-theme)
+commit `5ec848638409e4578d9e8c8478041fcab1df15f8` by
+`Scripts/vendor-material-icons.py`; provenance is recorded in
+`rust/crates/sirio_icons/UPSTREAM.md` and `ATTRIBUTION.md`, and the notice
+below is copied in `rust/crates/sirio_icons/LICENSE-MIT`.
 
-This section said the opposite between 2026-08-20 and 2026-09-18 — that the
-artwork had left with the Swift project — which stopped being true the day
-the icons came back. They are bundled, so the notice below travels with
-them:
+They replace a 55-glyph subset of the same artwork that lived in
+`rust/assets/icons/file-types/` from 2026-08-21, when it came back from the
+retired Swift app's `FileIcons` imagesets (commit `5430d7bf`), until 2026-09-22.
+Between 2026-08-20 and 2026-09-18 this section said the artwork had left with
+the Swift project, which stopped being true the day the icons came back.
+
+The table that maps a file or directory name to an icon,
+`rust/crates/sirio_icons/src/generated.rs`, is generated from that
+repository's `icon_themes/material-icon-theme.json`. The mapping is the Zed
+extension's own work and is licensed separately, under the Apache License 2.0;
+its full text is `rust/crates/sirio_icons/LICENSE-APACHE`.
+
+The artwork is bundled, so its notice travels with it:
 
 > The MIT License (MIT)
 > Copyright (c) 2025 Material Extensions

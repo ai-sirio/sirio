@@ -242,7 +242,11 @@ written down here.)
 The old subset goes: `rust/assets/icons/file-types/` and its `SOURCE.md` are
 deleted, `Icon::FileType`'s thirty-seven-arm path/`svg()` match is replaced by a
 lookup into the generated table, and `ATTRIBUTION.md` for the new crate is
-written in the shape `zed/` and `lobehub/` already use.
+written in the shape `zed/` and `lobehub/` already use. The repo-wide
+`THIRD_PARTY_NOTICES.md` has a Material section of its own that described the
+old subset; it names the crate, the pinned commit, the artwork release and
+both licences, and must be updated whenever the script is re-run against a
+new commit — it is the one provenance record the script does not write.
 
 ## §6 The tests that keep the tables honest
 
