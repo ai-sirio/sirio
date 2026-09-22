@@ -5755,7 +5755,17 @@ impl SirioWorkspace {
                                 state.editor_path =
                                     view.read(cx).path().to_string_lossy().into_owned();
                             }
-                            TabContent::Changes(_) | TabContent::ProjectSettings(_) => {}
+                            // Same live read: a commit tab keeps its commit
+                            // and a focused Changes tab its file.
+                            TabContent::Changes(changes) => {
+                                let changes = changes.read(cx);
+                                state.commit_sha = changes.commit().unwrap_or_default().to_owned();
+                                state.changes_focus = changes
+                                    .focused_path()
+                                    .map(|path| path.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                            }
+                            TabContent::ProjectSettings(_) => {}
                         }
                     });
                     state
@@ -18463,9 +18473,7 @@ fn restore_tabs_with_terminal_cache(
                 };
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(
-                cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
-            ),
+            "diff" => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
             "browser" => {
                 let Some(window) = window.as_deref_mut() else {
                     continue;
@@ -18628,6 +18636,29 @@ fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The Changes surface a restored "diff" tab rebuilds: on the commit it was
+/// opened on when it had one, focused on the file it was focused on. A SHA
+/// that no longer resolves is not checked here; the tab shows the git error
+/// `ChangesTab` already draws for it. Both restore paths go through here.
+fn restored_changes_tab(
+    state: &SessionTabState,
+    working_directory: &Path,
+    cx: &mut App,
+) -> Entity<ChangesTab> {
+    let root = working_directory.to_path_buf();
+    let changes = if state.commit_sha.is_empty() {
+        cx.new(|cx| ChangesTab::new(root, cx))
+    } else {
+        let sha = state.commit_sha.clone();
+        cx.new(|cx| ChangesTab::for_commit(root, sha, cx))
+    };
+    if !state.changes_focus.is_empty() {
+        let path = PathBuf::from(&state.changes_focus);
+        changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
+    }
+    changes
+}
+
 fn restored_browser_url(state: &SessionTabState) -> &str {
     if state.browser_url.is_empty() {
         "https://example.com"
@@ -18784,9 +18815,7 @@ fn restore_tabs_in_workspace(
                 });
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(
-                cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
-            ),
+            "diff" => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
             "browser" => {
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
@@ -37584,6 +37613,85 @@ browser  profile  "
             "the open file must reach the session snapshot"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A commit tab and a focused Changes tab are saved with what they show
+    /// and rebuilt showing it, not as a generic working-tree view.
+    #[gpui::test]
+    fn changes_tabs_come_back_on_their_commit_and_their_file(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("changes-tabs-restore");
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf-8 sha")
+        .trim()
+        .to_owned();
+
+        cx.new(|cx| {
+            let mut workspace = test_workspace_for_repo(cx, repo.clone(), false);
+            // Changes first: `add_changes_tab` reuses any Changes surface of
+            // this worktree, and a commit tab is one.
+            workspace.add_changes_tab(Some(PathBuf::from("README.md")), cx);
+            workspace.add_commit_tab(head.clone(), cx);
+
+            let layout = workspace.layout(cx);
+            assert!(
+                layout.tab_states.iter().any(|state| state.commit_sha == head),
+                "the commit is saved"
+            );
+            assert!(
+                layout.tab_states.iter().any(|state| state.changes_focus == "README.md"),
+                "the focused file is saved"
+            );
+
+            // Only the two Changes tabs: restoring the fixture's terminal
+            // would spawn a real shell for nothing this test reads.
+            let (tabs_saved, states_saved): (Vec<_>, Vec<_>) = layout
+                .tabs
+                .iter()
+                .cloned()
+                .zip(layout.tab_states.iter().cloned())
+                .filter(|(tab, _)| tab.kind == "diff")
+                .unzip();
+            assert_eq!(tabs_saved.len(), 2, "both Changes tabs are saved");
+            let restored = RestoredSession {
+                working_directory: repo.clone(),
+                tabs: tabs_saved,
+                tab_states: states_saved,
+                diagnostics: Vec::new(),
+            };
+            let (tabs, _) = restore_tabs(
+                &restored,
+                &repo,
+                None,
+                &mut AgentActivityModel::new(),
+                &BTreeMap::new(),
+                false,
+                cx,
+            );
+            let mut commits = Vec::new();
+            let mut focuses = Vec::new();
+            for tab in &tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Changes(changes) = content {
+                        let changes = changes.read(cx);
+                        commits.push(changes.commit().map(str::to_owned));
+                        focuses.push(changes.focused_path().map(Path::to_path_buf));
+                    }
+                });
+            }
+            assert!(commits.contains(&Some(head.clone())), "the commit tab is back on {head}");
+            assert!(
+                focuses.contains(&Some(PathBuf::from("README.md"))),
+                "the Changes tab is back on README.md"
+            );
+            workspace
+        });
     }
 
     /// #125 (spec R6.5), the save half: a browser tab's live address is read

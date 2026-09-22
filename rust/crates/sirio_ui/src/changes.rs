@@ -577,6 +577,10 @@ pub struct ChangesTab {
     /// and asks it to focus a path in the same tick always races it).
     /// Replayed once the next snapshot lands, then cleared either way.
     pending_focus: Option<PathBuf>,
+    /// The last path `focus_path` was asked for. Kept, unlike
+    /// `pending_focus` — which is consumed once a snapshot lands — so the
+    /// host can save it and replay it after a restart.
+    last_focus: Option<PathBuf>,
     /// #325: the keyboard-selected file row, keyed like `expanded_changes`
     /// because one path can appear in two sections and Enter has to act on
     /// the one the user is actually on.
@@ -648,6 +652,7 @@ impl ChangesTab {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            last_focus: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -664,6 +669,19 @@ impl ChangesTab {
     /// can; a commit view is immutable by definition.
     pub fn allows_staging(&self) -> bool {
         matches!(self.source, ChangesSource::WorkingTree)
+    }
+
+    /// The commit this surface shows, or `None` for the working tree.
+    pub fn commit(&self) -> Option<&str> {
+        match &self.source {
+            ChangesSource::Commit(sha) => Some(sha),
+            ChangesSource::WorkingTree => None,
+        }
+    }
+
+    /// The last path [`Self::focus_path`] was asked for.
+    pub fn focused_path(&self) -> Option<&Path> {
+        self.last_focus.as_deref()
     }
 
     /// Returns the status and per-file counts currently held by this mounted
@@ -1143,6 +1161,7 @@ impl ChangesTab {
     /// the file's diff is immediately visible instead of needing a second
     /// manual expand click.
     pub fn focus_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.last_focus = Some(path.to_path_buf());
         // If entries hasn't been populated yet (the caller raced the async
         // refresh new() kicked off), there is nothing to match against yet:
         // remember the request and replay it once a snapshot lands in
@@ -3168,6 +3187,7 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            last_focus: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -4849,6 +4869,7 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            last_focus: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -4917,6 +4938,7 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            last_focus: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -5207,6 +5229,7 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            last_focus: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -5468,6 +5491,7 @@ mod tests {
                 refresh_suspended: false,
                 suspended_ticks: 0,
                 pending_focus: None,
+                last_focus: None,
                 selected_change: None,
                 list_focus: None,
                 list_state: new_list_state(),
@@ -5855,6 +5879,7 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            last_focus: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
