@@ -41,8 +41,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sirio_project::FileIconKey;
-
 use sirio_theme::AgentBrandColor;
 
 /// The named icon set. `path` is the asset file name served by
@@ -121,12 +119,13 @@ pub enum Icon {
     SidebarLeft,
     /// Right-panel toggle (`zed/threads_sidebar_right_open.svg`).
     PanelRight,
-    /// An archive file in the Files tree — zip, tar, 7z, … (`zed/archive.svg`).
-    /// Added for F-CORE-FILE-08 (`FileIconKey::Archive`); no Phosphor predecessor.
+    /// The Zed catalog's archive mark (`zed/archive.svg`). It was the Files
+    /// tree's glyph for zip, tar, 7z, … until that tree moved to the Material
+    /// theme, which draws `zip` instead; nothing draws it today.
     Archive,
-    /// A lock file in the Files tree — `Cargo.lock`, `package-lock.json`, …
-    /// (`zed/lock.svg`). Added for F-CORE-FILE-08 (`FileIconKey::Lock`);
-    /// no Phosphor predecessor.
+    /// The Zed catalog's lock mark (`zed/lock.svg`). It was the Files tree's
+    /// glyph for `Cargo.lock`, `package-lock.json`, … until that tree moved to
+    /// the Material theme, which draws `lock` instead; nothing draws it today.
     Lock,
     /// The Files view in the right panel's rail (`zed/file_tree.svg`).
     FileTree,
@@ -161,7 +160,9 @@ pub enum Icon {
     /// The file editor's Markdown Code mode (`zed/code.svg`), the other
     /// half of that pair.
     Code,
-    /// A full-colour Material icon for a file type.
+    /// A full-colour Material file or folder icon, named by its asset stem
+    /// (`rust`, `folder-src-open`). The stems and the bytes both come from
+    /// `sirio_icons`; an unknown stem falls back to the theme's own `file`.
     FileType(&'static str),
 }
 
@@ -238,46 +239,9 @@ impl Icon {
             Icon::Eye => "icons/zed/eye.svg",
             Icon::EyeOff => "icons/zed/eye_off.svg",
             Icon::Code => "icons/zed/code.svg",
-            Icon::FileType(name) => match name {
-                "audio" => "icons/file-types/audio.svg",
-                "c" => "icons/file-types/c.svg",
-                "console" => "icons/file-types/console.svg",
-                "cpp" => "icons/file-types/cpp.svg",
-                "csharp" => "icons/file-types/csharp.svg",
-                "css" => "icons/file-types/css.svg",
-                "database" => "icons/file-types/database.svg",
-                "docker" => "icons/file-types/docker.svg",
-                "document" => "icons/file-types/document.svg",
-                "font" => "icons/file-types/font.svg",
-                "git" => "icons/file-types/git.svg",
-                "go" => "icons/file-types/go.svg",
-                "html" => "icons/file-types/html.svg",
-                "image" => "icons/file-types/image.svg",
-                "java" => "icons/file-types/java.svg",
-                "javascript" => "icons/file-types/javascript.svg",
-                "json" => "icons/file-types/json.svg",
-                "kotlin" => "icons/file-types/kotlin.svg",
-                "lock" => "icons/file-types/lock.svg",
-                "log" => "icons/file-types/log.svg",
-                "makefile" => "icons/file-types/makefile.svg",
-                "markdown" => "icons/file-types/markdown.svg",
-                "pdf" => "icons/file-types/pdf.svg",
-                "python" => "icons/file-types/python.svg",
-                "react" => "icons/file-types/react.svg",
-                "ruby" => "icons/file-types/ruby.svg",
-                "rust" => "icons/file-types/rust.svg",
-                "sass" => "icons/file-types/sass.svg",
-                "settings" => "icons/file-types/settings.svg",
-                "swift" => "icons/file-types/swift.svg",
-                "toml" => "icons/file-types/toml.svg",
-                "typescript" => "icons/file-types/typescript.svg",
-                "video" => "icons/file-types/video.svg",
-                "vue" => "icons/file-types/vue.svg",
-                "xml" => "icons/file-types/xml.svg",
-                "yaml" => "icons/file-types/yaml.svg",
-                "zip" => "icons/file-types/zip.svg",
-                _ => "icons/file-types/document.svg",
-            },
+            Icon::FileType(stem) => sirio_icons::asset_path(stem)
+                .or_else(|| sirio_icons::asset_path(sirio_icons::DEFAULT_FILE))
+                .unwrap_or("icons/material/file.svg"),
         }
     }
 
@@ -334,46 +298,9 @@ impl Icon {
             Icon::Eye => include_bytes!("../../../assets/icons/zed/eye.svg"),
             Icon::EyeOff => include_bytes!("../../../assets/icons/zed/eye_off.svg"),
             Icon::Code => include_bytes!("../../../assets/icons/zed/code.svg"),
-            Icon::FileType(name) => match name {
-                "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
-                "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
-                "console" => include_bytes!("../../../assets/icons/file-types/console.svg"),
-                "cpp" => include_bytes!("../../../assets/icons/file-types/cpp.svg"),
-                "csharp" => include_bytes!("../../../assets/icons/file-types/csharp.svg"),
-                "css" => include_bytes!("../../../assets/icons/file-types/css.svg"),
-                "database" => include_bytes!("../../../assets/icons/file-types/database.svg"),
-                "docker" => include_bytes!("../../../assets/icons/file-types/docker.svg"),
-                "document" => include_bytes!("../../../assets/icons/file-types/document.svg"),
-                "font" => include_bytes!("../../../assets/icons/file-types/font.svg"),
-                "git" => include_bytes!("../../../assets/icons/file-types/git.svg"),
-                "go" => include_bytes!("../../../assets/icons/file-types/go.svg"),
-                "html" => include_bytes!("../../../assets/icons/file-types/html.svg"),
-                "image" => include_bytes!("../../../assets/icons/file-types/image.svg"),
-                "java" => include_bytes!("../../../assets/icons/file-types/java.svg"),
-                "javascript" => include_bytes!("../../../assets/icons/file-types/javascript.svg"),
-                "json" => include_bytes!("../../../assets/icons/file-types/json.svg"),
-                "kotlin" => include_bytes!("../../../assets/icons/file-types/kotlin.svg"),
-                "lock" => include_bytes!("../../../assets/icons/file-types/lock.svg"),
-                "log" => include_bytes!("../../../assets/icons/file-types/log.svg"),
-                "makefile" => include_bytes!("../../../assets/icons/file-types/makefile.svg"),
-                "markdown" => include_bytes!("../../../assets/icons/file-types/markdown.svg"),
-                "pdf" => include_bytes!("../../../assets/icons/file-types/pdf.svg"),
-                "python" => include_bytes!("../../../assets/icons/file-types/python.svg"),
-                "react" => include_bytes!("../../../assets/icons/file-types/react.svg"),
-                "ruby" => include_bytes!("../../../assets/icons/file-types/ruby.svg"),
-                "rust" => include_bytes!("../../../assets/icons/file-types/rust.svg"),
-                "sass" => include_bytes!("../../../assets/icons/file-types/sass.svg"),
-                "settings" => include_bytes!("../../../assets/icons/file-types/settings.svg"),
-                "swift" => include_bytes!("../../../assets/icons/file-types/swift.svg"),
-                "toml" => include_bytes!("../../../assets/icons/file-types/toml.svg"),
-                "typescript" => include_bytes!("../../../assets/icons/file-types/typescript.svg"),
-                "video" => include_bytes!("../../../assets/icons/file-types/video.svg"),
-                "vue" => include_bytes!("../../../assets/icons/file-types/vue.svg"),
-                "xml" => include_bytes!("../../../assets/icons/file-types/xml.svg"),
-                "yaml" => include_bytes!("../../../assets/icons/file-types/yaml.svg"),
-                "zip" => include_bytes!("../../../assets/icons/file-types/zip.svg"),
-                _ => include_bytes!("../../../assets/icons/file-types/document.svg"),
-            },
+            Icon::FileType(stem) => sirio_icons::asset(stem)
+                .or_else(|| sirio_icons::asset(sirio_icons::DEFAULT_FILE))
+                .unwrap_or(b""),
         }
     }
 
@@ -404,6 +331,21 @@ impl Icon {
     /// size — and a test keeps the two from drifting apart.
     pub fn has_own_colours(self) -> bool {
         matches!(self, Icon::OhMyPi | Icon::Gemini | Icon::FileType(_))
+    }
+
+    /// The stem to draw in a given appearance. Upstream ships a `_light`
+    /// companion for the icons whose dark form paints a near-white glyph;
+    /// everything else serves both appearances from one asset.
+    ///
+    /// Takes the *resolved* [`sirio_theme::Appearance`], never
+    /// `Theme::mode`: the mode is a preference and includes `System`.
+    pub fn for_appearance(self, appearance: sirio_theme::Appearance) -> Self {
+        match (self, appearance) {
+            (Icon::FileType(stem), sirio_theme::Appearance::Light) => {
+                Icon::FileType(sirio_icons::light_variant(stem).unwrap_or(stem))
+            }
+            _ => self,
+        }
     }
 
     /// Resolves the stable icon for a catalog agent id.
@@ -462,110 +404,29 @@ impl Icon {
     }
 }
 
-/// The per-type file glyph for a document. The Files tree row and the tab
-/// that shows the same file both draw this one mark, so a name looks the
-/// same in both places.
+/// The per-type mark for a document. The Files tree row and the tab that
+/// shows the same file both draw this one mark, so a name looks the same in
+/// both places.
 ///
-/// The classification — which name or extension gets which *logical* icon
-/// key — is [`FileIconKey`], ported 1:1 from the original's
-/// `FileIconKey.swift` (F-CORE-FILE-08): see that type for the exact
-/// exact-name/extension/directory-name tables and their fallback rule.
-///
-/// The *rendering* of each logical key is necessarily narrower than the
-/// original's: the pinned `rust/assets/icons/zed/` catalog ships a focused
-/// set of general-purpose UI glyphs, not a
-/// per-language icon font, so most [`FileIconKey`] variants collapse onto
-/// the generic [`Icon::File`] / [`Icon::FolderFill`] marks below rather than
-/// getting an invented shape that doesn't exist in the pinned catalog.
-/// Only the handful of keys with an unambiguous Zed shape (a terminal for
-/// shell scripts, a branch for git files, a gear for env/settings, an
-/// archive box, a key for lock files) get their own icon.
-pub fn file_glyph(path: &Path, is_dir: bool) -> Icon {
-    let name = path
-        .file_name()
+/// Classification is `sirio_icons`: the whole name, then the longest dotted
+/// tail, then the theme's own `file`. Resolved from the name alone — never
+/// from the file's content.
+pub fn file_glyph(path: &Path) -> Icon {
+    Icon::file_type(sirio_icons::for_file(&entry_name(path)))
+}
+
+/// The mark for a directory, in the state its row is drawn in. Upstream
+/// ships collapsed and expanded as two assets per name, and the tree draws
+/// no disclosure arrow — this swap *is* the disclosure control, so the name
+/// has to reach both states.
+pub fn folder_glyph(path: &Path, expanded: bool) -> Icon {
+    Icon::file_type(sirio_icons::for_directory(&entry_name(path), expanded))
+}
+
+fn entry_name(path: &Path) -> String {
+    path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let key = if is_dir {
-        FileIconKey::for_directory_name(&name)
-    } else {
-        FileIconKey::for_file_name(&name)
-    };
-    if !is_dir && let Some(asset) = key.material_asset() {
-        return Icon::file_type(asset);
-    }
-    match key {
-        FileIconKey::Shell => Icon::SquareTerminal,
-        FileIconKey::Git => Icon::GitBranch,
-        FileIconKey::Env | FileIconKey::Settings => Icon::Settings,
-        FileIconKey::Archive => Icon::Archive,
-        FileIconKey::Lock => Icon::Lock,
-        // Every other file key — the per-language kinds (Swift, Python,
-        // Rust, …), markup/data kinds (Json, Yaml, Markdown, …), media
-        // kinds (Image, Video, Audio, Font) and the remaining exact-name
-        // kinds (Docker, Makefile, Sql, Database, Log) — has no dedicated
-        // glyph in the approved Zed subset and shares the generic file mark.
-        FileIconKey::Swift
-        | FileIconKey::C
-        | FileIconKey::Cpp
-        | FileIconKey::CSharp
-        | FileIconKey::Java
-        | FileIconKey::Kotlin
-        | FileIconKey::Python
-        | FileIconKey::Ruby
-        | FileIconKey::Rust
-        | FileIconKey::Go
-        | FileIconKey::JavaScript
-        | FileIconKey::TypeScript
-        | FileIconKey::React
-        | FileIconKey::Vue
-        | FileIconKey::Html
-        | FileIconKey::Css
-        | FileIconKey::Sass
-        | FileIconKey::Json
-        | FileIconKey::Yaml
-        | FileIconKey::Toml
-        | FileIconKey::Xml
-        | FileIconKey::Markdown
-        | FileIconKey::Text
-        | FileIconKey::Pdf
-        | FileIconKey::Image
-        | FileIconKey::Video
-        | FileIconKey::Audio
-        | FileIconKey::Font
-        | FileIconKey::Sql
-        | FileIconKey::Database
-        | FileIconKey::Docker
-        | FileIconKey::Log
-        | FileIconKey::Makefile
-        | FileIconKey::File
-        | FileIconKey::Symlink => Icon::File,
-        // Every folder key (Git, Src, Tests, Docs, Github, NodeModules,
-        // Dist, Scripts, Config, Assets, Public, Packages, Vscode, Lib,
-        // Tools, and the plain default) shares the folder mark: the
-        // approved Zed subset has one folder shape, not fifteen.
-        //
-        // `.git` used to deviate onto `GitBranch` here. It no longer does:
-        // the file tree pairs this mark with `Icon::FolderOpen` to show
-        // expansion, and a directory that kept a branch mark would be the
-        // one row in the tree that never opened. `FileIconKey::Git` — the
-        // *file* family, `.gitignore` and friends — still takes the branch.
-        FileIconKey::Folder
-        | FileIconKey::FolderGit
-        | FileIconKey::FolderSrc
-        | FileIconKey::FolderTests
-        | FileIconKey::FolderDocs
-        | FileIconKey::FolderGithub
-        | FileIconKey::FolderNodeModules
-        | FileIconKey::FolderDist
-        | FileIconKey::FolderScripts
-        | FileIconKey::FolderConfig
-        | FileIconKey::FolderAssets
-        | FileIconKey::FolderPublic
-        | FileIconKey::FolderPackages
-        | FileIconKey::FolderVscode
-        | FileIconKey::FolderLib
-        | FileIconKey::FolderTools => Icon::FolderFill,
-    }
+        .unwrap_or_default()
 }
 
 /// A lightweight adapter around GPUI's stock SVG element.
@@ -624,9 +485,19 @@ impl Styled for IconElement {
 
 impl RenderOnce for IconElement {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let size = self.size.resolve(sirio_theme::Theme::get(cx).typography);
-        if self.icon.has_own_colours() {
-            let icon = self.icon;
+        // `Theme::get` hands back a `&Theme` borrowed from `cx`, and the
+        // canvas closure below takes `cx` of its own. Copy the two values
+        // out so no borrow of `cx` is alive when the closure is built.
+        let (typography, appearance) = {
+            let theme = sirio_theme::Theme::get(cx);
+            (theme.typography, theme.appearance)
+        };
+        let size = self.size.resolve(typography);
+        // Resolved here, so the raster cache keys on the icon that is
+        // actually painted: both appearances coexist and a theme switch
+        // invalidates nothing.
+        let icon = self.icon.for_appearance(appearance);
+        if icon.has_own_colours() {
             let mut element = canvas(
                 |_, _, _| {},
                 move |bounds, _, window, cx| paint_agent_mark(icon, bounds, window, cx),
@@ -639,8 +510,8 @@ impl RenderOnce for IconElement {
             let mut element = svg()
                 .size(size)
                 .flex_none()
-                .path(self.icon.path())
-                .data(self.icon.svg())
+                .path(icon.path())
+                .data(icon.svg())
                 .text_color(window.text_style().color);
             element.style().refine(&self.style);
             element.into_any_element()
@@ -807,17 +678,25 @@ mod tests {
         }
     }
 
+    /// `path()` and `svg()` are independent match arms, and a `FileType`
+    /// stem now comes from a generated table rather than a list somebody
+    /// reads in review. So assert the two agree with the crate that owns
+    /// the bytes, not with each other.
     #[test]
-    fn representative_material_file_icons_are_embedded() {
-        for icon in [
-            Icon::file_type("java"),
-            Icon::file_type("python"),
-            Icon::file_type("rust"),
-        ] {
-            let bytes = icon.svg();
-            assert!(!bytes.is_empty());
-            assert_eq!(bytes[0], b'<');
+    fn file_type_icons_serve_the_vendored_material_asset() {
+        for stem in ["rust", "python", "toml", "folder-src", "folder-src-open"] {
+            let icon = Icon::file_type(stem);
+            assert_eq!(
+                icon.svg(),
+                sirio_icons::asset(stem).expect("vendored"),
+                "{stem:?} embeds the vendored bytes"
+            );
+            assert_eq!(icon.path(), format!("icons/material/{stem}.svg"));
         }
+        // An unknown stem must not panic and must not draw nothing: it
+        // falls back to the theme's own default file mark.
+        let unknown = Icon::file_type("no-such-icon");
+        assert_eq!(unknown.svg(), sirio_icons::asset("file").expect("vendored"));
     }
 
     #[test]
@@ -1245,5 +1124,89 @@ mod tests {
                 "{icon:?} must embed an SVG document"
             );
         }
+    }
+
+    /// 49 vendored assets ship a light companion because their dark form paints a
+    /// near-white glyph: `toml` is #cfd8dc, invisible on a light background,
+    /// and `toml` is every Cargo.toml. Everything else serves both.
+    #[test]
+    fn light_appearance_swaps_only_the_stems_that_ship_a_companion() {
+        use sirio_theme::Appearance;
+        assert_eq!(
+            Icon::file_type("toml").for_appearance(Appearance::Light),
+            Icon::file_type("toml_light")
+        );
+        assert_eq!(
+            Icon::file_type("toml").for_appearance(Appearance::Dark),
+            Icon::file_type("toml")
+        );
+        assert_eq!(
+            Icon::file_type("rust").for_appearance(Appearance::Light),
+            Icon::file_type("rust"),
+            "a stem with no companion is unchanged"
+        );
+        assert_eq!(
+            Icon::FolderFill.for_appearance(Appearance::Light),
+            Icon::FolderFill,
+            "the tinted catalog follows the theme's text colour, not a variant"
+        );
+    }
+
+    /// The resolution must key off the *resolved* appearance. `Theme::mode`
+    /// is the preference and includes `System`, so keying on it would send
+    /// every "System" user down the dark branch whatever their desktop says.
+    #[gpui::test]
+    async fn the_element_resolves_against_the_resolved_appearance(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            sirio_theme::Theme::install(sirio_theme::ThemeMode::Light, cx);
+            assert_eq!(
+                Icon::file_type("toml").for_appearance(sirio_theme::Theme::get(cx).appearance),
+                Icon::file_type("toml_light")
+            );
+            sirio_theme::Theme::install(sirio_theme::ThemeMode::Dark, cx);
+            assert_eq!(
+                Icon::file_type("toml").for_appearance(sirio_theme::Theme::get(cx).appearance),
+                Icon::file_type("toml")
+            );
+        });
+    }
+
+    /// The render path itself, not just the helper above: draw a real
+    /// `IconElement` for `toml` under a light theme and read which asset
+    /// the full-colour raster cache was filled with. If `render` ever goes
+    /// back to painting `self.icon`, or resolves against `Theme::mode`,
+    /// the cache holds `toml` and this fails — the helper's own test would
+    /// stay green. Each nextest test is its own process, so the
+    /// process-wide cache starts empty.
+    #[gpui::test]
+    async fn a_light_theme_rasterises_the_light_companion(cx: &mut TestAppContext) {
+        struct TomlIcon;
+        impl gpui::Render for TomlIcon {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                use gpui::ParentElement as _;
+                gpui::div().child(Icon::file_type("toml").element(IconSize::Small))
+            }
+        }
+        cx.update(sirio_theme::Theme::init);
+        cx.update(|cx| sirio_theme::Theme::install(sirio_theme::ThemeMode::Light, cx));
+        let window = cx.add_window(|_, _| TomlIcon);
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let painted: Vec<Icon> = agent_mark_cache()
+            .0
+            .lock()
+            .expect("the raster cache lock is not poisoned")
+            .keys()
+            .map(|(icon, _)| *icon)
+            .collect();
+        assert!(
+            painted.contains(&Icon::file_type("toml_light")),
+            "a light theme must paint the light companion, painted {painted:?}"
+        );
+        assert!(
+            !painted.contains(&Icon::file_type("toml")),
+            "the near-white dark asset must not be painted on a light theme: {painted:?}"
+        );
     }
 }

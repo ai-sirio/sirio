@@ -3837,7 +3837,7 @@ fn tab_has_terminal(tab: &OpenTab) -> bool {
 /// and it outranks the agent mark, as the old has-file flag did.
 fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Icon {
     if let Some(path) = file {
-        return file_glyph(path, false);
+        return file_glyph(path);
     }
     if let Some(agent_icon) = agent_icon {
         return agent_icon;
@@ -33621,10 +33621,10 @@ done
     fn file_tabs_wear_the_files_tree_glyph() {
         let cases: &[(&str, Icon)] = &[
             ("/repo/src/lib.rs", Icon::file_type("rust")),
-            ("/repo/CLAUDE.md", Icon::file_type("markdown")),
+            ("/repo/CLAUDE.md", Icon::file_type("claude")),
             ("/repo/Cargo.toml", Icon::file_type("toml")),
-            ("/repo/deploy.sh", Icon::SquareTerminal),
-            ("/repo/README", Icon::File),
+            ("/repo/deploy.sh", Icon::file_type("console")),
+            ("/repo/README", Icon::file_type("readme")),
         ];
         for (path, expected) in cases {
             assert_eq!(
