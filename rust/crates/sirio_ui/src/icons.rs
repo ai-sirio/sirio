@@ -334,6 +334,21 @@ impl Icon {
         matches!(self, Icon::OhMyPi | Icon::Gemini | Icon::FileType(_))
     }
 
+    /// The stem to draw in a given appearance. Upstream ships a `_light`
+    /// companion for the icons whose dark form paints a near-white glyph;
+    /// everything else serves both appearances from one asset.
+    ///
+    /// Takes the *resolved* [`sirio_theme::Appearance`], never
+    /// `Theme::mode`: the mode is a preference and includes `System`.
+    pub fn for_appearance(self, appearance: sirio_theme::Appearance) -> Self {
+        match (self, appearance) {
+            (Icon::FileType(stem), sirio_theme::Appearance::Light) => {
+                Icon::FileType(sirio_icons::light_variant(stem).unwrap_or(stem))
+            }
+            _ => self,
+        }
+    }
+
     /// Resolves the stable icon for a catalog agent id.
     pub fn for_agent_id(id: &str) -> Option<Self> {
         match id.strip_suffix("-acp").unwrap_or(id) {
@@ -552,9 +567,19 @@ impl Styled for IconElement {
 
 impl RenderOnce for IconElement {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let size = self.size.resolve(sirio_theme::Theme::get(cx).typography);
-        if self.icon.has_own_colours() {
-            let icon = self.icon;
+        // `Theme::get` hands back a `&Theme` borrowed from `cx`, and the
+        // canvas closure below takes `cx` of its own. Copy the two values
+        // out so no borrow of `cx` is alive when the closure is built.
+        let (typography, appearance) = {
+            let theme = sirio_theme::Theme::get(cx);
+            (theme.typography, theme.appearance)
+        };
+        let size = self.size.resolve(typography);
+        // Resolved here, so the raster cache keys on the icon that is
+        // actually painted: both appearances coexist and a theme switch
+        // invalidates nothing.
+        let icon = self.icon.for_appearance(appearance);
+        if icon.has_own_colours() {
             let mut element = canvas(
                 |_, _, _| {},
                 move |bounds, _, window, cx| paint_agent_mark(icon, bounds, window, cx),
@@ -567,8 +592,8 @@ impl RenderOnce for IconElement {
             let mut element = svg()
                 .size(size)
                 .flex_none()
-                .path(self.icon.path())
-                .data(self.icon.svg())
+                .path(icon.path())
+                .data(icon.svg())
                 .text_color(window.text_style().color);
             element.style().refine(&self.style);
             element.into_any_element()
@@ -1181,5 +1206,50 @@ mod tests {
                 "{icon:?} must embed an SVG document"
             );
         }
+    }
+
+    /// 52 assets ship a light companion because their dark form paints a
+    /// near-white glyph: `toml` is #cfd8dc, invisible on a light background,
+    /// and `toml` is every Cargo.toml. Everything else serves both.
+    #[test]
+    fn light_appearance_swaps_only_the_stems_that_ship_a_companion() {
+        use sirio_theme::Appearance;
+        assert_eq!(
+            Icon::file_type("toml").for_appearance(Appearance::Light),
+            Icon::file_type("toml_light")
+        );
+        assert_eq!(
+            Icon::file_type("toml").for_appearance(Appearance::Dark),
+            Icon::file_type("toml")
+        );
+        assert_eq!(
+            Icon::file_type("rust").for_appearance(Appearance::Light),
+            Icon::file_type("rust"),
+            "a stem with no companion is unchanged"
+        );
+        assert_eq!(
+            Icon::FolderFill.for_appearance(Appearance::Light),
+            Icon::FolderFill,
+            "the tinted catalog follows the theme's text colour, not a variant"
+        );
+    }
+
+    /// The resolution must key off the *resolved* appearance. `Theme::mode`
+    /// is the preference and includes `System`, so keying on it would send
+    /// every "System" user down the dark branch whatever their desktop says.
+    #[gpui::test]
+    async fn the_element_resolves_against_the_resolved_appearance(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            sirio_theme::Theme::install(sirio_theme::ThemeMode::Light, cx);
+            assert_eq!(
+                Icon::file_type("toml").for_appearance(sirio_theme::Theme::get(cx).appearance),
+                Icon::file_type("toml_light")
+            );
+            sirio_theme::Theme::install(sirio_theme::ThemeMode::Dark, cx);
+            assert_eq!(
+                Icon::file_type("toml").for_appearance(sirio_theme::Theme::get(cx).appearance),
+                Icon::file_type("toml")
+            );
+        });
     }
 }
