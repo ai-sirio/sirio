@@ -18507,8 +18507,8 @@ fn restore_tabs_with_terminal_cache(
                 agent_id.as_deref()
             },
         );
-        let content = match tab.kind.as_str() {
-            "chat" => {
+        let content = match session::kind_from_persisted(&tab.kind) {
+            Some(TabKind::AgentChat) => {
                 let chat = cx.new(|cx| {
                     if let Some(reason) = unavailable {
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
@@ -18532,7 +18532,7 @@ fn restore_tabs_with_terminal_cache(
                 }
                 TabContent::Chat(chat)
             }
-            "terminal" => {
+            Some(TabKind::Terminal) => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
@@ -18568,8 +18568,8 @@ fn restore_tabs_with_terminal_cache(
                 };
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
-            "browser" => {
+            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
+            Some(TabKind::Browser) => {
                 let Some(window) = window.as_deref_mut() else {
                     continue;
                 };
@@ -18577,7 +18577,7 @@ fn restore_tabs_with_terminal_cache(
                 let browser = cx.new(|cx| BrowserSurface::new(&address, window, cx));
                 TabContent::Browser(browser)
             }
-            "file" => {
+            Some(TabKind::Editor) => {
                 // #323: an Editor tab comes back only when its file still
                 // does; see `restored_editor_path`.
                 let Some(path) = restored_editor_path(&tab_state) else {
@@ -18592,9 +18592,8 @@ fn restore_tabs_with_terminal_cache(
             }
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
-            "settings" => continue,
-            // tabs_for_worktree loads only kinds kind_from_persisted knows.
-            _ => unreachable!("unexpected restored tab kind {}", tab.kind),
+            Some(TabKind::ProjectSettings) => continue,
+            None => continue,
         };
         let panes = match content {
             TabContent::Chat(chat) => replay_pane_events(
@@ -18886,8 +18885,8 @@ fn restore_tabs_in_workspace(
                 agent_id.as_deref()
             },
         );
-        let content = match tab.kind.as_str() {
-            "chat" => {
+        let content = match session::kind_from_persisted(&tab.kind) {
+            Some(TabKind::AgentChat) => {
                 let chat = cx.new(|cx| {
                     if let Some(reason) = unavailable {
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
@@ -18911,7 +18910,7 @@ fn restore_tabs_in_workspace(
                 }
                 TabContent::Chat(chat)
             }
-            "terminal" => {
+            Some(TabKind::Terminal) => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
@@ -18939,12 +18938,12 @@ fn restore_tabs_in_workspace(
                 });
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
-            "browser" => {
+            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx)),
+            Some(TabKind::Browser) => {
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
             }
-            "file" => {
+            Some(TabKind::Editor) => {
                 // #323: see the matching arm in `restore_tabs`.
                 let Some(path) = restored_editor_path(&tab_state) else {
                     continue;
@@ -18954,7 +18953,10 @@ fn restore_tabs_in_workspace(
                 let view = cx.new(|cx| FileView::new(path, cx));
                 TabContent::File { view }
             }
-            _ => continue,
+            // Built by `restore_project_settings_tabs` once a workspace
+            // exists: the seed comes from the sidebar.
+            Some(TabKind::ProjectSettings) => continue,
+            None => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
             let cwd = working_directory.to_path_buf();
@@ -18971,7 +18973,8 @@ fn restore_tabs_in_workspace(
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: tab_kind_from_persisted(&tab.kind),
+            kind: session::kind_from_persisted(&tab.kind)
+                .expect("settings and unknown kinds continue above"),
             agent_icon,
             agent_id,
             session_state: tab_state,
