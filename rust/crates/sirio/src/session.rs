@@ -104,6 +104,24 @@ pub struct SessionTabState {
     /// resolves — see `restored_editor_path`.
     #[serde(default)]
     pub editor_path: String,
+    /// Whether this tab was the one its pane showing when the session was
+    /// written. The `active` flag on the tab record says which *pane* had
+    /// focus; this says what the *other* pane was showing, which restore
+    /// otherwise forgets and replaces with that pane's first tab.
+    #[serde(default)]
+    pub shown_in_pane: bool,
+    /// A commit tab's SHA, captured from `ChangesTab::commit`. Empty for a
+    /// working-tree Changes tab, and for a session written before this field.
+    #[serde(default)]
+    pub commit_sha: String,
+    /// The file a Changes tab was focused on (`ChangesTab::focused_path`),
+    /// replayed through `focus_path` at restore. Empty means none.
+    #[serde(default)]
+    pub changes_focus: String,
+    /// A Project Settings tab's project. Empty for any other tab; a project
+    /// that no longer exists drops the tab at restore.
+    #[serde(default)]
+    pub settings_project_id: String,
 }
 
 impl SessionTabState {
@@ -131,6 +149,10 @@ impl SessionTabState {
             chat_draft: self.chat_draft.clone(),
             browser_url: self.browser_url.clone(),
             editor_path: self.editor_path.clone(),
+            shown_in_pane: self.shown_in_pane,
+            commit_sha: self.commit_sha.clone(),
+            changes_focus: self.changes_focus.clone(),
+            settings_project_id: self.settings_project_id.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -2369,6 +2391,7 @@ mod tests {
             chat_draft: String::new(),
             browser_url: String::new(),
             editor_path: String::new(),
+            ..SessionTabState::default()
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -2417,6 +2440,7 @@ mod tests {
             chat_draft: String::new(),
             browser_url: "https://example.org/probe".into(),
             editor_path: String::new(),
+            ..SessionTabState::default()
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -2535,6 +2559,56 @@ mod tests {
         );
         assert_eq!(restored.tabs[0].kind, "file");
         assert_eq!(restored.tab_states[0].editor_path, state.editor_path);
+    }
+
+    /// `encode` copies the struct field by field, so a new field forgotten
+    /// there is dropped on the way to disk with nothing else to notice.
+    #[test]
+    fn the_pane_changes_and_settings_fields_survive_the_round_trip_to_disk() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("pane-changes-settings-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let state = SessionTabState {
+            shown_in_pane: true,
+            commit_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            changes_focus: "src/lib.rs".into(),
+            settings_project_id: "project-7".into(),
+            ..SessionTabState::with_root(0)
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "changes".into(),
+                title: "Changes".into(),
+                kind: "diff".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![state.clone()],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/tmp"));
+        assert_eq!(restored.tab_states, vec![state]);
+    }
+
+    /// A session written before these fields existed still loads, with each
+    /// at its "nothing captured" default.
+    #[test]
+    fn a_tab_state_written_before_the_new_fields_decodes_to_their_defaults() {
+        let decoded = SessionTabState::decode(r#"{"root_id":3,"pane_events":[]}"#)
+            .expect("an old state decodes");
+        assert_eq!(decoded, SessionTabState::with_root(3));
+        assert!(!decoded.shown_in_pane);
+        assert!(decoded.commit_sha.is_empty());
+        assert!(decoded.changes_focus.is_empty());
+        assert!(decoded.settings_project_id.is_empty());
     }
 
     #[test]

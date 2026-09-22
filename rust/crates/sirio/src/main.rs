@@ -37296,6 +37296,7 @@ done
                 chat_draft: "an idea I never sent".into(),
                 browser_url: String::new(),
                 editor_path: String::new(),
+                ..SessionTabState::default()
             }],
             diagnostics: Vec::new(),
         };
@@ -37649,6 +37650,7 @@ browser  profile  "
                 chat_draft: String::new(),
                 browser_url: "https://example.org/probe".into(),
                 editor_path: String::new(),
+                ..SessionTabState::default()
             }],
             diagnostics: Vec::new(),
         };
@@ -37705,6 +37707,7 @@ browser  profile  "
                 chat_draft: String::new(),
                 browser_url: String::new(),
                 editor_path: String::new(),
+                ..SessionTabState::default()
             }],
             diagnostics: Vec::new(),
         };
