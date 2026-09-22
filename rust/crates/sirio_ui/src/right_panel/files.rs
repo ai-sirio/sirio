@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::editor::fs_actions;
 use crate::loading;
-use crate::sidebar::icons::file_glyph;
+use crate::sidebar::icons::{file_glyph, folder_glyph};
 
 pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, String> {
     let snapshot = status(repo_root).ok();
@@ -1050,11 +1050,15 @@ fn files_action_button(
 /// swap was mutated away, which is how this function came to exist.
 fn directory_icon_selector(glyph: Icon) -> &'static str {
     match glyph {
-        Icon::FolderOpen => "file-directory-icon-open",
-        Icon::FolderFill => "file-directory-icon-closed",
-        // Unreachable while every directory resolves to the folder pair.
-        // Named distinctly rather than folded into "closed" so a third
-        // folder mark fails the tests loudly instead of passing as shut.
+        Icon::FileType(stem) if stem == "folder-open" || stem.ends_with("-open") => {
+            "file-directory-icon-open"
+        }
+        Icon::FileType(stem) if stem == "folder" || stem.starts_with("folder-") => {
+            "file-directory-icon-closed"
+        }
+        // A directory row that drew something other than a folder stem is a
+        // bug. Named distinctly rather than folded into "closed" so it fails
+        // the tests loudly instead of passing as shut.
         _ => "file-directory-icon-unknown",
     }
 }
@@ -1067,13 +1071,9 @@ fn directory_icon_selector(glyph: Icon) -> &'static str {
 /// open, and a directory may never resolve to `None`.
 fn file_row_glyph(path: &Path, is_dir: bool, expanded: bool) -> Option<Icon> {
     if is_dir {
-        return Some(if expanded {
-            Icon::FolderOpen
-        } else {
-            file_glyph(path, true)
-        });
+        return Some(folder_glyph(path, expanded));
     }
-    Some(file_glyph(path, false))
+    Some(file_glyph(path))
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -1329,39 +1329,46 @@ mod tests {
         panic!("condition never became true within the pump budget");
     }
 
+    /// The Files tree's per-type glyphs come from the vendored Material
+    /// theme (`sirio_icons`). The expectations are the pinned table's own
+    /// answers, not a guess at what each name "should" get.
     #[test]
-    fn file_glyph_resolves_known_kinds_from_the_embedded_set() {
-        // The Files tree's per-type glyphs are driven by `FileIconKey`
-        // (F-CORE-FILE-08), ported from the original's `FileIconKey.swift`.
-        // The approved Zed subset intentionally maps fewer shapes than the
-        // original icon theme, so most kinds share the generic file mark —
-        // see `file_glyph`'s doc comment for which few don't.
-        let cases: &[(&str, bool, Icon)] = &[
-            ("/repo/src/main.rs", false, Icon::file_type("rust")),
-            ("/repo/deploy.sh", false, Icon::SquareTerminal),
-            (".gitignore", false, Icon::GitBranch),
-            ("Dockerfile", false, Icon::file_type("docker")),
-            ("Cargo.lock", false, Icon::file_type("lock")),
-            ("release.zip", false, Icon::file_type("zip")),
-            (".env", false, Icon::Settings),
-            ("service.env", false, Icon::Settings),
-            // Not in the original's tables — `pathExtension` treats a name
-            // that starts with `.` and has no *other* `.` as extension-less,
-            // and neither is an exact-name entry, so both fall back to the
-            // generic file mark rather than a heuristic Terminal/Settings
-            // guess. See `FileIconKey`'s own tests for the full table.
-            (".bashrc", false, Icon::File),
-            (".editorconfig", false, Icon::File),
-            (".env.local", false, Icon::File),
-            ("gitmodules", false, Icon::File), // no leading dot: not the exact-name key
-            ("Cargo.toml", false, Icon::file_type("toml")),
+    fn file_glyph_resolves_known_kinds_from_the_vendored_theme() {
+        let cases: &[(&str, Icon)] = &[
+            ("/repo/src/main.rs", Icon::file_type("rust")),
+            ("/repo/deploy.sh", Icon::file_type("console")),
+            (".gitignore", Icon::file_type("git")),
+            ("Dockerfile", Icon::file_type("docker")),
+            ("Cargo.lock", Icon::file_type("lock")),
+            ("Cargo.toml", Icon::file_type("toml")),
+            ("release.zip", Icon::file_type("zip")),
+            (".env", Icon::file_type("tune")),
+            ("service.env", Icon::file_type("tune")),
+            (".env.local", Icon::file_type("tune")),
+            (".editorconfig", Icon::file_type("editorconfig")),
+            ("README.md", Icon::file_type("readme")),
+            // Absent upstream, so it draws the theme's own default mark.
+            // Not a leftover of the retired Foundation extension rule --
+            // upstream simply has no icon for it.
+            (".bashrc", Icon::file_type("file")),
+            ("gitmodules", Icon::file_type("file")),
         ];
-        for (path, is_dir, expected) in cases {
-            assert_eq!(
-                file_glyph(Path::new(path), *is_dir),
-                *expected,
-                "file_glyph({path:?}, {is_dir})"
-            );
+        for (path, expected) in cases {
+            assert_eq!(file_glyph(Path::new(path)), *expected, "file_glyph({path:?})");
+        }
+    }
+
+    #[test]
+    fn folder_glyph_resolves_a_named_pair_and_falls_back_to_the_plain_folder() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("/repo/src", "folder-src", "folder-src-open"),
+            ("/repo/.git", "folder-git", "folder-git-open"),
+            ("/repo/node_modules", "folder-node", "folder-node-open"),
+            ("/repo/random-name", "folder", "folder-open"),
+        ];
+        for (path, collapsed, expanded) in cases {
+            assert_eq!(folder_glyph(Path::new(path), false), Icon::file_type(collapsed));
+            assert_eq!(folder_glyph(Path::new(path), true), Icon::file_type(expanded));
         }
     }
 
@@ -1369,13 +1376,14 @@ mod tests {
     fn file_row_glyph_marks_a_directory_open_or_closed_and_keeps_file_icons() {
         assert_eq!(
             file_row_glyph(Path::new("/repo/src"), true, false),
-            Some(Icon::FolderFill),
-            "a collapsed directory shows the closed folder"
+            Some(Icon::file_type("folder-src")),
+            "a collapsed directory shows its own closed folder"
         );
         assert_eq!(
             file_row_glyph(Path::new("/repo/src"), true, true),
-            Some(Icon::FolderOpen),
-            "an expanded directory shows the open folder"
+            Some(Icon::file_type("folder-src-open")),
+            "an expanded directory shows its own open folder -- the name is \
+             carried into both states, which the old signature discarded"
         );
         assert_eq!(
             file_row_glyph(Path::new("/repo/main.rs"), false, false),
@@ -1384,42 +1392,53 @@ mod tests {
         );
     }
 
-    /// `.git` is a directory like any other now. It used to deviate onto
-    /// `Icon::GitBranch`, which was invisible while directories drew no
-    /// glyph at all; with the folder pair drawn it would have been the one
-    /// row in the tree that never opened.
+    /// `.git` is a directory like any other: it opens. It used to deviate
+    /// onto `Icon::GitBranch` and would have been the one row in the tree
+    /// that never opened.
     #[test]
     fn file_row_glyph_opens_dot_git_like_every_other_directory() {
         assert_eq!(
             file_row_glyph(Path::new("/repo/.git"), true, false),
-            Some(Icon::FolderFill)
+            Some(Icon::file_type("folder-git"))
         );
         assert_eq!(
             file_row_glyph(Path::new("/repo/.git"), true, true),
-            Some(Icon::FolderOpen)
+            Some(Icon::file_type("folder-git-open"))
         );
         assert_eq!(
             file_row_glyph(Path::new("/repo/.gitignore"), false, false),
-            Some(Icon::GitBranch),
-            "the git *file* family keeps the branch mark"
+            Some(Icon::file_type("git")),
+            "the git *file* family keeps a git mark of its own"
         );
     }
 
+    /// The selector is derived from the icon that was drawn, never from the
+    /// row's flag -- a selector computed from the flag only ever asserts
+    /// that `expanded == expanded`. With 500 folder assets it can no longer
+    /// match two variants, so it reads the stem.
     #[test]
-    fn file_glyph_resolves_directory_kinds_and_falls_back_to_the_default_folder() {
-        let cases: &[(&str, Icon)] = &[
-            ("/repo/src", Icon::FolderFill),
-            ("/repo/.git", Icon::FolderFill),
-            ("/repo/node_modules", Icon::FolderFill),
-            ("/repo/random-name", Icon::FolderFill),
-        ];
-        for (path, expected) in cases {
-            assert_eq!(
-                file_glyph(Path::new(path), true),
-                *expected,
-                "file_glyph({path:?}, true)"
-            );
-        }
+    fn directory_icon_selector_names_the_state_the_drawn_stem_is_in() {
+        assert_eq!(
+            directory_icon_selector(Icon::file_type("folder-src-open")),
+            "file-directory-icon-open"
+        );
+        assert_eq!(
+            directory_icon_selector(Icon::file_type("folder-open")),
+            "file-directory-icon-open"
+        );
+        assert_eq!(
+            directory_icon_selector(Icon::file_type("folder-src")),
+            "file-directory-icon-closed"
+        );
+        assert_eq!(
+            directory_icon_selector(Icon::file_type("folder")),
+            "file-directory-icon-closed"
+        );
+        assert_eq!(
+            directory_icon_selector(Icon::file_type("rust")),
+            "file-directory-icon-unknown",
+            "a file stem in a directory row is a bug, and must say so"
+        );
     }
 
     #[gpui::test]
