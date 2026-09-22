@@ -5127,7 +5127,7 @@ impl SirioWorkspace {
             .collect();
         let active_tab_id = tabs.get(active_tab).map(|tab| tab.id);
         let mut center_split = CenterSplit::new(&tabs);
-        seed_shown_tabs(&mut center_split, &tabs);
+        seed_shown_tabs(&mut center_split, &tabs, &launch_snapshot);
         // `CenterSplit::new` takes each role's *first* tab, which is right for
         // a fresh workspace and wrong for a restored one: the session knows
         // which tab was active, and selecting it also focuses the half it
@@ -8937,7 +8937,8 @@ impl SirioWorkspace {
             self.working_directory = selected_path.clone();
             self.secondary_pane_hidden = self.session.secondary_pane_hidden_for(&selected_path);
             self.restore_project_settings_tabs(&restored, cx);
-            seed_shown_tabs(&mut self.center_split, &self.tabs);
+            self.center_split = CenterSplit::new(&self.tabs);
+            seed_shown_tabs(&mut self.center_split, &self.tabs, &restored);
             self.rebuild_center_split();
             restored_secondary_pane_hidden = Some(self.secondary_pane_hidden);
         }
@@ -18753,18 +18754,31 @@ fn restored_changes_tab(
     changes
 }
 
-/// The tab each pane was showing when the session was written.
+/// The tab each pane was showing when the session was written, read from
+/// the saved session rather than the live tabs. Live `shown_in_pane` flags
+/// go stale across a worktree switch (a kept-alive chat keeps its boot
+/// flag), and seeding from the previous worktree's split can leak an old
+/// tab id through, so the saved pair whose live tab still exists wins.
 /// `rebuild_center_split` and `CenterSplit::select_tab` keep a role's
 /// remembered tab while it still exists, so seeding it before them brings
 /// the unfocused pane back on that tab instead of its first one. Which pane
 /// has *focus* is still the `active` flag's call.
-fn seed_shown_tabs(center_split: &mut CenterSplit, tabs: &[OpenTab]) {
+fn seed_shown_tabs(
+    center_split: &mut CenterSplit,
+    tabs: &[OpenTab],
+    restored: &RestoredSession,
+) {
     for role in [PaneRole::Primary, PaneRole::Secondary] {
-        if let Some(tab) = tabs
-            .iter()
-            .find(|tab| tab.kind.pane_role() == role && tab.session_state.shown_in_pane)
-        {
-            center_split.set_active(role, Some(tab.id));
+        for (saved_tab, saved_state) in restored.tabs.iter().zip(&restored.tab_states) {
+            if !saved_state.shown_in_pane {
+                continue;
+            }
+            if let Some(tab) = tabs.iter().find(|tab| {
+                tab.persistence_id == saved_tab.id && tab.kind.pane_role() == role
+            }) {
+                center_split.set_active(role, Some(tab.id));
+                break;
+            }
         }
     }
 }
@@ -37840,11 +37854,26 @@ browser  profile  "
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
             workspace.tabs[1].kind = TabKind::Browser;
             workspace.tabs[2].kind = TabKind::Browser;
-            workspace.tabs[2].session_state.shown_in_pane = true;
             workspace.active_tab = 0;
             workspace.center_split = CenterSplit::new(&workspace.tabs);
 
-            seed_shown_tabs(&mut workspace.center_split, &workspace.tabs);
+            let layout = workspace.layout(cx);
+            let mut restored = RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            };
+            for state in &mut restored.tab_states {
+                state.shown_in_pane = false;
+            }
+            restored.tab_states[2].shown_in_pane = true;
+
+            seed_shown_tabs(
+                &mut workspace.center_split,
+                &workspace.tabs,
+                &restored,
+            );
             workspace.rebuild_center_split();
 
             assert_eq!(
@@ -37853,6 +37882,44 @@ browser  profile  "
                 "the Secondary pane is back on the tab it showed, not its first"
             );
             assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+            workspace
+        });
+    }
+
+    #[gpui::test]
+    fn a_stale_live_shown_flag_does_not_override_the_saved_one(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].session_state.shown_in_pane = true;
+            workspace.active_tab = 0;
+            workspace.center_split = CenterSplit::new(&workspace.tabs);
+
+            let layout = workspace.layout(cx);
+            let mut restored = RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            };
+            for state in &mut restored.tab_states {
+                state.shown_in_pane = false;
+            }
+            restored.tab_states[2].shown_in_pane = true;
+
+            seed_shown_tabs(
+                &mut workspace.center_split,
+                &workspace.tabs,
+                &restored,
+            );
+            workspace.rebuild_center_split();
+
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(workspace.tabs[2].id),
+                "the saved flag wins over a stale live one"
+            );
             workspace
         });
     }
