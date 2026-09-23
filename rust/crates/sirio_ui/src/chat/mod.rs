@@ -11493,6 +11493,7 @@ two"
         });
         cx.simulate_resize(size(px(600.0), px(600.0)));
         refresh_frame(cx);
+        hover_turn_rail(cx);
         chat.read_with(cx, |chat, _| {
             assert_eq!(chat.list_state.is_scrolled_to_end(), Some(true));
             let ticks = turn_rail::turn_ticks(&chat.entries);
@@ -11500,12 +11501,12 @@ two"
         });
         assert_eq!(
             cx.debug_bounds("turn-tick-line-3").unwrap().size.width,
-            px(16.0),
+            turn_rail::ACTIVE_TICK,
             "at the bottom the latest turn must be highlighted"
         );
         assert_eq!(
             cx.debug_bounds("turn-tick-line-2").unwrap().size.width,
-            px(10.0)
+            turn_rail::TICK
         );
         chat.update(cx, |chat, cx| {
             let ticks = turn_rail::turn_ticks(&chat.entries);
@@ -11518,11 +11519,11 @@ two"
         refresh_frame(cx);
         assert_eq!(
             cx.debug_bounds("turn-tick-line-1").unwrap().size.width,
-            px(16.0)
+            turn_rail::ACTIVE_TICK
         );
         assert_eq!(
             cx.debug_bounds("turn-tick-line-3").unwrap().size.width,
-            px(10.0)
+            turn_rail::TICK
         );
     }
 
@@ -11540,14 +11541,67 @@ two"
         });
         cx.simulate_resize(size(px(600.0), px(600.0)));
         refresh_frame(cx);
+        hover_turn_rail(cx);
         chat.read_with(cx, |chat, _| {
             assert!(chat.list_state.is_following_tail());
             assert_eq!(chat.list_state.is_scrolled_to_end(), None);
         });
         assert_eq!(
             cx.debug_bounds("turn-tick-line-2").unwrap().size.width,
-            px(16.0)
+            turn_rail::ACTIVE_TICK
         );
+    }
+
+    /// The rail stays out of sight until the pointer reaches its strip along
+    /// the left margin, and goes again once the pointer leaves it.
+    #[gpui::test]
+    async fn the_turn_rail_appears_only_while_its_strip_is_hovered(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            for text in ["first", "latest"] {
+                chat.push_entry(Entry::User {
+                    text: text.into(),
+                    at: None,
+                });
+            }
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(600.0), px(600.0)));
+        refresh_frame(cx);
+        let widths = |cx: &mut VisualTestContext| {
+            ["turn-tick-line-0", "turn-tick-line-1"].map(|selector| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is laid out"))
+                    .size
+                    .width
+            })
+        };
+        assert_eq!(widths(cx), [px(0.0); 2], "at rest the rail is hidden");
+
+        hover_turn_rail(cx);
+        assert_eq!(
+            widths(cx),
+            [turn_rail::TICK, turn_rail::ACTIVE_TICK],
+            "hovering the strip reveals every tick at its full length"
+        );
+
+        let transcript = cx.debug_bounds("chat-transcript").expect("transcript");
+        cx.simulate_mouse_move(transcript.center(), None, Modifiers::none());
+        refresh_frame(cx);
+        assert_eq!(widths(cx), [px(0.0); 2], "leaving the strip hides it again");
+    }
+
+    /// Puts the pointer on the turn rail's strip with reduced motion on, so
+    /// the reveal lands whole on the next frame instead of 150ms of wall
+    /// time later.
+    fn hover_turn_rail(cx: &mut VisualTestContext) {
+        use bezel::motion::AppExt as _;
+        cx.update(|_, cx| cx.set_reduced_motion(true));
+        let strip = cx
+            .debug_bounds("turn-rail")
+            .expect("the rail's strip is laid out");
+        cx.simulate_mouse_move(strip.center(), None, Modifiers::none());
+        refresh_frame(cx);
     }
 
     /// Three tall turns for a 300px pane: enough to overflow the transcript.
