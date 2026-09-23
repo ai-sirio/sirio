@@ -46,6 +46,7 @@ use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
 };
 use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
+use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
@@ -216,6 +217,7 @@ pub struct FileView {
 struct SurfaceScroll {
     source: UniformListScrollHandle,
     source_bar: ScrollbarState,
+    source_horizontal_bar: HorizontalBarState,
     preview: ScrollHandle,
     preview_bar: ScrollbarState,
 }
@@ -225,6 +227,7 @@ impl SurfaceScroll {
         Self {
             source: UniformListScrollHandle::new(),
             source_bar: ScrollbarState::new(painter),
+            source_horizontal_bar: HorizontalBarState::default(),
             preview: ScrollHandle::new(),
             preview_bar: ScrollbarState::new(painter),
         }
@@ -2020,6 +2023,50 @@ fn render_content(
     // list handle's base `ScrollHandle`: the same offset and overflow the
     // list itself scrolls by.
     let source_handle = scroll.source.0.borrow().base_handle.clone();
+    let viewport_width = source_handle.bounds().size.width;
+    let overflow_width = source_handle.max_offset().x;
+    let horizontal_offset = source_handle.offset().x;
+    let horizontal_bar = if scroll::thumb(
+        viewport_width,
+        overflow_width,
+        horizontal_offset,
+        scroll::MIN_THUMB,
+    )
+    .is_some()
+    {
+        let drag_handle = source_handle.clone();
+        horizontal_scroll::bar(
+            "file-horizontal-bar",
+            viewport_width,
+            overflow_width,
+            horizontal_offset,
+            &scroll.source_horizontal_bar,
+            move |x, cx| {
+                drag_handle.set_offset(point(x, drag_handle.offset().y));
+                entity.update(cx, |_, cx| cx.notify());
+            },
+        )
+    } else {
+        let watched = source_handle.clone();
+        canvas(
+            move |_, window, _| {
+                if scroll::thumb(
+                    watched.bounds().size.width,
+                    watched.max_offset().x,
+                    watched.offset().x,
+                    scroll::MIN_THUMB,
+                )
+                .is_some()
+                {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
+    };
     source
         .child(
             div()
@@ -2031,7 +2078,8 @@ fn render_content(
                     "file-text-bar",
                     &source_handle,
                     &scroll.source_bar,
-                )),
+                ))
+                .child(horizontal_bar),
         )
         .into_any_element()
 }
@@ -5561,6 +5609,63 @@ mod tests {
             cx.debug_bounds("file-text-bar").is_none(),
             "a source that fits its viewport shows no scrollbar"
         );
+    }
+
+    #[gpui::test]
+    async fn file_horizontal_bar_tracks_wide_source_without_changing_vertical_scroll(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let wide = TempFile::with_extension(
+            "rs",
+            &format!("{}\n{}", "w".repeat(400), "x\n".repeat(400)),
+        );
+        let (mut cx, view) = mounted_file_view(cx, wide.path().to_path_buf());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(cx.debug_bounds("file-horizontal-bar-track").is_some());
+        assert!(cx.debug_bounds("file-horizontal-bar-thumb").is_some());
+        assert!(cx.debug_bounds("file-text-bar").is_some());
+
+        let before_y = view.read_with(&cx.cx, |v, _| {
+            v.scroll.source.0.borrow().base_handle.offset().y
+        });
+        let track = cx.debug_bounds("file-horizontal-bar-track").unwrap();
+        let thumb = cx.debug_bounds("file-horizontal-bar-thumb").unwrap();
+        let end = gpui::point(track.right() - px(2.), thumb.center().y);
+        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(thumb.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(thumb.center().x + px(8.), thumb.center().y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        view.read_with(&cx.cx, |v, _| {
+            let position = v.scroll.source.0.borrow().base_handle.offset();
+            assert!(position.x < px(0.));
+            assert_eq!(position.y, before_y);
+        });
+
+        let short = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, _) = mounted_file_view(&mut cx.cx, short.path().to_path_buf());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(cx.debug_bounds("file-horizontal-bar-track").is_none());
+
+        let markdown = TempFile::with_extension("md", &format!("{}\n", "w".repeat(400)));
+        let (mut cx, _) = mounted_file_view(&mut cx.cx, markdown.path().to_path_buf());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(cx.debug_bounds("file-horizontal-bar-track").is_none());
     }
 
     /// The same contract for the rendered Markdown document in Preview.
