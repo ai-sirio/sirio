@@ -19,6 +19,7 @@ pub mod controls;
 pub mod editor;
 pub mod file_context_menu;
 pub mod file_view;
+mod horizontal_scroll;
 // F-CHG-06: the single git-status -> colour resolver. Deliberately its own
 // module rather than a helper inside right_panel or changes, because those two
 // each having their own copy is the defect it exists to make impossible.
