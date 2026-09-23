@@ -616,6 +616,13 @@ pub struct ChangesTab {
     unified_viewport: Pixels,
     unified_width_dirty: bool,
     unified_bar_state: HorizontalBarState,
+    split_left_x: Pixels,
+    split_right_x: Pixels,
+    split_left_max_width: Pixels,
+    split_right_max_width: Pixels,
+    split_viewport: Pixels,
+    split_left_bar_state: HorizontalBarState,
+    split_right_bar_state: HorizontalBarState,
 }
 
 impl ChangesTab {
@@ -676,6 +683,13 @@ impl ChangesTab {
             unified_viewport: px(0.0),
             unified_width_dirty: true,
             unified_bar_state: HorizontalBarState::default(),
+            split_left_x: px(0.0),
+            split_right_x: px(0.0),
+            split_left_max_width: px(0.0),
+            split_right_max_width: px(0.0),
+            split_viewport: px(0.0),
+            split_left_bar_state: HorizontalBarState::default(),
+            split_right_bar_state: HorizontalBarState::default(),
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -1509,6 +1523,8 @@ impl ChangesTab {
     fn render_change_row(
         row: ChangeRow,
         unified_x: Pixels,
+        split_left_x: Pixels,
+        split_right_x: Pixels,
         allows_staging: bool,
         draws_open_diff: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
@@ -1600,7 +1616,16 @@ impl ChangesTab {
                 path,
                 key,
                 row,
-            } => Self::render_split_line(section, path, key, row, theme).into_any_element(),
+            } => Self::render_split_line(
+                section,
+                path,
+                key,
+                row,
+                split_left_x,
+                split_right_x,
+                theme,
+            )
+            .into_any_element(),
             ChangeRow::Unavailable {
                 section,
                 path,
@@ -2000,6 +2025,8 @@ impl ChangesTab {
         path: PathBuf,
         key: usize,
         row: DiffSideBySideRow,
+        left_x: Pixels,
+        right_x: Pixels,
         theme: Theme,
     ) -> impl IntoElement {
         let shape = split_row_shape(&row);
@@ -2018,7 +2045,10 @@ impl ChangesTab {
             .items_stretch()
             .font_family(theme.typography.code_family)
             .text_size(theme.typography.scaled(12.0))
-            .child(split_cell(row.left, true, theme).debug_selector(|| "changes-split-left".into()))
+            .child(
+                split_cell(row.left, true, left_x, theme)
+                    .debug_selector(|| "changes-split-left".into()),
+            )
             .child(
                 div()
                     .w(px(SPLIT_DIVIDER_WIDTH))
@@ -2026,7 +2056,8 @@ impl ChangesTab {
                     .bg(theme.border),
             )
             .child(
-                split_cell(row.right, false, theme).debug_selector(|| "changes-split-right".into()),
+                split_cell(row.right, false, right_x, theme)
+                    .debug_selector(|| "changes-split-right".into()),
             )
     }
 
@@ -2326,7 +2357,12 @@ fn split_row_shape(row: &DiffSideBySideRow) -> &'static str {
 /// left column is the old file, the right column the new one — which is
 /// what makes a paired context row show *both* numbers across the row while
 /// a zipped deletion/addition pair shows one on each side.
-fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui::Div {
+fn split_cell(
+    line: Option<DiffSideBySideLine>,
+    old: bool,
+    side_x: Pixels,
+    theme: Theme,
+) -> gpui::Div {
     // `relative` + `overflow_hidden` with an absolutely positioned interior is
     // the whole trick, and it is load-bearing rather than stylistic.
     //
@@ -2406,10 +2442,16 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
                 div()
                     .flex_1()
                     .min_w(px(0.0))
+                    .relative()
                     .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(theme.text)
-                    .child(line.content),
+                    .child(
+                        div()
+                            .absolute()
+                            .left(side_x)
+                            .whitespace_nowrap()
+                            .text_color(theme.text)
+                            .child(line.content),
+                    ),
             ),
     )
 }
@@ -2544,6 +2586,54 @@ impl ChangesTab {
                         .width
                 })
                 .fold(px(0.0), Pixels::max);
+            if mode == DiffViewMode::Split {
+                let measure_side = |left: bool| {
+                    sections
+                        .iter()
+                        .flat_map(|section| section.rows.iter())
+                        .filter_map(|row| match row {
+                            ChangeRow::SplitLine { row, .. } => {
+                                let line = if left { &row.left } else { &row.right };
+                                line.as_ref().map(|line| &line.content)
+                            }
+                            _ => None,
+                        })
+                        .map(|content| {
+                            window
+                                .text_system()
+                                .layout_line(
+                                    content,
+                                    theme.typography.scaled(12.0),
+                                    &[gpui::TextRun {
+                                        len: content.len(),
+                                        font: gpui::font(theme.typography.code_family),
+                                        color: theme.text.into(),
+                                        ..Default::default()
+                                    }],
+                                    None,
+                                )
+                                .width
+                        })
+                        .fold(px(0.0), Pixels::max)
+                };
+                self.split_left_max_width = measure_side(true);
+                self.split_right_max_width = measure_side(false);
+                self.split_left_x = clamped_x(
+                    self.split_left_x,
+                    self.split_left_max_width,
+                    self.split_viewport,
+                );
+                self.split_right_x = clamped_x(
+                    self.split_right_x,
+                    self.split_right_max_width,
+                    self.split_viewport,
+                );
+            } else {
+                self.split_left_max_width = px(0.0);
+                self.split_right_max_width = px(0.0);
+                self.split_left_x = px(0.0);
+                self.split_right_x = px(0.0);
+            }
             self.unified_width_dirty = false;
             self.unified_x = clamped_x(
                 self.unified_x,
@@ -2557,6 +2647,8 @@ impl ChangesTab {
         let draws_open_diff = self.embedded_in_panel;
         let selected = self.selected_change.clone();
         let unified_x = self.unified_x;
+        let split_left_x = self.split_left_x;
+        let split_right_x = self.split_right_x;
         let unified_viewport = self.unified_viewport;
         let horizontal_bar_state = self.unified_bar_state.clone();
         let viewport_entity = entity.clone();
@@ -2611,6 +2703,8 @@ impl ChangesTab {
                                 row.clone()
                             },
                             unified_x,
+                            split_left_x,
+                            split_right_x,
                             allows_staging,
                             draws_open_diff,
                             selected.as_ref(),
@@ -2625,7 +2719,7 @@ impl ChangesTab {
                 .min_h(px(0.0))
                 .w_full(),
             )
-            .child(
+            .child(if mode == DiffViewMode::Unified {
                 canvas(
                     move |bounds, window, cx| {
                         let viewport = bounds.size.width;
@@ -2653,9 +2747,12 @@ impl ChangesTab {
                 ))
                 .right(px(DIFF_ROW_PADDING))
                 .bottom_0()
-                .h(px(10.0)),
-            )
-            .child({
+                .h(px(10.0))
+                .into_any_element()
+            } else {
+                div().into_any_element()
+            })
+            .child(if mode == DiffViewMode::Unified {
                 let viewport = self.unified_viewport.max(px(0.0));
                 let overflow = (self.unified_max_width - viewport).max(px(0.0));
                 div()
@@ -2686,6 +2783,124 @@ impl ChangesTab {
                             });
                         },
                     ))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
+            .child(if mode == DiffViewMode::Split {
+                let viewport_entity = entity.clone();
+                let previous_viewport = self.split_viewport;
+                canvas(
+                    move |bounds, window, cx| {
+                        let gutter = DIFF_NUMBER_WIDTH
+                            + DIFF_SIGN_WIDTH
+                            + 2.0 * DIFF_ROW_GAP
+                            + 2.0 * DIFF_ROW_PADDING;
+                        let side = ((bounds.size.width - px(SPLIT_DIVIDER_WIDTH)) / 2.0
+                            - px(gutter))
+                            .max(px(0.0));
+                        if (side - previous_viewport).abs() > px(0.5) {
+                            viewport_entity.update(cx, |tab, cx| {
+                                tab.split_viewport = side;
+                                tab.split_left_x = clamped_x(
+                                    tab.split_left_x,
+                                    tab.split_left_max_width,
+                                    side,
+                                );
+                                tab.split_right_x = clamped_x(
+                                    tab.split_right_x,
+                                    tab.split_right_max_width,
+                                    side,
+                                );
+                                cx.notify();
+                            });
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(10.0))
+                .into_any_element()
+            } else {
+                div().into_any_element()
+            })
+            .child(if mode == DiffViewMode::Split {
+                let side_viewport = self.split_viewport.max(px(0.0));
+                let gutter = px(
+                    DIFF_NUMBER_WIDTH
+                        + DIFF_SIGN_WIDTH
+                        + 2.0 * DIFF_ROW_GAP
+                        + 2.0 * DIFF_ROW_PADDING,
+                );
+                let left_state = self.split_left_bar_state.clone();
+                let right_state = self.split_right_bar_state.clone();
+                let left_entity = entity.clone();
+                let right_entity = entity.clone();
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(10.0))
+                    .flex()
+                    .items_start()
+                    .child(div().w(gutter).flex_none())
+                    .child(
+                        div()
+                            .w(side_viewport)
+                            .h(px(10.0))
+                            .relative()
+                            .flex_none()
+                            .child(horizontal_scroll::bar(
+                                "changes-split-left-horizontal-bar",
+                                side_viewport,
+                                (self.split_left_max_width - side_viewport).max(px(0.0)),
+                                self.split_left_x,
+                                &left_state,
+                                move |offset, cx| {
+                                    left_entity.update(cx, |tab, cx| {
+                                        tab.split_left_x = clamped_x(
+                                            offset,
+                                            tab.split_left_max_width,
+                                            tab.split_viewport,
+                                        );
+                                        cx.notify();
+                                    });
+                                },
+                            )),
+                    )
+                    .child(div().w(px(SPLIT_DIVIDER_WIDTH) + gutter).flex_none())
+                    .child(
+                        div()
+                            .w(side_viewport)
+                            .h(px(10.0))
+                            .relative()
+                            .flex_none()
+                            .child(horizontal_scroll::bar(
+                                "changes-split-right-horizontal-bar",
+                                side_viewport,
+                                (self.split_right_max_width - side_viewport).max(px(0.0)),
+                                self.split_right_x,
+                                &right_state,
+                                move |offset, cx| {
+                                    right_entity.update(cx, |tab, cx| {
+                                        tab.split_right_x = clamped_x(
+                                            offset,
+                                            tab.split_right_max_width,
+                                            tab.split_viewport,
+                                        );
+                                        cx.notify();
+                                    });
+                                },
+                            )),
+                    )
+                    .into_any_element()
+            } else {
+                div().into_any_element()
             })
             .into_any_element()
     }
@@ -3352,6 +3567,13 @@ mod tests {
             unified_viewport: px(0.0),
             unified_width_dirty: true,
             unified_bar_state: HorizontalBarState::default(),
+            split_left_x: px(0.0),
+            split_right_x: px(0.0),
+            split_left_max_width: px(0.0),
+            split_right_max_width: px(0.0),
+            split_viewport: px(0.0),
+            split_left_bar_state: HorizontalBarState::default(),
+            split_right_bar_state: HorizontalBarState::default(),
         }
     }
 
@@ -5149,6 +5371,13 @@ mod tests {
             unified_viewport: px(0.0),
             unified_width_dirty: true,
             unified_bar_state: HorizontalBarState::default(),
+            split_left_x: px(0.0),
+            split_right_x: px(0.0),
+            split_left_max_width: px(0.0),
+            split_right_max_width: px(0.0),
+            split_viewport: px(0.0),
+            split_left_bar_state: HorizontalBarState::default(),
+            split_right_bar_state: HorizontalBarState::default(),
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -5224,6 +5453,13 @@ mod tests {
             unified_viewport: px(0.0),
             unified_width_dirty: true,
             unified_bar_state: HorizontalBarState::default(),
+            split_left_x: px(0.0),
+            split_right_x: px(0.0),
+            split_left_max_width: px(0.0),
+            split_right_max_width: px(0.0),
+            split_viewport: px(0.0),
+            split_left_bar_state: HorizontalBarState::default(),
+            split_right_bar_state: HorizontalBarState::default(),
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -5521,6 +5757,13 @@ mod tests {
             unified_viewport: px(0.0),
             unified_width_dirty: true,
             unified_bar_state: HorizontalBarState::default(),
+            split_left_x: px(0.0),
+            split_right_x: px(0.0),
+            split_left_max_width: px(0.0),
+            split_right_max_width: px(0.0),
+            split_viewport: px(0.0),
+            split_left_bar_state: HorizontalBarState::default(),
+            split_right_bar_state: HorizontalBarState::default(),
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -5675,6 +5918,123 @@ mod tests {
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("changes-unified-horizontal-bar-track").is_none());
+    }
+
+    fn split_horizontal_fixture(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Sirio tests"]);
+        let wide: String = (1..40).map(|i| format!("seg{i:03}-")).collect::<String>()
+            + &"漢🙂界".repeat(24);
+        std::fs::write(dir.join("split.txt"), format!("head\n{wide}OLD\ntail\n"))
+            .expect("seed split file");
+        git(dir, &["add", "split.txt"]);
+        git(
+            dir,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "base"],
+        );
+        std::fs::write(dir.join("split.txt"), "head\nshort replacement\ntail\n")
+            .expect("write short replacement");
+    }
+
+    #[gpui::test]
+    async fn changes_split_horizontal_scrolls_each_code_column_independently(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        split_horizontal_fixture(&dir.0);
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        let row = cx.debug_bounds("changes-file-row").expect("changed row draws");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            window.refresh();
+            window.simulate_next_frame(app);
+        });
+        cx.run_until_parked();
+
+        let left = cx.debug_bounds("changes-split-left").unwrap();
+        let right = cx.debug_bounds("changes-split-right").unwrap();
+        let hunk = cx.debug_bounds("changes-hunk-row").expect("full-width hunk header draws");
+        assert!((f32::from(left.size.width) - f32::from(right.size.width)).abs() < 1.0);
+        let track = cx
+            .debug_bounds("changes-split-left-horizontal-bar-track")
+            .expect("long old-side code draws a left horizontal bar");
+        assert!(cx.debug_bounds("changes-split-right-horizontal-bar-track").is_none());
+        assert!(cx.debug_bounds("changes-unified-horizontal-bar-track").is_none());
+        let thumb = cx
+            .debug_bounds("changes-split-left-horizontal-bar-thumb")
+            .unwrap();
+        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(thumb.center(), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(thumb.center().x + px(8.0), thumb.center().y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        let end = gpui::point(track.right() + px(50.0), thumb.center().y);
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let left_x = tab.read_with(&cx.cx, |tab, _| tab.split_left_x);
+        assert!(left_x < px(0.0));
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.split_right_x), px(0.0));
+        assert_eq!(cx.debug_bounds("changes-split-left").unwrap(), left);
+        assert_eq!(cx.debug_bounds("changes-split-right").unwrap(), right);
+        assert_eq!(cx.debug_bounds("changes-hunk-row").unwrap(), hunk);
+
+        let wide: String = (1..40).map(|i| format!("seg{i:03}-")).collect::<String>()
+            + &"漢🙂界".repeat(24);
+        std::fs::write(
+            dir.0.join("split.txt"),
+            format!("head\nshort replacement\n{wide}\ntail\n"),
+        )
+        .expect("add long new-side code");
+        tab.update(&mut cx.cx, |tab, cx| tab.refresh(cx));
+        wait_for_tab(&cx, &tab, |tab| tab.split_right_max_width > tab.split_viewport);
+        cx.update(|window, app| {
+            window.refresh();
+            window.simulate_next_frame(app);
+        });
+        cx.run_until_parked();
+        let right_track = cx
+            .debug_bounds("changes-split-right-horizontal-bar-track")
+            .expect("long new-side code draws a right horizontal bar");
+        let right_thumb = cx.debug_bounds("changes-split-right-horizontal-bar-thumb").unwrap();
+        cx.simulate_mouse_move(right_thumb.center(), None, Modifiers::none());
+        cx.update(|window, app| window.draw(app).clear(app));
+        cx.simulate_mouse_down(right_thumb.center(), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(right_thumb.center().x + px(8.0), right_thumb.center().y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        let right_end = gpui::point(right_track.right() + px(50.0), right_thumb.center().y);
+        cx.simulate_mouse_move(right_end, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(right_end, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.split_left_x), left_x);
+        assert!(tab.read_with(&cx.cx, |tab, _| tab.split_right_x) < px(0.0));
+
+        for selector in ["changes-view-mode-0", "changes-view-mode-1", "changes-view-mode-0"] {
+            let segment = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(segment.center(), Modifiers::none());
+            cx.run_until_parked();
+        }
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
+        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        let file = cx.debug_bounds("changes-file-row").unwrap();
+        cx.simulate_click(file.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-split-left-horizontal-bar-track").is_none());
+        assert!(cx.debug_bounds("changes-split-right-horizontal-bar-track").is_none());
     }
 
     #[gpui::test]
@@ -5888,6 +6248,13 @@ mod tests {
                 unified_viewport: px(0.0),
                 unified_width_dirty: true,
                 unified_bar_state: HorizontalBarState::default(),
+                split_left_x: px(0.0),
+                split_right_x: px(0.0),
+                split_left_max_width: px(0.0),
+                split_right_max_width: px(0.0),
+                split_viewport: px(0.0),
+                split_left_bar_state: HorizontalBarState::default(),
+                split_right_bar_state: HorizontalBarState::default(),
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -6282,6 +6649,13 @@ mod tests {
             unified_viewport: px(0.0),
             unified_width_dirty: true,
             unified_bar_state: HorizontalBarState::default(),
+            split_left_x: px(0.0),
+            split_right_x: px(0.0),
+            split_left_max_width: px(0.0),
+            split_right_max_width: px(0.0),
+            split_viewport: px(0.0),
+            split_left_bar_state: HorizontalBarState::default(),
+            split_right_bar_state: HorizontalBarState::default(),
         }
     }
 
