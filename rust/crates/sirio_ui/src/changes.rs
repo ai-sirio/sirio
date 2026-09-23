@@ -45,8 +45,8 @@ use bezel::{
 };
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
-    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, PromptLevel,
-    Render, Rgba, Task, Window, div, list, prelude::*, px,
+    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
+    PromptLevel, Render, Rgba, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -62,6 +62,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::controls;
+use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
@@ -97,6 +98,10 @@ const DIFF_SIGN_WIDTH: f32 = 12.0;
 const DIFF_ROW_GAP: f32 = 8.0;
 const DIFF_ROW_PADDING: f32 = 10.0;
 const DIFF_WASH_ALPHA: f32 = 0.10;
+
+fn clamped_x(x: Pixels, content: Pixels, viewport: Pixels) -> Pixels {
+    x.clamp(-(content - viewport).max(px(0.0)), px(0.0))
+}
 const DIFF_HUNK_GUTTER_WIDTH: f32 = DIFF_NUMBER_WIDTH * 2.0 + DIFF_SIGN_WIDTH + 16.0;
 /// A run of unchanged context lines this long collapses into one labelled
 /// band (orca's "18 hidden lines").
@@ -605,6 +610,12 @@ pub struct ChangesTab {
     /// file row into view: a virtualized list draws nothing off-screen, so
     /// a selection that moved there would otherwise be invisible.
     reveal_selected: bool,
+    unified_x: Pixels,
+    unified_mode: DiffViewMode,
+    unified_max_width: Pixels,
+    unified_viewport: Pixels,
+    unified_width_dirty: bool,
+    unified_bar_state: HorizontalBarState,
 }
 
 impl ChangesTab {
@@ -659,6 +670,12 @@ impl ChangesTab {
             list_state: new_list_state(),
             list_fingerprint: 0,
             reveal_selected: false,
+            unified_x: px(0.0),
+            unified_mode: DiffViewMode::Unified,
+            unified_max_width: px(0.0),
+            unified_viewport: px(0.0),
+            unified_width_dirty: true,
+            unified_bar_state: HorizontalBarState::default(),
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -759,6 +776,7 @@ impl ChangesTab {
         self.diff_errors.extend(snapshot.diff_errors);
         self.entries = snapshot.entries;
         self.stats = snapshot.stats;
+        self.unified_width_dirty = true;
         // F-CHG-13: replay a focus_path request that raced this snapshot.
         // Applied at most once — if the path still isn't present (e.g. it
         // was reverted before the snapshot came back), there is nothing
@@ -1101,6 +1119,7 @@ impl ChangesTab {
 
     fn toggle_change(&mut self, section: ChangeSection, path: &Path, cx: &mut Context<Self>) {
         let key = (section, path.to_path_buf());
+        self.unified_width_dirty = true;
         if self.expanded_changes.contains(&key) {
             self.expanded_changes.remove(&key);
             // A partially-staged file can be expanded in two sections at
@@ -1159,6 +1178,7 @@ impl ChangesTab {
                         tab.diff_errors.insert(path, error.to_string());
                     }
                 }
+                tab.unified_width_dirty = true;
                 cx.notify();
             });
         })
@@ -1230,6 +1250,7 @@ impl ChangesTab {
         key: usize,
         cx: &mut Context<Self>,
     ) {
+        self.unified_width_dirty = true;
         if !self.expanded_bands.remove(&(section, path.clone(), key)) {
             self.expanded_bands.insert((section, path, key));
         }
@@ -1242,6 +1263,7 @@ impl ChangesTab {
     /// expansion render uses, so the two can never disagree about which
     /// runs exist.
     fn expand_all(&mut self, cx: &mut Context<Self>) {
+        self.unified_width_dirty = true;
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
@@ -1268,6 +1290,7 @@ impl ChangesTab {
     /// choice is a view state, not a git mutation — a refresh keeps the
     /// collapsed view.
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        self.unified_width_dirty = true;
         self.expanded_changes.clear();
         self.expanded_bands.clear();
         self.last_focus = None;
@@ -1275,6 +1298,7 @@ impl ChangesTab {
     }
 
     fn toggle_section(&mut self, section: ChangeSection, cx: &mut Context<Self>) {
+        self.unified_width_dirty = true;
         if !self.collapsed_sections.remove(&section) {
             self.collapsed_sections.insert(section);
         }
@@ -1484,6 +1508,7 @@ impl ChangesTab {
 
     fn render_change_row(
         row: ChangeRow,
+        unified_x: Pixels,
         allows_staging: bool,
         draws_open_diff: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
@@ -1569,7 +1594,7 @@ impl ChangesTab {
                 section,
                 path,
                 line,
-            } => Self::render_diff_line(section, path, line, theme).into_any_element(),
+            } => Self::render_diff_line(section, path, line, unified_x, theme).into_any_element(),
             ChangeRow::SplitLine {
                 section,
                 path,
@@ -2009,6 +2034,7 @@ impl ChangesTab {
         section: ChangeSection,
         path: PathBuf,
         line: DiffLine,
+        unified_x: Pixels,
         theme: Theme,
     ) -> impl IntoElement {
         let (background, marker_color, marker, text_color) = match line.origin {
@@ -2070,13 +2096,14 @@ impl ChangesTab {
                     .child(marker),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(text_color)
-                    .child(line.content),
+                div().flex_1().min_w(px(0.0)).relative().overflow_hidden().child(
+                    div()
+                        .absolute()
+                        .left(unified_x)
+                        .whitespace_nowrap()
+                        .text_color(text_color)
+                        .child(line.content),
+                ),
             )
     }
 
@@ -2088,6 +2115,10 @@ impl ChangesTab {
             return;
         }
         DiffViewMode::set(mode, cx);
+        self.unified_mode = mode;
+        self.unified_width_dirty = true;
+        self.unified_x = px(0.0);
+        self.unified_max_width = px(0.0);
         cx.notify();
     }
 
@@ -2429,6 +2460,12 @@ impl ChangesTab {
     ) -> AnyElement {
         #[cfg(test)]
         perf_baseline::render_body();
+        if self.unified_mode != mode {
+            self.unified_mode = mode;
+            self.unified_width_dirty = true;
+            self.unified_x = px(0.0);
+            self.unified_max_width = px(0.0);
+        }
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
         }
@@ -2482,11 +2519,48 @@ impl ChangesTab {
                 .child("No changes")
                 .into_any_element();
         }
+        if self.unified_width_dirty {
+            self.unified_max_width = sections
+                .iter()
+                .flat_map(|section| section.rows.iter())
+                .filter_map(|row| match row {
+                    ChangeRow::Line { line, .. } => Some(&line.content),
+                    _ => None,
+                })
+                .map(|content| {
+                    window
+                        .text_system()
+                        .layout_line(
+                            content,
+                            theme.typography.scaled(12.0),
+                            &[gpui::TextRun {
+                                len: content.len(),
+                                font: gpui::font(theme.typography.code_family),
+                                color: theme.text.into(),
+                                ..Default::default()
+                            }],
+                            None,
+                        )
+                        .width
+                })
+                .fold(px(0.0), Pixels::max);
+            self.unified_width_dirty = false;
+            self.unified_x = clamped_x(
+                self.unified_x,
+                self.unified_max_width,
+                self.unified_viewport,
+            );
+        }
         let rows = self.sync_list_rows(sections);
-        let row_entity = entity;
+        let row_entity = entity.clone();
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let selected = self.selected_change.clone();
+        let unified_x = self.unified_x;
+        let unified_viewport = self.unified_viewport;
+        let horizontal_bar_state = self.unified_bar_state.clone();
+        let viewport_entity = entity.clone();
+        let bar_entity = entity.clone();
         let list_focus = self
             .list_focus
             .as_ref()
@@ -2512,6 +2586,7 @@ impl ChangesTab {
             .w_full()
             .flex()
             .flex_col()
+            .relative()
             .child(
                 list(
                     self.list_state.clone(),
@@ -2535,6 +2610,7 @@ impl ChangesTab {
                                 perf_baseline::draw_row_clone(row);
                                 row.clone()
                             },
+                            unified_x,
                             allows_staging,
                             draws_open_diff,
                             selected.as_ref(),
@@ -2549,6 +2625,68 @@ impl ChangesTab {
                 .min_h(px(0.0))
                 .w_full(),
             )
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let viewport = bounds.size.width;
+                        if (viewport - unified_viewport).abs() > px(0.5) {
+                            viewport_entity.update(cx, |tab, cx| {
+                                tab.unified_viewport = viewport;
+                                tab.unified_x = clamped_x(
+                                    tab.unified_x,
+                                    tab.unified_max_width,
+                                    viewport,
+                                );
+                                cx.notify();
+                            });
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .left(px(
+                    DIFF_NUMBER_WIDTH * 2.0
+                        + DIFF_SIGN_WIDTH
+                        + 3.0 * DIFF_ROW_GAP
+                        + 2.0 * DIFF_ROW_PADDING,
+                ))
+                .right(px(DIFF_ROW_PADDING))
+                .bottom_0()
+                .h(px(10.0)),
+            )
+            .child({
+                let viewport = self.unified_viewport.max(px(0.0));
+                let overflow = (self.unified_max_width - viewport).max(px(0.0));
+                div()
+                    .absolute()
+                    .left(px(
+                        DIFF_NUMBER_WIDTH * 2.0
+                            + DIFF_SIGN_WIDTH
+                            + 3.0 * DIFF_ROW_GAP
+                            + 2.0 * DIFF_ROW_PADDING,
+                    ))
+                    .right(px(DIFF_ROW_PADDING))
+                    .bottom_0()
+                    .h(px(10.0))
+                    .child(horizontal_scroll::bar(
+                        "changes-unified-horizontal-bar",
+                        viewport,
+                        overflow,
+                        unified_x,
+                        &horizontal_bar_state,
+                        move |offset, cx| {
+                            bar_entity.update(cx, |tab, cx| {
+                                tab.unified_x = clamped_x(
+                                    offset,
+                                    tab.unified_max_width,
+                                    tab.unified_viewport,
+                                );
+                                cx.notify();
+                            });
+                        },
+                    ))
+            })
             .into_any_element()
     }
 
@@ -3208,6 +3346,12 @@ mod tests {
             list_state: new_list_state(),
             list_fingerprint: 0,
             reveal_selected: false,
+            unified_x: px(0.0),
+            unified_mode: DiffViewMode::Unified,
+            unified_max_width: px(0.0),
+            unified_viewport: px(0.0),
+            unified_width_dirty: true,
+            unified_bar_state: HorizontalBarState::default(),
         }
     }
 
@@ -4999,6 +5143,12 @@ mod tests {
             list_state: new_list_state(),
             list_fingerprint: 0,
             reveal_selected: false,
+            unified_x: px(0.0),
+            unified_mode: DiffViewMode::Unified,
+            unified_max_width: px(0.0),
+            unified_viewport: px(0.0),
+            unified_width_dirty: true,
+            unified_bar_state: HorizontalBarState::default(),
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -5068,6 +5218,12 @@ mod tests {
             list_state: new_list_state(),
             list_fingerprint: 0,
             reveal_selected: false,
+            unified_x: px(0.0),
+            unified_mode: DiffViewMode::Unified,
+            unified_max_width: px(0.0),
+            unified_viewport: px(0.0),
+            unified_width_dirty: true,
+            unified_bar_state: HorizontalBarState::default(),
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -5359,6 +5515,12 @@ mod tests {
             list_state: new_list_state(),
             list_fingerprint: 0,
             reveal_selected: false,
+            unified_x: px(0.0),
+            unified_mode: DiffViewMode::Unified,
+            unified_max_width: px(0.0),
+            unified_viewport: px(0.0),
+            unified_width_dirty: true,
+            unified_bar_state: HorizontalBarState::default(),
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -5421,7 +5583,8 @@ mod tests {
         git(dir, &["init", "-q"]);
         git(dir, &["config", "user.email", "tests@example.invalid"]);
         git(dir, &["config", "user.name", "Sirio tests"]);
-        let wide: String = (1..40).map(|i| format!("seg{i:03}-")).collect();
+        let wide: String = (1..40).map(|i| format!("seg{i:03}-")).collect::<String>()
+            + &"漢🙂界".repeat(24);
         std::fs::write(dir.join("wide.txt"), format!("head\n{wide}OLD\ntail\n"))
             .expect("seed wide file");
         git(dir, &["add", "wide.txt"]);
@@ -5431,6 +5594,104 @@ mod tests {
         );
         std::fs::write(dir.join("wide.txt"), format!("head\n{wide}NEW\ntail\n"))
             .expect("edit wide file");
+    }
+
+    #[gpui::test]
+    async fn changes_unified_horizontal_bar_tracks_only_expanded_wide_code(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        wide_line_fixture(&dir.0);
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let surface = cx.debug_bounds("changes-surface").expect("surface drawn");
+        let track = cx
+            .debug_bounds("changes-unified-horizontal-bar-track")
+            .expect("expanded wide unified code draws its horizontal bar");
+        let toolbar = cx
+            .debug_bounds("changes-view-mode-0")
+            .expect("toolbar remains drawn");
+        assert!(track.left() >= surface.left() && track.right() <= surface.right());
+        assert!(toolbar.left() >= surface.left() && toolbar.right() <= surface.right());
+        let (max_width, viewport) = tab.read_with(&cx.cx, |tab, _| {
+            (tab.unified_max_width, tab.unified_viewport)
+        });
+        assert!(max_width > viewport, "Unicode code width exceeds its viewport");
+        let thumb = cx
+            .debug_bounds("changes-unified-horizontal-bar-thumb")
+            .expect("overflow has a draggable thumb");
+        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(thumb.center(), gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(thumb.center().x + px(8.0), thumb.center().y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        let end = gpui::point(track.right() + px(50.0), thumb.center().y);
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let x = tab.read_with(&cx.cx, |tab, _| tab.unified_x);
+        assert_eq!(x, -(max_width - viewport));
+        cx.simulate_resize(gpui::size(px(500.0), px(600.0)));
+        cx.run_until_parked();
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| tab.unified_x) < px(0.0),
+            "narrowing keeps X clamped inside its new overflow range"
+        );
+        cx.simulate_resize(gpui::size(px(10000.0), px(600.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            window.refresh();
+            window.simulate_next_frame(app);
+        });
+        cx.run_until_parked();
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
+        assert!(
+            cx.debug_bounds("changes-unified-horizontal-bar-track").is_none(),
+            "wide viewport should remove overflow: max/viewport={:?}",
+            tab.read_with(&cx.cx, |tab, _| (tab.unified_max_width, tab.unified_viewport))
+        );
+        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        let unified = cx.debug_bounds("changes-view-mode-0").unwrap();
+        cx.simulate_click(unified.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
+
+        // Collapsing the only wide row removes its code and its bar.
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("file row remains drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-unified-horizontal-bar-track").is_none());
+    }
+
+    #[gpui::test]
+    async fn changes_unified_horizontal_bar_is_absent_for_short_lines(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        side_by_side_fixture(&dir.0);
+        let (mut cx, _tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &_tab, |tab| section_count(tab, "Changed") == 1);
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-diff-line").is_some());
+        assert!(cx.debug_bounds("changes-unified-horizontal-bar-track").is_none());
     }
 
     /// "Long lines must scroll inside the diff, never scroll the window as a
@@ -5621,6 +5882,12 @@ mod tests {
                 list_state: new_list_state(),
                 list_fingerprint: 0,
                 reveal_selected: false,
+                unified_x: px(0.0),
+                unified_mode: DiffViewMode::Unified,
+                unified_max_width: px(0.0),
+                unified_viewport: px(0.0),
+                unified_width_dirty: true,
+                unified_bar_state: HorizontalBarState::default(),
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -6009,6 +6276,12 @@ mod tests {
             list_state: new_list_state(),
             list_fingerprint: 0,
             reveal_selected: false,
+            unified_x: px(0.0),
+            unified_mode: DiffViewMode::Unified,
+            unified_max_width: px(0.0),
+            unified_viewport: px(0.0),
+            unified_width_dirty: true,
+            unified_bar_state: HorizontalBarState::default(),
         }
     }
 
