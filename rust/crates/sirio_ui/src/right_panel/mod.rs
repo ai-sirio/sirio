@@ -591,8 +591,14 @@ impl RightPanel {
         cx: &mut Context<Self>,
     ) {
         let repo_root = repo_root.into();
+        let capability_changed = self.project_is_git != project_is_git;
         self.project_is_git = project_is_git;
         if self.worktree_selected && self.repo_root == repo_root {
+            if capability_changed {
+                self.changes = None;
+                self.changes_subscriptions.clear();
+                cx.notify();
+            }
             return;
         }
         if !self.allowed_roots.iter().any(|root| root == &repo_root) {
@@ -1280,6 +1286,39 @@ mod tests {
                 "a stale checkout's diff must not survive"
             );
         });
+    }
+
+    #[gpui::test]
+    fn rebinding_same_path_with_new_git_capability_rebuilds_changes(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel = cx.new(|_| {
+            RightPanel::with_activity_and_snapshot_for_project(
+                dir.0.clone(),
+                false,
+                Vec::new(),
+                None,
+            )
+        });
+
+        let old_changes = panel.update(cx, |panel, cx| panel.ensure_changes(cx));
+        assert!(!old_changes.read_with(cx, |changes, _| changes.allows_staging()));
+
+        panel.update(cx, |panel, cx| {
+            panel.bind_worktree(dir.0.clone(), true, cx);
+            assert!(
+                panel.changes.is_none(),
+                "a capability change must drop the cached Diff surface"
+            );
+            assert!(
+                panel.changes_subscriptions.is_empty(),
+                "a dropped Diff surface must release its subscriptions"
+            );
+        });
+
+        let new_changes = panel.update(cx, |panel, cx| panel.ensure_changes(cx));
+        assert_ne!(old_changes.entity_id(), new_changes.entity_id());
+        assert!(new_changes.read_with(cx, |changes, _| changes.allows_staging()));
     }
 
     fn settled_snapshot(
