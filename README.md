@@ -45,7 +45,7 @@ Each project lists its git worktrees, one row per branch, sorted by who needs yo
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/agents/activity-states"><img src="assets/readme/feature-sidebar.png" alt="The sidebar with one project and its three worktrees, main waiting for input" width="100%" /></a>
+  <a href="https://sirioai.app/docs/agents/activity-states"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-sidebar.png" /><img src="assets/readme/feature-sidebar.gif" alt="Sirio's window zooming onto the sidebar, where main waits for input" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -59,7 +59,7 @@ Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the V
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/tabs"><img src="assets/readme/feature-terminal.png" alt="Claude Code, Pi and OpenCode in terminal panes inside one worktree, split right and then down" width="100%" /></a>
+  <a href="https://sirioai.app/docs/workspace/tabs"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-terminal.png" /><img src="assets/readme/feature-terminal.gif" alt="Claude Code, Pi and OpenCode in terminal panes split right and then down, zooming onto Claude Code's pane" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -73,7 +73,7 @@ Click a `.md` link in the terminal, drag a file in, or press `Ctrl+O`: it opens 
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/surfaces"><img src="assets/readme/feature-markdown.png" alt="PLAN.md rendered in a tab, with headings, a checklist, a table and a code block" width="100%" /></a>
+  <a href="https://sirioai.app/docs/workspace/surfaces"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-markdown.png" /><img src="assets/readme/feature-markdown.gif" alt="Sirio's window zooming onto PLAN.md rendered in a tab, with headings, a checklist, a table and a code block" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -87,7 +87,7 @@ A git-status-aware Changes surface for every worktree: stage, unstage, discard, 
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/surfaces"><img src="assets/readme/feature-changes.png" alt="The Changes surface with README.md open to its diff, and Discard and Stage beside it" width="100%" /></a>
+  <a href="https://sirioai.app/docs/workspace/surfaces"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-changes.png" /><img src="assets/readme/feature-changes.gif" alt="Sirio's window zooming onto the Changes surface, with README.md open to its diff and Discard and Stage beside it" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
