@@ -43,7 +43,7 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord, stable_worktree_id,
 };
-use sirio_project::{DiscoveredProject, discover_project, is_git_repository};
+use sirio_project::{DiscoveredProject, TabKind, discover_project, is_git_repository};
 
 /// How long a burst of changes is held before one write. 500 ms is under the
 /// reaction time between discrete user actions (a click then flushes at the
@@ -104,6 +104,24 @@ pub struct SessionTabState {
     /// resolves — see `restored_editor_path`.
     #[serde(default)]
     pub editor_path: String,
+    /// Whether this tab was the one its pane showing when the session was
+    /// written. The `active` flag on the tab record says which *pane* had
+    /// focus; this says what the *other* pane was showing, which restore
+    /// otherwise forgets and replaces with that pane's first tab.
+    #[serde(default)]
+    pub shown_in_pane: bool,
+    /// A commit tab's SHA, captured from `ChangesTab::commit`. Empty for a
+    /// working-tree Changes tab, and for a session written before this field.
+    #[serde(default)]
+    pub commit_sha: String,
+    /// The file a Changes tab was focused on (`ChangesTab::focused_path`),
+    /// replayed through `focus_path` at restore. Empty means none.
+    #[serde(default)]
+    pub changes_focus: String,
+    /// A Project Settings tab's project. Empty for any other tab; a project
+    /// that no longer exists drops the tab at restore.
+    #[serde(default)]
+    pub settings_project_id: String,
 }
 
 impl SessionTabState {
@@ -131,6 +149,10 @@ impl SessionTabState {
             chat_draft: self.chat_draft.clone(),
             browser_url: self.browser_url.clone(),
             editor_path: self.editor_path.clone(),
+            shown_in_pane: self.shown_in_pane,
+            commit_sha: self.commit_sha.clone(),
+            changes_focus: self.changes_focus.clone(),
+            settings_project_id: self.settings_project_id.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -443,6 +465,35 @@ impl SessionLayout {
             tab_states: vec![SessionTabState::default(), SessionTabState::default()],
         }
     }
+}
+
+/// The persisted spelling of a surface kind. Exhaustive: a new `TabKind`
+/// must name its spelling here before it can be saved at all.
+pub fn persisted_kind(kind: TabKind) -> &'static str {
+    match kind {
+        TabKind::Terminal => "terminal",
+        TabKind::AgentChat => "chat",
+        TabKind::Browser => "browser",
+        TabKind::Editor => "file",
+        TabKind::Diff => "diff",
+        TabKind::ProjectSettings => "settings",
+    }
+}
+
+/// The surface kind a persisted spelling names, or `None` for one this build
+/// does not know. The inverse of [`persisted_kind`]; the loader skips exactly
+/// the `None`s, so what can be written and what can be read are one list.
+pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
+    let kind = match kind {
+        "terminal" => TabKind::Terminal,
+        "chat" => TabKind::AgentChat,
+        "browser" => TabKind::Browser,
+        "file" => TabKind::Editor,
+        "diff" => TabKind::Diff,
+        "settings" => TabKind::ProjectSettings,
+        _ => return None,
+    };
+    Some(kind)
 }
 
 /// The result of restoring a layout at launch.
@@ -1003,12 +1054,23 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     project.name = name;
     project.root_path = project_path;
     db.save_project(&project)?;
-    db.save_worktree(&WorktreeRecord::new(
-        &worktree_id,
-        &project_id,
-        &branch,
-        &worktree_path,
-    ))?;
+    // A layout flush runs on every debounced save, worktree switch and
+    // quit: rebuilding the row from scratch would reset the hidden flag,
+    // comment, primary flag and order the catalog writer maintains.
+    let record = db
+        .worktrees()?
+        .into_iter()
+        .find(|worktree| worktree.id == worktree_id)
+        .map(|mut existing| {
+            existing.project_id = project_id.clone();
+            existing.branch = branch.clone();
+            existing.path = worktree_path.clone();
+            existing
+        })
+        .unwrap_or_else(|| {
+            WorktreeRecord::new(&worktree_id, &project_id, &branch, &worktree_path)
+        });
+    db.save_worktree(&record)?;
 
     let tabs: Vec<TabRecord> = layout
         .tabs
@@ -1198,7 +1260,7 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
                 // re-derives the row from a catalog that has no idea a pane
                 // is open, so without carrying it forward every startup
                 // normalization would close it.
-                record.secondary_pane_open = existing.secondary_pane_open;
+                record.secondary_pane_hidden = existing.secondary_pane_hidden;
             }
             db.save_worktree(&record)?;
         }
@@ -1450,13 +1512,9 @@ fn tabs_for_worktree(
     let mut tabs = Vec::new();
     let mut tab_states = Vec::new();
     for record in records {
-        // Only editor tabs remain unavailable in this shell; browser is a
-        // first-class persisted surface alongside chat, terminal, and diff.
-        if record.kind != "chat"
-            && record.kind != "terminal"
-            && record.kind != "diff"
-            && record.kind != "browser"
-        {
+        // One list with the writer: every kind `persisted_kind` can spell is
+        // loaded, and only a spelling this build does not know is skipped.
+        if kind_from_persisted(&record.kind).is_none() {
             diagnostics.push(format!(
                 "tab {:?} ({}) is not restorable in this build; skipped",
                 record.title, record.kind
@@ -1751,11 +1809,11 @@ impl SessionStore {
         }
     }
 
-    /// #323: whether this worktree's Secondary centre pane was open when the
-    /// session was last written. `false` for a worktree with no row yet, and
-    /// for a database in fallback mode -- a closed pane is the safe answer,
-    /// since it is also what a worktree with no Secondary tabs shows.
-    pub fn secondary_pane_open_for(&self, working_directory: &Path) -> bool {
+    /// Whether this worktree's Secondary centre pane was hidden when the
+    /// session was last written (v19). `false` — visible — for a worktree
+    /// with no row yet, for a database in fallback mode, and on a read error:
+    /// the pane is part of the layout, so showing it is the safe answer.
+    pub fn secondary_pane_hidden_for(&self, working_directory: &Path) -> bool {
         let db = self
             .inner
             .db
@@ -1765,19 +1823,19 @@ impl SessionStore {
             return false;
         };
         match db.worktree_by_path(&working_directory.to_string_lossy()) {
-            Ok(record) => record.is_some_and(|record| record.secondary_pane_open),
+            Ok(record) => record.is_some_and(|record| record.secondary_pane_hidden),
             Err(error) => {
-                eprintln!("[session] failed to read the pane flag: {error}; assuming closed");
+                eprintln!("[session] failed to read the pane flag: {error}; assuming visible");
                 false
             }
         }
     }
 
-    /// #323: records that this worktree's Secondary pane is open or closed.
-    /// A no-op for a worktree with no persisted row -- the row is written by
+    /// Records that this worktree's Secondary pane is hidden or shown. A
+    /// no-op for a worktree with no persisted row -- the row is written by
     /// the catalog upsert, and a pane state with no worktree to hang off is
     /// not worth inventing one for.
-    pub fn save_secondary_pane_open(&self, working_directory: &Path, open: bool) {
+    pub fn save_secondary_pane_hidden(&self, working_directory: &Path, hidden: bool) {
         let db = self
             .inner
             .db
@@ -1789,10 +1847,10 @@ impl SessionStore {
         let path = working_directory.to_string_lossy();
         match db.worktree_by_path(&path) {
             Ok(Some(mut record)) => {
-                if record.secondary_pane_open == open {
+                if record.secondary_pane_hidden == hidden {
                     return;
                 }
-                record.secondary_pane_open = open;
+                record.secondary_pane_hidden = hidden;
                 if let Err(error) = db.save_worktree(&record) {
                     eprintln!("[session] failed to persist the pane flag for {path}: {error}");
                 }
@@ -2344,6 +2402,7 @@ mod tests {
             chat_draft: String::new(),
             browser_url: String::new(),
             editor_path: String::new(),
+            ..SessionTabState::default()
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -2392,6 +2451,7 @@ mod tests {
             chat_draft: String::new(),
             browser_url: "https://example.org/probe".into(),
             editor_path: String::new(),
+            ..SessionTabState::default()
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -2427,6 +2487,166 @@ mod tests {
             restored.tab_states[0].browser_url,
             "https://example.org/probe"
         );
+    }
+
+    /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
+    /// compile until it is listed here too — and then the round trip below
+    /// covers it.
+    fn every_tab_kind() -> Vec<TabKind> {
+        let all = vec![
+            TabKind::Terminal,
+            TabKind::AgentChat,
+            TabKind::Browser,
+            TabKind::Editor,
+            TabKind::Diff,
+            TabKind::ProjectSettings,
+        ];
+        for kind in &all {
+            match kind {
+                TabKind::Terminal
+                | TabKind::AgentChat
+                | TabKind::Browser
+                | TabKind::Editor
+                | TabKind::Diff
+                | TabKind::ProjectSettings => {}
+            }
+        }
+        all
+    }
+
+    /// Saved and loaded through one map: a kind that can be written can be
+    /// read back. The Editor tab was the one that could not.
+    #[test]
+    fn every_tab_kind_round_trips_through_its_persisted_spelling() {
+        for kind in every_tab_kind() {
+            assert_eq!(
+                kind_from_persisted(persisted_kind(kind)),
+                Some(kind),
+                "{kind:?} is written as {:?} and must read back",
+                persisted_kind(kind)
+            );
+        }
+        assert_eq!(kind_from_persisted("hologram"), None);
+    }
+
+    /// #323 saved an Editor tab's file and the loader still skipped the tab
+    /// as "not restorable in this build".
+    #[test]
+    fn an_editor_tab_survives_the_round_trip_through_the_store() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("editor-tab-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let file = working_directory.join("notes.md");
+        std::fs::write(&file, "# notes\n").expect("fixture file");
+        let state = SessionTabState {
+            editor_path: file.to_string_lossy().into_owned(),
+            ..SessionTabState::with_root(0)
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "file".into(),
+                title: "notes.md".into(),
+                kind: "file".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![state.clone()],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = store.restore_tabs_for(&working_directory);
+        assert_eq!(
+            restored.tabs.len(),
+            1,
+            "the editor tab must not be skipped: {:?}",
+            restored.diagnostics
+        );
+        assert_eq!(restored.tabs[0].kind, "file");
+        assert_eq!(restored.tab_states[0].editor_path, state.editor_path);
+    }
+
+    /// `encode` copies the struct field by field, so a new field forgotten
+    /// there is dropped on the way to disk with nothing else to notice.
+    #[test]
+    fn the_pane_changes_and_settings_fields_survive_the_round_trip_to_disk() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("pane-changes-settings-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let state = SessionTabState {
+            shown_in_pane: true,
+            commit_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            changes_focus: "src/lib.rs".into(),
+            settings_project_id: "project-7".into(),
+            ..SessionTabState::with_root(0)
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "changes".into(),
+                title: "Changes".into(),
+                kind: "diff".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![state.clone()],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/tmp"));
+        assert_eq!(restored.tab_states, vec![state]);
+    }
+
+    #[test]
+    fn a_hidden_secondary_pane_survives_a_layout_save_and_a_reopen() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("hidden-pane-survives-layout-save");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&working_directory, three_tabs()));
+        store.flush_now();
+
+        store.save_secondary_pane_hidden(&working_directory, true);
+
+        store.schedule(layout(&working_directory, three_tabs()));
+        store.flush_now();
+        assert!(
+            store.secondary_pane_hidden_for(&working_directory),
+            "a layout save must not un-hide the secondary pane"
+        );
+
+        let reopened = SessionStore::open(&db_path);
+        assert!(
+            reopened.secondary_pane_hidden_for(&working_directory),
+            "the hidden flag must survive a reopen"
+        );
+    }
+
+    /// A session written before these fields existed still loads, with each
+    /// at its "nothing captured" default.
+    #[test]
+    fn a_tab_state_written_before_the_new_fields_decodes_to_their_defaults() {
+        let decoded = SessionTabState::decode(r#"{"root_id":3,"pane_events":[]}"#)
+            .expect("an old state decodes");
+        assert_eq!(decoded, SessionTabState::with_root(3));
+        assert!(!decoded.shown_in_pane);
+        assert!(decoded.commit_sha.is_empty());
+        assert!(decoded.changes_focus.is_empty());
+        assert!(decoded.settings_project_id.is_empty());
     }
 
     #[test]
@@ -3654,24 +3874,24 @@ mod tests {
         store.schedule_catalog(&catalog);
 
         assert!(
-            !store.secondary_pane_open_for(&root),
-            "a worktree that never opened the pane reads closed"
+            !store.secondary_pane_hidden_for(&root),
+            "a worktree that never hid the pane reads visible"
         );
 
-        store.save_secondary_pane_open(&root, true);
-        assert!(store.secondary_pane_open_for(&root), "the flag round-trips");
+        store.save_secondary_pane_hidden(&root, true);
+        assert!(store.secondary_pane_hidden_for(&root), "the flag round-trips");
 
-        // Any later boot re-runs this; it must not close the pane.
+        // Any later boot re-runs this; it must not un-hide the pane.
         store.schedule_catalog(&catalog);
         assert!(
-            store.secondary_pane_open_for(&root),
+            store.secondary_pane_hidden_for(&root),
             "schedule_catalog must not clobber the pane flag"
         );
 
-        store.save_secondary_pane_open(&root, false);
+        store.save_secondary_pane_hidden(&root, false);
         assert!(
-            !store.secondary_pane_open_for(&root),
-            "closing the pane persists too"
+            !store.secondary_pane_hidden_for(&root),
+            "showing the pane persists too"
         );
     }
 

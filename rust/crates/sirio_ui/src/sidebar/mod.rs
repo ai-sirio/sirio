@@ -1464,7 +1464,11 @@ impl Sidebar {
         }
     }
 
-    fn start_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the folder chooser that starts Add Project. Public so the
+    /// centre's no-project state reuses this flow — chooser, the
+    /// not-a-git-repository prompt (F-PRJ-03), `SidebarEvent::AddProject` —
+    /// rather than a copy of it.
+    pub fn start_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_project_menu.close();
         // GPUI's platform path prompt is the one mechanism this codebase
         // opens a chooser with: it routes to the XDG portal on Linux and

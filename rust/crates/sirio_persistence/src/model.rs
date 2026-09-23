@@ -90,15 +90,14 @@ pub struct WorktreeRecord {
     pub is_primary: bool,
     /// User-authored sidebar note for this worktree.
     pub comment: Option<String>,
-    /// Whether this worktree's Secondary centre pane is open (#323).
+    /// Whether this worktree's Secondary centre pane is hidden (v19).
     ///
-    /// Stored, not derived — and that is a deliberate exception to how the
-    /// rest of the centre split works. A tab's half comes from its kind, and
-    /// the pane is normally exactly as present as its tabs are. The one state
-    /// that cannot be derived is "closed while still holding tabs", which is
-    /// what the keyboard toggle produces. Take the toggle away and this
-    /// column must go with it.
-    pub secondary_pane_open: bool,
+    /// Stored, not derived: the pane is part of the layout whether or not it
+    /// holds tabs, and the one thing that cannot be derived is the user
+    /// having hidden it with the keyboard toggle. `false` — visible — is the
+    /// default, for a new worktree and for every worktree that predates the
+    /// column.
+    pub secondary_pane_hidden: bool,
     /// Creation time as Unix milliseconds, when known.
     pub created_at: Option<i64>,
     /// Last update time as Unix milliseconds, when known.
@@ -122,7 +121,7 @@ impl WorktreeRecord {
             comment: None,
             created_at: None,
             updated_at: None,
-            secondary_pane_open: false,
+            secondary_pane_hidden: false,
         }
     }
 }

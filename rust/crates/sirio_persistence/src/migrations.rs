@@ -289,6 +289,9 @@ fn migrate_v15(db: &Transaction) -> Result<(), rusqlite::Error> {
 /// tabs. What cannot be derived is "closed, but still holding tabs" — the
 /// state the keyboard toggle produces. Without that toggle this column would
 /// have no reason to exist.
+///
+/// Superseded by v19, which stores the inverse. This column stays in the
+/// table and is no longer read.
 fn migrate_v16(db: &Transaction) -> Result<(), rusqlite::Error> {
     db.execute_batch(
         "ALTER TABLE worktree
@@ -462,6 +465,21 @@ fn migrate_v18(db: &Transaction) -> Result<(), rusqlite::Error> {
     db.execute_batch("ALTER TABLE tab ADD COLUMN agent_session_id TEXT;")
 }
 
+/// v19 — the Secondary pane's flag, inverted.
+///
+/// v16 stored "open" with `DEFAULT 0`, which was right while the pane existed
+/// only while it held tabs. The pane is now part of the layout from the first
+/// frame, so the stored fact is the exception — the user hid it — and every
+/// worktree, including every existing one, starts visible. v16's column is
+/// left in place and unread: dropping it costs a table rebuild and buys
+/// nothing.
+fn migrate_v19(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE worktree
+         ADD COLUMN secondary_pane_hidden INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -483,6 +501,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v16,
     migrate_v17,
     migrate_v18,
+    migrate_v19,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -878,5 +897,38 @@ mod tests {
             )
             .expect("read the new column");
         assert_eq!(agent_session_id, None);
+    }
+
+    /// v19: the pane flag is inverted. Whatever v16 stored — open or closed —
+    /// every worktree comes out of the migration with its Secondary pane
+    /// visible, because v16's `0` was a default, not a choice.
+    #[test]
+    fn v19_leaves_every_existing_worktree_with_its_secondary_pane_visible() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate_up_to(&mut conn, 18).expect("migrate to the version before the hidden flag");
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path)
+                 VALUES ('project-1', 'Project', '/tmp/project');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx, secondary_pane_open)
+                 VALUES ('was-open', 'project-1', 'main', '/tmp/project', 0, 1);
+             INSERT INTO worktree (id, project_id, branch, path, order_idx, secondary_pane_open)
+                 VALUES ('was-closed', 'project-1', 'feature', '/tmp/feature', 1, 0);",
+        )
+        .expect("seed worktrees under the v16 flag");
+
+        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward");
+
+        let hidden: Vec<(String, i64)> = conn
+            .prepare("SELECT id, secondary_pane_hidden FROM worktree ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(
+            hidden,
+            vec![("was-closed".to_owned(), 0), ("was-open".to_owned(), 0)],
+            "no existing worktree starts with its pane hidden"
+        );
     }
 }

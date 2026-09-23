@@ -27,6 +27,7 @@ pub mod loading;
 pub mod modal;
 pub mod orbit;
 pub mod outline;
+pub mod pane_launcher;
 pub mod project_forms;
 pub mod project_identity;
 pub mod right_panel;
@@ -36,6 +37,7 @@ pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod titlebar;
+pub mod worktree_picker;
 
 // P32: visual-bar conformance suite — test-only module, no rendering code.
 #[cfg(test)]
