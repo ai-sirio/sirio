@@ -1,12 +1,15 @@
 //! The turn rail: one hairline tick per user message, along the left edge of
-//! the transcript. The tick for the turn under the viewport's top edge is
-//! drawn longer and brighter (the latest turn while following the tail or
-//! scrolled to the end); hovering a tick previews its message in a
-//! [`TurnPreview`] card, clicking it scrolls the transcript to that turn.
+//! the transcript. It stays out of sight until the pointer reaches its strip
+//! of the left margin, then fades in with its ticks growing out of the edge.
+//! The tick for the turn under the viewport's top edge is drawn longer and
+//! brighter (the latest turn while following the tail or scrolled to the
+//! end); hovering a tick previews its message in a [`TurnPreview`] card,
+//! clicking it scrolls the transcript to that turn.
 //!
 //! Everything that decides *what* the rail shows is pure and lives up here;
 //! the element itself is built from bezel's tokens in `Chat::render_turn_rail`.
 
+use bezel::motion::{Fade, Painter, hover_listener, hover_t};
 use bezel::theme::{Theme as BezelTheme, ink};
 use bezel::ui::widgets::{ButtonStyle, Buttons};
 use bezel::ui::{popover, surface};
@@ -21,9 +24,9 @@ use super::{Chat, Entry};
 /// Longest preview a tick offers on hover — the fold row's own clip, so a
 /// turn reads the same whether it is named by its fold or by its tick.
 pub(crate) const PREVIEW_MAX_CHARS: usize = super::TURN_LABEL_MAX_CHARS;
-/// Step between ticks when the transcript has room for it — ChatGPT's rail
-/// spaces its ticks about this far apart on a full-height window.
-pub(crate) const REST_GAP: Pixels = px(20.0);
+/// Step between ticks when the transcript has room for it: tight enough
+/// that the rail reads as one column rather than a scatter of marks.
+pub(crate) const REST_GAP: Pixels = px(10.0);
 /// Tightest the ticks pack before the rail simply runs out of viewport.
 pub(crate) const MIN_GAP: Pixels = px(3.0);
 
@@ -119,15 +122,26 @@ pub(crate) fn tick_gap(count: usize, available: Pixels) -> Pixels {
     fitted.clamp(MIN_GAP, REST_GAP)
 }
 
-/// Where the rail's left edge sits inside `chat-root`.
+/// The strip that reveals the rail, along `chat-root`'s left edge: the
+/// transcript's own left padding, so hovering it never means hovering prose.
+const RAIL_WIDTH: f32 = 24.0;
+/// Where the ticks start inside the strip.
 const RAIL_LEFT: f32 = 6.0;
 /// The transcript's own top padding — the rail starts where the list does.
 const RAIL_TOP: f32 = 28.0;
 /// A resting tick, and the longer one for the current turn.
-const TICK: f32 = 10.0;
-const ACTIVE_TICK: f32 = 16.0;
+pub(crate) const TICK: Pixels = px(5.0);
+pub(crate) const ACTIVE_TICK: Pixels = px(8.0);
 /// Tallest a tick's hit row grows — a hairline alone is nothing to aim at.
 const HIT_ROW: Pixels = px(8.0);
+
+/// A tick's length `shown` of the way through the rail's reveal (`0..=1`,
+/// bezel's hover progress): the ticks grow out of the left edge as they
+/// fade in, and shrink back into it as they fade out.
+pub(crate) fn tick_width(is_active: bool, shown: f32) -> Pixels {
+    let full = if is_active { ACTIVE_TICK } else { TICK };
+    full * shown.clamp(0.0, 1.0)
+}
 
 /// The card a tick opens on hover: the message the tick jumps to, and which
 /// turn it is. Sirio's own view over bezel's `popover_card`, at the hover
@@ -230,6 +244,10 @@ impl Chat {
     /// `relative`) and spanning the transcript list's viewport. Empty for a
     /// transcript with no user message yet.
     ///
+    /// The strip is always there to hover; what fades is its paint. Opacity
+    /// scales only what is drawn, so an invisible strip still hears the
+    /// pointer arrive — `invisible()` would have dropped its listeners too.
+    ///
     /// The viewport height comes from the list as the last frame left it —
     /// all a render pass can see. The canvas at the end asks for one more
     /// frame when the list's fresh layout disagrees, so the rail is right on
@@ -268,16 +286,21 @@ impl Chat {
         let gap = tick_gap(ticks.len(), viewport);
         let row = gap.min(HIT_ROW);
         let count = ticks.len();
+        let reveal = Fade::new(Painter::of(cx), "turn-rail");
+        let shown = hover_t(&reveal);
 
         let mut rail = div()
             .id("turn-rail")
             .debug_selector(|| "turn-rail".into())
             .absolute()
-            .left(px(RAIL_LEFT))
+            .left_0()
             .top(px(RAIL_TOP))
             .h(viewport)
-            .w(px(ACTIVE_TICK))
+            .w(px(RAIL_WIDTH))
+            .pl(px(RAIL_LEFT))
             .overflow_hidden()
+            .opacity(shown)
+            .on_hover(hover_listener(reveal))
             .flex()
             .flex_col()
             .items_start()
@@ -306,7 +329,7 @@ impl Chat {
             let line = div()
                 .debug_selector(move || format!("turn-tick-line-{index}"))
                 .h(px(1.0))
-                .w(px(if is_active { ACTIVE_TICK } else { TICK }))
+                .w(tick_width(is_active, shown))
                 .rounded_full()
                 .bg(if is_active {
                     bezel_theme.text
@@ -573,8 +596,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_grows_out_of_the_edge_as_the_rail_reveals() {
+        assert_eq!(tick_width(false, 0.0), px(0.0));
+        assert_eq!(tick_width(true, 0.0), px(0.0));
+        assert_eq!(tick_width(false, 1.0), TICK);
+        assert_eq!(tick_width(true, 1.0), ACTIVE_TICK);
+        assert_eq!(tick_width(true, 0.5), ACTIVE_TICK / 2.0);
+        // Progress outside 0..1 is clamped: a tick never outgrows its length.
+        assert_eq!(tick_width(false, 1.5), TICK);
+        assert_eq!(tick_width(false, -0.5), px(0.0));
+    }
+
+    #[test]
     fn the_gap_compresses_to_fit_many_turns() {
-        // 60 ticks in 300px cannot keep a 14px step: 5px each fits exactly.
+        // 60 ticks in 300px cannot keep a 10px step: 5px each fits exactly.
         assert_eq!(tick_gap(60, px(300.0)), px(5.0));
         // …and never below the floor, however many turns there are.
         assert_eq!(tick_gap(1000, px(300.0)), MIN_GAP);
