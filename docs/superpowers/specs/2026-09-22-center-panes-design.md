@@ -100,8 +100,11 @@ does nothing while no worktree is selected.
   Secondary. `open_secondary_pane` keeps this job under a new body; the
   startup repair next to `persisted_secondary_pane_open` keeps its job too.
 - **The `×` at the end of the Secondary strip** (`render_secondary_pane_close`)
-  still closes every Secondary tab (#324). The pane stays and shows its
-  launcher. With the strip empty, the `×` is not drawn.
+  closes the pane: the same hide as Ctrl+Shift+B, tabs kept, drawn even over
+  an empty strip and absent only with no worktree selected. The launcher's
+  last tile, **Hide Pane**, does the same. All three go through
+  `set_secondary_pane_hidden`. *Amended in 0.25:* as first implemented, the
+  `×` closed every Secondary tab and left the pane on its launcher (#324).
 
 ### Geometry
 
@@ -189,6 +192,7 @@ are kept wherever the element survives, so no test changes without a reason.
 | Changes (`Icon::Diff`) | `add_changes_tab(None)`; **disabled** when the worktree is not a git repository |
 | Open File (`Icon::File`, Ctrl+O) | dispatches `OpenFile` — the existing native dialog in `handle_open_file`; a cancelled dialog does nothing |
 | Project Settings (`Icon::Settings`) | `add_project_settings_tab` for the project the current worktree belongs to |
+| Hide Pane (`Icon::Close`, Ctrl+Shift+B) | `set_secondary_pane_hidden(true)`, the strip's `×` as a tile (added in 0.25) |
 
 ### No worktree selected
 

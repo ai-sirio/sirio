@@ -3999,6 +3999,7 @@ enum LauncherAction {
     Changes,
     OpenFile,
     ProjectSettings,
+    HidePane,
 }
 
 /// Resolves the labels shown by the running shell from its selected checkout,
@@ -6265,16 +6266,21 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// #324: hides or shows the Secondary pane, *keeping* its tabs. This is
-    /// the gesture the persisted flag exists for -- the `×` at the end of the
-    /// Secondary strip closes the tabs instead, and the two must not be
-    /// conflated: if `×` merely hid the pane it would duplicate this and
-    /// should not exist.
+    /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane.
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
+        self.set_secondary_pane_hidden(!self.secondary_pane_hidden, cx);
+    }
+
+    /// Hides or shows the Secondary pane, *keeping* its tabs, and persists
+    /// the choice for the current worktree. Every gesture that closes the
+    /// pane lands here — Ctrl+Shift+B, the strip's `×`, the launcher's
+    /// Hide Pane tile — so they cannot drift apart. Without a worktree
+    /// there is nothing to own the flag, and nothing happens.
+    fn set_secondary_pane_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
         if !self.has_current_worktree() {
             return;
         }
-        self.secondary_pane_hidden = !self.secondary_pane_hidden;
+        self.secondary_pane_hidden = hidden;
         self.session
             .save_secondary_pane_hidden(&self.working_directory, self.secondary_pane_hidden);
         // Hiding the pane the user was typing in would otherwise leave focus
@@ -12908,9 +12914,9 @@ impl SirioWorkspace {
         }
     }
 
-    /// The Secondary pane's launcher: every surface that lives in that half.
-    /// Changes needs git and Project Settings a project; each says why when
-    /// it cannot be used.
+    /// The Secondary pane's launcher: every surface that lives in that half,
+    /// then the pane's own close. Changes needs git and Project Settings a
+    /// project; each says why when it cannot be used.
     fn secondary_launcher_items(&self) -> Vec<LauncherItem<LauncherAction>> {
         let project = self.current_catalog_project();
         vec![
@@ -12948,6 +12954,14 @@ impl SirioWorkspace {
                 disabled: project
                     .is_none()
                     .then(|| "This worktree belongs to no project".into()),
+            },
+            LauncherItem {
+                id: "launcher-hide-pane",
+                action: LauncherAction::HidePane,
+                icon: Icon::Close,
+                label: "Hide Pane".into(),
+                shortcut: Some(window_shortcut_hint(WindowCommand::ToggleSecondaryPane).into()),
+                disabled: None,
             },
         ]
     }
@@ -13001,6 +13015,7 @@ impl SirioWorkspace {
                     self.add_project_settings_tab(&project_id, cx);
                 }
             }
+            LauncherAction::HidePane => self.set_secondary_pane_hidden(true, cx),
         }
     }
 
@@ -14782,11 +14797,13 @@ impl SirioWorkspace {
             })
     }
 
-    /// #320: the `×` at the end of the Secondary strip. It **closes the
-    /// pane's tabs**, and the pane stays, back on its launcher — it
-    /// does not hide the pane. That distinction is the whole reason this
-    /// control is allowed to exist beside `ctrl-shift-b`, which hides and
-    /// keeps: a `×` that merely hid would be a second spelling of the toggle.
+    /// The `×` at the end of the Secondary strip: it closes the pane, the
+    /// same hide Ctrl+Shift+B does, and the tabs stay for when the pane comes
+    /// back. Until 0.25 it closed every Secondary tab and left the pane on
+    /// its launcher (#320); with the pane drawn from the first frame, the
+    /// thing a user reaches for in its header is the pane's own close. Drawn
+    /// even over an empty strip, since the pane is there to close. The
+    /// tooltip names the chord, which is also the way back.
     fn render_secondary_pane_close(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
         div()
             .id("secondary-pane-close")
@@ -14802,27 +14819,20 @@ impl SirioWorkspace {
             .rounded(theme.radii.control)
             .text_color(theme.text_faint)
             .hover(|style| style.bg(theme.element_hover))
-            .on_click(move |_, window, cx| {
+            .tooltip(|window, cx| {
+                bezel::ui::tooltip::Tooltip::with_keystroke(
+                    "Hide Pane",
+                    window_shortcut_hint(WindowCommand::ToggleSecondaryPane),
+                    window,
+                    cx,
+                )
+            })
+            .on_click(move |_, _, cx| {
                 entity.update(cx, |workspace, cx| {
-                    workspace.close_secondary_pane_tabs(window, cx);
+                    workspace.set_secondary_pane_hidden(true, cx);
                 });
             })
             .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text_faint))
-    }
-
-    /// Closes every Secondary tab, one real close each — the same path a tab's
-    /// own `×` takes, so a dirty editor's guard and a browser's native
-    /// teardown are not skipped by closing the pane instead of its tabs.
-    fn close_secondary_pane_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<usize> = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
-            .map(|tab| tab.id)
-            .collect();
-        for id in ids {
-            self.close_tab_by_id(id, Some(window), cx);
-        }
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -16094,16 +16104,11 @@ impl SirioWorkspace {
                                     window,
                                     cx,
                                 ))
-                                .when(
-                                    self.tabs
-                                        .iter()
-                                        .any(|tab| tab.kind.pane_role() == PaneRole::Secondary),
-                                    |this| {
-                                        this.child(
-                                            self.render_secondary_pane_close(*theme, entity.clone()),
-                                        )
-                                    },
-                                )
+                                .when(self.has_current_worktree(), |this| {
+                                    this.child(
+                                        self.render_secondary_pane_close(*theme, entity.clone()),
+                                    )
+                                })
                                 .when(
                                     self.tab_menu_open && menu_role == Some(PaneRole::Secondary),
                                     |this| {
@@ -36797,7 +36802,8 @@ done
 
     /// The Secondary pane is part of the layout from the first frame: a
     /// worktree holding only Primary tabs draws it anyway, showing the
-    /// launcher of the surfaces that live there. Nothing to close, so no `×`.
+    /// launcher of the surfaces that live there — and the way to close it,
+    /// both as the launcher's last tile and as the strip's `×`.
     #[gpui::test]
     async fn drawn_empty_secondary_pane_offers_its_launcher(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -36815,25 +36821,31 @@ done
             "launcher-changes",
             "launcher-open-file",
             "launcher-project-settings",
+            "launcher-hide-pane",
         ] {
             assert!(cx.debug_bounds(selector).is_some(), "{selector} is drawn");
         }
         assert!(
-            cx.debug_bounds("secondary-pane-close").is_none(),
-            "an empty strip has nothing for its `×` to close"
+            cx.debug_bounds("secondary-pane-close").is_some(),
+            "the `×` closes the pane itself, so an empty strip draws it too"
         );
     }
 
-    /// The `×` closes the Secondary tabs (#324) and the pane stays, back on
-    /// its launcher.
+    /// The strip's `×` closes the Secondary pane the way Ctrl+Shift+B does:
+    /// the pane goes, its tabs stay, and bringing the pane back brings them
+    /// back rather than the launcher.
     #[gpui::test]
-    async fn closing_every_secondary_tab_leaves_the_pane_on_its_launcher(
-        cx: &mut TestAppContext,
-    ) {
+    async fn the_secondary_close_hides_the_pane_and_keeps_its_tabs(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
         let project_settings = cx
             .debug_bounds("launcher-project-settings")
             .expect("the launcher offers Project Settings");
@@ -36846,15 +36858,64 @@ done
 
         let close = cx
             .debug_bounds("secondary-pane-close")
-            .expect("a strip with a tab draws its `×`");
+            .expect("the strip draws its `×`");
         cx.simulate_click(close.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("pane-secondary").is_some(), "the pane stays");
         assert!(
-            cx.debug_bounds("secondary-launcher").is_some(),
-            "and shows its launcher again"
+            cx.debug_bounds("pane-secondary").is_none(),
+            "the `×` closes the pane"
         );
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.secondary_pane_hidden, "closed is the persisted hide");
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.kind == TabKind::ProjectSettings),
+                "the pane's tab survives the close"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-secondary").is_some(),
+            "Ctrl+Shift+B brings the pane back"
+        );
+        assert!(
+            cx.debug_bounds("secondary-launcher").is_none(),
+            "with its settings tab, not the launcher"
+        );
+    }
+
+    /// The launcher's own Hide Pane tile hides the empty pane.
+    #[gpui::test]
+    async fn the_launcher_hide_tile_hides_the_empty_secondary_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let tile = cx
+            .debug_bounds("launcher-hide-pane")
+            .expect("the launcher offers Hide Pane");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("pane-secondary").is_none(),
+            "the tile closes the pane"
+        );
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.secondary_pane_hidden, "closed is the persisted hide");
+        });
     }
 
     #[gpui::test]
@@ -36878,6 +36939,17 @@ done
         );
 
         open_palette_for_test(&mut cx, &workspace);
+        // Filter every row away: a palette row is itself a button, and one
+        // that happened to lie over the tile — "New Browser Tab" does at
+        // this size — would open a Browser through the palette and hide the
+        // very leak this test is for. With no row left, a Browser tab can
+        // only come from the click reaching the launcher.
+        cx.simulate_input("no command matches this");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("command-palette-empty").is_some(),
+            "the palette shows no row to click"
+        );
         let launcher_center = cx
             .debug_bounds("launcher-browser")
             .expect("the launcher is still drawn under the palette")
@@ -36976,6 +37048,10 @@ done
         assert!(
             cx.debug_bounds("secondary-launcher").is_none(),
             "nothing can be launched without a worktree"
+        );
+        assert!(
+            cx.debug_bounds("secondary-pane-close").is_none(),
+            "nor closed: the hidden flag is kept per worktree, and there is none"
         );
     }
 
@@ -37717,8 +37793,8 @@ browser  profile  "
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// #324: the toggle hides the pane and *keeps* its tabs. Conflating it
-    /// with the strip's `×`, which closes them, is the mistake this guards.
+    /// #324: the toggle hides the pane and *keeps* its tabs — as does the
+    /// strip's `×`, which shares its path (`set_secondary_pane_hidden`).
     #[gpui::test]
     async fn the_toggle_hides_the_secondary_pane_without_closing_its_tabs(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
