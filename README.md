@@ -25,7 +25,10 @@
 </h3>
 
 <p align="center">
-  <img src="assets/readme/hero.png" alt="Sirio with a project's three worktrees in the sidebar, a native Claude Code chat, PLAN.md rendered beside it and the Files panel on the right" width="960" />
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/hero.png" />
+    <img src="assets/readme/sirio-promo.gif" alt="A short tour of Sirio: live worktree status in the sidebar, Claude Code, OpenCode and Pi side by side, a native Claude chat, the Changes review, a Markdown preview that follows its file, and Claude splitting the window with sirioctl" width="960" />
+  </picture>
 </p>
 
 ## Features
