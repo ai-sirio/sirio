@@ -2628,11 +2628,6 @@ impl ChangesTab {
                     self.split_right_max_width,
                     self.split_viewport,
                 );
-            } else {
-                self.split_left_max_width = px(0.0);
-                self.split_right_max_width = px(0.0);
-                self.split_left_x = px(0.0);
-                self.split_right_x = px(0.0);
             }
             self.unified_width_dirty = false;
             self.unified_x = clamped_x(
@@ -6021,20 +6016,47 @@ mod tests {
         assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.split_left_x), left_x);
         assert!(tab.read_with(&cx.cx, |tab, _| tab.split_right_x) < px(0.0));
 
-        for selector in ["changes-view-mode-0", "changes-view-mode-1", "changes-view-mode-0"] {
-            let segment = cx.debug_bounds(selector).unwrap();
-            cx.simulate_click(segment.center(), Modifiers::none());
-            cx.run_until_parked();
-        }
-        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
+        let split_positions = tab.read_with(&cx.cx, |tab, _| {
+            (tab.split_left_x, tab.split_right_x)
+        });
+        let unified = cx.debug_bounds("changes-view-mode-0").unwrap();
+        cx.simulate_click(unified.center(), Modifiers::none());
+        cx.run_until_parked();
         let split = cx.debug_bounds("changes-view-mode-1").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
+        cx.update(|window, app| {
+            window.refresh();
+            window.simulate_next_frame(app);
+        });
+        cx.run_until_parked();
+        let (restored, left_width, right_width, viewport) = tab.read_with(&cx.cx, |tab, _| {
+            (
+                (tab.split_left_x, tab.split_right_x),
+                tab.split_left_max_width,
+                tab.split_right_max_width,
+                tab.split_viewport,
+            )
+        });
+        assert!(
+            left_width > viewport && right_width > viewport,
+            "both sides still overflow"
+        );
+        assert_eq!(
+            restored, split_positions,
+            "Split → Unified → Split preserves valid X offsets"
+        );
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
         let file = cx.debug_bounds("changes-file-row").unwrap();
         cx.simulate_click(file.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("changes-split-left-horizontal-bar-track").is_none());
         assert!(cx.debug_bounds("changes-split-right-horizontal-bar-track").is_none());
+        assert_eq!(
+            tab.read_with(&cx.cx, |tab, _| (tab.split_left_x, tab.split_right_x)),
+            (px(0.0), px(0.0)),
+            "collapsing expanded split content resets offsets with no remaining overflow"
+        );
     }
 
     #[gpui::test]
