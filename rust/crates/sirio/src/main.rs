@@ -3992,6 +3992,7 @@ struct WorktreeContext {
     branch: String,
     path: String,
     activity_label: String,
+    is_git: bool,
 }
 
 /// Resolves the labels shown by the running shell from its selected checkout,
@@ -4007,6 +4008,7 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
                     project.name.clone(),
                     worktree.branch.clone(),
                     worktree.is_primary,
+                    project.is_git,
                 )
             })
     });
@@ -4015,8 +4017,12 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| working_directory.to_string_lossy().into_owned());
-    let (project, catalog_branch, is_primary) =
-        catalog_entry.unwrap_or((fallback_project, String::new(), false));
+    let (project, catalog_branch, is_primary, is_git) = catalog_entry.unwrap_or((
+        fallback_project,
+        String::new(),
+        false,
+        is_git_repository(working_directory),
+    ));
     let branch = read_head_label(working_directory)
         .or_else(|| (is_primary && !catalog_branch.is_empty()).then_some(catalog_branch.clone()))
         .or_else(|| (!catalog_branch.is_empty()).then_some(catalog_branch))
@@ -4026,6 +4032,7 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         branch: branch.clone(),
         path: display_path(working_directory),
         activity_label: format!("{project}/{branch}"),
+        is_git,
     }
 }
 
@@ -8944,8 +8951,9 @@ impl SirioWorkspace {
         let selected_path_for_panel = selected_path.clone();
         let files_snapshot = self.files_snapshots.get(&selected_path).cloned();
         self.right_panel = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot(
+            RightPanel::with_activity_and_snapshot_for_project(
                 selected_path_for_panel,
+                context.is_git,
                 activity,
                 files_snapshot,
             )
@@ -9448,10 +9456,12 @@ impl SirioWorkspace {
         // the gate and render performs the next reconciliation.
         let has_worktree = self.has_current_worktree();
         let working_directory = self.working_directory.clone();
+        let working_directory_is_git =
+            worktree_context(&self.project_catalog, &working_directory).is_git;
         self.right_panel.update(cx, |panel, cx| {
             panel.set_activity(activity, cx);
             if has_worktree {
-                panel.bind_worktree(working_directory, cx);
+                panel.bind_worktree(working_directory, working_directory_is_git, cx);
             } else {
                 panel.clear_worktree(cx);
             }
@@ -10333,6 +10343,7 @@ impl SirioWorkspace {
 
     fn rebind_changes_tabs(&mut self, cx: &mut Context<Self>) {
         let working_directory = self.working_directory.clone();
+        let is_git = worktree_context(&self.project_catalog, &working_directory).is_git;
         let current_tab_ids: HashSet<usize> =
             self.tab_ids_for_worktree(&working_directory).collect();
         for tab in &mut self.tabs {
@@ -10340,7 +10351,9 @@ impl SirioWorkspace {
                 continue;
             }
             let pane_id = tab.focused_pane;
-            let changes = cx.new(|cx| ChangesTab::new(working_directory.clone(), cx));
+            let changes = cx.new(|cx| {
+                ChangesTab::new_with_git_capability(working_directory.clone(), is_git, cx)
+            });
             Self::subscribe_changes_tab(&changes, cx);
             tab.panes = PaneNode::leaf(pane_id, TabContent::Changes(changes));
         }
@@ -12062,7 +12075,10 @@ impl SirioWorkspace {
             return;
         }
 
-        let changes = cx.new(|cx| ChangesTab::new(self.working_directory.clone(), cx));
+        let is_git = worktree_context(&self.project_catalog, &self.working_directory).is_git;
+        let changes = cx.new(|cx| {
+            ChangesTab::new_with_git_capability(self.working_directory.clone(), is_git, cx)
+        });
         Self::subscribe_changes_tab(&changes, cx);
         // F-CHG-13: OpenDiff(path) expects the Changes tab to do something
         // path-specific with that file, not just open the generic multi-file
@@ -18311,9 +18327,13 @@ fn restore_tabs_with_terminal_cache(
                 };
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(
-                cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
-            ),
+            "diff" => TabContent::Changes(cx.new(|cx| {
+                ChangesTab::new_with_git_capability(
+                    working_directory.to_path_buf(),
+                    is_git_repository(working_directory),
+                    cx,
+                )
+            })),
             "browser" => {
                 let Some(window) = window.as_deref_mut() else {
                     continue;
@@ -18629,9 +18649,13 @@ fn restore_tabs_in_workspace(
                 });
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(
-                cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
-            ),
+            "diff" => TabContent::Changes(cx.new(|cx| {
+                ChangesTab::new_with_git_capability(
+                    working_directory.to_path_buf(),
+                    is_git_repository(working_directory),
+                    cx,
+                )
+            })),
             "browser" => {
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
