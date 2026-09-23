@@ -27,9 +27,11 @@ __pycache__/
 *.pyc
 
 # Local tool/IDE/planning artifacts — not shared repo content. docs/ stays
-# local except two directories the repo itself depends on. Both need the
+# local except three directories the repo itself depends on. Each needs the
 # `/docs/*` + `!` shape, because a parent excluded with `/docs/` could not
 # be re-included:
+#   - agents: CLAUDE.md sends the engineering skills there for the issue
+#     tracker, the triage labels and the domain docs.
 #   - release-notes: release.yml refuses a tag whose
 #     docs/release-notes/<version>.md is missing.
 #   - superpowers/specs: shipped rustdoc links into them by URL (sirio_apply
@@ -39,6 +41,7 @@ __pycache__/
 #     are execution scaffolding and go stale the moment the work lands.
 /.codegraph/
 /docs/*
+!/docs/agents/
 !/docs/release-notes/
 !/docs/superpowers/
 /docs/superpowers/*
