@@ -5,6 +5,7 @@
 //! `docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md` §3.
 
 mod mermaid;
+mod plantuml;
 mod svg;
 
 use std::borrow::Cow;
@@ -209,6 +210,20 @@ pub fn store(dir: &Path, key: &str, svg: &Svg) -> std::io::Result<PathBuf> {
 
 /// Renders one diagram. Blocking: the caller picks the thread.
 pub fn render(kind: DiagramKind, source: &str, options: &Options) -> Result<Svg, DiagramError> {
+    render_with_search_path(
+        kind,
+        source,
+        options,
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+}
+
+fn render_with_search_path(
+    kind: DiagramKind,
+    source: &str,
+    options: &Options,
+    search_path: &std::ffi::OsStr,
+) -> Result<Svg, DiagramError> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(DiagramError::TooLarge);
     }
@@ -216,7 +231,9 @@ pub fn render(kind: DiagramKind, source: &str, options: &Options) -> Result<Svg,
     let source = source.replace("\r\n", "\n");
     match kind {
         DiagramKind::Mermaid => mermaid::render(&source, &options.palette),
-        DiagramKind::PlantUml => Err(DiagramError::NotAvailable),
+        DiagramKind::PlantUml => {
+            plantuml::render_local(&source, options, search_path, plantuml::LOCAL_TIMEOUT)
+        }
     }
 }
 
