@@ -170,10 +170,16 @@ a div registers its mouse listeners before painting its children
 `Interactivity::paint`) and the capture phase walks listeners in
 registration order (`Window::dispatch_mouse_event`). A test drags over the sidebar
 and asserts no indicator is drawn. The indicator and
-overlay are drawn only while `cx.has_active_drag()` holds, so a stale target
-left by a drag that ended without a drop (Escape, release outside the window
-— the case `schedule_panel_width_save` documents) is never visible, and the
-next `on_drag` resets it. `cancel_tab_drag` clears it too.
+overlay are drawn only while a tab drag is in flight. The pinned gpui has no
+typed accessor for the active drag (`App::active_drag` is `pub(crate)`; only
+`has_active_drag()` is public), so "a tab drag" is `tab_drag_snapshot`
+(which gains `dragged: usize`, the tab being dragged) together with
+`cx.has_active_drag()`. A drag that ends without a drop (release outside the
+window — the case `schedule_panel_width_save` documents) would leave both the
+snapshot and the target behind, and a later divider drag would then read as a
+tab drag; so `render` clears both whenever no drag is active. That is sound
+because the snapshot exists only for Escape *during* a drag.
+`cancel_tab_drag` clears the target too.
 
 ### Drop on the other strip
 
@@ -182,7 +188,10 @@ The per-tab `on_drag_move::<RowDrag>` splits in two:
 - dragged tab in the **same** half → `preview_tab_reorder`, unchanged;
 - dragged tab in the **other** half and movable → `pane_drop_target =
   { pane: this half, anchor: Some((id, before)) }`; the strip draws a 2 px
-  vertical insertion bar in bezel's accent on that side of the tab.
+  vertical insertion bar in `theme.text` — the colour of the focused tab's
+  underline — on that side of the tab (`tab-drop-indicator-<id>`). Not
+  `theme.accent`: that token is the quantity blue of meters and progress
+  bars.
 
 The strip container's existing `on_drop::<RowDrag>` calls
 `move_tab_to_pane` when a target is set, then clears the snapshot and the
@@ -195,17 +204,20 @@ restoring.
 
 ### Drop on the other pane's body
 
-While a tab drag is in flight, the *other* half's surface is covered by an
-absolutely positioned drop overlay (accent tint at low opacity, accent
-border) that sets `pane_drop_target = { pane, anchor: None }` and, on drop,
-moves the tab to the end of that strip. This includes an empty half showing
-its launcher.
+While a movable tab is being dragged, the *other* half's surface is covered
+by an absolutely positioned drop overlay (`pane-drop-overlay-<half>`) that
+sets `pane_drop_target = { pane, anchor: None }` and, on drop, moves the tab
+to the end of that strip. It is transparent until it is the target, then
+filled with `theme.element_active` and outlined in `theme.border_strong`.
+This includes an empty half showing its launcher.
 
 A Browser is a native child window above GPUI's surface (#376), so it would
 paint over the overlay and swallow the release. `overlay_obscures_browsers`
-gains a `tab_drag_active` parameter, fed from `cx.has_active_drag()` in
-`sync_browser_overlay_obscured`; the page is unmapped for the drag and mapped
-again after it.
+gains a `tab_drag_toward_secondary` parameter — true exactly when the overlay
+is drawn over the Secondary half, i.e. a movable tab is being dragged out of
+Primary — fed in `sync_browser_overlay_obscured`; the page is unmapped for
+that drag and mapped again after it. A drag of a Secondary tab never blanks
+the page.
 
 ### Refused silently
 
@@ -253,9 +265,14 @@ Pane.
   tile: `empty_chat_picker_open: bool` becomes `Option<PaneRole>`. The right
   picker's selector is `secondary-empty-chat-agent-menu`; the left keeps
   `empty-chat-agent-menu` and its `empty-chat-agent-<id>` rows.
-- `add_terminal_tab*` and `add_chat_tab` take the target half. Every existing
-  caller passes `kind.default_pane()`, so Ctrl+T, `+`, the sidebar, Resume
-  Chat and `sirioctl` behave exactly as today.
+- The creation paths are untouched: a Secondary tile opens its tab through
+  the same `open_action` / `open_chat_agent` as everywhere else — so in its
+  home half — and then calls `move_tab_to_pane(new_id, Secondary, None, …)`
+  in the same update (`open_in_pane`). No frame is drawn in between, so the
+  PTY is sized once, in the right half, and `move_tab_to_pane` stays the only
+  writer of `pane`. A creation that opens nothing (a chat refused with a
+  toast) moves nothing. Ctrl+T, `+`, the sidebar, Resume Chat and `sirioctl`
+  behave exactly as today.
 
 ## §6 Persistence and restore
 
