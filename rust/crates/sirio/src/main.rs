@@ -7451,6 +7451,12 @@ impl SirioWorkspace {
             SidebarEvent::ContextAction { target, action } => {
                 self.handle_sidebar_context_action(target, *action, cx)
             }
+            // Wired by the sessions host task; ignored until then.
+            SidebarEvent::ViewChanged(_)
+            | SidebarEvent::CloseSessionTab(_)
+            | SidebarEvent::CloseParkedTab { .. }
+            | SidebarEvent::ReopenClosedChat(_)
+            | SidebarEvent::DeleteClosedChat(_) => {}
         }
     }
 
