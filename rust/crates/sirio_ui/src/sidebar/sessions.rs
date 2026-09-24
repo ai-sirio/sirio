@@ -123,7 +123,7 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
     }
     // `sort_by` is stable: equal times keep tree order.
     open.sort_by(|a, b| newest_first(a.at, b.at));
-    let closed = closed
+    let mut closed = closed
         .iter()
         .filter_map(|session| {
             let index = rows.iter().position(|row| {
@@ -152,6 +152,8 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
             })
         })
         .collect::<Vec<_>>();
+    // `sort_by` is stable: equal close times keep input order.
+    closed.sort_by(|a, b| newest_first(a.at, b.at));
     SessionList {
         open: open
             .into_iter()
@@ -384,6 +386,32 @@ mod tests {
         assert_eq!(list.closed[0].branch, "feat/x");
         assert_eq!(list.closed[0].target, SessionTarget::Closed("kept".into()));
         assert_eq!(list.closed[0].at, Some(4));
+    }
+
+    #[test]
+    fn closed_sessions_are_newest_first_and_ties_keep_input_order() {
+        let rows = vec![project(0, "p"), worktree(1, "main", "/r/main", Vec::new())];
+        let closed = [
+            ("old", 10),
+            ("tie-first", 30),
+            ("middle", 20),
+            ("tie-second", 30),
+        ]
+        .into_iter()
+        .map(|(tab_id, closed_at)| ClosedSession {
+            tab_id: tab_id.into(),
+            worktree_path: PathBuf::from("/r/main"),
+            title: tab_id.into(),
+            agent: None,
+            closed_at,
+        })
+        .collect::<Vec<_>>();
+
+        let list = session_list(&rows, &closed, "");
+        assert_eq!(
+            keys(&list.closed),
+            ["tie-first", "tie-second", "middle", "old"]
+        );
     }
 
     #[test]
