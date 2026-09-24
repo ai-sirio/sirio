@@ -4747,6 +4747,7 @@ impl Chat {
         if let Some(client) = &self.client {
             let _ = client.respond_permission(request_id, option.id.clone());
         }
+        self.clear_question_answer_focus();
         cx.notify();
     }
 
@@ -16172,6 +16173,41 @@ let answer = 42;
             chat.entries.iter().any(|entry| {
                 matches!(entry, Entry::Permission { resolved: None, expired: true, .. })
             }) && chat.has_completed_turn
+        });
+    }
+
+    /// Choosing a listed answer discards any typed draft owned by that request.
+    #[gpui::test]
+    async fn choosing_an_option_clears_the_typed_answer(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Bl");
+        cx.run_until_parked();
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        let blue = cx
+            .debug_bounds("permission-option-blue")
+            .expect("the Blue answer is drawn");
+        cx.simulate_click(blue.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Blue"
+            ));
+            assert!(chat.question_answer.draft.is_empty());
+            assert_eq!(chat.question_answer.for_request, None);
         });
     }
 
