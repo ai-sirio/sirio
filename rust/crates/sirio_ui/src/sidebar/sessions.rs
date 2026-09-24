@@ -507,3 +507,231 @@ mod tests {
         assert_eq!(agent_name(AgentBrandColor::Unknown), "");
     }
 }
+
+/// Wall-clock now in Unix milliseconds.
+pub(super) fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// What one session card renders from, compared before it notifies.
+#[derive(Clone, PartialEq)]
+pub(super) struct SessionRowInputs {
+    pub(super) row: SessionRow,
+    pub(super) index: usize,
+    pub(super) time: String,
+}
+
+/// One session card as its own view, like `RowView`: a travelling bloom's
+/// lease re-renders this card and no other.
+pub(super) struct SessionRowView {
+    pub(super) sidebar: gpui::Entity<Sidebar>,
+    pub(super) inputs: SessionRowInputs,
+    pub(super) render_count: u64,
+}
+
+impl Render for SessionRowView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("SessionRowView.render", self.inputs.index as u64);
+        self.render_count = self.render_count.wrapping_add(1);
+        let theme = *Theme::get(cx);
+        Sidebar::render_session_row(self.inputs.clone(), self.sidebar.clone(), theme, window, cx)
+            .into_any_element()
+    }
+}
+
+impl Sidebar {
+    pub(super) fn render_session_row(
+        inputs: SessionRowInputs,
+        sidebar: gpui::Entity<Sidebar>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<SessionRowView>,
+    ) -> impl IntoElement {
+        let SessionRowInputs { row, index, time } = inputs;
+        let group = format!("session-group-{index}");
+        let select_target = row.target.clone();
+        let select_entity = sidebar.clone();
+        let close_target = row.target.clone();
+        let status = match RowStatusGlyph::for_status(row.status, theme) {
+            RowStatusGlyph::Running(tint) => Some(
+                div()
+                    .id(("session-status-running", index))
+                    .debug_selector(move || format!("session-status-running-{index}"))
+                    .flex_none()
+                    .child(loading::bloom(
+                        "session-running-bloom",
+                        loading::BLOOM_GLYPH,
+                        tint,
+                        &theme,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element(),
+            ),
+            RowStatusGlyph::Settled(tint) => Some(
+                div()
+                    .id(("session-status-settled", index))
+                    .debug_selector(move || format!("session-status-settled-{index}"))
+                    .flex_none()
+                    .child(loading::settled_bloom(
+                        "session-settled-bloom",
+                        loading::BLOOM_GLYPH,
+                        tint,
+                    ))
+                    .into_any_element(),
+            ),
+            RowStatusGlyph::None => (row.status == Some(ActivityStatus::Idle)).then(|| {
+                div()
+                    .debug_selector(move || format!("session-idle-{index}"))
+                    .flex_none()
+                    .text_size(theme.typography.scaled(11.0))
+                    .text_color(theme.text_faint)
+                    .child("idle")
+                    .into_any_element()
+            }),
+        };
+        div()
+            .id(("session", index))
+            .debug_selector(move || format!("session-{index}"))
+            .group(group.clone())
+            .relative()
+            .w_full()
+            .h(px(Self::row_drawn_height_for_card(&theme.typography)))
+            .px(px(12.0))
+            .py(px(7.0))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(ROW_GAP))
+            .when(row.selected, |this| this.bg(theme.element_active))
+            .when(!row.selected, |this| this.hover(|style| style.bg(theme.element_hover)))
+            .on_click(move |_, _, cx| {
+                let event = match &select_target {
+                    SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
+                    SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab {
+                        path: path.clone(),
+                        index: *index,
+                    },
+                    SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id.clone()),
+                };
+                select_entity.update(cx, |_, cx| cx.emit(event));
+            })
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .line_height(Self::title_line_height(&theme.typography))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_none()
+                            .child(
+                                IconElement::new(row.icon, IconSize::Small)
+                                    .text_color(Self::pill_icon_color(row.brand, theme)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(theme.typography.scaled(ROW_TITLE_FONT_SIZE))
+                            .text_color(theme.text)
+                            .child(row.title.clone()),
+                    )
+                    .when_some(status, |this, status| this.child(status)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .pl(px(22.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .line_height(px(ROW_SUB_LINE_HEIGHT))
+                    .text_size(theme.typography.scaled(12.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .child(row.project.clone()),
+                    )
+                    .child(
+                        IconElement::new(Icon::GitBranch, IconSize::XSmall)
+                            .text_color(theme.text_faint),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(theme.text_faint)
+                            .child(row.branch.clone()),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || format!("session-time-{index}"))
+                            .flex_none()
+                            .text_size(theme.typography.scaled(11.5))
+                            .text_color(theme.text_faint)
+                            .group_hover(group.clone(), |style| style.invisible())
+                            .child(time),
+                    ),
+            )
+            .when(!matches!(close_target, SessionTarget::Closed(_)), |this| {
+                let close_entity = sidebar.clone();
+                this.child(
+                    div()
+                        .id(("session-close", index))
+                        .debug_selector(move || format!("session-close-{index}"))
+                        .absolute()
+                        .right(px(10.0))
+                        .bottom(px(5.0))
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radii.chip)
+                        .bg(theme.surface_raised)
+                        .invisible()
+                        .group_hover(group.clone(), |style| style.visible())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            let event = match &close_target {
+                                SessionTarget::Open(id) => SidebarEvent::CloseSessionTab(*id),
+                                SessionTarget::Parked { path, index } => {
+                                    SidebarEvent::CloseParkedTab {
+                                        path: path.clone(),
+                                        index: *index,
+                                    }
+                                },
+                                SessionTarget::Closed(_) => return,
+                            };
+                            close_entity.update(cx, |_, cx| cx.emit(event));
+                        })
+                        .child(
+                            IconElement::new(Icon::Close, IconSize::XSmall)
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
+    }
+
+    /// A session card's height: the worktree card's two-line rhythm at the
+    /// persisted interface size.
+    pub(super) fn row_drawn_height_for_card(typography: &Typography) -> f32 {
+        CARD_TWO_LINE_HEIGHT + f32::from(Self::title_line_height(typography))
+            - ROW_TITLE_LINE_HEIGHT
+    }
+}
