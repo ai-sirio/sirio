@@ -2744,6 +2744,7 @@ mod tests {
             // widths: this round trip is what proves the SessionStore layer
             // carries a silenced-language list through to its SQLite row.
             lsp_silenced_languages: r#"["java"]"#.into(),
+            markdown_plantuml_server: "http://plantuml.test".into(),
         };
 
         {
@@ -2777,6 +2778,10 @@ mod tests {
                 ("general.autoNaming".into(), "true".into()),
                 ("general.summarizerAgent".into(), "codex".into()),
                 ("lsp.silencedLanguages".into(), r#"["java"]"#.into()),
+                (
+                    "markdown.plantumlServer".into(),
+                    "http://plantuml.test".into(),
+                ),
                 ("session.resumeAgentSessions".into(), "false".into()),
                 ("updates.enabled".into(), "true".into()),
                 ("usage.claudeVisible".into(), "false".into()),

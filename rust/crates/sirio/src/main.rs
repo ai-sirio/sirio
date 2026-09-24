@@ -19471,6 +19471,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
+        markdown_plantuml_server: String::new(),
     }
 }
 
@@ -30906,6 +30907,7 @@ done
             right_panel_width: 405,
             center_split_ratio: 610,
             lsp_silenced_languages: "[]".to_string(),
+            markdown_plantuml_server: String::new(),
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -31082,6 +31084,7 @@ done
             right_panel_width: 405,
             center_split_ratio: 610,
             lsp_silenced_languages: "[]".to_string(),
+            markdown_plantuml_server: String::new(),
         };
         store.save_settings(&persisted);
 
