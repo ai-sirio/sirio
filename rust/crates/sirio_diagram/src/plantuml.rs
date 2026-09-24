@@ -56,17 +56,37 @@ fn absolute_search_path(search_path: &OsStr) -> OsString {
     .unwrap_or_default()
 }
 
-/// The allowlist root as PlantUML sees it: canonicalised, because PlantUML
-/// canonicalises the included file but not this entry. Falls back to the
-/// path as given when the worktree cannot be read.
-fn allowlist_path(options: &Options) -> OsString {
-    let canonical = std::fs::canonicalize(&options.include_root)
-        .unwrap_or_else(|_| options.include_root.clone());
-    let mut text = canonical.as_os_str().to_string_lossy().into_owned();
-    if cfg!(windows) {
-        text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned();
+/// The allowlist roots PlantUML checks `!include` against: the given
+/// absolute `include_root` and its canonical form, deduplicated — versions
+/// differ on whether an absolute include path is canonicalised before the
+/// check. Joined with PlantUML's own separators (`;` on Windows, `:`
+/// elsewhere). Falls back to the path as given when the worktree cannot be
+/// read.
+fn allowlist_value(options: &Options) -> OsString {
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let mut roots = vec![normalize_allowlist_root(&options.include_root)];
+    if let Ok(canonical) = std::fs::canonicalize(&options.include_root) {
+        let text = normalize_allowlist_root(&canonical);
+        if text != roots[0] {
+            roots.push(text);
+        }
     }
-    text.into()
+    roots.join(separator).into()
+}
+
+/// One allowlist root as PlantUML compares it. On Windows a canonicalised
+/// root arrives with a `\\?\` prefix (devices) or a `\\?\UNC\` one
+/// (network shares); neither ever matches an include path, so both go.
+fn normalize_allowlist_root(path: &Path) -> String {
+    let mut text = path.as_os_str().to_string_lossy().into_owned();
+    if cfg!(windows) {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            text = format!(r"\\{rest}");
+        } else {
+            text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned();
+        }
+    }
+    text
 }
 
 #[cfg(unix)]
@@ -117,24 +137,20 @@ pub(crate) fn render_local(
         .ok_or_else(|| DiagramError::Io("plantuml printed no SVG".into()))
 }
 
-/// Runs `program` with piped stdio from the Markdown file's directory:
-/// `input` on stdin, stdout and stderr collected on threads of their own (a
-/// diagram big enough to fill a pipe would otherwise deadlock against a
-/// child blocked writing). Sandboxed (design §3) through the environment —
-/// the `ALLOWLIST` security profile blocks URLs and environment variables,
-/// and `plantuml.allowlist.path` admits files only under the worktree;
-/// PlantUML reads both from the environment as well as from Java system
-/// properties, so no JVM flag has to reach the launcher. Past `timeout` the
-/// whole process tree is killed. Shared by `-version` and the render.
-fn run_piped(
+/// The child `Command` for `<program> args`: sandboxed through the
+/// environment (design §3) — the `ALLOWLIST` security profile blocks URLs
+/// and environment variables, and the allowlist admits files only under the
+/// worktree; PlantUML reads both from the environment as well as from Java
+/// system properties, so no JVM flag has to reach the launcher — offline-safe
+/// and scrubbed of anything that would widen the sandbox again. Shared by
+/// `-version` and the render.
+fn plantuml_command(
     program: &Path,
     args: &[&str],
-    input: &[u8],
     options: &Options,
     search_path: &OsStr,
-    timeout: Duration,
-) -> Result<(ExitStatus, Vec<u8>, String), DiagramError> {
-    let allowed = allowlist_path(options);
+) -> Command {
+    let allowed = allowlist_value(options);
     let mut command = Command::new(program);
     command
         .args(args)
@@ -166,9 +182,24 @@ fn run_piped(
     {
         command.env("NoDefaultCurrentDirectoryInExePath", "1");
     }
+    command
+}
+
+/// Runs `program` with piped stdio from the Markdown file's directory:
+/// `input` on stdin, stdout and stderr collected on threads of their own (a
+/// diagram big enough to fill a pipe would otherwise deadlock against a
+/// child blocked writing). Past `timeout` the whole process tree is killed.
+fn run_piped(
+    program: &Path,
+    args: &[&str],
+    input: &[u8],
+    options: &Options,
+    search_path: &OsStr,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>, String), DiagramError> {
     // `find_program` already resolved the program: anything missing now (the
     // working directory, the launcher's interpreter) is an I/O error.
-    let mut child = command
+    let mut child = plantuml_command(program, args, options, search_path)
         .spawn()
         .map_err(|error| DiagramError::Io(error.to_string()))?;
 
@@ -239,10 +270,29 @@ fn kill_tree(child: &mut Child) {
     }
 }
 
+/// The grandchild is gone: signal 0 fails, or (on Linux) it lingers as a
+/// zombie — killed, but not yet reaped by its (also dead) parent. Only the
+/// timeout test reads it.
+#[cfg(all(unix, test))]
+fn grandchild_gone(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            && let Some(state) = stat.rsplit(')').next()
+        {
+            return state.trim_start().starts_with('Z');
+        }
+    }
+    false
+}
+
 /// The `-version` verdict per program path and modification time, so the
-/// JVM starts for `-version` once per program, not per diagram: `Ok` the
-/// sandboxable banner, `Err` the banner too old to sandbox, or `"unknown"`.
-type VersionVerdict = Result<String, String>;
+/// JVM starts for `-version` once per program, not per diagram. Only
+/// verdicts are cached — a failed run is its own error, returned fresh.
+type VersionVerdict = Result<(), DiagramError>;
 type VersionCache = Mutex<HashMap<(PathBuf, SystemTime), VersionVerdict>>;
 
 fn version_cache() -> &'static VersionCache {
@@ -264,52 +314,54 @@ fn sandboxed_program(
         .and_then(|meta| meta.modified())
         .ok()
         .map(|modified| (program.to_path_buf(), modified));
-    let verdict = cache_key
-        .clone()
-        .and_then(|key| {
+    if let Some(key) = cache_key.clone()
+        && let Some(verdict) = version_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .cloned()
+    {
+        return verdict;
+    }
+    let fresh = check_version(program, options, search_path, timeout);
+    if let Some(key) = cache_key {
+        // Only a verdict is cached: a failed run must run again.
+        if matches!(&fresh, Ok(()) | Err(DiagramError::Unsandboxed { .. })) {
             version_cache()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&key)
-                .cloned()
-        })
-        .unwrap_or_else(|| {
-            let fresh = check_version(program, options, search_path, timeout);
-            if let Some(key) = cache_key {
-                version_cache()
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(key, fresh.clone());
-            }
-            fresh
-        });
-    verdict
-        .map(|_| ())
-        .map_err(|version| DiagramError::Unsandboxed { version })
+                .insert(key, fresh.clone());
+        }
+    }
+    fresh
 }
 
-/// Runs `<program> -version`: `Ok` the banner of a PlantUML new enough to
-/// sandbox, `Err` the banner (or `"unknown"`) of one that is not.
+/// Runs `<program> -version`: `Ok` for a PlantUML new enough to sandbox. A
+/// release too old (or an exit-0 run with no parseable banner) is
+/// `Unsandboxed`; a run that fails is its own error, never a verdict.
 fn check_version(
     program: &Path,
     options: &Options,
     search_path: &OsStr,
     timeout: Duration,
-) -> Result<String, String> {
-    let (status, stdout, _) = run_piped(program, &["-version"], &[], options, search_path, timeout)
-        .map_err(|_| "unknown".to_string())?;
+) -> Result<(), DiagramError> {
+    let (status, stdout, stderr) =
+        run_piped(program, &["-version"], &[], options, search_path, timeout)?;
     if !status.success() {
-        return Err("unknown".into());
+        return Err(DiagramError::Io(last_stderr_line(&stderr).unwrap_or_else(
+            || format!("plantuml -version exited with {status}"),
+        )));
     }
     match parse_version(&String::from_utf8_lossy(&stdout)) {
-        Some((year, number)) if (year, number) >= MIN_SANDBOXABLE => {
-            Ok(format!("1.{year}.{number}"))
-        }
-        Some((year, number)) => Err(format!("1.{year}.{number}")),
-        None => Err("unknown".into()),
+        Some((year, number)) if (year, number) >= MIN_SANDBOXABLE => Ok(()),
+        Some((year, number)) => Err(DiagramError::Unsandboxed {
+            version: format!("1.{year}.{number}"),
+        }),
+        None => Err(DiagramError::Unsandboxed {
+            version: "unknown".into(),
+        }),
     }
 }
-
 /// The first `1.YYYY.N` in `banner`: its year and release number.
 fn parse_version(banner: &str) -> Option<(u32, u32)> {
     let bytes = banner.as_bytes();
@@ -385,6 +437,8 @@ fn syntax_error(stderr: &str) -> DiagramError {
 mod tests {
     use super::*;
     use crate::{DiagramKind, render, scratch_dir, test_options};
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
     use std::net::TcpListener;
     use std::time::Instant;
 
@@ -408,16 +462,22 @@ mod tests {
     /// `-version` first, because `render_local` checks it before rendering.
     #[cfg(unix)]
     fn fake_plantuml_with_version(dir: &Path, banner: &str, body: &str) {
+        write_fake_plantuml(
+            dir,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo '{banner}'; exit 0; fi\n{body}\n"
+            ),
+        );
+    }
+
+    /// A fake with full control over the script, for version checks that do
+    /// not answer cleanly.
+    #[cfg(unix)]
+    fn write_fake_plantuml(dir: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).expect("bin dir");
         let path = dir.join("plantuml");
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo '{banner}'; exit 0; fi\n{body}\n"
-            ),
-        )
-        .expect("write fake plantuml");
+        std::fs::write(&path, script).expect("write fake plantuml");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
@@ -484,12 +544,7 @@ mod tests {
             env.lines()
                 .any(|line| line == "PLANTUML_SECURITY_PROFILE=ALLOWLIST")
         );
-        let allowed = allowlist_path(&options);
-        assert!(
-            env.lines().any(
-                |line| line == format!("plantuml.allowlist.path={}", allowed.to_string_lossy())
-            )
-        );
+        let allowed = allowlist_value(&options);
         assert!(
             env.lines().any(
                 |line| line == format!("PLANTUML_ALLOWLIST_PATH={}", allowed.to_string_lossy())
@@ -510,6 +565,45 @@ mod tests {
             std::fs::canonicalize(pwd.trim()).expect("pwd exists"),
             std::fs::canonicalize(&docs).expect("docs exists")
         );
+    }
+
+    /// The sandbox as the `Command` carries it: dash drops dotted env names,
+    /// so the dotted allowlist entry is asserted here, not in the shell.
+    #[test]
+    fn the_child_environment_is_sandboxed() {
+        let root = scratch_dir("plantuml-env");
+        let options = test_options(&root);
+        let search_path = std::env::var_os("PATH").unwrap_or_default();
+        let command = plantuml_command(Path::new("plantuml"), &["-tsvg"], &options, &search_path);
+        let env: HashMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
+        assert_eq!(
+            env.get(OsStr::new("PLANTUML_SECURITY_PROFILE")).copied(),
+            Some(Some(OsStr::new("ALLOWLIST")))
+        );
+        let allowed = allowlist_value(&options);
+        assert_eq!(
+            env.get(OsStr::new("plantuml.allowlist.path")).copied(),
+            Some(Some(allowed.as_os_str()))
+        );
+        assert_eq!(
+            env.get(OsStr::new("PLANTUML_ALLOWLIST_PATH")).copied(),
+            Some(Some(allowed.as_os_str()))
+        );
+        for name in [
+            "PLANTUML_INCLUDE_PATH",
+            "plantuml.include.path",
+            "PLANTUML_ALLOWLIST_URL",
+            "plantuml.allowlist.url",
+            "JAVA_TOOL_OPTIONS",
+            "_JAVA_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+        ] {
+            assert_eq!(
+                env.get(OsStr::new(name)).copied(),
+                Some(None),
+                "{name} is scrubbed"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -621,6 +715,120 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_failing_version_check_is_an_io_error_not_too_old() {
+        let root = scratch_dir("plantuml-version-fails");
+        let bin = root.join("bin");
+        write_fake_plantuml(
+            &bin,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'java: not found' >&2; exit 127; fi\ncat > /dev/null\nprintf '%s' 'unused'\n",
+        );
+        assert_eq!(
+            render_local(
+                "A -> B",
+                &test_options(&root),
+                &path_with(&bin),
+                LOCAL_TIMEOUT
+            ),
+            Err(DiagramError::Io("java: not found".into()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_version_check_is_not_cached() {
+        let root = scratch_dir("plantuml-version-uncached");
+        let bin = root.join("bin");
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).expect("out");
+        let out_dir = out.display();
+        write_fake_plantuml(
+            &bin,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo done >> '{out_dir}/versions'; exit 1; fi\ncat > /dev/null\nprintf '%s' '{SVG}'\n"
+            ),
+        );
+        let options = test_options(&root);
+        let search_path = path_with(&bin);
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    render_local("A -> B", &options, &search_path, LOCAL_TIMEOUT),
+                    Err(DiagramError::Io(_))
+                ),
+                "a failed check is its own error"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(out.join("versions"))
+                .expect("versions")
+                .lines()
+                .count(),
+            2,
+            "a failed check runs again"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_verdict_is_cached() {
+        let root = scratch_dir("plantuml-version-cached");
+        let bin = root.join("bin");
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).expect("out");
+        let out_dir = out.display();
+        write_fake_plantuml(
+            &bin,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo done >> '{out_dir}/versions'; echo 'PlantUML version 1.2024.3 (Sun Jan 28 2024)'; exit 0; fi\nprintf '%s' '{SVG}'\n"
+            ),
+        );
+        let options = test_options(&root);
+        let search_path = path_with(&bin);
+        for _ in 0..2 {
+            render_local("A -> B", &options, &search_path, LOCAL_TIMEOUT).expect("renders");
+        }
+        assert_eq!(
+            std::fs::read_to_string(out.join("versions"))
+                .expect("versions")
+                .lines()
+                .count(),
+            1,
+            "the verdict runs once"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_allowlist_holds_the_root_and_its_canonical_form() {
+        let root = scratch_dir("plantuml-allowlist");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        std::os::unix::fs::symlink(&real, root.join("link")).expect("symlink");
+        let linked = Options {
+            working_dir: root.join("link"),
+            include_root: root.join("link"),
+            ..test_options(&root)
+        };
+        let canonical = std::fs::canonicalize(&root).unwrap_or(root.clone());
+        assert_eq!(
+            allowlist_value(&linked),
+            std::ffi::OsString::from(format!(
+                "{}:{}/real",
+                root.join("link").display(),
+                canonical.display()
+            ))
+        );
+        let plain = test_options(&root);
+        let single = allowlist_value(&plain).to_string_lossy().into_owned();
+        assert_eq!(
+            single.split(':').count(),
+            1,
+            "a non-symlinked root is a single entry: {single}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_hung_plantuml_and_its_children_are_killed_at_the_timeout() {
         let root = scratch_dir("plantuml-tree");
         let bin = root.join("bin");
@@ -653,8 +861,7 @@ mod tests {
             .expect("pid parses");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            // Signal 0: succeeds while the process still exists.
-            if unsafe { libc::kill(grandchild, 0) } != 0 {
+            if grandchild_gone(grandchild) {
                 break;
             }
             assert!(
@@ -710,12 +917,29 @@ mod tests {
     }
 
     fn real_plantuml() -> bool {
-        let found =
-            find_program("plantuml", &std::env::var_os("PATH").unwrap_or_default()).is_some();
-        if !found {
+        let search_path = std::env::var_os("PATH").unwrap_or_default();
+        let Some(program) = find_program("plantuml", &search_path) else {
             eprintln!("SKIP: plantuml is not on PATH");
+            return false;
+        };
+        // The version check never renders, so any scratch-free directory does.
+        let probe_dir = std::env::temp_dir();
+        match sandboxed_program(
+            &program,
+            &test_options(&probe_dir),
+            &search_path,
+            LOCAL_TIMEOUT,
+        ) {
+            Ok(()) => true,
+            Err(DiagramError::Unsandboxed { .. }) => {
+                eprintln!("SKIP: plantuml too old to sandbox");
+                false
+            }
+            Err(error) => {
+                eprintln!("SKIP: plantuml -version failed: {error:?}");
+                false
+            }
         }
-        found
     }
 
     #[test]
@@ -764,21 +988,19 @@ mod tests {
         .expect("an include inside the worktree renders");
         assert!(inside.markup.contains("INSIDE"));
 
-        // An include outside the worktree is refused as a syntax error. If
-        // the installed PlantUML predates security profiles, nothing below
-        // can run sandboxed: skip instead of failing.
-        match render(
-            DiagramKind::PlantUml,
-            &format!("!include {}\n", outside.join("secret.puml").display()),
-            &options,
-        ) {
-            Err(DiagramError::Syntax { .. }) => {}
-            Err(DiagramError::Unsandboxed { .. }) => {
-                eprintln!("SKIP: plantuml too old to sandbox");
-                return;
-            }
-            other => panic!("an include outside the worktree must be refused, got {other:?}"),
-        }
+        // An include outside the worktree is refused as a syntax error
+        // (`real_plantuml` already skipped binaries too old to sandbox).
+        assert!(
+            matches!(
+                render(
+                    DiagramKind::PlantUml,
+                    &format!("!include {}\n", outside.join("secret.puml").display()),
+                    &options,
+                ),
+                Err(DiagramError::Syntax { .. })
+            ),
+            "an include outside the worktree must be refused"
+        );
 
         let _ = render(
             DiagramKind::PlantUml,
