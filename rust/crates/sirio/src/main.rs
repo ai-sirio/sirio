@@ -454,7 +454,8 @@ fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 10] {
         (WindowCommand::NewBrowser, "ctrl-shift-l"),
         (WindowCommand::FocusAddressBar, "ctrl-l"),
         // Spec 2026-09-24 §5: the `ctrl-shift-` family survives inside a
-        // terminal. Windows delivery is to be probed the way #374 probed S/I/O before a release; if it is swallowed there, slide it here.
+        // terminal. Windows delivery is to be probed the way #374 probed
+        // S/I/O before a release; if it is swallowed there, slide it here.
         (WindowCommand::MoveTabToOtherPane, "ctrl-shift-m"),
     ]
 }
@@ -1160,7 +1161,7 @@ impl OpenTab {
     /// in the Primary half would break the invariant `pane` carries.
     fn set_kind(&mut self, kind: TabKind) {
         self.kind = kind;
-        self.pane = TabKind::default_pane(kind);
+        self.pane = kind.default_pane();
     }
 }
 
@@ -4355,13 +4356,10 @@ struct SirioWorkspace {
     restore_focus_pending: bool,
     tabs: Vec<OpenTab>,
     active_tab: usize,
-    /// F-TAB-24: the tab order (by id) and active tab id at the moment a
-    /// tab drag started, captured in `render_open_tab`'s `on_drag`.
-    /// `preview_tab_reorder` mutates `tabs` live on every hover crossing
-    /// (there is no separate "commit on drop" step), so this is the only
-    /// record of what to put back if the drag is cancelled instead of
-    /// dropped. Cleared on a real drop (`render_open_tabs`'s
-    /// `on_drop::<RowDrag>`) and on Escape (`cancel_tab_drag`).
+    /// The pre-drag tab order and active tab id: the Escape-cancel snapshot,
+    /// and also the "a tab drag is live" marker used by `pane_drop_overlay_role`
+    /// and browser obscuring. Cleared by `drop_on_pane` (strip or overlay),
+    /// `cancel_tab_drag`, and `render` when no drag is active.
     tab_drag_snapshot: Option<TabDragSnapshot>,
     /// Spec 2026-09-24 §5: where the tab being dragged would land in the
     /// *other* half if released now. Recomputed on every move of a tab drag
@@ -10697,10 +10695,10 @@ impl SirioWorkspace {
         if !rebuild_pane_cache {
             return;
         }
-        // F-TERM-PTY-08: every tab placement transition (MoveTabToOtherPane,
-        // "Move to New Pane", and tab reordering all funnel through here) is a real seam moment -- record each terminal
-        // pane's current placement so the cache stays a true mirror of the
-        // pane tree, not just of the specific moves the row names.
+        // F-TERM-PTY-08: callers that request a pane-cache rebuild come
+        // through this seam, so it re-records every terminal leaf.
+        // `MoveTabToOtherPane` instead calls `move_tab_to_pane`, which tracks
+        // the moved tab directly.
         let tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
         for tab_id in tab_ids {
             self.track_terminal_panes_in_cache(tab_id);
@@ -40325,8 +40323,9 @@ browser  profile  "
         );
     }
 
-    /// Review Focus 3: a restart whose right half was hidden but whose active
-    /// tab is a moved terminal must bring the half back — the same repair
+    /// Review Focus 3: a restore-time rebuild (`rebuild_center_split` on a
+    /// live workspace) with an active moved terminal in the hidden right half
+    /// must reveal it — the same repair
     /// `restoring_an_active_secondary_tab_reopens_the_secondary_pane` pins
     /// for an editor, now reading the stored half.
     #[gpui::test]
