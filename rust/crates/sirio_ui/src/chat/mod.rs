@@ -41,10 +41,12 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
 mod list_scroll;
+mod question_dock;
 mod thought;
 mod tool_calls;
 mod transcript;
 mod turn_rail;
+use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use bezel::ui::widgets::{ButtonStyle, Buttons, Controls, SliderDrag, slider_fraction};
@@ -694,16 +696,19 @@ actions!(
     ]
 );
 
-actions!(chat_question_answer, [SendAnswer, CancelAnswer]);
+actions!(chat_question_answer, [SendAnswer, CancelAnswer, LeaveAnswer]);
 
-/// One option rendered on a question or plan-approval card.
+/// One option offered by an open question, drawn as a row of the dock.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AnswerOption {
     /// Protocol option id sent back to the agent.
     id: String,
     /// Human-readable label.
     label: String,
-    /// Whether the option declines the request, tinted distinctly.
+    /// What choosing it means, shown under the label. Only a native
+    /// `AskUserQuestion` option carries one; never persisted.
+    description: Option<String>,
+    /// Whether the option declines the request.
     is_rejection: bool,
 }
 
@@ -717,10 +722,16 @@ struct AnswerTextInput {
 }
 
 impl AnswerTextInput {
-    fn placeholder(&self) -> String {
-        self.placeholder
-            .clone()
-            .unwrap_or_else(|| "Type an answer".into())
+    /// The declared placeholder; otherwise one that says where the field
+    /// sits — below listed answers it is the way to say something else.
+    fn placeholder(&self, after_options: bool) -> String {
+        self.placeholder.clone().unwrap_or_else(|| {
+            if after_options {
+                "Type something else…".into()
+            } else {
+                "Type an answer".into()
+            }
+        })
     }
 }
 
@@ -759,6 +770,21 @@ struct QuestionAnswerState {
     draft: String,
     /// The request whose answer field currently holds focus.
     for_request: Option<u64>,
+}
+
+/// The question dock's own state: its focus, the row the keyboard is on,
+/// and the request that row belongs to, so a new question starts on its
+/// first row.
+#[derive(Clone, Debug)]
+struct QuestionDockState {
+    /// Focus handle of the dock.
+    focus: FocusHandle,
+    /// The selected row, clamped to the open question's rows when read.
+    selected: usize,
+    /// The request `selected` belongs to.
+    for_request: Option<u64>,
+    /// When the current request first appeared in the dock.
+    shown_at: Option<std::time::Instant>,
 }
 
 /// A tool call nested inside a subagent task card.
@@ -847,6 +873,10 @@ enum Entry {
         options: Vec<AnswerOption>,
         /// Free-text input when the question offers one.
         text_input: Option<AnswerTextInput>,
+        /// Whether the request carried a structured question rather than a
+        /// plain tool gate: a Pi question (prompt blanked because it repeats
+        /// its header) and a permission (no prompt) look alike otherwise.
+        is_question: bool,
         resolved: Option<String>,
         expired: bool,
         /// The user dismissed an unrenderable request; distinct from denial.
@@ -1299,9 +1329,11 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                         is_rejection: option.kind == "reject",
                         id: option.id,
                         label: option.name,
+                        description: None,
                     })
                     .collect(),
                 text_input: None,
+                is_question: false,
                 resolved,
                 expired,
                 dismissed,
@@ -1909,10 +1941,10 @@ pub struct Chat {
     composer_placeholder_shown: String,
     /// F-CHAT-25: the question answer field (focus, draft, owner request).
     question_answer: QuestionAnswerState,
-    /// The answer field's own caret. It lives on `Chat` rather than inside
-    /// `QuestionAnswerState` because that struct is cloned once per frame
-    /// for the render closure, and blink state must not be duplicated —
-    /// one surface, one `Blink`, one timer.
+    /// The question dock above the composer (focus, selected row).
+    question_dock: QuestionDockState,
+    /// The answer field's own caret. It lives on Chat rather than inside
+    /// QuestionAnswerState so there is one surface, one Blink, one timer.
     answer_blink: caret::Blink,
     answer_caret_visible: bool,
     /// The model picker's search row: a real bezel field (`Shape::Line`),
@@ -2270,6 +2302,12 @@ impl Chat {
                 draft: String::new(),
                 for_request: None,
             },
+            question_dock: QuestionDockState {
+                focus: cx.focus_handle().tab_stop(true),
+                selected: 0,
+                for_request: None,
+                shown_at: None,
+            },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
             effort_picker_focus: cx.focus_handle().tab_stop(true),
@@ -2568,6 +2606,18 @@ impl Chat {
             KeyBinding::new("enter", SendAnswer, Some("ChatQuestionAnswer")),
             KeyBinding::new("return", SendAnswer, Some("ChatQuestionAnswer")),
             KeyBinding::new("escape", CancelAnswer, Some("ChatQuestionAnswer")),
+            // The question dock: the arrows move between answers, Enter
+            // takes the selected one, Escape withdraws the question. Digits
+            // are read raw by the dock itself (`on_question_dock_key`).
+            KeyBinding::new("up", DockPrevious, Some("ChatQuestionDock")),
+            KeyBinding::new("down", DockNext, Some("ChatQuestionDock")),
+            KeyBinding::new("enter", DockConfirm, Some("ChatQuestionDock")),
+            KeyBinding::new("return", DockConfirm, Some("ChatQuestionDock")),
+            KeyBinding::new("escape", DockCancel, Some("ChatQuestionDock")),
+            // Up from the typed answer goes back to the listed ones. The
+            // field sits inside the dock, so its context is the deeper one
+            // and wins over the dock's own `up`.
+            KeyBinding::new("up", LeaveAnswer, Some("ChatQuestionAnswer")),
         ]);
     }
 
@@ -2927,6 +2977,7 @@ impl Chat {
                         is_rejection: option.kind.contains("Reject"),
                         id: option.id,
                         label: option.name,
+                        description: option.description,
                     })
                     .collect::<Vec<_>>();
                 let is_plan_approval = title.to_ascii_lowercase().contains("plan")
@@ -2947,11 +2998,19 @@ impl Chat {
                         });
                     }
                 } else {
-                    let has_structured_question = question.is_some();
+                    let is_question = question.is_some();
                     let structured_prompt = question
                         .as_ref()
                         .map(|question| question.prompt.clone())
                         .unwrap_or_default();
+                    // A structured question names itself: its header, not
+                    // the asking tool's title (`Question` on the native
+                    // transport). The header always exists — it falls back
+                    // to the prompt — so Pi's title stays the question text.
+                    let title = question
+                        .as_ref()
+                        .map(|question| question.header.clone())
+                        .unwrap_or(title);
                     let text_input = question
                         .and_then(|question| question.text_input)
                         .map(|input| AnswerTextInput {
@@ -2964,7 +3023,7 @@ impl Chat {
                             // plain permission with no choices is different:
                             // its wire request has no renderable answer, so it
                             // gets Dismiss below instead of a fake option.
-                            (has_structured_question && answer_options.is_empty()).then_some(
+                            (is_question && answer_options.is_empty()).then_some(
                                 AnswerTextInput {
                                     placeholder: None,
                                     prefill: None,
@@ -2977,6 +3036,7 @@ impl Chat {
                         prompt: structured_prompt,
                         options: answer_options,
                         text_input,
+                        is_question,
                         resolved: None,
                         expired: false,
                         dismissed: false,
@@ -4687,6 +4747,7 @@ impl Chat {
         if let Some(client) = &self.client {
             let _ = client.respond_permission(request_id, option.id.clone());
         }
+        self.clear_question_answer_focus();
         cx.notify();
     }
 
@@ -4844,35 +4905,48 @@ impl Chat {
     }
 
     /// The first unanswered question in the transcript, with its entry
-    /// index — the pending bar lives exactly while this is Some (F-CHAT-26).
+    /// index. Found through `question_dock::is_open`, the predicate the dock
+    /// uses, so the disabled composer and the dock agree by construction.
     fn pending_question(&self) -> Option<(usize, String)> {
-        self.entries
+        let (index, entry) = self
+            .entries
             .iter()
             .enumerate()
-            .find_map(|(index, entry)| match entry {
-                Entry::Permission {
-                    title,
-                    resolved: None,
-                    expired: false,
-                    ..
-                } => Some((index, title.clone())),
-                Entry::Plan {
-                    approval:
-                        Some(PlanApproval {
-                            title,
-                            resolved: None,
-                            expired: false,
-                            ..
-                        }),
-                    ..
-                } => Some((index, title.clone())),
-                _ => None,
-            })
+            .find(|(_, entry)| question_dock::is_open(entry))?;
+        match entry {
+            Entry::Permission { title, .. } => Some((index, title.clone())),
+            Entry::Plan {
+                approval: Some(approval),
+                ..
+            } => Some((index, approval.title.clone())),
+            _ => None,
+        }
     }
 
     fn clear_question_answer_focus(&mut self) {
         self.question_answer.draft.clear();
         self.question_answer.for_request = None;
+    }
+
+    /// F-CHAT-25: gives the answer field focus for `request_id`, seeding an
+    /// empty draft from the question's prefill the first time.
+    fn focus_question_answer(
+        &mut self,
+        request_id: u64,
+        prefill: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.question_answer.focus.focus(window, cx);
+        if self.question_answer.for_request != Some(request_id) {
+            self.question_answer.for_request = Some(request_id);
+            if self.question_answer.draft.is_empty()
+                && let Some(prefill) = prefill
+            {
+                self.question_answer.draft = prefill;
+            }
+            cx.notify();
+        }
     }
 
     fn send_action(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
@@ -5259,6 +5333,9 @@ impl Chat {
                 self.answer_question_text(request_id, &draft, cx);
             } else if event.keystroke.key == "escape" {
                 self.cancel_question(request_id, cx);
+            } else if event.keystroke.key == "backspace" {
+                self.question_answer.draft.pop();
+                cx.notify();
             } else if let Some(character) = event.keystroke.key_char.as_deref()
                 && !event.keystroke.modifiers.platform
                 && !event.keystroke.modifiers.control
@@ -5299,23 +5376,20 @@ impl Chat {
         cx.notify();
     }
 
-    /// F-CHAT-25: the answer row of a question card — a text field with the
-    /// question's draft, a Send control, and a Cancel control. The field
-    /// owns the `ChatQuestionAnswer` key context while focused.
+    /// F-CHAT-25: the typed-answer field of a question, drawn in the dock's
+    /// free-text row. Enter sends and Escape withdraws (the
+    /// `ChatQuestionAnswer` key context and `on_composer_key`); there are no
+    /// buttons.
     fn render_question_answer_row(
         request_id: u64,
-        input: &AnswerTextInput,
+        placeholder: String,
+        prefill: Option<String>,
         theme: &Theme,
         entity: Entity<Self>,
         question_answer: &QuestionAnswerState,
         caret_visible: bool,
     ) -> AnyElement {
         let typography = theme.typography;
-        let field_entity = entity.clone();
-        let send_entity = entity.clone();
-        let cancel_entity = entity.clone();
-        let placeholder = input.placeholder();
-        let prefill_for_click = input.prefill.clone();
         // The bar always occupies layout, so the answer text does not shift
         // by two pixels every half second as it blinks. An empty field
         // carries it at the placeholder's start (`caret::field_placeholder`,
@@ -5335,101 +5409,51 @@ impl Chat {
         // clicking it seeds the draft from the declared prefill when
         // nothing has been typed yet.
         div()
+            .id(("question-answer-input", request_id))
+            .debug_selector(|| "question-answer-input".into())
+            .key_context("ChatQuestionAnswer")
+            .track_focus(&question_answer.focus)
+            .px(px(8.0))
+            .py(px(5.0))
+            .flex_1()
+            .min_w_0()
+            .rounded(theme.radii.control)
+            .bg(theme.surface_raised)
+            .border_1()
+            .border_color(if question_answer.for_request == Some(request_id) {
+                theme.text
+            } else {
+                theme.border
+            })
+            .text_size(typography.headline)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                let prefill = prefill.clone();
+                entity.update(cx, |chat, cx| {
+                    chat.focus_question_answer(request_id, prefill, window, cx);
+                });
+            })
             .flex()
             .items_center()
-            .gap(px(8.0))
+            // A long answer is clipped from the start, so the tail
+            // being typed stays in view (`caret::field_value`); the
+            // placeholder keeps its start (`caret::field_placeholder`).
+            .overflow_hidden()
             .child(
-                div()
-                    .id(("question-answer-input", request_id))
-                    .debug_selector(|| "question-answer-input".into())
-                    .key_context("ChatQuestionAnswer")
-                    .track_focus(&question_answer.focus)
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .flex_1()
-                    .rounded(theme.radii.control)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(if question_answer.for_request == Some(request_id) {
-                        theme.text
-                    } else {
-                        theme.border
-                    })
-                    .text_size(typography.headline)
-                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                        let prefill = prefill_for_click.clone();
-                        field_entity.update(cx, |chat, cx| {
-                            chat.question_answer.focus.focus(window, cx);
-                            if chat.question_answer.for_request != Some(request_id) {
-                                chat.question_answer.for_request = Some(request_id);
-                                if chat.question_answer.draft.is_empty()
-                                    && let Some(prefill) = prefill
-                                {
-                                    chat.question_answer.draft = prefill;
-                                }
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .flex()
-                    .items_center()
-                    // A long answer is clipped from the start, so the tail
-                    // being typed stays in view (`caret::field_value`); the
-                    // placeholder keeps its start (`caret::field_placeholder`).
-                    .overflow_hidden()
-                    .child(
-                        if question_answer.draft.is_empty() {
-                            caret::field_placeholder(
-                                div().text_color(theme.text_faint).child(placeholder),
-                                Some(answer_caret()),
-                            )
-                        } else {
-                            caret::field_value(
-                                div()
-                                    .text_color(theme.text)
-                                    .child(question_answer.draft.clone()),
-                            )
-                        }
-                        .debug_selector(|| "question-answer-text".into()),
+                if question_answer.draft.is_empty() {
+                    caret::field_placeholder(
+                        div().text_color(theme.text_faint).child(placeholder),
+                        Some(answer_caret()),
                     )
-                    .children((!question_answer.draft.is_empty()).then(answer_caret)),
+                } else {
+                    caret::field_value(
+                        div()
+                            .text_color(theme.text)
+                            .child(question_answer.draft.clone()),
+                    )
+                }
+                .debug_selector(|| "question-answer-text".into()),
             )
-            .child(
-                div()
-                    .id(("question-answer-send", request_id))
-                    .debug_selector(|| "question-answer-send".into())
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.surface_raised)
-                    .text_size(typography.footnote)
-                    .text_color(theme.text)
-                    .hover(|style| style.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        send_entity.update(cx, |chat, cx| {
-                            let draft = chat.question_answer.draft.clone();
-                            chat.answer_question_text(request_id, &draft, cx);
-                        });
-                    })
-                    .child("Send"),
-            )
-            .child(
-                div()
-                    .id(("question-answer-cancel", request_id))
-                    .debug_selector(|| "question-answer-cancel".into())
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.footnote)
-                    .text_color(theme.danger)
-                    .hover(|style| style.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        cancel_entity.update(cx, |chat, cx| {
-                            chat.cancel_question(request_id, cx);
-                        });
-                    })
-                    .child("Cancel"),
-            )
+            .children((!question_answer.draft.is_empty()).then(answer_caret))
             .into_any_element()
     }
 
@@ -5861,8 +5885,6 @@ impl Chat {
         entity: gpui::Entity<Self>,
         transcript_focus: FocusHandle,
         source_start: usize,
-        question_answer: &QuestionAnswerState,
-        answer_caret_visible: bool,
         copied_target: Option<CopyTarget>,
         edit_summary: Option<EditSummaryState>,
         thought_streaming: bool,
@@ -6075,16 +6097,28 @@ impl Chat {
                 request_id,
                 title,
                 prompt,
-                options,
-                text_input,
                 resolved,
                 expired,
                 dismissed,
+                ..
             } => {
+                // The record of a question: what was asked and what became
+                // of it. It is answered from the dock above the composer,
+                // so it carries no buttons in any state.
                 let header = if title.is_empty() {
                     "Permission requested".to_string()
                 } else {
                     title
+                };
+                let status = if let Some(choice) = resolved {
+                    format!("Answered: {choice}")
+                } else if dismissed {
+                    "Dismissed — request cancelled".to_string()
+                } else if expired {
+                    // F-CHAT-27: the turn ended unanswered.
+                    "No answer — the turn ended".to_string()
+                } else {
+                    "Waiting for your answer below".to_string()
                 };
                 let mut card = div()
                     .id(("permission-card", request_id as usize))
@@ -6093,7 +6127,7 @@ impl Chat {
                     .rounded(theme.radii.code_block)
                     .bg(theme.surface_raised)
                     .border_l_2()
-                    .border_color(theme.warning)
+                    .border_color(permission_card_accent(theme))
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
@@ -6113,99 +6147,13 @@ impl Chat {
                             .child(prompt),
                     );
                 }
-                let unrenderable = options.is_empty()
-                    && text_input.is_none()
-                    && resolved.is_none()
-                    && !expired
-                    && !dismissed;
-                if let Some(choice) = resolved {
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .child(format!("Answered: {choice}")),
-                    );
-                } else if dismissed {
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .child("Dismissed — request cancelled"),
-                    );
-                } else if expired {
-                    // F-CHAT-27: the turn ended unanswered; offering the
-                    // buttons again would be a lie.
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .child("No answer — the turn ended"),
-                    );
-                } else if let Some(input) = text_input {
-                    card = card.child(Self::render_question_answer_row(
-                        request_id,
-                        &input,
-                        theme,
-                        entity.clone(),
-                        question_answer,
-                        answer_caret_visible,
-                    ));
-                } else {
-                    let mut row = div().flex().flex_wrap().gap(px(8.0)).gap_y(px(6.0));
-                    for option in options {
-                        let entity = entity.clone();
-                        let option_for_click = option.clone();
-                        let option_id = option.id.clone();
-                        row = row.child(
-                            div()
-                                .id((
-                                    "permission-option",
-                                    request_id as usize ^ option_hash(&option),
-                                ))
-                                .debug_selector(move || format!("permission-option-{option_id}"))
-                                .px(px(10.0))
-                                .py(px(5.0))
-                                .rounded(theme.radii.control)
-                                .bg(theme.surface_raised)
-                                .text_size(typography.footnote)
-                                .text_color(if option.is_rejection {
-                                    theme.danger
-                                } else {
-                                    theme.text
-                                })
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    entity.update(cx, |chat, cx| {
-                                        chat.respond_permission(request_id, &option_for_click, cx);
-                                    });
-                                })
-                                .child(option.label.clone()),
-                        );
-                    }
-                    card = card.child(row);
-                }
-                if unrenderable {
-                    let dismiss_entity = entity.clone();
-                    card = card.child(
-                        div()
-                            .id(("permission-dismiss", request_id as usize))
-                            .debug_selector(move || format!("permission-dismiss-{request_id}"))
-                            .px(px(10.0))
-                            .py(px(5.0))
-                            .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(move |_, _, cx| {
-                                dismiss_entity.update(cx, |chat, cx| {
-                                    chat.dismiss_permission(request_id, cx);
-                                });
-                            })
-                            .child("Dismiss"),
-                    );
-                }
-                card.into_any_element()
+                card.child(
+                    div()
+                        .text_size(typography.footnote)
+                        .text_color(theme.text_faint)
+                        .child(status),
+                )
+                .into_any_element()
             }
             Entry::Plan { entries, approval } => {
                 let completed = entries
@@ -6253,61 +6201,21 @@ impl Chat {
                     );
                 }
                 if let Some(approval) = approval {
-                    if let Some(choice) = &approval.resolved {
-                        card = card.child(
-                            div()
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child(format!("Approved: {choice}")),
-                        );
+                    // Approved from the dock above the composer; the card
+                    // keeps the plan and says what became of the approval.
+                    let status = if let Some(choice) = &approval.resolved {
+                        format!("Approved: {choice}")
                     } else if approval.expired {
-                        card = card.child(
-                            div()
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child("No answer — the turn ended"),
-                        );
+                        "No answer — the turn ended".to_string()
                     } else {
-                        let mut row = div().flex().flex_wrap().gap(px(8.0)).gap_y(px(6.0));
-                        for option in &approval.options {
-                            let entity = entity.clone();
-                            let option_for_click = option.clone();
-                            let option_id = option.id.clone();
-                            let request_id = approval.request_id;
-                            row = row.child(
-                                div()
-                                    .id((
-                                        "permission-option",
-                                        request_id as usize ^ option_hash(option),
-                                    ))
-                                    .debug_selector(move || {
-                                        format!("permission-option-{option_id}")
-                                    })
-                                    .px(px(10.0))
-                                    .py(px(5.0))
-                                    .rounded(theme.radii.control)
-                                    .bg(theme.surface_raised)
-                                    .text_size(typography.footnote)
-                                    .text_color(if option.is_rejection {
-                                        theme.danger
-                                    } else {
-                                        theme.text
-                                    })
-                                    .hover(|style| style.bg(theme.overlay))
-                                    .on_click(move |_, _, cx| {
-                                        entity.update(cx, |chat, cx| {
-                                            chat.respond_permission(
-                                                request_id,
-                                                &option_for_click,
-                                                cx,
-                                            );
-                                        });
-                                    })
-                                    .child(option.label.clone()),
-                            );
-                        }
-                        card = card.child(row);
-                    }
+                        "Waiting for your approval below".to_string()
+                    };
+                    card = card.child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(theme.text_faint)
+                            .child(status),
+                    );
                 }
                 card.into_any_element()
             }
@@ -8893,7 +8801,6 @@ impl Render for Chat {
         // transient spinner below borrows the original.
         let row_bezel_theme = bezel_theme.clone();
         let entity = cx.entity();
-        let entity_for_bar = entity.clone();
         let transcript_ranges = self.transcript_entry_ranges();
         // F-CHAT-22, turn half: resolved once per frame, not once per drawn
         // row — segmenting the transcript is O(entries), and the virtualizer
@@ -8910,8 +8817,12 @@ impl Render for Chat {
             cx,
         );
         self.answer_caret_visible = answer_focused && self.answer_blink.visible();
-        let answer_caret_visible = self.answer_caret_visible;
-        let question_answer = self.question_answer.clone();
+        // The open question's dock, drawn above the queue and the composer;
+        // its selection and focus follow the question first.
+        let question_view = question_dock::question_view(&self.entries);
+        self.sync_question_dock(question_view.as_ref(), window, cx);
+        let dock =
+            question_view.map(|view| self.render_question_dock(view, &theme, &bezel_theme, cx));
         // F-CHAT-13: captured once per render, same as Swift's `canAcceptDrop`
         // — a permission-wait that starts mid-drag simply means the next
         // render (the composer disabling itself already forces one) stops
@@ -8940,6 +8851,7 @@ impl Render for Chat {
             .on_action(cx.listener(Self::popup_accept))
             .on_action(cx.listener(Self::send_answer_action))
             .on_action(cx.listener(Self::cancel_answer_action))
+            .on_action(cx.listener(Self::leave_answer_action))
             .on_key_down(cx.listener(Self::on_composer_key))
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
@@ -9057,8 +8969,6 @@ impl Render for Chat {
                                                                     entity.clone(),
                                                                     transcript_focus.clone(),
                                                                     source_start,
-                                                                    &question_answer,
-                                                                    answer_caret_visible,
                                                                     this.copied_target.clone(),
                                                                     None,
                                                                     this.thought_is_streaming(
@@ -9159,8 +9069,6 @@ impl Render for Chat {
                                             entity.clone(),
                                             transcript_focus.clone(),
                                             source_start,
-                                            &question_answer,
-                                            answer_caret_visible,
                                             this.copied_target.clone(),
                                             this.edit_summaries.get(&entry_index).cloned(),
                                             this.thought_is_streaming(entry_index),
@@ -9225,66 +9133,9 @@ impl Render for Chat {
                     .flex_col()
                     .items_center()
                     .pb(px(18.0))
-                    .when_some(self.pending_question(), |this, (index, title)| {
-                        // F-CHAT-26: the persistent "the agent is waiting on
-                        // you" bar above the composer. It exists exactly
-                        // while a question is unanswered; Show scrolls the
-                        // transcript to the question card.
-                        let show_entity = entity_for_bar.clone();
-                        let bar_typography = theme.typography;
-                        this.child(
-                            div()
-                                .id("pending-question-bar")
-                                .debug_selector(|| "pending-question-bar".into())
-                                .w_full()
-                                .max_w(px(TRANSCRIPT_WIDTH))
-                                .mb(px(8.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded(theme.radii.control)
-                                .bg(theme.surface_raised)
-                                .border_1()
-                                .border_color(theme.warning)
-                                .text_size(bar_typography.footnote)
-                                .child(div().text_color(theme.warning).child("?"))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        // Pi sends the question text itself as the
-                                        // title; without `min_w_0` the row never
-                                        // shrinks below the unwrapped line and Show
-                                        // is pushed past the border (#233 pattern).
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_color(theme.text)
-                                        .child(format!("Question waiting · {title}")),
-                                )
-                                .child(
-                                    div()
-                                        .id("pending-question-show")
-                                        .debug_selector(|| "pending-question-show".into())
-                                        .flex_shrink_0()
-                                        .px(px(8.0))
-                                        .py(px(3.0))
-                                        .rounded(theme.radii.control)
-                                        .text_size(bar_typography.caption2)
-                                        .text_color(theme.text_faint)
-                                        .hover(|style| style.bg(theme.overlay))
-                                        .on_click(move |_, _, cx| {
-                                            show_entity.update(cx, |chat, cx| {
-                                                chat.list_state.scroll_to_reveal_item(index);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child("Show"),
-                                ),
-                        )
-                    })
+                    // F-CHAT-26: the question dock. It exists exactly while
+                    // a question is open and is the one place it is answered.
+                    .children(dock)
                     // #159: nothing is drawn between the composer card and
                     // the bottom of the pane. The working directory used to
                     // sit here as a centred caption, duplicating what the
@@ -9460,12 +9311,6 @@ fn finish_mention_matches(mut relative_paths: Vec<String>, query: &str) -> Vec<S
     });
     ranked.truncate(8);
     ranked
-}
-
-fn option_hash(option: &AnswerOption) -> usize {
-    option.id.bytes().fold(0usize, |acc, byte| {
-        acc.wrapping_mul(31).wrapping_add(byte as usize)
-    })
 }
 
 /// F-CHAT-22: the `[start, end]` bounds (inclusive) of the consecutive run
@@ -9868,6 +9713,13 @@ fn composer_field_edge(theme: &bezel::theme::Theme) -> gpui::Hsla {
 /// visibly brighter than the surface.
 fn composer_border(_focused: bool, theme: &bezel::theme::Theme) -> gpui::Hsla {
     theme.border
+}
+
+/// The question card's accent: the neutral rule the Plan and Rewind cards
+/// wear. It used to be the warning colour, which made an ordinary question
+/// read as an alarm.
+fn permission_card_accent(theme: &Theme) -> Rgba {
+    theme.border_strong
 }
 
 #[cfg(test)]
@@ -10458,6 +10310,64 @@ mod tests {
         let (chat, _) =
             cx.add_window_view(|_, cx| Chat::new(Some(launch), std::env::temp_dir(), cx));
         chat
+    }
+
+    /// A drawn chat that never connects: no subprocess, so nothing expires
+    /// the questions a test pushes and no connection error lands in the
+    /// transcript.
+    fn offline_chat_view(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        cx.add_window_view(|_, cx| {
+            Chat::new(
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
+                std::env::temp_dir(),
+                cx,
+            )
+        })
+    }
+
+    fn focus_composer(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let handle = chat.read(cx).composer_field.read(cx).focus_handle(cx);
+            handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn dock_is_focused(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| chat.read(cx).question_dock.focus.is_focused(window))
+    }
+
+    fn composer_is_focused(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            chat.read(cx)
+                .composer_field
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
+    }
+
+    /// A question with listed answers and a typed one.
+    fn open_question_with_free_text(request_id: u64) -> Entry {
+        Entry::Permission {
+            request_id,
+            title: "Which color?".into(),
+            prompt: "Which color should the button be?".into(),
+            options: question_dock::answer_options(&["Blue", "Green"]),
+            text_input: Some(AnswerTextInput {
+                placeholder: None,
+                prefill: None,
+            }),
+            is_question: true,
+            resolved: None,
+            expired: false,
+            dismissed: false,
+        }
     }
 
     /// A native chat with one sent turn: a user entry whose checkpoint id
@@ -12666,8 +12576,8 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            cx.debug_bounds("permission-dismiss-1").is_some(),
-            "unrenderable permissions expose Dismiss"
+            cx.debug_bounds("question-dock-dismiss").is_some(),
+            "the dock offers Dismiss for a request with nothing to choose"
         );
         assert!(
             cx.debug_bounds("permission-option-allow").is_none(),
@@ -12675,7 +12585,7 @@ let answer = 42;
         );
 
         let dismiss = cx
-            .debug_bounds("permission-dismiss-1")
+            .debug_bounds("question-dock-dismiss")
             .expect("dismiss control");
         cx.simulate_click(dismiss.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12729,7 +12639,7 @@ let answer = 42;
         });
         refresh_frame(cx);
         let dismiss1 = cx
-            .debug_bounds("permission-dismiss-1")
+            .debug_bounds("question-dock-dismiss")
             .expect("first dismiss control");
         cx.simulate_click(dismiss1.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12761,7 +12671,7 @@ let answer = 42;
         });
         refresh_frame(cx);
         let dismiss2 = cx
-            .debug_bounds("permission-dismiss-2")
+            .debug_bounds("question-dock-dismiss")
             .expect("second dismiss control");
         cx.simulate_click(dismiss2.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12817,6 +12727,8 @@ let answer = 42;
         let allow = cx
             .debug_bounds("permission-option-allow")
             .expect("allow button");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(allow.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -12836,6 +12748,8 @@ let answer = 42;
         let deny = cx
             .debug_bounds("permission-option-deny")
             .expect("deny button");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(deny.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -13059,13 +12973,13 @@ let answer = 42;
     /// F-CHAT-25: the "listed option" arm -- a structured question with
     /// populated wire options renders clickable pills instead of a
     /// free-text field; clicking one records the choice on the card,
-    /// clears the pending bar, and the agent receives the chosen option id.
-    /// Sibling of `a_text_answer_leaves_the_surface_and_clears_the_pending_bar`
+    /// clears the dock, and the agent receives the chosen option id.
+    /// Sibling of `a_text_answer_leaves_the_surface_and_clears_the_dock`
     /// below, which drives the text-field arm; this is the arm that was
     /// never re-driven when a later pass touched an unrelated part of the
     /// row.
     #[gpui::test]
-    async fn a_listed_option_leaves_the_surface_and_clears_the_pending_bar(
+    async fn a_listed_option_leaves_the_surface_and_clears_the_dock(
         cx: &mut TestAppContext,
     ) {
         let (chat, cx) = chat_view(cx, &["question-options"]);
@@ -13077,7 +12991,7 @@ let answer = 42;
         cx.run_until_parked();
 
         // The question is pending: option pills are drawn, not a text
-        // field, and the pending bar names the asker.
+        // field, and the dock names the asker.
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(
@@ -13101,26 +13015,28 @@ let answer = 42;
             "both listed options are drawn as clickable pills"
         );
         assert!(
-            cx.debug_bounds("pending-question-bar").is_some(),
-            "the pending-question bar is drawn while the question is open"
+            cx.debug_bounds("question-dock").is_some(),
+            "the dock is drawn while the question is open"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| {
                 chat.pending_question()
-                    .is_some_and(|(_, title)| title == "Ask user question")
+                    .is_some_and(|(_, title)| title == "Which color?")
             }),
-            "the pending bar names the asking tool"
+            "the question is named by its own header, not the asking tool"
         );
 
         // Click the Blue pill.
         let blue = cx
             .debug_bounds("permission-option-blue")
             .expect("the Blue pill is drawn");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(blue.center(), Modifiers::none());
         cx.run_until_parked();
 
-        // The choice left the surface: the card records it, the pending
-        // bar is gone, and the agent received it (echoed back in the turn).
+        // The choice left the surface: the card records it, the dock is
+        // gone, and the agent received it (echoed back in the turn).
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(
@@ -13138,8 +13054,8 @@ let answer = 42;
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_none(),
-            "the pending-question bar is gone after the click"
+            cx.debug_bounds("question-dock").is_none(),
+            "the dock is gone after the click"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| {
@@ -13155,12 +13071,12 @@ let answer = 42;
     }
 
     /// F-CHAT-25 + F-CHAT-26: a structured question renders with a free-text
-    /// field while the pending-question bar sits above the composer; typing
-    /// an answer and pressing Enter records it on the card, clears the bar,
+    /// field in the dock; typing an answer and pressing Enter records it on
+    /// the card, clears the dock,
     /// and the agent echoes the text back — the answer leaves the surface
     /// end to end.
     #[gpui::test]
-    async fn a_text_answer_leaves_the_surface_and_clears_the_pending_bar(cx: &mut TestAppContext) {
+    async fn a_text_answer_leaves_the_surface_and_clears_the_dock(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["question"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         refresh_frame(cx);
@@ -13169,8 +13085,8 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
-        // The question is pending: the card offers the text field, and the
-        // pending bar names the asker.
+        // The question is pending: the dock offers the text field and names
+        // the asker.
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(
@@ -13189,20 +13105,21 @@ let answer = 42;
             "the pending question offers a text answer field"
         );
         assert!(
-            cx.debug_bounds("question-answer-send").is_some()
-                && cx.debug_bounds("question-answer-cancel").is_some(),
-            "Send and Cancel controls are drawn with the field"
+            cx.debug_bounds("question-answer-send").is_none()
+                && cx.debug_bounds("question-answer-cancel").is_none(),
+            "the dock's field answers with Enter and withdraws with Escape; \
+             it carries no Send or Cancel buttons"
         );
         assert!(
-            cx.debug_bounds("pending-question-bar").is_some(),
-            "the pending-question bar is drawn while the question is open"
+            cx.debug_bounds("question-dock").is_some(),
+            "the dock is drawn while the question is open"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| {
                 chat.pending_question()
-                    .is_some_and(|(_, title)| title == "Ask user question")
+                    .is_some_and(|(_, title)| title == "Which color?")
             }),
-            "the pending bar names the asking tool"
+            "the question is named by its own header, not the asking tool"
         );
 
         // Focus the field, type the answer, send it with Enter.
@@ -13215,8 +13132,8 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
-        // The answer left the surface: the card records it, the pending bar
-        // is gone, and the agent received it (echoed back in the turn).
+        // The answer left the surface: the card records it, the dock is
+        // gone, and the agent received it (echoed back in the turn).
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(
@@ -13234,8 +13151,8 @@ let answer = 42;
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_none(),
-            "the pending-question bar is gone after the answer"
+            cx.debug_bounds("question-dock").is_none(),
+            "the dock is gone after the answer"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| {
@@ -13251,7 +13168,7 @@ let answer = 42;
     }
 
     /// F-CHAT-25 (Cancel): withdrawing a pending question marks the card
-    /// no longer answerable and clears the pending state; the turn still
+    /// no longer answerable and clears the dock; the turn still
     /// completes.
     #[gpui::test]
     async fn cancel_on_a_question_closes_it_without_an_answer(cx: &mut TestAppContext) {
@@ -13276,14 +13193,16 @@ let answer = 42;
         });
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_some(),
+            cx.debug_bounds("question-dock").is_some(),
             "the pending bar shows before the cancel"
         );
 
-        let cancel = cx
-            .debug_bounds("question-answer-cancel")
-            .expect("the cancel control is drawn");
-        cx.simulate_click(cancel.center(), Modifiers::none());
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
         pump_chat_until(cx, &chat, |chat| {
@@ -13304,7 +13223,7 @@ let answer = 42;
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_none(),
+            cx.debug_bounds("question-dock").is_none(),
             "the pending bar is gone after the cancel"
         );
         assert!(
@@ -13352,9 +13271,15 @@ let answer = 42;
         });
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_some(),
+            cx.debug_bounds("question-dock").is_some(),
             "the pending bar is up while the question is open"
         );
+
+        // Escape from the composer cancels the turn; the dock's own Escape
+        // withdraws only the question. Give the keyboard back first.
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
 
         // Escape cancels the turn; the protocol answers the pending
         // permission with `cancelled`, and the card must expire instead of
@@ -13383,7 +13308,7 @@ let answer = 42;
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_none(),
+            cx.debug_bounds("question-dock").is_none(),
             "the pending bar clears when the question expires"
         );
         assert!(
@@ -13419,7 +13344,7 @@ let answer = 42;
     }
 
     /// F-CHAT-24: a plan renders as a named Plan card with its entries; a
-    /// pending approval attaches its option buttons to the card, and the
+    /// pending approval draws its option buttons in the dock, and the
     /// approved plan advances in place.
     #[gpui::test]
     async fn a_plan_renders_approval_attaches_and_the_plan_advances(cx: &mut TestAppContext) {
@@ -13464,14 +13389,24 @@ let answer = 42;
             "the plan approval renders both decision buttons"
         );
         assert!(
-            cx.debug_bounds("pending-question-bar").is_some(),
-            "the pending bar covers the plan approval"
+            cx.debug_bounds("question-dock").is_some(),
+            "the dock covers the plan approval"
+        );
+        let dock = cx.debug_bounds("question-dock").expect("the dock is drawn");
+        let approve = cx
+            .debug_bounds("permission-option-approve")
+            .expect("approve is drawn");
+        assert!(
+            approve.top() >= dock.top() && approve.bottom() <= dock.bottom(),
+            "the plan is approved from the dock, not from the Plan card"
         );
 
         // Approve: the decision leaves the surface, the plan advances.
         let approve = cx
             .debug_bounds("permission-option-approve")
             .expect("approve button");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(approve.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -13501,8 +13436,8 @@ let answer = 42;
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("pending-question-bar").is_none(),
-            "the pending bar clears after the approval"
+            cx.debug_bounds("question-dock").is_none(),
+            "the dock clears after the approval"
         );
     }
 
@@ -15817,24 +15752,150 @@ let answer = 42;
         );
     }
 
-    /// The pending-question bar's title never shrank below min-content, so
-    /// a long question title (Pi sends the question text itself as the
-    /// title) ran past the bar's border and pushed Show out of the card.
-    /// The title must truncate (`flex_1` + `min_w_0` + `text_ellipsis`,
-    /// with a `flex_shrink_0` Show) instead of overflowing.
+    /// A structured question is named by its own header, not by the asking
+    /// tool (the native transport's title for every question is the
+    /// constant `Question`), and its options keep their descriptions; a
+    /// plain permission keeps the tool's title and is not a question.
     #[gpui::test]
-    async fn a_long_question_title_does_not_push_show_outside_the_pending_bar(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::from_test_command(
-                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
+    async fn a_question_is_ingested_with_its_header_and_descriptions(cx: &mut TestAppContext) {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::PermissionRequest {
+                    request_id: 7,
+                    session_id: "session".into(),
+                    title: "Question".into(),
+                    options: vec![sirio_acp::PermissionOption {
+                        id: "Docked".into(),
+                        name: "Docked".into(),
+                        kind: "AllowOnce".into(),
+                        description: Some("Sits above the composer".into()),
+                    }],
+                    question: Some(sirio_acp::PermissionQuestion {
+                        header: "Approach".into(),
+                        prompt: "Which layout should the panel use?".into(),
+                        text_input: Some(sirio_acp::PermissionTextInput {
+                            placeholder: None,
+                            prefill: None,
+                        }),
+                    }),
+                },
                 cx,
             );
-            chat.entries.push(Entry::Permission {
+            chat.handle_event(
+                AcpEvent::PermissionRequest {
+                    request_id: 8,
+                    session_id: "session".into(),
+                    title: "/repo/src/main.rs".into(),
+                    options: vec![sirio_acp::PermissionOption {
+                        id: "allow_once".into(),
+                        name: "Allow".into(),
+                        kind: "AllowOnce".into(),
+                        description: None,
+                    }],
+                    question: None,
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            let Some(Entry::Permission {
+                title,
+                prompt,
+                options,
+                text_input,
+                is_question,
+                ..
+            }) = chat.entries.first()
+            else {
+                panic!("the question is recorded: {:?}", chat.entries);
+            };
+            assert_eq!(title, "Approach");
+            assert_eq!(prompt, "Which layout should the panel use?");
+            assert!(*is_question);
+            assert_eq!(
+                options[0].description.as_deref(),
+                Some("Sits above the composer")
+            );
+            assert!(text_input.is_some());
+
+            let Some(Entry::Permission {
+                title, is_question, ..
+            }) = chat.entries.get(1)
+            else {
+                panic!("the permission is recorded: {:?}", chat.entries);
+            };
+            assert_eq!(title, "/repo/src/main.rs");
+            assert!(!*is_question);
+        });
+    }
+
+    /// The dock is where a question is answered: every answer is drawn
+    /// there, one under the other, and none on the transcript's card, which
+    /// keeps the record. Answering takes the dock away.
+    #[gpui::test]
+    async fn the_open_question_is_answered_from_the_dock_not_the_card(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/src/main.rs",
+                &["Allow", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let dock = cx
+            .debug_bounds("question-dock")
+            .expect("the dock is drawn while the question is open");
+        let card = cx
+            .debug_bounds("permission-card-1")
+            .expect("the transcript keeps its record of the question");
+        let allow = cx
+            .debug_bounds("permission-option-allow")
+            .expect("the first answer is drawn");
+        let reject = cx
+            .debug_bounds("permission-option-reject")
+            .expect("every answer is drawn");
+        assert!(
+            allow.top() >= dock.top() && reject.bottom() <= dock.bottom(),
+            "the answers live in the dock: {allow:?} {reject:?} vs {dock:?}"
+        );
+        assert!(
+            allow.bottom() <= reject.top(),
+            "the answers are listed one under the other: {allow:?} {reject:?}"
+        );
+        assert!(
+            !(allow.top() >= card.top() && allow.bottom() <= card.bottom()),
+            "the card carries no buttons: {allow:?} inside {card:?}"
+        );
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_click(reject.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(chat.read_with(&*cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Reject"
+        )));
+        assert!(
+            cx.debug_bounds("question-dock").is_none(),
+            "the dock goes once the question is answered"
+        );
+    }
+
+    /// Pi sends the question itself as the title: the dock draws all of it,
+    /// wrapped inside its frame, where the old bar cut it to one line.
+    #[gpui::test]
+    async fn a_long_question_is_drawn_whole_inside_the_dock(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(Entry::Permission {
                 request_id: 1,
                 title: "[Scope punto 1] Clic su una worktree B mentre la worktree A ha \
                         harness/agenti in esecuzione: oggi il centro NON cambia (gate di \
@@ -15842,103 +15903,561 @@ let answer = 42;
                         che succeda quando clicchi su una worktree diversa?"
                     .into(),
                 prompt: String::new(),
-                options: Vec::new(),
+                options: question_dock::answer_options(&["Switch", "Stay"]),
                 text_input: None,
+                is_question: true,
                 resolved: None,
                 expired: false,
                 dismissed: false,
             });
-            chat
+            cx.notify();
         });
-        cx.update(|window, _| window.refresh());
+        refresh_frame(cx);
 
-        let bar = cx
-            .debug_bounds("pending-question-bar")
-            .expect("the pending-question bar is drawn while the question is open");
-        let show = cx
-            .debug_bounds("pending-question-show")
-            .expect("the bar carries its Show control");
+        let dock = cx.debug_bounds("question-dock").expect("the dock is drawn");
+        let caption = cx
+            .debug_bounds("question-dock-caption")
+            .expect("the dock names the kind of question");
+        let body = cx
+            .debug_bounds("question-dock-body")
+            .expect("the dock draws the question");
         assert!(
-            show.right() <= bar.right(),
-            "Show overflows the pending-question bar: \
-             show right {} vs bar right {}",
-            show.right(),
-            bar.right(),
+            body.right() <= dock.right(),
+            "the question stays inside the dock: {body:?} vs {dock:?}"
+        );
+        assert!(
+            body.size.height > caption.size.height * 1.5,
+            "the whole question wraps onto several lines instead of being cut \
+             to one: body {body:?} caption {caption:?}"
         );
     }
 
-    /// ACP-supplied option labels can be long ("Yes, and do not ask again
-    /// for this session") and a request can offer many of them: without
-    /// `flex_wrap` the option row grows past the card and the buttons are
-    /// pushed beyond its border.
+    /// ACP labels can be long ("Yes, and do not ask again for this
+    /// session"): listed one per row, each still ends inside the dock.
     #[gpui::test]
-    async fn long_permission_option_labels_wrap_inside_the_card(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::from_test_command(
-                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
-                cx,
-            );
+    async fn long_permission_option_labels_stay_inside_the_dock(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            let mut options = question_dock::answer_options(&[
+                "Yes, allow this time only and remember my choice for later",
+                "Yes, and do not ask again for this session or any future one",
+                "No, never allow this tool call to modify anything in this directory",
+            ]);
+            options[2].id = "deny".into();
+            options[2].is_rejection = true;
             chat.push_entry(Entry::Permission {
                 request_id: 1,
                 title: "Permission requested".into(),
                 prompt: "The agent wants to edit files in the repository.".into(),
-                options: vec![
-                    AnswerOption {
-                        id: "allow-once".into(),
-                        label: "Yes, allow this time only and remember my choice for later".into(),
-                        is_rejection: false,
-                    },
-                    AnswerOption {
-                        id: "allow-always".into(),
-                        label: "Yes, and do not ask again for this session or any future one"
-                            .into(),
-                        is_rejection: false,
-                    },
-                    AnswerOption {
-                        id: "allow-session".into(),
-                        label: "Yes, and do not ask again for this session regardless of file"
-                            .into(),
-                        is_rejection: false,
-                    },
-                    AnswerOption {
-                        id: "deny".into(),
-                        label:
-                            "No, never allow this tool call to modify anything in this directory"
-                                .into(),
-                        is_rejection: true,
-                    },
-                ],
+                options,
                 text_input: None,
+                is_question: false,
                 resolved: None,
                 expired: false,
                 dismissed: false,
             });
-            chat
+            cx.notify();
         });
         refresh_frame(cx);
 
-        let card = cx
-            .debug_bounds("permission-card-1")
-            .expect("the permission card is drawn");
+        let dock = cx.debug_bounds("question-dock").expect("the dock is drawn");
         let last = cx
             .debug_bounds("permission-option-deny")
-            .expect("the last option button is drawn");
+            .expect("the last answer is drawn");
         assert!(
-            last.right() <= card.right(),
-            "the last option button overflows the permission card: \
-             option right {} vs card right {}",
-            last.right(),
-            card.right(),
+            last.right() <= dock.right() && last.bottom() <= dock.bottom(),
+            "the last answer overflows the dock: {last:?} vs {dock:?}"
         );
+    }
+
+    /// Review focus: a forty-line command must not push the composer off
+    /// the pane — the body stops at its cap and scrolls.
+    #[gpui::test]
+    async fn a_long_command_scrolls_inside_the_dock_instead_of_growing_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = offline_chat_view(cx);
+        let command = (0..40)
+            .map(|line| format!("echo line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                &command,
+                &["Allow", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let dock = cx.debug_bounds("question-dock").expect("the dock is drawn");
+        let body = cx
+            .debug_bounds("question-dock-body")
+            .expect("the command is drawn");
+        let composer = cx
+            .debug_bounds("composer")
+            .expect("the composer is still drawn");
+        assert!(
+            body.size.height <= px(question_dock::DOCK_BODY_MAX_HEIGHT + 0.5),
+            "the body is capped: {body:?}"
+        );
+        assert!(
+            composer.top() >= dock.bottom(),
+            "the composer sits below the dock, on screen: {composer:?} vs {dock:?}"
+        );
+    }
+
+    /// No part of a question is drawn in the warning colour any more: the
+    /// card's accent is the neutral one the Plan and Rewind cards use, and
+    /// the dock wears the composer's own hairline.
+    #[test]
+    fn a_question_is_never_painted_in_the_warning_colour() {
+        for theme in [Theme::dark(), Theme::light()] {
+            assert_eq!(permission_card_accent(&theme), theme.border_strong);
+            assert_ne!(permission_card_accent(&theme), theme.warning);
+        }
+        for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
+            assert_eq!(question_dock::dock_border(&theme), theme.border);
+        }
+    }
+
+    /// A blocked digit neither answers the question nor moves the selection.
+    #[gpui::test]
+    async fn a_digit_blocked_by_arming_does_not_move_the_selection(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Always", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.simulate_keystrokes("2");
+        cx.run_until_parked();
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::Permission { resolved: None, .. })
+            ));
+            assert_eq!(chat.question_dock.selected, 0);
+        });
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+        )));
+    }
+
+    /// A queued question cannot be answered until a frame draws that request.
+    #[gpui::test]
+    async fn a_queued_question_is_not_armed_before_it_is_drawn(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
+            chat.push_entry(question_dock::open_permission(
+                2,
+                "/repo/b.rs",
+                &["Allow", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.activate_dock_row(0, window, cx);
+                chat.activate_dock_row(0, window, cx);
+            });
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                chat.entries.iter().find(|entry| {
+                    matches!(entry, Entry::Permission { request_id: 1, .. })
+                }),
+                Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+            ));
+            assert!(matches!(
+                chat.entries.iter().find(|entry| {
+                    matches!(entry, Entry::Permission { request_id: 2, .. })
+                }),
+                Some(Entry::Permission { resolved: None, .. })
+            ));
+            assert_eq!(question_dock::question_view(&chat.entries).unwrap().request_id, 2);
+        });
+
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(0, window, cx)));
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.iter().find(|entry| {
+                matches!(entry, Entry::Permission { request_id: 2, .. })
+            }),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+        )));
+    }
+
+    /// A key already in flight cannot answer before the user has seen the dock.
+    #[gpui::test]
+    async fn an_answer_given_before_the_dock_is_armed_is_ignored(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: None, .. })
+        )));
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+        )));
+    }
+
+    /// A question asked while the user is in this chat takes the keyboard.
+    #[gpui::test]
+    async fn the_dock_takes_the_keyboard_from_the_composer(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx), "the dock holds the keyboard");
+    }
+
+    /// It never takes the keyboard from somewhere else — a terminal in
+    /// another pane the user is typing into.
+    #[gpui::test]
+    async fn the_dock_leaves_the_keyboard_alone_outside_the_chat(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.update(|window, cx| window.blur(cx));
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("question-dock").is_some(),
+            "the dock is drawn all the same"
+        );
+        assert!(!dock_is_focused(&chat, cx), "but it does not take the keyboard");
+    }
+
+    /// Down then Enter answers with the second option, end to end, and the
+    /// keyboard goes back to the composer.
+    #[gpui::test]
+    async fn arrows_and_enter_answer_from_the_dock(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["permission"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "may I?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx), "the question takes the keyboard");
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Permission { resolved: Some(choice), .. } if choice == "Deny once")
+            }) && chat.has_completed_turn
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(
+            composer_is_focused(&chat, cx),
+            "with the question answered the keyboard goes back to the composer"
+        );
+    }
+
+    /// A digit answers with its row, end to end.
+    #[gpui::test]
+    async fn a_digit_answers_its_row(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["question-options"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("2");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Assistant { text, .. } if text.contains("You picked: green"))
+            })
+        });
+    }
+
+    /// Escape in the dock withdraws the question — not the turn.
+    #[gpui::test]
+    async fn escape_in_the_dock_withdraws_the_question(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["question-options"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Permission { resolved: None, expired: true, .. })
+            }) && chat.has_completed_turn
+        });
+    }
+
+    /// Choosing a listed answer discards any typed draft owned by that request.
+    #[gpui::test]
+    async fn choosing_an_option_clears_the_typed_answer(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Bl");
+        cx.run_until_parked();
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        let blue = cx
+            .debug_bounds("permission-option-blue")
+            .expect("the Blue answer is drawn");
+        cx.simulate_click(blue.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Blue"
+            ));
+            assert!(chat.question_answer.draft.is_empty());
+            assert_eq!(chat.question_answer.for_request, None);
+        });
+    }
+
+    /// Backspace removes the last character from the typed answer.
+    #[gpui::test]
+    async fn backspace_edits_the_typed_answer(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Blux");
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input("e");
+        cx.run_until_parked();
+
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.question_answer.draft.clone()),
+            "Blue"
+        );
+    }
+
+    /// Review focus: a digit typed into the free-text answer is text.
+    #[gpui::test]
+    async fn a_digit_typed_in_the_answer_field_is_text_not_a_choice(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("2");
+        cx.run_until_parked();
+        chat.read_with(&*cx, |chat, _| {
+            assert_eq!(chat.question_answer.draft, "2");
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::Permission { resolved: None, .. })
+            ));
+        });
+    }
+
+    /// Up from the typed answer goes back to the last listed answer.
+    #[gpui::test]
+    async fn up_from_the_answer_field_returns_to_the_listed_answers(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.simulate_keystrokes("3");
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| chat.read(cx).question_answer.focus.is_focused(window)),
+            "the third row is the typed answer"
+        );
+
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx));
+        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 1);
+    }
+
+    /// Review focus: two questions open at once — the second follows the
+    /// first in the dock, on its first row, with the keyboard kept.
+    #[gpui::test]
+    async fn a_second_question_follows_the_first_with_the_keyboard(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(2, "/repo/b.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        refresh_frame(cx);
+        chat.read_with(&*cx, |chat, _| {
+            assert_eq!(
+                question_dock::question_view(&chat.entries).map(|view| view.request_id),
+                Some(2)
+            );
+            assert_eq!(chat.question_dock.selected, 0, "a new question starts on row 1");
+        });
+        assert!(dock_is_focused(&chat, cx), "the keyboard stays on the dock");
+    }
+
+    /// Review focus: the pointer moving onto a row selects it, so only one
+    /// row is ever lit.
+    #[gpui::test]
+    async fn moving_the_pointer_onto_a_row_selects_it(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Always", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let reject = cx
+            .debug_bounds("permission-option-reject")
+            .expect("the third answer is drawn");
+        cx.simulate_mouse_move(reject.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 2);
+    }
+
+    /// Review focus: a question closed from outside the dock (the turn
+    /// ended) hands the keyboard back to the composer.
+    #[gpui::test]
+    async fn a_question_closed_elsewhere_hands_the_keyboard_back(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx));
+
+        chat.update(cx, |chat, cx| {
+            chat.expire_unanswered();
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("question-dock").is_none());
+        assert!(composer_is_focused(&chat, cx));
     }
 
     /// A diff header's path is external text of arbitrary length: without
     /// `min_w_0` the flex row never shrinks below the path's min-content,
     /// so the `+added/-removed` counts are pushed past the header's border
-    /// (the same `#233` pattern as the pending-question bar above).
+    /// (the same `#233` pattern as the former waiting bar above).
     #[gpui::test]
     async fn a_long_diff_path_does_not_push_the_change_counts_out_of_the_header(
         cx: &mut TestAppContext,

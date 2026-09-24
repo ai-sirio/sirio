@@ -641,18 +641,33 @@ fn a_permission_left_open_expires_into_a_refusal() {
 fn a_structured_question_carries_its_prompt_and_its_options() {
     let (mut client, events) = launch("question");
     client.prompt("ask me").expect("prompt is accepted");
-    let (request_id, question) = loop {
+    let (request_id, options, question) = loop {
         if let AcpEvent::PermissionRequest {
             request_id,
+            options,
             question,
             ..
         } = next_event(&events)
         {
-            break (request_id, question.expect("a structured question"));
+            break (request_id, options, question.expect("a structured question"));
         }
     };
     assert_eq!(question.header, "Pick a branch");
     assert_eq!(question.prompt, "Which branch should this target?");
+    // Each option says what choosing it means, when the tool input does.
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.description.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("The default branch"), None]
+    );
+    // The native transport takes a typed answer, so it offers the field
+    // even though the tool input declared none.
+    assert!(
+        question.text_input.is_some(),
+        "a native question offers free text"
+    );
     client
         .respond_permission(request_id, "main")
         .expect("the answer reaches the agent");
