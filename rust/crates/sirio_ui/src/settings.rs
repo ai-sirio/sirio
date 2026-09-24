@@ -4983,6 +4983,7 @@ mod tests {
         };
         let window = cx.add_window(|_window, cx| Settings::with_snapshot(cx, snapshot));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
         cx.run_until_parked();
 
         let general = cx
