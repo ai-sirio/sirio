@@ -4,6 +4,7 @@
 //! are tested without a window; `sirio_ui` owns scheduling and state. Design:
 //! `docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md` §3.
 
+mod mermaid;
 mod svg;
 
 use std::borrow::Cow;
@@ -204,6 +205,19 @@ pub fn store(dir: &Path, key: &str, svg: &Svg) -> std::io::Result<PathBuf> {
         return Err(error);
     }
     Ok(path)
+}
+
+/// Renders one diagram. Blocking: the caller picks the thread.
+pub fn render(kind: DiagramKind, source: &str, options: &Options) -> Result<Svg, DiagramError> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(DiagramError::TooLarge);
+    }
+    // A file saved on Windows keeps its `\r\n` inside the fence.
+    let source = source.replace("\r\n", "\n");
+    match kind {
+        DiagramKind::Mermaid => mermaid::render(&source, &options.palette),
+        DiagramKind::PlantUml => Err(DiagramError::NotAvailable),
+    }
 }
 
 /// A PlantUML source ready for `plantuml`: wrapped in `@startuml`/`@enduml`
@@ -428,5 +442,83 @@ mod tests {
             leftovers, 0,
             "the temporary file is renamed, not left behind"
         );
+    }
+
+    #[test]
+    fn a_flowchart_renders_in_the_palette() {
+        let root = scratch_dir("mermaid-flow");
+        let svg = render(
+            DiagramKind::Mermaid,
+            "flowchart TD\n  A[Open] --> B[Preview]\n",
+            &test_options(&root),
+        )
+        .expect("a valid flowchart renders");
+        assert!(svg.markup.contains("Open"));
+        assert!(
+            svg.markup.to_ascii_lowercase().contains("#fafafa"),
+            "the palette's background is used"
+        );
+        assert!(svg.logical_width > 0 && svg.logical_height > 0);
+    }
+
+    #[test]
+    fn light_and_dark_render_differently() {
+        let root = scratch_dir("mermaid-dark");
+        let light = test_options(&root);
+        let dark = Options {
+            palette: test_palette(true),
+            ..test_options(&root)
+        };
+        let source = "flowchart TD\n  A --> B\n";
+        assert_ne!(
+            render(DiagramKind::Mermaid, source, &light)
+                .expect("light")
+                .markup,
+            render(DiagramKind::Mermaid, source, &dark)
+                .expect("dark")
+                .markup
+        );
+    }
+
+    #[test]
+    fn a_broken_diagram_is_a_syntax_error() {
+        let root = scratch_dir("mermaid-broken");
+        match render(
+            DiagramKind::Mermaid,
+            "flowchart TD\n  A -->\n",
+            &test_options(&root),
+        ) {
+            Err(DiagramError::Syntax { message, .. }) => assert!(!message.is_empty()),
+            other => panic!("expected a syntax error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_source_over_64_kib_is_too_large() {
+        let root = scratch_dir("mermaid-large");
+        let source = format!(
+            "flowchart TD\n{}",
+            "%% padding\n".repeat(MAX_SOURCE_BYTES / 10)
+        );
+        assert!(source.len() > MAX_SOURCE_BYTES);
+        assert_eq!(
+            render(DiagramKind::Mermaid, &source, &test_options(&root)),
+            Err(DiagramError::TooLarge)
+        );
+    }
+
+    /// Review Focus 1: a file saved on Windows keeps `\r\n` inside the fence.
+    #[test]
+    fn crlf_source_renders_like_lf() {
+        let root = scratch_dir("mermaid-crlf");
+        let options = test_options(&root);
+        let lf = render(DiagramKind::Mermaid, "flowchart TD\n  A --> B\n", &options).expect("lf");
+        let crlf = render(
+            DiagramKind::Mermaid,
+            "flowchart TD\r\n  A --> B\r\n",
+            &options,
+        )
+        .expect("crlf");
+        assert_eq!(lf, crlf);
     }
 }

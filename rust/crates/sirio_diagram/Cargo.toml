@@ -9,3 +9,7 @@ publish.workspace = true
 # A leaf: no gpui, no bezel, no local crates.
 [dependencies]
 sha2 = "0.10"
+# Pinned: the renderer's name and version are part of every Mermaid cache key
+# (`MERMAID_RENDERER` in lib.rs), so a bump is deliberate and moves both.
+# Without default features: no CLI (clap) and no PNG output (resvg).
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
