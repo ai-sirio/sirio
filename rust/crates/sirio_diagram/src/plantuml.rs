@@ -362,6 +362,7 @@ fn check_version(
         }),
     }
 }
+
 /// The first `1.YYYY.N` in `banner`: its year and release number.
 fn parse_version(banner: &str) -> Option<(u32, u32)> {
     let bytes = banner.as_bytes();
@@ -818,7 +819,14 @@ mod tests {
                 canonical.display()
             ))
         );
-        let plain = test_options(&root);
+        // Canonicalised first, so the root truly has no symlink in it even
+        // where the temp dir is one (always on macOS).
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root.clone());
+        let plain = Options {
+            working_dir: canonical_root.clone(),
+            include_root: canonical_root,
+            ..test_options(&root)
+        };
         let single = allowlist_value(&plain).to_string_lossy().into_owned();
         assert_eq!(
             single.split(':').count(),
@@ -936,8 +944,9 @@ mod tests {
                 false
             }
             Err(error) => {
-                eprintln!("SKIP: plantuml -version failed: {error:?}");
-                false
+                // Not a skip: a broken `-version` must fail loudly below.
+                eprintln!("plantuml -version failed: {error:?}");
+                true
             }
         }
     }
