@@ -15357,6 +15357,20 @@ impl SirioWorkspace {
             },
         ];
 
+        // Spec 2026-09-24 §5: absent, not disabled, for a kind that can
+        // never move — disabled means "not now".
+        if tab.kind.can_move_between_panes() {
+            let label = match tab.pane {
+                PaneRole::Primary => "Move to Right Pane",
+                PaneRole::Secondary => "Move to Left Pane",
+            };
+            items.push(TabContextItem::enabled(
+                label,
+                "move-to-other-pane",
+                TabContextAction::MoveToOtherPane,
+            ));
+        }
+
         items.push(TabContextItem::separator());
         if self.can_attach_tab_to_current_terminal(tab_id) {
             items.push(TabContextItem::enabled(
@@ -15372,9 +15386,6 @@ impl SirioWorkspace {
                 "select another terminal tab",
             ));
         }
-
-        // Center split: no pane-move; routing is derived from TabKind, there is no
-        // "other pane" to move to. The Move-to-Pane family is removed per #325.
 
         items.push(TabContextItem::separator());
         if self.retained_chats.is_empty() {
@@ -15505,6 +15516,18 @@ impl SirioWorkspace {
             }
             TabContextAction::MoveLater => {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
+            }
+            TabContextAction::MoveToOtherPane => {
+                if let Some(tab_id) = self.tab_menu_tab
+                    && let Some(target) = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .map(|tab| tab.pane.other())
+                {
+                    self.move_tab_to_pane(tab_id, target, None, Some(window), cx);
+                }
+                self.dismiss_tab_menu(cx);
             }
             TabContextAction::AttachToCurrentTerminal => {
                 if let Some(tab_id) = self.tab_menu_tab {
@@ -22750,44 +22773,47 @@ done
         );
     }
 
-    /// #319: the tab context menu offers no move-between-panes entry at all,
-    /// under any label. Two of them died here for different reasons —
-    /// F-TAB-12 removed a permanently-disabled "Move to This Pane", and the
-    /// center split removes the live "Move to Pane {id}" that replaced it —
-    /// so the assertion is on the *absence of the whole family*, not on one
-    /// spelling. A tab's half is derived from its `TabKind`, and no menu item
-    /// can change what a tab is.
-    ///
-    /// The fixture puts a Secondary tab beside a Primary one, which is the
-    /// state the deleted entries needed to be live in: with only one pane
-    /// populated they would have been absent anyway and this would assert
-    /// nothing.
+    /// Spec 2026-09-24 §5: a terminal or chat offers the move to the half it
+    /// is not in, named by direction; a kind that can never move does not
+    /// list it at all — absent means "never, for this kind", disabled would
+    /// mean "not now".
     #[gpui::test]
-    fn tab_context_menu_never_offers_a_move_between_panes(cx: &mut TestAppContext) {
+    fn tab_context_menu_offers_the_other_pane_only_to_terminals_and_chats(cx: &mut TestAppContext) {
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
             workspace.tabs[1].set_kind(sirio_project::TabKind::Editor);
             workspace.rebuild_center_split();
-            workspace.tab_menu_tab = Some(0);
             workspace
         });
+        let labels = |tab: usize, cx: &mut TestAppContext| {
+            workspace.update(cx, |workspace, _| {
+                workspace.tab_menu_tab = Some(tab);
+                workspace
+                    .tab_context_items()
+                    .iter()
+                    .map(|item| item.label().to_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
 
-        let items = workspace.read_with(cx, |workspace, _| workspace.tab_context_items());
+        let terminal = labels(0, cx);
+        assert!(terminal.iter().any(|label| label == "Move to Right Pane"));
+        assert!(!terminal.iter().any(|label| label == "Move to Left Pane"));
 
-        let offender = items
-            .iter()
-            .find(|item| item.label().contains("Pane") || item.label().contains("pane"));
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_tab_to_pane(0, PaneRole::Secondary, None, None, cx);
+        });
+        let moved = labels(0, cx);
+        assert!(moved.iter().any(|label| label == "Move to Left Pane"));
+
+        let editor = labels(1, cx);
         assert!(
-            offender.is_none(),
-            "no context item may name a pane destination, found {:?}",
-            offender.map(|item| item.label())
+            !editor.iter().any(|label| label.contains("Pane")),
+            "an editor never moves, so the move is not listed: {editor:?}"
         );
-
-        // The reordering entries that sat beside it must survive, so this
-        // fails on a re-addition rather than on the menu going empty.
         assert!(
-            items.iter().any(|item| item.label() == "Move Earlier"),
-            "reordering within a pane is still offered"
+            editor.iter().any(|label| label == "Move Earlier"),
+            "reordering within a half is still offered"
         );
     }
 
@@ -28150,6 +28176,47 @@ done
             vec![1, 2, 0],
             "the drawn tab drag must update the live strip order"
         );
+    }
+
+    /// Spec 2026-09-24 §5: the drawn menu item moves the tab, focus follows
+    /// it to the right half, and the menu closes.
+    #[gpui::test]
+    async fn drawn_tab_context_menu_moves_a_terminal_to_the_right_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        right_click_tab(&mut cx, 1);
+        let item = cx
+            .debug_bounds("tab-command-move-to-other-pane")
+            .expect("the move is offered on a terminal");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![1]
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert!(!workspace.tab_menu_open, "the menu closes after the move");
+        });
+        let pane = cx
+            .debug_bounds("pane-secondary")
+            .expect("the right half is drawn");
+        let tab = cx
+            .debug_bounds("workspace-tab-1")
+            .expect("the moved tab is drawn");
+        assert!(pane.contains(&tab.center()));
     }
 
     /// F-TAB-24: `preview_tab_reorder` mutates the live tab vector on every
