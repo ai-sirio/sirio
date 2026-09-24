@@ -16095,6 +16095,10 @@ impl SirioWorkspace {
                                 .relative()
                                 .h(px(TAB_BAR_HEIGHT))
                                 .w_full()
+                                // The tabs paint `surface` only up to the `×`
+                                // slot; without this the `×` sits on the
+                                // darker window behind the strip.
+                                .bg(theme.surface)
                                 .border_b_1()
                                 .border_color(theme.border)
                                 .child(self.render_open_tabs(
