@@ -19,6 +19,9 @@ sirio_theme.workspace = true
 sirio_git.workspace = true
 sirio_acp.workspace = true
 sirio_markdown.workspace = true
+# Diagram source to SVG for the Markdown Preview (Mermaid in-process,
+# PlantUML through `plantuml` or a configured server). A leaf with no gpui.
+sirio_diagram.workspace = true
 sirio_project.workspace = true
 sirio_agents.workspace = true
 # The Material icon theme as data: 1112 vendored assets and the tables that
