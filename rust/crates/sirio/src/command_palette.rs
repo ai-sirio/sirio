@@ -90,6 +90,9 @@ impl PaletteDisabledReason {
         match self {
             Self::Window(WindowCommandDisabledReason::NoActiveFile) => "No active file",
             Self::Window(WindowCommandDisabledReason::NoActiveBrowser) => "No active browser",
+            Self::Window(WindowCommandDisabledReason::NoMovableTab) => {
+                "Only terminals and chats move between panes"
+            }
             Self::Sidebar(SidebarDisabledReason::AlreadyGitProject) => "Git is already initialized",
             Self::Sidebar(SidebarDisabledReason::ResolvingUpstream) => "Checking the remote…",
             Self::Sidebar(SidebarDisabledReason::NoUpstreamBranch) => "No remote branch to delete",
@@ -265,6 +268,12 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             Some(window_shortcut_hint(WindowCommand::FocusAddressBar)),
             context,
         ),
+        window_entry(
+            WindowCommand::MoveTabToOtherPane,
+            "Move Tab to Other Pane",
+            Some(window_shortcut_hint(WindowCommand::MoveTabToOtherPane)),
+            context,
+        ),
         if context.symbols_available {
             PaletteEntry::enabled(PaletteCommand::GoToSymbol, "Go to Symbol in File", None)
         } else {
@@ -396,17 +405,16 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             "Move Tab Later",
             None,
         ),
-        // #319: "Move Tab to Other Pane" used to sit here, gated on
-        // `has_other_pane`; F-TAB-12 had already deleted its "Move Tab to This
-        // Pane" sibling. The center split ends the family rather than fixing
-        // it: a tab's half is derived from its `TabKind`, so the only way to
-        // move a tab across the divider is to change what the tab is. There is
-        // no destination left to name.
+        // #319: the old "Move Tab to Other Pane" tab-family row was removed
+        // when a tab's half was derived from its kind; F-TAB-12 had also
+        // removed the inert "Move Tab to This Pane" sibling. Terminals and
+        // chats now store their half on the tab. The active-tab move lives
+        // above as a `WindowCommand`; don't add a second row to this family.
         //
         // Swift's richer gesture (`SplitContentMenu.swift:286`, a "Move
         // Existing Tab" submenu listing tabs by name under "This Pane" /
-        // "Other Panes") is not unported work waiting to be finished — it is
-        // work the two fixed roles make meaningless. Do not re-add it.
+        // "Other Panes") is still not a one-to-one match: this command moves
+        // only the focused terminal/chat to its other half.
         if context.has_retained_chat {
             PaletteEntry::enabled(
                 PaletteCommand::Tab(TabCommand::ResumeChat),
@@ -551,36 +559,34 @@ mod tests {
         assert!(commands.iter().any(|entry| entry.label == "New Chat"));
     }
 
-    /// #319: the palette must not offer to move a tab between the two center
-    /// panes, under either of the two labels the command has worn. It is
-    /// pinned here rather than left to the absence of code because both
-    /// spellings were deleted for *different* reasons — "This Pane" was inert
-    /// and enabled (F-TAB-12), "Other Pane" was real and worked — and only the
-    /// second removal is load-bearing for the center split. A re-addition
-    /// would compile and behave, so nothing but a test catches it.
+    /// Spec 2026-09-24 §5: the palette mirrors Ctrl+Shift+M. "Move Tab to
+    /// Other Pane" is back — there are exactly two halves, so it names the
+    /// whole destination — and enabled only with a terminal or chat active.
+    /// "Move Tab to This Pane" (F-TAB-12, inert) stays gone.
     #[test]
-    fn the_palette_does_not_offer_to_move_a_tab_between_panes() {
-        let commands = entries(&context());
-
-        for label in ["Move Tab to This Pane", "Move Tab to Other Pane"] {
-            assert!(
-                !commands.iter().any(|entry| entry.label == label),
-                "{label} names a gesture the center split does not have: a \
-                 tab's half is derived from its kind"
-            );
-        }
-
-        // The neighbours it sat between must survive, so this test fails on a
-        // re-addition rather than on the whole tab family going missing.
-        assert!(
-            commands
-                .iter()
-                .any(|entry| entry.label == "Move Tab Earlier"),
-            "tab reordering within a pane is still offered"
+    fn the_palette_moves_only_a_terminal_or_chat_to_the_other_pane() {
+        let row = |kind| {
+            entries(&PaletteContext {
+                active_tab_kind: Some(kind),
+                ..context()
+            })
+            .into_iter()
+            .find(|entry| entry.label == "Move Tab to Other Pane")
+            .expect("the row is listed")
+        };
+        assert!(row(TabKind::Terminal).is_enabled());
+        assert!(row(TabKind::AgentChat).is_enabled());
+        let editor = row(TabKind::Editor);
+        assert!(!editor.is_enabled());
+        assert_eq!(
+            editor.disabled_reason.map(PaletteDisabledReason::label),
+            Some("Only terminals and chats move between panes")
         );
+        assert_eq!(row(TabKind::Terminal).shortcut, Some("Ctrl+Shift+M"));
         assert!(
-            commands.iter().any(|entry| entry.label == "Move Tab Later"),
-            "tab reordering within a pane is still offered"
+            !entries(&context())
+                .iter()
+                .any(|entry| entry.label == "Move Tab to This Pane")
         );
     }
 

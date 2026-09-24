@@ -370,6 +370,7 @@ actions!(
         RestoreLaunchSnapshot,
         NewBrowser,
         FocusAddressBar,
+        MoveTabToOtherPane,
     ]
 );
 
@@ -392,12 +393,14 @@ enum WindowCommand {
     RestoreLaunchSnapshot,
     NewBrowser,
     FocusAddressBar,
+    MoveTabToOtherPane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowCommandDisabledReason {
     NoActiveFile,
     NoActiveBrowser,
+    NoMovableTab,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -406,7 +409,7 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 10] {
     // #374: `ctrl-shift-s`, `ctrl-shift-i` and `ctrl-shift-o` never reach
     // the app on Windows — they are already taken there as system-wide
     // hotkeys (a `RegisterHotKey` probe for exactly those chords fails
@@ -449,6 +452,9 @@ fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
         // window-level bindings and command-palette rows.
         (WindowCommand::NewBrowser, "ctrl-shift-l"),
         (WindowCommand::FocusAddressBar, "ctrl-l"),
+        // Spec 2026-09-24 §5: the `ctrl-shift-` family survives inside a
+        // terminal. Windows delivery is to be probed the way #374 probed S/I/O before a release; if it is swallowed there, slide it here.
+        (WindowCommand::MoveTabToOtherPane, "ctrl-shift-m"),
     ]
 }
 
@@ -470,6 +476,7 @@ pub(crate) fn window_shortcut_hint(command: WindowCommand) -> &'static str {
         WindowCommand::RestoreLaunchSnapshot => "Ctrl+Shift+O",
         WindowCommand::NewBrowser => "Ctrl+Shift+L",
         WindowCommand::FocusAddressBar => "Ctrl+L",
+        WindowCommand::MoveTabToOtherPane => "Ctrl+Shift+M",
     }
 }
 
@@ -489,6 +496,11 @@ fn window_command_availability(
         WindowCommand::FocusAddressBar if active_tab_kind != Some(TabKind::Browser) => {
             WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
         }
+        WindowCommand::MoveTabToOtherPane
+            if !active_tab_kind.is_some_and(TabKind::can_move_between_panes) =>
+        {
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoMovableTab)
+        }
         WindowCommand::NewTerminalTab
         | WindowCommand::OpenFile
         | WindowCommand::SaveFile
@@ -497,7 +509,8 @@ fn window_command_availability(
         | WindowCommand::ToggleSecondaryPane
         | WindowCommand::RestoreLaunchSnapshot
         | WindowCommand::NewBrowser
-        | WindowCommand::FocusAddressBar => WindowCommandAvailability::Enabled,
+        | WindowCommand::FocusAddressBar
+        | WindowCommand::MoveTabToOtherPane => WindowCommandAvailability::Enabled,
     }
 }
 
@@ -541,6 +554,9 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::NewBrowser => KeyBinding::new(shortcut, NewBrowser, None),
                 WindowCommand::FocusAddressBar => {
                     KeyBinding::new(shortcut, FocusAddressBar, YIELDS_TO_TERMINAL)
+                }
+                WindowCommand::MoveTabToOtherPane => {
+                    KeyBinding::new(shortcut, MoveTabToOtherPane, None)
                 }
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
@@ -6353,6 +6369,29 @@ impl SirioWorkspace {
     /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane.
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
         self.set_secondary_pane_hidden(!self.secondary_pane_hidden, cx);
+    }
+
+    /// Spec 2026-09-24 §5: Ctrl+Shift+M moves the focused half's shown tab
+    /// to the other half, and focus goes with it — so the chord pressed
+    /// twice brings the tab back. With nothing movable focused it lets the
+    /// key through (#227: a matched binding otherwise eats it).
+    fn handle_move_tab_to_other_pane(
+        &mut self,
+        _: &MoveTabToOtherPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let movable = self
+            .center_split
+            .active_for_focused()
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .filter(|tab| tab.kind.can_move_between_panes())
+            .map(|tab| (tab.id, tab.pane.other()));
+        let Some((tab_id, target)) = movable else {
+            cx.propagate();
+            return;
+        };
+        self.move_tab_to_pane(tab_id, target, None, Some(window), cx);
     }
 
     /// Hides or shows the Secondary pane, *keeping* its tabs, and persists
@@ -17503,6 +17542,9 @@ impl SirioWorkspace {
                 WindowCommand::FocusAddressBar => {
                     window.dispatch_action(Box::new(FocusAddressBar), cx)
                 }
+                WindowCommand::MoveTabToOtherPane => {
+                    window.dispatch_action(Box::new(MoveTabToOtherPane), cx)
+                }
             },
             PaletteCommand::Tab(command) => match command {
                 TabCommand::FocusPane(direction, forward) => match (direction, forward) {
@@ -18310,6 +18352,7 @@ impl Render for SirioWorkspace {
             .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
                 workspace.toggle_secondary_pane(cx);
             }))
+            .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .on_action(cx.listener(Self::handle_focus_pane_above))
@@ -22576,6 +22619,7 @@ done
             let restore_launch_snapshot = self.fired.clone();
             let new_browser = self.fired.clone();
             let focus_address_bar = self.fired.clone();
+            let move_tab_to_other_pane = self.fired.clone();
             div()
                 .key_context(self.key_context)
                 .track_focus(&self.focus_handle)
@@ -22617,6 +22661,11 @@ done
                     focus_address_bar
                         .borrow_mut()
                         .push(WindowCommand::FocusAddressBar);
+                }))
+                .on_action(cx.listener(move |_, _: &MoveTabToOtherPane, _, _| {
+                    move_tab_to_other_pane
+                        .borrow_mut()
+                        .push(WindowCommand::MoveTabToOtherPane);
                 }))
                 .child("window command fixture")
         }
@@ -31170,12 +31219,12 @@ done
 
         // #374: on Windows the s/i/o chords are bound as d/r/h instead
         // (system-wide hotkeys swallow the former before they ever reach
-        // the window), so the same nine actions are driven through the
+        // the window), so the same ten actions are driven through the
         // platform chords there, in the same order.
         let chords = if cfg!(target_os = "windows") {
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-d ctrl-shift-r ctrl-shift-b ctrl-shift-h ctrl-shift-l ctrl-l"
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-d ctrl-shift-r ctrl-shift-b ctrl-shift-h ctrl-shift-l ctrl-l ctrl-shift-m"
         } else {
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l"
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l ctrl-shift-m"
         };
         cx.simulate_keystrokes(chords);
         cx.run_until_parked();
@@ -31192,6 +31241,7 @@ done
                 WindowCommand::RestoreLaunchSnapshot,
                 WindowCommand::NewBrowser,
                 WindowCommand::FocusAddressBar,
+                WindowCommand::MoveTabToOtherPane,
             ],
             "Linux primary and secondary chords must reach typed shell actions"
         );
@@ -31258,7 +31308,7 @@ done
         } else {
             "ctrl-shift-s"
         };
-        cx.simulate_keystrokes(&format!("{sidebar} ctrl-shift-b"));
+        cx.simulate_keystrokes(&format!("{sidebar} ctrl-shift-b ctrl-shift-m"));
         cx.run_until_parked();
 
         assert_eq!(
@@ -31266,6 +31316,7 @@ done
             &[
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleSecondaryPane,
+                WindowCommand::MoveTabToOtherPane,
             ],
             "the ctrl-shift family must keep reaching the shell from inside a terminal"
         );
@@ -31301,6 +31352,7 @@ done
                 (WindowCommand::RestoreLaunchSnapshot, restore),
                 (WindowCommand::NewBrowser, "ctrl-shift-l"),
                 (WindowCommand::FocusAddressBar, "ctrl-l"),
+                (WindowCommand::MoveTabToOtherPane, "ctrl-shift-m"),
             ]
         );
     }
@@ -31340,6 +31392,96 @@ done
         // The untouched family members keep their chords on every platform.
         assert_eq!(hint(WindowCommand::ToggleSecondaryPane), "Ctrl+Shift+B");
         assert_eq!(hint(WindowCommand::NewBrowser), "Ctrl+Shift+L");
+        assert_eq!(hint(WindowCommand::MoveTabToOtherPane), "Ctrl+Shift+M");
+    }
+
+    #[test]
+    fn moving_to_the_other_pane_needs_a_terminal_or_chat() {
+        for kind in [TabKind::Terminal, TabKind::AgentChat] {
+            assert_eq!(
+                window_command_availability(WindowCommand::MoveTabToOtherPane, Some(kind)),
+                WindowCommandAvailability::Enabled
+            );
+        }
+        for kind in [
+            None,
+            Some(TabKind::Browser),
+            Some(TabKind::Editor),
+            Some(TabKind::Diff),
+            Some(TabKind::ProjectSettings),
+        ] {
+            assert_eq!(
+                window_command_availability(WindowCommand::MoveTabToOtherPane, kind),
+                WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoMovableTab)
+            );
+        }
+    }
+
+    /// Spec §5 + Review Focus 4: the chord moves the focused half's shown tab
+    /// and focus follows, so twice is a round trip; with nothing movable
+    /// focused it changes nothing.
+    #[gpui::test]
+    async fn ctrl_shift_m_moves_the_focused_tab_across_and_back(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let press = |cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.handle_move_tab_to_other_pane(&MoveTabToOtherPane, window, cx);
+            });
+            cx.run_until_parked();
+        };
+        workspace.update(&mut cx, |workspace, cx| workspace.select_tab(1, None, cx));
+
+        press(&mut cx);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().find(|t| t.id == 1).unwrap().pane,
+                PaneRole::Secondary
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+
+        press(&mut cx);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().find(|t| t.id == 1).unwrap().pane,
+                PaneRole::Primary
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[1].set_kind(TabKind::Editor);
+            workspace.rebuild_center_split();
+            workspace.select_tab(1, None, cx);
+        });
+        press(&mut cx);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().find(|t| t.id == 1).unwrap().pane,
+                PaneRole::Secondary,
+                "an editor focused on the right stays there"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_center_split();
+            cx.notify();
+        });
+        press(&mut cx);
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.is_empty()),
+            "nothing to move: nothing happens, and nothing panics"
+        );
     }
 
     #[test]
