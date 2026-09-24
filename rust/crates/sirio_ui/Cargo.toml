@@ -42,6 +42,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # built here without a second copy of the types.
 image = { version = "0.25.10", default-features = false }
 smallvec.workspace = true
+# An async lock for the app-wide PlantUML turn (markdown_preview.rs). The
+# same 0.3 line gpui already locks, promoted to a direct dependency.
+futures = "0.3"
 # F-PRJ-16: grapheme-cluster-correct single-emoji validation. Already
 # resolved transitively at this version; promoted to a direct dependency.
 unicode-segmentation = "1.13"

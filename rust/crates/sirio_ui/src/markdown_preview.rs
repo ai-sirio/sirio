@@ -5,6 +5,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use gpui::App;
 
 use markdown::BlockKind;
 use sirio_diagram::{DiagramKind, Palette};
@@ -228,6 +231,67 @@ pub(crate) fn include_root(file: &Path) -> PathBuf {
 /// SVG, which must not open in a tab.
 pub(crate) fn is_diagram_target(target: &str, diagram_dir: Option<&Path>) -> bool {
     diagram_dir.is_some_and(|dir| Path::new(target).starts_with(dir))
+}
+
+/// Where diagrams are cached and which PlantUML server may be asked
+/// (design §3, §6). The host installs it at startup and again whenever
+/// Settings change. Without it the Preview renders no diagrams and every
+/// fence stays code, which is what a test app that never asked sees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagramSettings {
+    pub cache_dir: PathBuf,
+    pub plantuml_server: Option<String>,
+}
+
+impl gpui::Global for DiagramSettings {}
+
+impl DiagramSettings {
+    /// The production settings: the per-user cache directory, and `server`
+    /// unless it is blank. `None` when the platform names no cache
+    /// directory, in which case diagrams are not rendered.
+    pub fn from_environment(server: &str) -> Option<Self> {
+        let cache_dir = sirio_diagram::cache_dir(&|key: &str| std::env::var_os(key))?;
+        let server = server.trim();
+        Some(Self {
+            cache_dir,
+            plantuml_server: (!server.is_empty()).then(|| server.to_string()),
+        })
+    }
+
+    pub fn set(settings: Self, cx: &mut App) {
+        cx.set_global(settings);
+    }
+
+    /// Installs [`Self::from_environment`] for `server`, if there is one.
+    pub fn apply(server: &str, cx: &mut App) {
+        if let Some(settings) = Self::from_environment(server) {
+            Self::set(settings, cx);
+        }
+    }
+
+    pub(crate) fn get(cx: &App) -> Option<&Self> {
+        cx.try_global::<Self>()
+    }
+}
+
+/// The app-wide PlantUML turn: one JVM at a time (design §3). The lock is
+/// async, so a fence waiting its turn holds no background thread.
+#[derive(Clone, Default)]
+pub(crate) struct PlantUmlQueue(Arc<futures::lock::Mutex<()>>);
+
+impl gpui::Global for PlantUmlQueue {}
+
+impl PlantUmlQueue {
+    pub(crate) fn get(cx: &mut App) -> Self {
+        if cx.try_global::<Self>().is_none() {
+            cx.set_global(Self::default());
+        }
+        cx.global::<Self>().clone()
+    }
+
+    pub(crate) async fn turn(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
 }
 
 #[cfg(test)]

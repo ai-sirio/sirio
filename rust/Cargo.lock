@@ -7492,6 +7492,7 @@ dependencies = [
  "bezel-markdown",
  "bezel-syntax",
  "chrono",
+ "futures",
  "gtk",
  "image",
  "objc2 0.6.4",

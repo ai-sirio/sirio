@@ -5461,12 +5461,11 @@ impl Chat {
     /// lets the existing per-render link callback win before bezel's default
     /// external opener runs.
     pub(crate) fn render_markdown_document_with_link_override(
-        document: LegacyDocument,
+        document: markdown::Doc,
         _theme: &Theme,
         link_click: LinkClickOverride,
     ) -> AnyElement {
-        MarkdownBody::with_link_override(bezel_doc_from_legacy(document), link_click)
-            .into_any_element()
+        MarkdownBody::with_link_override(document, link_click).into_any_element()
     }
     /// F-CHAT-31: a diff preview for a tool call that changed a file —
     /// removed lines then added lines at each point of divergence, capped
