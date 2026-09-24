@@ -4,8 +4,10 @@
 //! are tested without a window; `sirio_ui` owns scheduling and state. Design:
 //! `docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md` §3.
 
+mod encode;
 mod mermaid;
 mod plantuml;
+mod server;
 mod svg;
 
 use std::borrow::Cow;
@@ -222,6 +224,11 @@ pub fn render(kind: DiagramKind, source: &str, options: &Options) -> Result<Svg,
     )
 }
 
+/// The local `plantuml`, for Settings to report (design §6).
+pub fn find_plantuml() -> Option<PathBuf> {
+    plantuml::find_program("plantuml", &std::env::var_os("PATH").unwrap_or_default())
+}
+
 fn render_with_search_path(
     kind: DiagramKind,
     source: &str,
@@ -236,7 +243,18 @@ fn render_with_search_path(
     match kind {
         DiagramKind::Mermaid => mermaid::render(&source, &options.palette),
         DiagramKind::PlantUml => {
-            plantuml::render_local(&source, options, search_path, plantuml::LOCAL_TIMEOUT)
+            match plantuml::render_local(&source, options, search_path, plantuml::LOCAL_TIMEOUT) {
+                Err(DiagramError::NotAvailable) => match options
+                    .plantuml_server
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|server| !server.is_empty())
+                {
+                    Some(server) => server::render_remote(&source, server, server::SERVER_TIMEOUT),
+                    None => Err(DiagramError::NotAvailable),
+                },
+                other => other,
+            }
         }
     }
 }
@@ -548,5 +566,57 @@ mod tests {
         )
         .expect("crlf");
         assert_eq!(lf, crlf);
+    }
+
+    #[test]
+    fn without_local_plantuml_a_configured_server_renders() {
+        use std::io::{Read, Write};
+        let root = scratch_dir("fallback-server");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = "<svg width=\"8\" height=\"4\"></svg>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let empty = root.join("bin");
+        std::fs::create_dir_all(&empty).expect("bin");
+        let options = Options {
+            plantuml_server: Some(base),
+            ..test_options(&root)
+        };
+        let svg =
+            render_with_search_path(DiagramKind::PlantUml, "A -> B", &options, empty.as_os_str())
+                .expect("the server renders");
+        assert_eq!(svg.logical_width, 8);
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn without_local_plantuml_or_a_server_it_is_not_available() {
+        let root = scratch_dir("fallback-none");
+        let empty = root.join("bin");
+        std::fs::create_dir_all(&empty).expect("bin");
+        for server in [None, Some("   ".to_string())] {
+            let options = Options {
+                plantuml_server: server,
+                ..test_options(&root)
+            };
+            assert_eq!(
+                render_with_search_path(
+                    DiagramKind::PlantUml,
+                    "A -> B",
+                    &options,
+                    empty.as_os_str()
+                ),
+                Err(DiagramError::NotAvailable)
+            );
+        }
     }
 }

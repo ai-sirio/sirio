@@ -7330,9 +7330,11 @@ dependencies = [
 name = "sirio_diagram"
 version = "0.25.1"
 dependencies = [
+ "flate2",
  "libc",
  "mermaid-rs-renderer",
  "sha2 0.10.9",
+ "ureq",
 ]
 
 [[package]]
