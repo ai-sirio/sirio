@@ -111,6 +111,7 @@ pub struct Svg {
 pub enum DiagramError {
     Syntax { message: String, line: Option<u32> },
     NotAvailable,
+    Unsandboxed { version: String },
     Timeout { seconds: u64 },
     TooLarge,
     Server { status: u16, message: String },
@@ -134,6 +135,9 @@ impl DiagramError {
                 "PlantUML is not available: `plantuml` is not on PATH and no server is configured"
                     .to_string()
             }
+            Self::Unsandboxed { version } => format!(
+                "PlantUML {version} is too old to run sandboxed (1.2020.11 or later is needed), so the diagram was not rendered"
+            ),
             Self::Timeout { seconds } => format!("{label} timed out after {seconds} s"),
             Self::TooLarge => format!("{label} diagram is larger than 64 KiB and was not rendered"),
             Self::Server { status, message } => {
@@ -384,6 +388,13 @@ mod tests {
         assert_eq!(
             DiagramError::NotAvailable.note(PlantUml),
             "PlantUML is not available: `plantuml` is not on PATH and no server is configured"
+        );
+        assert_eq!(
+            DiagramError::Unsandboxed {
+                version: "1.2020.2".into()
+            }
+            .note(PlantUml),
+            "PlantUML 1.2020.2 is too old to run sandboxed (1.2020.11 or later is needed), so the diagram was not rendered"
         );
         assert_eq!(
             DiagramError::Timeout { seconds: 15 }.note(PlantUml),
