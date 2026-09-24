@@ -306,16 +306,13 @@ fn check_version(
 ) -> Result<(), DiagramError> {
     let (status, stdout, stderr) =
         run_piped(program, &["-version"], &[], options, search_path, timeout)?;
-    if !status.success() {
-        return Err(DiagramError::Io(last_stderr_line(&stderr).unwrap_or_else(
-            || format!("plantuml -version exited with {status}"),
-        )));
-    }
     match parse_version(&String::from_utf8_lossy(&stdout)) {
         Some((year, number)) if (year, number) >= MIN_SANDBOXABLE => Ok(()),
         Some((year, number)) => Err(DiagramError::Unsandboxed {
             version: format!("1.{year}.{number}"),
         }),
+        None if !status.success() => Err(DiagramError::Io(last_stderr_line(&stderr)
+            .unwrap_or_else(|| format!("plantuml -version exited with {status}")))),
         None => Err(DiagramError::Unsandboxed {
             version: "unknown".into(),
         }),
@@ -622,6 +619,10 @@ mod tests {
             parse_version("PlantUML version 1.2023.9 (Sun Jan 28 2023)"),
             Some((2023, 9))
         );
+        assert_eq!(
+            parse_version("PlantUML version 1.2026.8 / 149874a [2026-09-05 15:59:17 UTC]"),
+            Some((2026, 8))
+        );
         assert_eq!(parse_version("nonsense"), None::<(u32, u32)>);
     }
 
@@ -662,6 +663,18 @@ mod tests {
             &bin,
             "PlantUML version 1.2023.9",
             &format!("cat > /dev/null\nprintf '%s' '{SVG}'"),
+        );
+        assert!(render_local("A -> B", &test_options(&root), &path_with(&bin), LOCAL_TIMEOUT).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_banner_is_authoritative_even_when_exit_status_is_nonzero() {
+        let root = scratch_dir("plantuml-version-banner-status");
+        let bin = root.join("bin");
+        write_fake_plantuml(
+            &bin,
+            &format!("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'PlantUML version 1.2024.3'; exit 16; fi\ncat > /dev/null\nprintf '%s' '{SVG}'\n"),
         );
         assert!(render_local("A -> B", &test_options(&root), &path_with(&bin), LOCAL_TIMEOUT).is_ok());
     }
