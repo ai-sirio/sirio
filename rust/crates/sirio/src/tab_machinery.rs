@@ -63,6 +63,41 @@ pub(crate) fn visible_tab_count(
         .count()
 }
 
+/// #319: the tab that takes over a half when the one it showed leaves it —
+/// the tab that slid into its place, or the one before it when it was last.
+/// `remaining` is the half's tab ids after the departure, `position` where
+/// the departed tab stood. `close_tab` and `move_tab_to_pane` both ask this,
+/// so closing a tab and moving it away cannot pick different neighbours.
+pub(crate) fn nearest_remaining(remaining: &[usize], position: usize) -> Option<usize> {
+    remaining
+        .get(position)
+        .or_else(|| remaining.last())
+        .copied()
+}
+
+/// Where a tab moving into `target` is inserted in the shared tab list.
+/// `tabs` is that list *without* the moving tab. With an anchor that is in
+/// `target`, the tab lands just before or after it; otherwise after the last
+/// tab of `target`, or at the end of the list when `target` holds none. Each
+/// strip's order is the relative order of its own tabs in the one list, so
+/// either answer leaves the other strip exactly as it was.
+pub(crate) fn cross_pane_insertion_index<T: SplitTab>(
+    tabs: &[T],
+    target: PaneRole,
+    anchor: Option<(usize, bool)>,
+) -> usize {
+    if let Some((anchor_id, before)) = anchor
+        && let Some(index) = tabs
+            .iter()
+            .position(|tab| tab.split_id() == anchor_id && tab.split_role() == target)
+    {
+        return index + usize::from(!before);
+    }
+    tabs.iter()
+        .rposition(|tab| tab.split_role() == target)
+        .map_or(tabs.len(), |index| index + 1)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CenterSplit {
     primary_active: Option<usize>,
@@ -210,7 +245,9 @@ impl CenterSplit {
 
 #[cfg(test)]
 mod tests {
-    use super::{CenterSplit, MoveDirection, SplitTab};
+    use super::{
+        CenterSplit, MoveDirection, SplitTab, cross_pane_insertion_index, nearest_remaining,
+    };
     use sirio_project::{PaneRole, TabKind};
 
     /// The split reads a tab's id and stored half. Building those two
@@ -364,6 +401,44 @@ mod tests {
             split.active(PaneRole::Secondary),
             Some(2),
             "rebuild keeps it right"
+        );
+    }
+
+    /// #319: the half a shown tab leaves goes to the tab that slid into its
+    /// place, or the one before it when it was last.
+    #[test]
+    fn nearest_remaining_takes_the_tab_that_slid_in_or_the_one_before() {
+        assert_eq!(nearest_remaining(&[1, 3, 4], 1), Some(3));
+        assert_eq!(nearest_remaining(&[1, 3], 2), Some(3));
+        assert_eq!(nearest_remaining(&[], 0), None);
+    }
+
+    /// Spec §3: a tab crossing the divider lands beside its anchor, or after
+    /// the target half's last tab; the other strip's order never changes.
+    #[test]
+    fn a_tab_crossing_over_lands_by_its_anchor_or_after_the_targets_last_tab() {
+        // The shared list without the moving tab: P1 S3 P2 S4.
+        let tabs = vec![
+            placed(1, TabKind::Terminal, PaneRole::Primary),
+            placed(3, TabKind::Editor, PaneRole::Secondary),
+            placed(2, TabKind::Terminal, PaneRole::Primary),
+            placed(4, TabKind::Diff, PaneRole::Secondary),
+        ];
+        let at = |anchor| cross_pane_insertion_index(&tabs, PaneRole::Secondary, anchor);
+        assert_eq!(at(Some((4, true))), 3, "before 4");
+        assert_eq!(at(Some((3, false))), 2, "after 3");
+        assert_eq!(at(None), 4, "after the right half's last tab");
+        assert_eq!(
+            at(Some((2, true))),
+            4,
+            "an anchor in the wrong half is no anchor"
+        );
+
+        let primary_only = vec![placed(1, TabKind::Terminal, PaneRole::Primary)];
+        assert_eq!(
+            cross_pane_insertion_index(&primary_only, PaneRole::Secondary, None),
+            1,
+            "an empty target half: the end of the list"
         );
     }
 

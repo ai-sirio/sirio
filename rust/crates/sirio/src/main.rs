@@ -354,7 +354,9 @@ use session::{
     CatalogProjectSettings, PaneEvent, ProjectCatalog, RestoredSession, SessionLayout,
     SessionStore, SessionTab, SessionTabState,
 };
-use tab_machinery::{CenterSplit, MoveDirection, visible_tab_count};
+use tab_machinery::{
+    CenterSplit, MoveDirection, cross_pane_insertion_index, nearest_remaining, visible_tab_count,
+};
 
 actions!(
     window_commands,
@@ -7968,6 +7970,65 @@ impl SirioWorkspace {
         true
     }
 
+    /// Spec 2026-09-24 §3: the only way a tab changes half after it is
+    /// built. Refuses a kind that cannot move and a tab already in `target`;
+    /// otherwise re-places the tab in the shared list (beside `anchor`, or at
+    /// the end of the target strip), hands the half it left to its nearest
+    /// remaining tab — the rule `close_tab` applies — and gives the target
+    /// half focus on the moved tab. A hidden Secondary half is revealed by
+    /// `rebuild_center_split`, because the active tab is now in it. The
+    /// surface's entity moves as it is: nothing is restarted, a terminal is
+    /// only resized to its new half. Returns whether anything moved.
+    fn move_tab_to_pane(
+        &mut self,
+        tab_id: usize,
+        target: PaneRole,
+        anchor: Option<(usize, bool)>,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        let source = self.tabs[from].pane;
+        if source == target || !self.tabs[from].kind.can_move_between_panes() {
+            return false;
+        }
+        if self
+            .tab_rename
+            .as_ref()
+            .is_some_and(|rename| rename.tab_id == tab_id)
+        {
+            match window.as_deref_mut() {
+                Some(window) => self.commit_tab_rename(window, cx),
+                None => self.tab_rename = None,
+            }
+        }
+        let was_shown = self.center_split.active(source) == Some(tab_id);
+        let position = self
+            .center_split
+            .tabs_for(source, &self.tabs)
+            .iter()
+            .position(|id| *id == tab_id);
+
+        let mut tab = self.tabs.remove(from);
+        tab.pane = target;
+        let insert_at = cross_pane_insertion_index(&self.tabs, target, anchor);
+        self.tabs.insert(insert_at, tab);
+
+        if was_shown && let Some(position) = position {
+            let remaining = self.center_split.tabs_for(source, &self.tabs);
+            self.center_split
+                .set_active(source, nearest_remaining(&remaining, position));
+        }
+        self.active_tab = insert_at;
+        self.rebuild_center_split();
+        self.track_terminal_panes_in_cache(tab_id);
+        self.select_tab(tab_id, window, cx);
+        cx.notify();
+        true
+    }
+
     fn control_add_project(
         &mut self,
         path: &Path,
@@ -10870,11 +10931,8 @@ impl SirioWorkspace {
             // The tab that slid into the closed one's place, or the one
             // before it when the closed tab was last.
             let remaining = self.center_split.tabs_for(closing_role, &self.tabs);
-            let nearest = remaining
-                .get(position)
-                .or_else(|| remaining.last())
-                .copied();
-            self.center_split.set_active(closing_role, nearest);
+            self.center_split
+                .set_active(closing_role, nearest_remaining(&remaining, position));
         }
         self.rebuild_center_split();
         if let Some(active_id) = self.center_split.active_for_focused()
@@ -28588,6 +28646,246 @@ done
             assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
             workspace
         });
+    }
+
+    /// The `TerminalView` entity a tab holds. The same id before and after a
+    /// move is the proof the PTY was not restarted.
+    fn terminal_entity_id(workspace: &SirioWorkspace, tab_id: usize) -> gpui::EntityId {
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .expect("the tab exists");
+        let mut id = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Terminal { view } = content {
+                id = Some(view.entity_id());
+            }
+        });
+        id.expect("the tab holds a terminal")
+    }
+
+    /// Spec §3: moving a terminal re-homes it on the right, hands the left
+    /// half to the tab that slid into its place, and focuses the moved tab.
+    #[gpui::test]
+    fn moving_a_terminal_right_hands_the_left_half_to_its_nearest_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.select_tab(1, None, cx);
+
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx));
+
+            let moved = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 1)
+                .expect("tab 1");
+            assert_eq!(moved.pane, PaneRole::Secondary);
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Primary, &workspace.tabs),
+                vec![0, 2]
+            );
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![1]
+            );
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Primary),
+                Some(2),
+                "the tab that slid into its place"
+            );
+            assert_eq!(workspace.center_split.active(PaneRole::Secondary), Some(1));
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert_eq!(workspace.tabs[workspace.active_tab].id, 1);
+            workspace
+        });
+    }
+
+    /// Spec §3: the one writer refuses a kind that cannot move and a move
+    /// into the half the tab is already in.
+    #[gpui::test]
+    fn only_a_terminal_or_chat_moves_and_never_into_its_own_half(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].set_kind(TabKind::Editor);
+            workspace.rebuild_center_split();
+            let before = workspace
+                .tabs
+                .iter()
+                .map(|tab| (tab.id, tab.pane))
+                .collect::<Vec<_>>();
+
+            assert!(
+                !workspace.move_tab_to_pane(1, PaneRole::Primary, None, None, cx),
+                "an editor stays in the right half"
+            );
+            assert!(
+                !workspace.move_tab_to_pane(0, PaneRole::Primary, None, None, cx),
+                "a terminal already on the left goes nowhere"
+            );
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.id, tab.pane))
+                    .collect::<Vec<_>>(),
+                before
+            );
+            workspace
+        });
+    }
+
+    /// Spec §3 step 4: a tab cannot move into a half that is not drawn.
+    #[gpui::test]
+    fn moving_into_a_hidden_right_half_reveals_it(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.set_secondary_pane_hidden(true, cx);
+            assert!(!workspace.secondary_pane_visible());
+
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx));
+
+            assert!(workspace.secondary_pane_visible());
+            workspace
+        });
+    }
+
+    /// Review Focus 1: a move is not a worktree change, and a moved tab
+    /// closes like any right-hand tab — the right half falls to its nearest
+    /// remaining tab and the left half does not change.
+    #[gpui::test]
+    fn a_moved_tab_keeps_its_worktree_and_closes_like_any_right_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            let owner = workspace.tab_worktree_path(1);
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx);
+            assert_eq!(workspace.tab_worktree_path(1), owner);
+
+            workspace.select_tab(1, None, cx);
+            let index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.id == 1)
+                .expect("tab 1");
+            workspace.close_tab(index, None, cx);
+
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2]
+            );
+            assert_eq!(workspace.center_split.active(PaneRole::Secondary), Some(2));
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Primary, &workspace.tabs),
+                vec![0]
+            );
+            workspace
+        });
+    }
+
+    /// Review Focus 2: hiding the right half while a moved terminal holds
+    /// focus keeps the tab, returns focus left, and selecting the tab — what
+    /// a sidebar row click reaches — reveals the half again.
+    #[gpui::test]
+    fn hiding_the_right_half_keeps_a_moved_terminal_and_selecting_it_reveals_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+
+            workspace.toggle_secondary_pane(cx);
+            assert!(!workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+            assert!(
+                workspace.tabs.iter().any(|tab| tab.id == 1),
+                "hiding never closes"
+            );
+
+            workspace.select_tab(1, None, cx);
+            assert!(workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            workspace
+        });
+    }
+
+    /// Spec §7: moving the last left-hand tab out leaves the left half on
+    /// its launcher, not on an empty surface.
+    #[gpui::test]
+    async fn drawn_left_half_falls_back_to_its_launcher_when_its_last_tab_moves_out(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.move_tab_to_pane(0, PaneRole::Secondary, None, Some(window), cx));
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("empty-worktree-new-terminal").is_some(),
+            "the left half shows its launcher"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-0").is_some(),
+            "the tab is drawn on the right"
+        );
+    }
+
+    /// Spec §0/§8: the moved tab holds the very same `TerminalView` — the
+    /// PTY was not restarted — and is drawn in the right half's strip.
+    #[gpui::test]
+    async fn drawn_moved_terminal_is_the_same_view_inside_the_right_half(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let before = workspace.read_with(&cx.cx, |workspace, _| terminal_entity_id(workspace, 1));
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, Some(window), cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| terminal_entity_id(workspace, 1)),
+            before,
+            "the same entity, so the same PTY"
+        );
+        let pane = cx
+            .debug_bounds("pane-secondary")
+            .expect("the right half is drawn");
+        let tab = cx
+            .debug_bounds("workspace-tab-1")
+            .expect("the moved tab is drawn");
+        assert!(
+            pane.contains(&tab.center()),
+            "the moved tab sits in the right strip"
+        );
     }
 
     /// #320: both halves always show which of their tabs is current, but
