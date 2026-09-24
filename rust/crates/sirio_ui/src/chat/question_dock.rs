@@ -202,6 +202,21 @@ impl Chat {
         }
     }
 
+    /// Whether the open question's option rows accept activation: the dock
+    /// has been drawn for this very request (`sync_question_dock` took it)
+    /// and `DOCK_ARMING_DELAY` has passed since. Until then an Enter, digit
+    /// or click is ignored — and moves nothing — because it may have been
+    /// meant for the question before, or be a key already in flight.
+    fn dock_armed(&self, view: &QuestionView, cx: &Context<Self>) -> bool {
+        self.question_dock.for_request == Some(view.request_id)
+            && self.question_dock.shown_at.is_some_and(|shown_at| {
+                cx.background_executor()
+                    .now()
+                    .saturating_duration_since(shown_at)
+                    >= DOCK_ARMING_DELAY
+            })
+    }
+
     /// Moves the selection to row `index`, redrawing only on a change — a
     /// pointer resting on a row costs no frames.
     pub(super) fn select_dock_row(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -507,19 +522,12 @@ impl Chat {
         let Some(row) = view.rows.get(index).cloned() else {
             return;
         };
+        if matches!(row, DockRow::Option(_)) && !self.dock_armed(&view, cx) {
+            return;
+        }
         self.question_dock.selected = index;
         match row {
-            DockRow::Option(option) => {
-                let now = cx.background_executor().now();
-                if self
-                    .question_dock
-                    .shown_at
-                    .is_some_and(|at| now.saturating_duration_since(at) < DOCK_ARMING_DELAY)
-                {
-                    return;
-                }
-                self.respond_permission(view.request_id, &option, cx)
-            }
+            DockRow::Option(option) => self.respond_permission(view.request_id, &option, cx),
             DockRow::FreeText(input) => {
                 self.focus_question_answer(view.request_id, input.prefill, window, cx)
             }

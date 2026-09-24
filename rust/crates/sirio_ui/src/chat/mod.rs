@@ -16022,6 +16022,96 @@ let answer = 42;
         }
     }
 
+    /// A blocked digit neither answers the question nor moves the selection.
+    #[gpui::test]
+    async fn a_digit_blocked_by_arming_does_not_move_the_selection(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Always", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.simulate_keystrokes("2");
+        cx.run_until_parked();
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::Permission { resolved: None, .. })
+            ));
+            assert_eq!(chat.question_dock.selected, 0);
+        });
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+        )));
+    }
+
+    /// A queued question cannot be answered until a frame draws that request.
+    #[gpui::test]
+    async fn a_queued_question_is_not_armed_before_it_is_drawn(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
+            chat.push_entry(question_dock::open_permission(
+                2,
+                "/repo/b.rs",
+                &["Allow", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.activate_dock_row(0, window, cx);
+                chat.activate_dock_row(0, window, cx);
+            });
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                chat.entries.iter().find(|entry| {
+                    matches!(entry, Entry::Permission { request_id: 1, .. })
+                }),
+                Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+            ));
+            assert!(matches!(
+                chat.entries.iter().find(|entry| {
+                    matches!(entry, Entry::Permission { request_id: 2, .. })
+                }),
+                Some(Entry::Permission { resolved: None, .. })
+            ));
+            assert_eq!(question_dock::question_view(&chat.entries).unwrap().request_id, 2);
+        });
+
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(0, window, cx)));
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.iter().find(|entry| {
+                matches!(entry, Entry::Permission { request_id: 2, .. })
+            }),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+        )));
+    }
+
     /// A key already in flight cannot answer before the user has seen the dock.
     #[gpui::test]
     async fn an_answer_given_before_the_dock_is_armed_is_ignored(cx: &mut TestAppContext) {

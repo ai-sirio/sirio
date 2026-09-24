@@ -274,10 +274,12 @@ Otherwise it is drawn unfocused and reachable by click.
 ### Arming
 
 A question's option rows ignore activation by Enter, digits, or clicks for
-500ms after the dock first shows that request. The free-text row, Dismiss, and
-Escape are not delayed. The dock takes focus from the composer and sits where
-the last question sat, so a key or click already in flight must not answer a
-question the user has not seen.
+500ms after the dock first shows that request. The delay counts from the frame
+that first draws a request, and an activation that arming blocks neither
+answers nor moves the selection. The free-text row, Dismiss, and Escape are not
+delayed. The dock takes focus from the composer and sits where the last question
+sat, so a key or click already in flight must not answer a question the user has
+not seen.
 
 ### After an answer
 
