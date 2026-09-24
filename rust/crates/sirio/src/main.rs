@@ -1251,6 +1251,9 @@ enum WorkspaceAction {
     /// Window-needing follow-up from a non-Window context.
     OpenNewTabPalette,
     SetTranslucency(bool),
+    /// The Markdown Preview's PlantUML server changed in Settings; the
+    /// diagram settings global follows it (needs an `App`, hence the queue).
+    SetPlantumlServer(String),
 }
 
 #[derive(Clone)]
@@ -4794,6 +4797,10 @@ impl SirioWorkspace {
                                 }
                                 WorkspaceAction::SetTranslucency(enabled) => {
                                     workspace.apply_translucency(enabled, window, cx);
+                                }
+                                WorkspaceAction::SetPlantumlServer(server) => {
+                                    sirio_ui::markdown_preview::DiagramSettings::apply(&server, cx);
+                                    cx.refresh_windows();
                                 }
                                 WorkspaceAction::RestoreLaunchSnapshot => {
                                     if let Err(error) =
@@ -19432,6 +19439,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         // itself makes.
         lsp_silenced_languages: serde_json::from_str(&settings.lsp_silenced_languages)
             .unwrap_or_default(),
+        plantuml_server: settings.markdown_plantuml_server,
     }
 }
 
@@ -19471,7 +19479,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
-        markdown_plantuml_server: String::new(),
+        markdown_plantuml_server: snapshot.plantuml_server,
     }
 }
 
@@ -19893,6 +19901,11 @@ fn main() {
             cx,
         );
         Theme::set_interface_font_size(saved_settings.ui_font_size as i32, cx);
+        // The Markdown Preview's diagram cache and PlantUML server (design §6).
+        sirio_ui::markdown_preview::DiagramSettings::apply(
+            &saved_settings.markdown_plantuml_server,
+            cx,
+        );
         // The window below is opened with the material resolved from the
         // persisted preference; the theme's surfaces must fade to match from
         // the first frame, not only once the toggle is next flipped, or a
@@ -20199,6 +20212,7 @@ fn main() {
                             }
                         })
                         .on_change(move |snapshot| {
+                            let plantuml_server = snapshot.plantuml_server.clone();
                             let translucency = snapshot.translucency;
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
@@ -20207,6 +20221,7 @@ fn main() {
                             session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
+                                actions.push(WorkspaceAction::SetPlantumlServer(plantuml_server));
                             }
                         })
                         .on_revoke_browser_origin({
@@ -30907,7 +30922,7 @@ done
             right_panel_width: 405,
             center_split_ratio: 610,
             lsp_silenced_languages: "[]".to_string(),
-            markdown_plantuml_server: String::new(),
+            markdown_plantuml_server: "http://plantuml.test".into(),
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -30932,8 +30947,10 @@ done
         assert_eq!(snapshot.refresh_interval, 11);
         assert_eq!(snapshot.opencode_workspace_id_override, "wrk_main");
         assert!(snapshot.translucency);
+        assert_eq!(snapshot.plantuml_server, "http://plantuml.test");
 
         let restored = app_settings_from_snapshot(snapshot);
+        assert_eq!(restored.markdown_plantuml_server, persisted.markdown_plantuml_server);
         assert_eq!(restored.appearance, persisted.appearance);
         assert_eq!(restored.ui_font_size, persisted.ui_font_size);
         assert_eq!(restored.terminal_font_size, persisted.terminal_font_size);
