@@ -276,6 +276,7 @@ fn inline_breaks_and_images_round_trip() {
                     target: "img.png".to_string(),
                     title: Some("t".to_string()),
                     alt: "alt text".to_string(),
+                    width: None,
                 }],
             },
         ]

@@ -216,6 +216,10 @@ pub enum Inline {
         title: Option<String>,
         /// The alt text, flattened to plain text.
         alt: String,
+        /// The picture's width in pixels, from an HTML `<img width>`.
+        /// Markdown's own image syntax has no width, so [`crate::parse`]
+        /// always leaves this `None`; [`crate::expand_html`] fills it.
+        width: Option<u32>,
     },
     /// A line break from a single newline inside a paragraph. A renderer may
     /// render this as a space or as a `<br>` depending on its `white-space`
