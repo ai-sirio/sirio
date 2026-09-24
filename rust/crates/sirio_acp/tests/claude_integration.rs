@@ -849,7 +849,7 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
     // Drain until the turn ends, collecting notices at each signal so the
     // order they were posted in is the order they are read in.
     let mut notices = Vec::new();
-    let mut task_counts = Vec::new();
+    let mut task_updates = Vec::new();
     loop {
         match next_event(&events) {
             AcpEvent::OtherSessionUpdate { kind } if kind == "SessionNotice" => {
@@ -858,7 +858,7 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
             AcpEvent::OtherSessionUpdate { kind }
                 if kind.starts_with("BackgroundTasksUpdate") =>
             {
-                task_counts.push(client.background_task_count());
+                task_updates.push(kind);
             }
             AcpEvent::TurnEnded { .. } => break,
             _ => {}
@@ -885,7 +885,14 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
             },
         ]
     );
-    assert_eq!(task_counts, vec![1, 0]);
+    // The client exposes the latest count, which may already be zero by the
+    // time these queued events are read. The events themselves retain both
+    // transitions in order.
+    assert_eq!(
+        task_updates,
+        ["BackgroundTasksUpdate(1)", "BackgroundTasksUpdate(0)"]
+    );
+    assert_eq!(client.background_task_count(), 0);
     // Draining is draining: a second read after the turn returns nothing.
     assert!(client.take_notices().is_empty());
 }
