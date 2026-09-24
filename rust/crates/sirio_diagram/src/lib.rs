@@ -136,7 +136,7 @@ impl DiagramError {
                     .to_string()
             }
             Self::Unsandboxed { version } => format!(
-                "PlantUML {version} is too old to run sandboxed (1.2020.11 or later is needed), so the diagram was not rendered"
+                "PlantUML {version} is too old to run sandboxed (1.2023.9 or later is needed), so the diagram was not rendered"
             ),
             Self::Timeout { seconds } => format!("{label} timed out after {seconds} s"),
             Self::TooLarge => format!("{label} diagram is larger than 64 KiB and was not rendered"),
@@ -152,6 +152,7 @@ impl DiagramError {
 /// palette (Mermaid only — PlantUML keeps its own colours) and the source.
 pub fn cache_key(kind: DiagramKind, source: &str, palette: &Palette) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"svg-v2");
     hasher.update(kind.renderer_identity().as_bytes());
     hasher.update([0]);
     if kind == DiagramKind::Mermaid {
@@ -189,7 +190,7 @@ pub fn cached(dir: &Path, key: &str) -> Option<(PathBuf, u32)> {
     let path = dir.join(format!("{key}.svg"));
     let markup = std::fs::read_to_string(&path).ok()?;
     let (width, _) = svg::root_size(&markup)?;
-    Some((path, (width / 2.0).ceil() as u32))
+    Some((path, width.ceil() as u32))
 }
 
 /// Writes `svg` into `dir` under `key`, through a temporary name and a
@@ -472,7 +473,7 @@ mod tests {
     #[test]
     fn a_stored_diagram_is_found_again_with_its_logical_width() {
         let dir = scratch_dir("diagram-store");
-        let svg = svg::double_for_hidpi(
+        let svg = svg::as_rendered(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40.5\" height=\"20\"></svg>",
         )
         .expect("a sized root");

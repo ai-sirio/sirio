@@ -99,7 +99,7 @@ pub(crate) fn render_local(
             last_stderr_line(&stderr).unwrap_or_else(|| format!("plantuml exited with {status}")),
         ));
     }
-    svg::double_for_hidpi(&String::from_utf8_lossy(&stdout))
+    svg::as_rendered(&String::from_utf8_lossy(&stdout))
         .ok_or_else(|| DiagramError::Io("plantuml printed no SVG".into()))
 }
 

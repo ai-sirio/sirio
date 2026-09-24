@@ -19,7 +19,7 @@ pub(crate) fn render(source: &str, palette: &Palette) -> Result<Svg, DiagramErro
         message: format!("{error:#}"),
         line: None,
     })?;
-    svg::double_for_hidpi(&markup)
+    svg::as_rendered(&markup)
         .ok_or_else(|| DiagramError::Io("the Mermaid renderer produced no SVG".into()))
 }
 

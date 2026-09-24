@@ -1,23 +1,16 @@
-//! The root `<svg>` element's size, read and doubled.
+//! The root `<svg>` element's size, read without changing the markup.
 
 use std::ops::Range;
 
 use crate::Svg;
 
-/// Rewrites `markup` so gpui, which rasterises SVG images at scale 1.0,
-/// draws it at twice its logical size. The root's `width`/`height` are
-/// doubled (read from `viewBox` when absent) and `viewBox` is left alone.
-/// Any `width`/`height` in the root's `style` is removed so it cannot win
-/// over the attributes. `None` when there is no `<svg` root or no size.
-pub(crate) fn double_for_hidpi(markup: &str) -> Option<Svg> {
+/// Returns the SVG as rendered and its logical size. `None` when there is no
+/// `<svg` root or no size.
+pub(crate) fn as_rendered(markup: &str) -> Option<Svg> {
     let (start, end) = root_tag(markup)?;
-    let tag = &markup[start..end];
-    let (width, height) = size_of(tag)?;
-    let rewritten = strip_style_size(tag);
-    let rewritten = set_attr(&rewritten, "height", height * 2.0);
-    let rewritten = set_attr(&rewritten, "width", width * 2.0);
+    let (width, height) = size_of(&markup[start..end])?;
     Some(Svg {
-        markup: format!("{}{}{}", &markup[..start], rewritten, &markup[end..]),
+        markup: markup.to_owned(),
         logical_width: width.ceil() as u32,
         logical_height: height.ceil() as u32,
     })
@@ -90,97 +83,45 @@ fn attr<'a>(tag: &'a str, name: &str) -> Option<(Range<usize>, &'a str)> {
     None
 }
 
-fn set_attr(tag: &str, name: &str, value: f64) -> String {
-    let rendered = format!("{name}=\"{value}\"");
-    match attr(tag, name) {
-        Some((range, _)) => format!("{}{}{}", &tag[..range.start], rendered, &tag[range.end..]),
-        None => format!("<svg {rendered}{}", &tag["<svg".len()..]),
-    }
-}
-
-/// The root's `style` without its `width`/`height` declarations. PlantUML
-/// writes both there as well as in attributes.
-fn strip_style_size(tag: &str) -> String {
-    let Some((range, style)) = attr(tag, "style") else {
-        return tag.to_string();
-    };
-    let kept: Vec<&str> = style
-        .split(';')
-        .map(str::trim)
-        .filter(|declaration| !declaration.is_empty())
-        .filter(|declaration| {
-            let property = declaration.split(':').next().unwrap_or("").trim();
-            !property.eq_ignore_ascii_case("width") && !property.eq_ignore_ascii_case("height")
-        })
-        .collect();
-    let rendered = if kept.is_empty() {
-        String::new()
-    } else {
-        format!("style=\"{};\"", kept.join(";"))
-    };
-    format!("{}{}{}", &tag[..range.start], rendered, &tag[range.end..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_mermaid_root_is_doubled_and_its_logical_size_kept() {
-        let svg = double_for_hidpi(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"275.3827\" height=\"336.9915\" viewBox=\"0 0 275.3827 336.9915\"><rect width=\"275.3827\"/></svg>",
-        )
-        .expect("a sized root");
-        assert!(svg.markup.contains("width=\"550.7654\""));
-        assert!(svg.markup.contains("height=\"673.983\""));
-        assert!(svg.markup.contains("viewBox=\"0 0 275.3827 336.9915\""));
-        assert!(
-            svg.markup.contains("<rect width=\"275.3827\"/>"),
-            "only the root is rewritten"
-        );
+    fn a_mermaid_root_is_preserved_and_its_logical_size_kept() {
+        let markup = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"275.3827\" height=\"336.9915\" viewBox=\"0 0 275.3827 336.9915\"><rect width=\"275.3827\"/></svg>";
+        let svg = as_rendered(markup).expect("a sized root");
+        assert_eq!(svg.markup, markup);
         assert_eq!((svg.logical_width, svg.logical_height), (276, 337));
     }
 
     #[test]
-    fn stroke_width_is_not_width() {
-        let svg = double_for_hidpi("<svg stroke-width=\"3\" width=\"10\" height=\"20\"></svg>")
-            .expect("a sized root");
-        assert!(svg.markup.contains("stroke-width=\"3\""));
-        assert!(svg.markup.contains(" width=\"20\""));
-        assert!(svg.markup.contains(" height=\"40\""));
+    fn svg_markup_is_unchanged() {
+        let markup = "<svg stroke-width=\"3\" width=\"10\" height=\"20\"></svg>";
+        let svg = as_rendered(markup).expect("a sized root");
+        assert_eq!(svg.markup, markup);
     }
 
     #[test]
-    fn a_root_sized_only_by_its_view_box_gains_a_size() {
-        let svg = double_for_hidpi("<svg viewBox=\"0 0 100 50\"></svg>").expect("a view box");
-        assert!(
-            svg.markup
-                .starts_with("<svg width=\"200\" height=\"100\" viewBox=\"0 0 100 50\">")
-        );
+    fn a_root_sized_only_by_its_view_box_keeps_a_size() {
+        let markup = "<svg viewBox=\"0 0 100 50\"></svg>";
+        let svg = as_rendered(markup).expect("a view box");
+        assert_eq!(svg.markup, markup);
         assert_eq!((svg.logical_width, svg.logical_height), (100, 50));
     }
 
     #[test]
-    fn a_plantuml_root_loses_its_style_size_and_keeps_its_prolog() {
-        let svg = double_for_hidpi(
-            "<?xml version=\"1.0\"?><svg height=\"123px\" style=\"width:456px;height:123px;background:#FFFFFF;\" viewBox=\"0 0 456 123\" width=\"456px\"><g/></svg>",
-        )
-        .expect("a sized root");
-        assert!(svg.markup.starts_with("<?xml version=\"1.0\"?><svg "));
-        assert!(svg.markup.contains("width=\"912\""));
-        assert!(svg.markup.contains("height=\"246\""));
-        assert!(svg.markup.contains("style=\"background:#FFFFFF;\""));
+    fn a_plantuml_root_keeps_its_style_size_and_prolog() {
+        let markup = "<?xml version=\"1.0\"?><svg height=\"123px\" style=\"width:456px;height:123px;background:#FFFFFF;\" viewBox=\"0 0 456 123\" width=\"456px\"><g/></svg>";
+        let svg = as_rendered(markup).expect("a sized root");
+        assert_eq!(svg.markup, markup);
         assert_eq!((svg.logical_width, svg.logical_height), (456, 123));
     }
 
     #[test]
     fn markup_without_an_svg_root_is_refused() {
-        assert_eq!(double_for_hidpi("<html></html>"), None);
-        assert_eq!(
-            double_for_hidpi("<svg></svg>"),
-            None,
-            "no size, no view box"
-        );
+        assert_eq!(as_rendered("<html></html>"), None);
+        assert_eq!(as_rendered("<svg></svg>"), None, "no size, no view box");
     }
 
     #[test]

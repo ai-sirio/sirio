@@ -34,9 +34,9 @@ Two platform facts shape the design:
   and gpui decodes `.svg` files (`ImageFormat::Svg`, resvg). **A diagram
   rendered to an SVG file can therefore reach the screen through the existing
   image block, with no change to bezel** (pinned `=0.1.4`).
-- gpui rasterises an SVG image at **scale 1.0** — `img.rs` has the
-  `scale_factor` line commented out. Unhandled, every diagram would be blurry
-  on a 2× display, and macOS is the reference platform.
+- gpui rasterises an SVG image at twice its size itself
+  (`SMOOTH_SVG_SCALE_FACTOR = 2` in bezel-gpui's `svg_renderer.rs`). Sirio
+  writes the SVG as rendered and passes `width = logical_width`.
 
 ## §1 Decisions
 
@@ -171,17 +171,15 @@ appearances, as images do on GitHub.
 ### Crisp on 2× displays
 
 `sirio_diagram` records the SVG root's `width`/`height` (derived from
-`viewBox` when absent) as `logical_width`/`logical_height`, then doubles the
-root's `width`/`height`, leaving `viewBox` alone. The Preview emits
-`BlockKind::Image { width: Some(logical_width) }`. gpui rasterises at 2× and
-bezel draws it at the logical width, so it stays sharp at 2× and is
-downscaled at 1×.
+`viewBox` when absent) as `logical_width`/`logical_height`. gpui rasterises
+SVG images at twice their size itself, so Sirio writes the SVG as rendered and
+passes `width = logical_width` to `BlockKind::Image`.
 
 ### Cache
 
-- **Key:** SHA-256 over the kind, a renderer identity (crate name and version
-  for Mermaid, `plantuml` for PlantUML), the palette fingerprint (Mermaid
-  only) and the source. `sha2` is already in the lockfile.
+- **Key:** SHA-256 over the `svg-v2` format salt, kind, a renderer identity
+  (crate name and version for Mermaid, `plantuml` for PlantUML), the palette
+  fingerprint (Mermaid only) and the source. `sha2` is already in the lockfile.
 - **On disk:** `<key>.svg`, written to a temporary name and renamed into
   place so gpui can never read half a file. Directory:
   `$XDG_CACHE_HOME/Sirio/diagrams` (falling back to `~/.cache/Sirio/diagrams`)

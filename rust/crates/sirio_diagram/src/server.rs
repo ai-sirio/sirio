@@ -80,7 +80,7 @@ pub(crate) fn render_remote(
     if !(head.starts_with("<svg") || head.starts_with("<?xml")) {
         return Err(not_svg());
     }
-    svg::double_for_hidpi(&text).ok_or_else(not_svg)
+    svg::as_rendered(&text).ok_or_else(not_svg)
 }
 
 #[cfg(test)]

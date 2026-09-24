@@ -213,8 +213,8 @@ The file view's Preview has no HTML engine. `expand_html` maps a GitHub-style
 subset of raw HTML onto the existing `Block`/`Inline` model and reduces the rest
 to text; `sirio_ui::markdown_preview` then turns lone images into picture blocks
 and diagram fences into SVG files in a per-user cache, which bezel's
-`BlockKind::Image` draws. gpui rasterises SVG images at scale 1.0, so every
-diagram is written at twice its logical size. Mermaid renders in-process
+`BlockKind::Image` draws. gpui rasterises SVG images at 2× on its own, so the
+SVG is cached as rendered. Mermaid renders in-process
 (`mermaid-rs-renderer`, pinned `=0.3.1` because its version is part of the cache
 key). PlantUML follows `sirio_lsp`'s "a program on PATH" model — `plantuml` is
 found, never shipped — with one difference: a fence it cannot render gets a
