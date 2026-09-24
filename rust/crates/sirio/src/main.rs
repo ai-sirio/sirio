@@ -4048,8 +4048,10 @@ struct WorktreeContext {
 /// string, so `handle_launcher_action` matches exhaustively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LauncherAction {
-    NewTerminal,
-    NewChat,
+    /// Opens in the named half (spec 2026-09-24 §5).
+    NewTerminal(PaneRole),
+    /// Opens in the named half (spec 2026-09-24 §5).
+    NewChat(PaneRole),
     NewBrowser,
     Changes,
     OpenFile,
@@ -4404,10 +4406,8 @@ struct SirioWorkspace {
     overflow_menu_open: bool,
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
-    /// Whether the empty-worktree state's New Chat picker (the agent list)
-    /// is expanded. Mirrors `TabBar::chat_picker_open`, owned here because
-    /// the empty state renders in this crate, not in `sirio_ui`.
-    empty_chat_picker_open: bool,
+    /// Which half's empty-state agent picker is expanded, if any.
+    empty_chat_picker_open: Option<PaneRole>,
     tab_rename: Option<TabRename>,
     pending_title_prompt: Option<PendingTitlePrompt>,
     /// Blink state of the "Set Title" modal field's insertion caret, and
@@ -5342,7 +5342,7 @@ impl SirioWorkspace {
             overflow_menu_open: false,
             tab_menu_open: false,
             tab_menu_tab: None,
-            empty_chat_picker_open: false,
+            empty_chat_picker_open: None,
             tab_rename: None,
             pending_title_prompt: None,
             modal_field_blink: sirio_ui::caret::Blink::new(),
@@ -13508,12 +13508,30 @@ impl SirioWorkspace {
         }
     }
 
-    /// The Secondary pane's launcher: every surface that lives in that half,
-    /// then the pane's own close. Changes needs git and Project Settings a
-    /// project; each says why when it cannot be used.
+    /// The Secondary pane's launcher: every surface that lives in that half —
+    /// plus a terminal and a chat, which may — then the pane's own close.
+    /// Changes needs git and Project Settings a project; each says why when it
+    /// cannot be used.
     fn secondary_launcher_items(&self) -> Vec<LauncherItem<LauncherAction>> {
         let project = self.current_catalog_project();
         vec![
+            LauncherItem {
+                id: "launcher-terminal",
+                action: LauncherAction::NewTerminal(PaneRole::Secondary),
+                icon: Icon::SquareTerminal,
+                label: "Terminal".into(),
+                // Ctrl+T opens on the left; naming it here would be false.
+                shortcut: None,
+                disabled: None,
+            },
+            LauncherItem {
+                id: "launcher-chat",
+                action: LauncherAction::NewChat(PaneRole::Secondary),
+                icon: Icon::MessageSquare,
+                label: "Chat".into(),
+                shortcut: None,
+                disabled: None,
+            },
             LauncherItem {
                 id: "launcher-browser",
                 action: LauncherAction::NewBrowser,
@@ -13566,7 +13584,7 @@ impl SirioWorkspace {
         vec![
             LauncherItem {
                 id: "empty-worktree-new-terminal",
-                action: LauncherAction::NewTerminal,
+                action: LauncherAction::NewTerminal(PaneRole::Primary),
                 icon: Icon::SquareTerminal,
                 label: "Terminal".into(),
                 shortcut: None,
@@ -13574,7 +13592,7 @@ impl SirioWorkspace {
             },
             LauncherItem {
                 id: "empty-worktree-new-chat",
-                action: LauncherAction::NewChat,
+                action: LauncherAction::NewChat(PaneRole::Primary),
                 icon: Icon::MessageSquare,
                 label: "Chat".into(),
                 shortcut: None,
@@ -13593,9 +13611,19 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         match action {
-            LauncherAction::NewTerminal => self.open_action(NewTabAction::NewTerminal, window, cx),
-            LauncherAction::NewChat => {
-                self.empty_chat_picker_open = !self.empty_chat_picker_open;
+            LauncherAction::NewTerminal(pane) => self.open_in_pane(
+                pane,
+                |workspace, window, cx| {
+                    workspace.open_action(NewTabAction::NewTerminal, window, cx)
+                },
+                window,
+                cx,
+            ),
+            LauncherAction::NewChat(pane) => {
+                self.empty_chat_picker_open = match self.empty_chat_picker_open {
+                    Some(open) if open == pane => None,
+                    _ => Some(pane),
+                };
                 cx.notify();
             }
             LauncherAction::NewBrowser => self.open_action(NewTabAction::NewBrowser, window, cx),
@@ -13611,6 +13639,162 @@ impl SirioWorkspace {
             }
             LauncherAction::HidePane => self.set_secondary_pane_hidden(true, cx),
         }
+    }
+
+    /// Spec 2026-09-24 §5, "Secondary launcher": opens a tab through its
+    /// ordinary creation path — which puts it in its home half — then moves
+    /// it to `pane` in the same update, before any frame is drawn, so a
+    /// terminal's PTY is sized once, where it will stay. `move_tab_to_pane`
+    /// stays the only writer of a tab's half. A creation that opened nothing
+    /// (a chat refused with a toast) moves nothing; `pane` being the home
+    /// half moves nothing either.
+    fn open_in_pane(
+        &mut self,
+        pane: PaneRole,
+        open: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first_new_id = self.next_tab_id;
+        open(self, window, cx);
+        let opened = self
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .filter(|id| *id >= first_new_id)
+            .max();
+        if let Some(tab_id) = opened {
+            self.move_tab_to_pane(tab_id, pane, None, Some(window), cx);
+        }
+    }
+
+    /// The empty-state agent picker, drawn under the Chat tile of `target`'s
+    /// launcher while that half's picker is open. Both halves share it; the
+    /// right one's selectors carry a `secondary-` prefix so the two can
+    /// never be confused. Picking an agent opens its chat in `target`.
+    fn render_empty_chat_picker(
+        &self,
+        target: PaneRole,
+        theme: Theme,
+        entity: Entity<Self>,
+    ) -> Option<AnyElement> {
+        if self.empty_chat_picker_open != Some(target) {
+            return None;
+        }
+        let prefix: &'static str = match target {
+            PaneRole::Primary => "empty-chat-",
+            PaneRole::Secondary => "secondary-empty-chat-",
+        };
+        // The same resolved-source gate the tab bar's New Chat picker
+        // applies: only adapters with a concrete command today (Builtin or
+        // Installed) are offered as chats.
+        let available: Vec<(&'static str, &'static str)> = AGENT_CATALOG
+            .iter()
+            .filter(|adapter| agent_command_for(&self.launch_source_for(adapter.id())).is_some())
+            .map(|adapter| (adapter.id(), adapter.display_name()))
+            .collect();
+        let dismiss_entity = entity.clone();
+        let mut menu = div()
+            .id(format!("{prefix}agent-menu"))
+            .debug_selector(move || format!("{prefix}agent-menu"))
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.titlebar_control_spacing)
+            .mt(theme.spacing.titlebar_control_spacing)
+            .p(theme.spacing.titlebar_control_spacing)
+            .w(theme.spacing.menu_width)
+            .rounded(theme.radii.control)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.floating_surface)
+            .shadow_lg()
+            .text_size(theme.typography.footnote)
+            .on_mouse_down_out(move |_, _, cx| {
+                dismiss_entity.update(cx, |workspace, cx| {
+                    workspace.empty_chat_picker_open = None;
+                    cx.notify();
+                });
+            });
+        if available.is_empty() {
+            let settings_entity = entity.clone();
+            menu = menu.child(
+                div()
+                    .id(format!("{prefix}empty"))
+                    .debug_selector(move || format!("{prefix}empty"))
+                    .flex()
+                    .flex_col()
+                    .gap(theme.spacing.titlebar_control_spacing)
+                    .px(theme.spacing.card_gap)
+                    .py(theme.spacing.titlebar_control_spacing)
+                    .rounded(theme.radii.control)
+                    .text_color(theme.text_faint)
+                    .hover(|style| style.bg(theme.element_hover))
+                    .on_click(move |_, _, cx| {
+                        settings_entity.update(cx, |workspace, cx| {
+                            workspace.empty_chat_picker_open = None;
+                            workspace.open_settings(Some(SettingsCategory::Agents), cx);
+                        });
+                    })
+                    .child("Other agents…")
+                    .child(
+                        div()
+                            .text_size(theme.typography.caption2)
+                            .child("No supported agent found on PATH"),
+                    ),
+            );
+        } else {
+            for (id, display_name) in available {
+                let row_entity = entity.clone();
+                let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
+                menu = menu.child(
+                    div()
+                        .id(format!("{prefix}agent-{id}"))
+                        .debug_selector(move || format!("{prefix}agent-{id}"))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .px(theme.spacing.card_gap)
+                        .py(theme.spacing.titlebar_control_spacing)
+                        .rounded(theme.radii.control)
+                        .text_color(theme.text)
+                        .hover(|style| style.bg(theme.element_hover))
+                        .on_click(move |_, window, cx| {
+                            row_entity.update(cx, |workspace, cx| {
+                                workspace.empty_chat_picker_open = None;
+                                workspace.open_in_pane(
+                                    target,
+                                    |workspace, window, cx| {
+                                        workspace.open_chat_agent(id, window, cx)
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            });
+                        })
+                        .child(IconElement::new(icon, IconSize::Small).text_color(theme.text))
+                        .child(div().id(format!("{prefix}label-{id}")).child(display_name)),
+                );
+            }
+            let other_entity = entity;
+            menu = menu.child(
+                div()
+                    .id(format!("{prefix}other-agents"))
+                    .debug_selector(move || format!("{prefix}other-agents"))
+                    .px(theme.spacing.card_gap)
+                    .py(theme.spacing.titlebar_control_spacing)
+                    .rounded(theme.radii.control)
+                    .text_color(theme.text_faint)
+                    .hover(|style| style.bg(theme.element_hover))
+                    .on_click(move |_, _, cx| {
+                        other_entity.update(cx, |workspace, cx| {
+                            workspace.empty_chat_picker_open = None;
+                            workspace.open_settings(Some(SettingsCategory::Agents), cx);
+                        });
+                    })
+                    .child("Other agents…"),
+            );
+        }
+        Some(menu.into_any_element())
     }
 
     /// The full-window Settings route used by the status-bar affordance and
@@ -14835,6 +15019,7 @@ impl SirioWorkspace {
                         .flex_1()
                         .size_full()
                         .flex()
+                        .flex_col()
                         .items_center()
                         .justify_center()
                         .p(theme.spacing.card_gap)
@@ -14848,22 +15033,15 @@ impl SirioWorkspace {
                                 });
                             },
                         ))
+                        .children(self.render_empty_chat_picker(
+                            PaneRole::Secondary,
+                            theme,
+                            entity.clone(),
+                        ))
                         .into_any_element()
                 } else if role == PaneRole::Primary && self.has_current_worktree() {
-                    let dismiss_chat_picker_entity = entity.clone();
-                    let picker_open = self.empty_chat_picker_open;
-                    // The same resolved-source gate the tab bar's New Chat
-                    // picker applies: only adapters with a concrete command
-                    // today (Builtin or Installed) are offered as chats.
-                    let available: Vec<(&'static str, &'static str)> = AGENT_CATALOG
-                        .iter()
-                        .filter(|adapter| {
-                            agent_command_for(&self.launch_source_for(adapter.id())).is_some()
-                        })
-                        .map(|adapter| (adapter.id(), adapter.display_name()))
-                        .collect();
                     let launcher_entity = entity.clone();
-                    let mut empty = div()
+                    let empty = div()
                         .id("empty-worktree")
                         .debug_selector(|| "empty-worktree".to_owned())
                         .flex_1()
@@ -14883,111 +15061,12 @@ impl SirioWorkspace {
                                     workspace.handle_launcher_action(action, window, cx)
                                 });
                             },
+                        ))
+                        .children(self.render_empty_chat_picker(
+                            PaneRole::Primary,
+                            theme,
+                            entity.clone(),
                         ));
-                    if picker_open {
-                        let mut menu = div()
-                            .id("empty-chat-agent-menu")
-                            .debug_selector(|| "empty-chat-agent-menu".to_owned())
-                            .flex()
-                            .flex_col()
-                            .gap(theme.spacing.titlebar_control_spacing)
-                            .mt(theme.spacing.titlebar_control_spacing)
-                            .p(theme.spacing.titlebar_control_spacing)
-                            .w(theme.spacing.menu_width)
-                            .rounded(theme.radii.control)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.floating_surface)
-                            .shadow_lg()
-                            .text_size(theme.typography.footnote)
-                            .on_mouse_down_out(move |_, _, cx| {
-                                dismiss_chat_picker_entity.update(cx, |workspace, cx| {
-                                    workspace.empty_chat_picker_open = false;
-                                    cx.notify();
-                                });
-                            });
-                        if available.is_empty() {
-                            let empty_settings_entity = entity.clone();
-                            menu = menu.child(
-                                div()
-                                    .id("empty-chat-empty")
-                                    .debug_selector(|| "empty-chat-empty".to_owned())
-                                    .flex()
-                                    .flex_col()
-                                    .gap(theme.spacing.titlebar_control_spacing)
-                                    .px(theme.spacing.card_gap)
-                                    .py(theme.spacing.titlebar_control_spacing)
-                                    .rounded(theme.radii.control)
-                                    .text_color(theme.text_faint)
-                                    .hover(|style| style.bg(theme.element_hover))
-                                    .on_click(move |_, _, cx| {
-                                        empty_settings_entity.update(cx, |workspace, cx| {
-                                            workspace.empty_chat_picker_open = false;
-                                            workspace
-                                                .open_settings(Some(SettingsCategory::Agents), cx);
-                                        });
-                                    })
-                                    .child("Other agents…")
-                                    .child(
-                                        div()
-                                            .text_size(theme.typography.caption2)
-                                            .child("No supported agent found on PATH"),
-                                    ),
-                            );
-                        } else {
-                            for (id, display_name) in available {
-                                let row_entity = entity.clone();
-                                let selector = format!("empty-chat-agent-{id}");
-                                let selector_for_debug = selector.clone();
-                                let label_selector = format!("empty-chat-label-{id}");
-                                let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
-                                menu = menu.child(
-                                    div()
-                                        .id(selector)
-                                        .debug_selector(move || selector_for_debug.clone())
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(7.0))
-                                        .px(theme.spacing.card_gap)
-                                        .py(theme.spacing.titlebar_control_spacing)
-                                        .rounded(theme.radii.control)
-                                        .text_color(theme.text)
-                                        .hover(|style| style.bg(theme.element_hover))
-                                        .on_click(move |_, window, cx| {
-                                            row_entity.update(cx, |workspace, cx| {
-                                                workspace.empty_chat_picker_open = false;
-                                                workspace.open_chat_agent(id, window, cx);
-                                            });
-                                        })
-                                        .child(
-                                            IconElement::new(icon, IconSize::Small)
-                                                .text_color(theme.text),
-                                        )
-                                        .child(div().id(label_selector).child(display_name)),
-                                );
-                            }
-                            let other_entity = entity.clone();
-                            menu = menu.child(
-                                div()
-                                    .id("empty-chat-other-agents")
-                                    .debug_selector(|| "empty-chat-other-agents".to_owned())
-                                    .px(theme.spacing.card_gap)
-                                    .py(theme.spacing.titlebar_control_spacing)
-                                    .rounded(theme.radii.control)
-                                    .text_color(theme.text_faint)
-                                    .hover(|style| style.bg(theme.element_hover))
-                                    .on_click(move |_, _, cx| {
-                                        other_entity.update(cx, |workspace, cx| {
-                                            workspace.empty_chat_picker_open = false;
-                                            workspace
-                                                .open_settings(Some(SettingsCategory::Agents), cx);
-                                        });
-                                    })
-                                    .child("Other agents…"),
-                            );
-                        }
-                        empty = empty.child(menu);
-                    }
                     empty.into_any_element()
                 } else if role == PaneRole::Primary
                     && let Some(prompt) = self.empty_pane_prompts.get(&0)
@@ -38342,6 +38421,8 @@ done
         );
         for selector in [
             "secondary-launcher",
+            "launcher-terminal",
+            "launcher-chat",
             "launcher-browser",
             "launcher-changes",
             "launcher-open-file",
@@ -38354,6 +38435,121 @@ done
             cx.debug_bounds("secondary-pane-close").is_some(),
             "the `×` closes the pane itself, so an empty strip draws it too"
         );
+    }
+
+    /// Spec 2026-09-24 §5: Ctrl+T opens on the left, so the right launcher's
+    /// Terminal tile must not claim it; the left one still does.
+    #[gpui::test]
+    fn the_right_terminal_tile_shows_no_shortcut(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let workspace = palette_test_workspace(cx);
+            let right = workspace.secondary_launcher_items();
+            let tile = right
+                .iter()
+                .find(|item| item.id == "launcher-terminal")
+                .expect("the right launcher offers a terminal");
+            assert_eq!(
+                tile.action,
+                LauncherAction::NewTerminal(PaneRole::Secondary)
+            );
+            assert!(tile.shortcut.is_none());
+            let left = SirioWorkspace::primary_launcher_items();
+            assert!(left[0].shortcut.is_some(), "the left tile keeps Ctrl+T");
+            workspace
+        });
+    }
+
+    /// Spec 2026-09-24 §5: the right launcher's Terminal tile opens a
+    /// terminal in the right half, focused there.
+    #[gpui::test]
+    async fn drawn_right_terminal_tile_opens_a_terminal_on_the_right(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
+
+        let tile = cx
+            .debug_bounds("launcher-terminal")
+            .expect("the tile is drawn");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(workspace.tabs.len(), before + 1);
+            let opened = workspace
+                .tabs
+                .iter()
+                .max_by_key(|tab| tab.id)
+                .expect("a tab");
+            assert_eq!(opened.kind, TabKind::Terminal);
+            assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+    }
+
+    /// Spec 2026-09-24 §5: the right launcher's Chat tile opens the agent
+    /// picker under itself — not the left one's — and the picked chat opens
+    /// on the right.
+    #[gpui::test]
+    async fn drawn_right_chat_tile_opens_its_own_picker_and_a_chat_on_the_right(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        // Drain the construction-time launch-source refresh before the
+        // override, as `drawn_selected_worktree_without_tabs_offers_new_chat_picker` does.
+        cx.run_until_parked();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.launch.sources.insert(
+                "codex".into(),
+                sirio_registry::LaunchSource::Builtin {
+                    program: "codex-acp".into(),
+                    args: Vec::new(),
+                },
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let tile = cx.debug_bounds("launcher-chat").expect("the tile is drawn");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("secondary-empty-chat-agent-menu").is_some());
+        assert!(
+            cx.debug_bounds("empty-chat-agent-menu").is_none(),
+            "not the left picker"
+        );
+
+        let agent = cx
+            .debug_bounds("secondary-empty-chat-agent-codex")
+            .expect("the right picker lists Codex");
+        cx.simulate_click(agent.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let opened = workspace
+                .tabs
+                .iter()
+                .max_by_key(|tab| tab.id)
+                .expect("a tab");
+            assert_eq!(opened.kind, TabKind::AgentChat);
+            assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(workspace.empty_chat_picker_open, None, "the picker closes");
+        });
     }
 
     /// The strip's `×` closes the Secondary pane the way Ctrl+Shift+B does:
@@ -38475,18 +38671,21 @@ done
             cx.debug_bounds("command-palette-empty").is_some(),
             "the palette shows no row to click"
         );
-        let launcher_center = cx
+        let launcher = cx
             .debug_bounds("launcher-browser")
-            .expect("the launcher is still drawn under the palette")
-            .center();
+            .expect("the launcher is still drawn under the palette");
         let palette = cx
             .debug_bounds("command-palette")
             .expect("the palette is open");
-        assert!(
-            palette.contains(&launcher_center),
-            "the palette must cover the launcher tile in the test window"
+        let overlap_point = point(
+            launcher.left().max(palette.left()) + px(1.0),
+            launcher.top().max(palette.top()) + px(1.0),
         );
-        cx.simulate_click(launcher_center, Modifiers::none());
+        assert!(
+            launcher.contains(&overlap_point) && palette.contains(&overlap_point),
+            "the palette must overlap the launcher tile in the test window"
+        );
+        cx.simulate_click(overlap_point, Modifiers::none());
         cx.run_until_parked();
 
         workspace.read_with(&cx.cx, |workspace, _| {
