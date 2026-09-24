@@ -139,11 +139,11 @@ prefix that `..` and symlinks escape (verified on 1.2026.8). The child's PATH
 drops relative entries and its environment drops
 `PLANTUML_INCLUDE_PATH`/`plantuml.include.path`,
 `PLANTUML_ALLOWLIST_URL`/`plantuml.allowlist.url`, `JAVA_TOOL_OPTIONS`,
-`_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`; a timeout kills the whole process tree.
+`_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`; PlantUML older than 1.2023.9 is refused; a timeout kills the whole process tree.
 
 ### The server
 
-Consulted only when the local command is `NotAvailable` and
+Consulted when the local command is `NotAvailable` or too old to sandbox, and
 `markdown.plantumlServer` is non-empty.
 
 - Request: `GET {server}/svg/{encoded}`, where `encoded` is the source

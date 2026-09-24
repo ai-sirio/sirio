@@ -242,15 +242,19 @@ fn render_with_search_path(
         DiagramKind::Mermaid => mermaid::render(&source, &options.palette),
         DiagramKind::PlantUml => {
             match plantuml::render_local(&source, options, search_path, plantuml::LOCAL_TIMEOUT) {
-                Err(DiagramError::NotAvailable) => match options
-                    .plantuml_server
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|server| !server.is_empty())
-                {
-                    Some(server) => server::render_remote(&source, server, server::SERVER_TIMEOUT),
-                    None => Err(DiagramError::NotAvailable),
-                },
+                Err(error @ (DiagramError::NotAvailable | DiagramError::Unsandboxed { .. })) => {
+                    match options
+                        .plantuml_server
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|server| !server.is_empty())
+                    {
+                        Some(server) => {
+                            server::render_remote(&source, server, server::SERVER_TIMEOUT)
+                        }
+                        None => Err(error),
+                    }
+                }
                 other => other,
             }
         }
@@ -409,7 +413,7 @@ mod tests {
                 version: "1.2020.2".into()
             }
             .note(PlantUml),
-            "PlantUML 1.2020.2 is too old to run sandboxed (1.2020.11 or later is needed), so the diagram was not rendered"
+            "PlantUML 1.2020.2 is too old to run sandboxed (1.2023.9 or later is needed), so the diagram was not rendered"
         );
         assert_eq!(
             DiagramError::Timeout { seconds: 15 }.note(PlantUml),
@@ -593,6 +597,39 @@ mod tests {
                 .expect("the server renders");
         assert_eq!(svg.logical_width, 8);
         server.join().expect("server");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsandboxed_plantuml_falls_back_to_a_configured_server() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch_dir("fallback-unsandboxed");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let plantuml = bin.join("plantuml");
+        std::fs::write(&plantuml, "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'PlantUML version 1.2020.2'; exit 0; fi\n")
+            .expect("fake plantuml");
+        std::fs::set_permissions(&plantuml, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = "<svg width=\"8\" height=\"4\"></svg>";
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        });
+        let options = Options { plantuml_server: Some(base), ..test_options(&root) };
+        let result = render_with_search_path(DiagramKind::PlantUml, "A -> B", &options, bin.as_os_str());
+        assert!(result.is_ok(), "configured server should answer: {result:?}");
+        server.join().expect("server");
+
+        let options = Options { plantuml_server: None, ..test_options(&root) };
+        assert!(matches!(
+            render_with_search_path(DiagramKind::PlantUml, "A -> B", &options, bin.as_os_str()),
+            Err(DiagramError::Unsandboxed { .. })
+        ));
     }
 
     #[test]

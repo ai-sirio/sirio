@@ -14,9 +14,8 @@ use crate::{DiagramError, Options, Svg, plantuml_document, svg};
 /// How long a local render may take: a cold JVM alone takes 1–3 s.
 pub(crate) const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// PlantUML learned security profiles in 1.2020.11; older releases ignore
-/// `PLANTUML_SECURITY_PROFILE` and run with full file and URL access.
-const MIN_SANDBOXABLE: (u32, u32) = (2020, 11);
+/// PlantUML's sandbox has published bypasses fixed in 1.2023.9.
+const MIN_SANDBOXABLE: (u32, u32) = (2023, 9);
 
 /// Finds `program` on `search_path` the way a shell would, ignoring relative
 /// and empty entries (they would resolve against an untrusted directory).
@@ -262,10 +261,8 @@ fn version_cache() -> &'static VersionCache {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Refuses a `plantuml` too old to sandbox: security profiles exist only
-/// from 1.2020.11, and older releases silently run with full file and URL
-/// access. Deliberately no server fallback here: only `NotAvailable` falls
-/// back, never a program that cannot run sandboxed.
+/// Refuses a `plantuml` too old to sandbox: older releases have published
+/// sandbox bypasses. The caller may fall back to a configured server.
 fn sandboxed_program(
     program: &Path,
     options: &Options,
@@ -618,19 +615,19 @@ mod tests {
     #[test]
     fn the_version_is_read_from_its_banner() {
         assert_eq!(
-            parse_version("PlantUML version 1.2020.2 (Sat Feb 01 2020)"),
-            Some((2020, 2))
+            parse_version("PlantUML version 1.2023.8 (Sat Feb 01 2023)"),
+            Some((2023, 8))
         );
         assert_eq!(
-            parse_version("PlantUML version 1.2024.3 (Sun Jan 28 2024)"),
-            Some((2024, 3))
+            parse_version("PlantUML version 1.2023.9 (Sun Jan 28 2023)"),
+            Some((2023, 9))
         );
         assert_eq!(parse_version("nonsense"), None::<(u32, u32)>);
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_plantuml_older_than_1_2020_11_is_refused() {
+    fn a_plantuml_older_than_1_2023_9_is_refused() {
         let root = scratch_dir("plantuml-old");
         let bin = root.join("bin");
         let out = root.join("out");
@@ -639,7 +636,7 @@ mod tests {
         let marker_arg = marker.display();
         fake_plantuml_with_version(
             &bin,
-            "PlantUML version 1.2020.2 (Sat Feb 01 2020)",
+            "PlantUML version 1.2023.8 (Sat Feb 01 2023)",
             &format!("touch '{marker_arg}'\nprintf '%s' '{SVG}'"),
         );
         assert_eq!(
@@ -650,10 +647,23 @@ mod tests {
                 LOCAL_TIMEOUT
             ),
             Err(DiagramError::Unsandboxed {
-                version: "1.2020.2".into()
+                version: "1.2023.8".into()
             })
         );
         assert!(!marker.exists(), "the render never ran");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plantuml_1_2023_9_is_accepted_for_sandboxing() {
+        let root = scratch_dir("plantuml-minimum");
+        let bin = root.join("bin");
+        fake_plantuml_with_version(
+            &bin,
+            "PlantUML version 1.2023.9",
+            &format!("cat > /dev/null\nprintf '%s' '{SVG}'"),
+        );
+        assert!(render_local("A -> B", &test_options(&root), &path_with(&bin), LOCAL_TIMEOUT).is_ok());
     }
 
     #[cfg(unix)]

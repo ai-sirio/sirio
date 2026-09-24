@@ -220,8 +220,8 @@ key). PlantUML follows `sirio_lsp`'s "a program on PATH" model — `plantuml` is
 found, never shipped — with one difference: a fence it cannot render gets a
 one-line note, because the author asked for a picture. The local run is
 sandboxed (`PLANTUML_SECURITY_PROFILE=SANDBOX`: no network, no local
-includes — only the embedded stdlib); PlantUML older than 1.2020.11 is refused
-with a note, because its sandbox profile is unavailable, and the optional server
+includes — only the embedded stdlib); PlantUML older than 1.2023.9 is refused
+with a note, because its sandbox profile is unsafe, and the optional server
 (`markdown.plantumlServer`) is off by default because it sends the source off
 the machine.
 `docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md` has the design.
