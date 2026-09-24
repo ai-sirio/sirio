@@ -13655,6 +13655,8 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let other_pane = pane.other();
+        let other_active = self.center_split.active(other_pane);
         let first_new_id = self.next_tab_id;
         open(self, window, cx);
         let opened = self
@@ -13663,8 +13665,17 @@ impl SirioWorkspace {
             .map(|tab| tab.id)
             .filter(|id| *id >= first_new_id)
             .max();
-        if let Some(tab_id) = opened {
-            self.move_tab_to_pane(tab_id, pane, None, Some(window), cx);
+        if let Some(tab_id) = opened
+            && self.move_tab_to_pane(tab_id, pane, None, Some(window), cx)
+            && let Some(previous_id) = other_active
+            && self
+                .tabs
+                .iter()
+                .any(|tab| tab.id == previous_id && tab.pane == other_pane)
+        {
+            self.center_split.set_active(other_pane, Some(previous_id));
+            self.schedule_save(cx);
+            cx.notify();
         }
     }
 
@@ -38464,7 +38475,7 @@ done
     #[gpui::test]
     async fn drawn_right_terminal_tile_opens_a_terminal_on_the_right(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -38490,6 +38501,16 @@ done
                 .expect("a tab");
             assert_eq!(opened.kind, TabKind::Terminal);
             assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Primary),
+                Some(0),
+                "opening on the right must leave the left half showing A"
+            );
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(opened.id),
+                "the new terminal is shown on the right"
+            );
             assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
         });
     }
@@ -38502,7 +38523,7 @@ done
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = cx.update(|window, _| {
             window
@@ -38514,6 +38535,7 @@ done
         // override, as `drawn_selected_worktree_without_tabs_offers_new_chat_picker` does.
         cx.run_until_parked();
         workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_tab(0, None, cx);
             workspace.launch.sources.insert(
                 "codex".into(),
                 sirio_registry::LaunchSource::Builtin {
@@ -38548,6 +38570,17 @@ done
                 .expect("a tab");
             assert_eq!(opened.kind, TabKind::AgentChat);
             assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Primary),
+                Some(0),
+                "opening on the right must leave the left half showing A"
+            );
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(opened.id),
+                "the new chat is shown on the right"
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
             assert_eq!(workspace.empty_chat_picker_open, None, "the picker closes");
         });
     }
