@@ -289,8 +289,8 @@ Written first, per the repo's convention.
   decodes to the text published beside it, and encode∘decode round-trips. The encoder's own bytes are
   not compared, because DEFLATE output legitimately varies between
   implementations.
-- The 2× rewrite: doubled `width`/`height`, untouched `viewBox`, logical size
-  preserved, derived from `viewBox` when the root has no size.
+- `as_rendered`: markup unchanged; logical size read from `width`/`height`,
+  from `viewBox` when absent, with `px` accepted.
 - Mermaid: a valid source renders; an invalid one is `Syntax`; 64 KiB + 1 is
   `TooLarge`.
 - Local PlantUML against a **fake `plantuml`** placed first on a temporary
