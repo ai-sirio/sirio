@@ -4,7 +4,11 @@
 //! keyboard uses; the design is
 //! `docs/superpowers/specs/2026-09-24-question-dock-design.md`.
 
-use super::{AnswerOption, AnswerTextInput, Entry, PlanApproval};
+use bezel::ui::popover;
+use gpui::{AnyElement, Context, Window, div, prelude::*, px};
+use sirio_theme::Theme;
+
+use super::{AnswerOption, AnswerTextInput, Chat, Entry, PlanApproval, TRANSCRIPT_WIDTH};
 
 /// What the dock draws for the open question.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +142,200 @@ pub(super) fn row_for_digit(key: &str, row_count: usize) -> Option<usize> {
 /// The number drawn on row `index`, for the nine rows a digit reaches.
 pub(super) fn badge_label(index: usize) -> Option<String> {
     (index < 9).then(|| (index + 1).to_string())
+}
+
+/// Tallest the question body grows before it scrolls, so a long command
+/// cannot push the composer off the pane.
+pub(super) const DOCK_BODY_MAX_HEIGHT: f32 = 160.0;
+
+/// The dock's frame colour: the composer card's own hairline
+/// (`composer_border`), so the two read as one pair — never an alert tint.
+pub(super) fn dock_border(theme: &bezel::theme::Theme) -> gpui::Hsla {
+    theme.border
+}
+
+impl Chat {
+    /// Draws the dock for the open question: its caption, the whole
+    /// question, and one numbered row per answer.
+    pub(super) fn render_question_dock(
+        &self,
+        view: QuestionView,
+        theme: &Theme,
+        bezel_theme: &bezel::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let typography = theme.typography;
+        let entity = cx.entity();
+        let painter = bezel::motion::Painter::of(cx);
+        let request_id = view.request_id;
+        let selected = clamp_selection(self.question_dock.selected, view.rows.len());
+        let after_options = view
+            .rows
+            .iter()
+            .any(|row| matches!(row, DockRow::Option(_)));
+
+        let rows = view
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let highlighted = index == selected;
+                let badge = badge_label(index).map(|label| {
+                    div()
+                        .flex_none()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radii.control)
+                        .border_1()
+                        .border_color(bezel_theme.border)
+                        .when(highlighted, |badge| badge.bg(theme.border_strong))
+                        .text_size(typography.caption2)
+                        .text_color(if highlighted {
+                            theme.text
+                        } else {
+                            theme.text_faint
+                        })
+                        .child(label)
+                });
+                let click_entity = entity.clone();
+                // bezel's menu row — the one the chat's pickers use — with
+                // the keyboard's row as its `highlighted` one.
+                let frame = popover::menu_row_nav(
+                    bezel_theme,
+                    false,
+                    highlighted,
+                    bezel::motion::Fade::new(
+                        painter,
+                        format!("question-dock-row-{request_id}-{index}"),
+                    ),
+                )
+                .id(("question-dock-row", index))
+                .items_start()
+                .on_click(move |_, window, cx| {
+                    click_entity.update(cx, |chat, cx| {
+                        chat.activate_dock_row(index, window, cx);
+                    });
+                })
+                .children(badge);
+                match row {
+                    DockRow::Option(option) => {
+                        let option_id = option.id.clone();
+                        frame
+                            .debug_selector(move || format!("permission-option-{option_id}"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    // A rejection is not tinted: a red "Reject"
+                                    // reads as an error on a legitimate choice.
+                                    .child(div().text_color(theme.text).child(option.label))
+                                    .children(option.description.map(|description| {
+                                        div()
+                                            .text_size(typography.footnote)
+                                            .text_color(theme.text_muted)
+                                            .child(description)
+                                    })),
+                            )
+                            .into_any_element()
+                    }
+                    DockRow::FreeText(input) => frame
+                        .debug_selector(|| "question-dock-other".into())
+                        .child(Self::render_question_answer_row(
+                            request_id,
+                            input.placeholder(after_options),
+                            input.prefill.clone(),
+                            theme,
+                            entity.clone(),
+                            &self.question_answer,
+                            self.answer_caret_visible,
+                        ))
+                        .into_any_element(),
+                    DockRow::Dismiss => frame
+                        .debug_selector(|| "question-dock-dismiss".into())
+                        .child(div().flex_1().text_color(theme.text).child("Dismiss"))
+                        .into_any_element(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .id("question-dock")
+            .debug_selector(|| "question-dock".into())
+            .key_context("ChatQuestionDock")
+            .track_focus(&self.question_dock.focus)
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .mb(px(8.0))
+            // The composer card's own frame (`render_composer`).
+            .rounded(px(bezel::theme::Theme::surface_radius()))
+            .border_1()
+            .border_color(dock_border(bezel_theme))
+            .bg(bezel_theme.card_glass_bg())
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .debug_selector(|| "question-dock-caption".into())
+                            .text_size(typography.footnote)
+                            .text_color(theme.text_muted)
+                            .child(view.caption),
+                    )
+                    .when(!view.body.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .id("question-dock-body")
+                                .debug_selector(|| "question-dock-body".into())
+                                .max_h(px(DOCK_BODY_MAX_HEIGHT))
+                                .overflow_y_scroll()
+                                .text_size(typography.callout)
+                                .text_color(theme.text)
+                                .child(view.body),
+                        )
+                    }),
+            )
+            .child(div().flex().flex_col().gap(px(2.0)).children(rows))
+            .into_any_element()
+    }
+
+    /// Acts on row `index` of the open question: answers with an option,
+    /// opens the typed answer, or dismisses a request with nothing to
+    /// choose.
+    pub(super) fn activate_dock_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = question_view(&self.entries) else {
+            return;
+        };
+        let Some(row) = view.rows.get(index).cloned() else {
+            return;
+        };
+        self.question_dock.selected = index;
+        match row {
+            DockRow::Option(option) => self.respond_permission(view.request_id, &option, cx),
+            DockRow::FreeText(input) => {
+                self.focus_question_answer(view.request_id, input.prefill, window, cx)
+            }
+            DockRow::Dismiss => self.dismiss_permission(view.request_id, cx),
+        }
+    }
 }
 
 /// Options with the given labels; each id is its label, lower-cased.
