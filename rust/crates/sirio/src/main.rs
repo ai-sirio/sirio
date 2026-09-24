@@ -9539,7 +9539,10 @@ impl SirioWorkspace {
             }
         });
         if has_worktree {
-            self.reconcile_changes_tabs(working_directory_is_git, cx);
+            // Not forced: a reconcile runs on every activity change, and only
+            // a flip in the worktree's Git capability may replace a Changes
+            // tab -- a forced rebind would drop its state each time.
+            self.reconcile_changes_tabs(false, cx);
         }
 
         self.sync_sidebar_tabs(ParkedRows::Read, cx);
@@ -22643,8 +22646,8 @@ done
         ));
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).expect("create non-git project");
-        let catalog = |is_git| {
-            ProjectCatalog::from_projects(vec![session::CatalogProject {
+        let projects = |is_git| {
+            vec![session::CatalogProject {
                 id: "capability-project".into(),
                 name: "Capability Project".into(),
                 root_path: repo.clone(),
@@ -22654,7 +22657,7 @@ done
                     path: repo.clone(),
                     is_primary: true,
                 }],
-            }])
+            }]
         };
         let changes_entity = |workspace: &mut SirioWorkspace| {
             let mut changes = None;
@@ -22669,7 +22672,11 @@ done
         let window = cx.add_window(|_window, cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
             workspace.working_directory = repo.clone();
-            workspace.project_catalog = catalog(false);
+            workspace.project_catalog = ProjectCatalog::from_projects(projects(false));
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &repo,
+            )));
             workspace.right_panel = cx.new(|_| RightPanel::new(repo.clone()));
             let right_panel = workspace.right_panel.clone();
             SirioWorkspace::subscribe_right_panel(&right_panel, cx);
@@ -22689,7 +22696,7 @@ done
 
         workspace.update(&mut cx, |workspace, cx| {
             let before = workspace.project_catalog.clone();
-            workspace.project_catalog.replace_projects(catalog(true));
+            workspace.project_catalog.replace_projects(projects(true));
             assert!(workspace.apply_catalog_refresh(
                 before,
                 Ok(()),
@@ -22706,7 +22713,7 @@ done
 
         workspace.update(&mut cx, |workspace, cx| {
             let before = workspace.project_catalog.clone();
-            workspace.project_catalog.replace_projects(catalog(false));
+            workspace.project_catalog.replace_projects(projects(false));
             assert!(workspace.apply_catalog_refresh(
                 before,
                 Ok(()),
@@ -22735,8 +22742,8 @@ done
         ));
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).expect("create non-git project");
-        let catalog = |is_git| {
-            ProjectCatalog::from_projects(vec![session::CatalogProject {
+        let projects = |is_git| {
+            vec![session::CatalogProject {
                 id: "split-capability-project".into(),
                 name: "Split Capability Project".into(),
                 root_path: repo.clone(),
@@ -22746,13 +22753,17 @@ done
                     path: repo.clone(),
                     is_primary: true,
                 }],
-            }])
+            }]
         };
 
         let window = cx.add_window(|_window, cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
             workspace.working_directory = repo.clone();
-            workspace.project_catalog = catalog(false);
+            workspace.project_catalog = ProjectCatalog::from_projects(projects(false));
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &repo,
+            )));
             workspace.right_panel = cx.new(|_| RightPanel::new(repo.clone()));
             let right_panel = workspace.right_panel.clone();
             SirioWorkspace::subscribe_right_panel(&right_panel, cx);
@@ -22793,7 +22804,7 @@ done
             });
 
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.project_catalog.replace_projects(catalog(true));
+            workspace.project_catalog.replace_projects(projects(true));
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
@@ -22861,7 +22872,7 @@ done
         };
 
         let mut activity = AgentActivityModel::new();
-        let (git_tabs, _) = cx.update(|cx| {
+        let (git_tabs, _, _) = cx.update(|cx| {
             restore_tabs_with_terminal_cache(
                 &restored,
                 &repo,
@@ -22887,7 +22898,7 @@ done
         });
         assert!(git_changes);
 
-        let (non_git_tabs, _) = cx.update(|cx| {
+        let (non_git_tabs, _, _) = cx.update(|cx| {
             restore_tabs_with_terminal_cache(
                 &restored,
                 &repo,
