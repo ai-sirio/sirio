@@ -44,6 +44,11 @@ impl Diagrams {
         self.states.insert(key, state);
     }
 
+    /// Drops the entry for `key`, so the next frame requests it again.
+    pub(crate) fn remove(&mut self, key: &str) {
+        self.states.remove(key);
+    }
+
     /// Drops every failure, so the next frame tries again: installing
     /// PlantUML or configuring a server takes effect without reopening.
     pub(crate) fn forget_failures(&mut self) {
@@ -123,7 +128,18 @@ pub(crate) fn build(
                     }
                     Some(DiagramState::Pending) => blocks.push(fence),
                     None => {
-                        missing.push(DiagramRequest { key, kind, source });
+                        // The same diagram twice in one document is rendered
+                        // once: first occurrence wins, both fences show as code.
+                        if !missing
+                            .iter()
+                            .any(|existing: &DiagramRequest| existing.key == key)
+                        {
+                            missing.push(DiagramRequest {
+                                key: key.clone(),
+                                kind,
+                                source,
+                            });
+                        }
                         blocks.push(fence);
                     }
                 }
@@ -387,11 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn the_same_diagram_twice_is_one_key() {
+    fn the_same_diagram_twice_is_requested_once() {
         let twice = format!("{FENCE}\n```mermaid\nflowchart TD\n  A --> B\n```\n");
         let preview = preview(&twice, &Diagrams::default());
-        assert_eq!(preview.missing.len(), 2);
-        assert_eq!(preview.missing[0].key, preview.missing[1].key);
+        assert_eq!(preview.missing.len(), 1);
+        let fences = preview
+            .doc
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.kind, BlockKind::Code { .. }))
+            .count();
+        assert_eq!(fences, 2, "both fences still show as code");
     }
 
     /// Review Focus 3.

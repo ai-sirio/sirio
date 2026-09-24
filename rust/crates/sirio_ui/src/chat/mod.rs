@@ -5456,10 +5456,10 @@ impl Chat {
         }
     }
 
-    /// Shared bezel-markdown renderer used by file tabs. The legacy parsed
-    /// tree is converted to bezel's flat Doc at the seam; BlockLayouts then
-    /// lets the existing per-render link callback win before bezel's default
-    /// external opener runs.
+    /// Shared bezel-markdown renderer used by file tabs. The caller
+    /// (`markdown_preview::build`) hands it a finished `Doc`; BlockLayouts
+    /// then lets the existing per-render link callback win before bezel's
+    /// default external opener runs.
     pub(crate) fn render_markdown_document_with_link_override(
         document: markdown::Doc,
         _theme: &Theme,

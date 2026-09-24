@@ -215,6 +215,9 @@ pub struct FileView {
     /// The diagram settings the last frame saw. A change forgets every
     /// failure, so a newly installed `plantuml` or a new server is tried.
     diagram_settings: Option<DiagramSettings>,
+    /// Bumped whenever the settings change. A render scheduled under older
+    /// settings lands stale and is discarded, never stored.
+    diagram_generation: u64,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -384,6 +387,7 @@ impl FileView {
             pending_reveal: None,
             diagrams: Diagrams::default(),
             diagram_settings: None,
+            diagram_generation: 0,
         }
     }
 
@@ -1338,6 +1342,7 @@ impl FileView {
         if settings != self.diagram_settings {
             self.diagrams.forget_failures();
             self.diagram_settings = settings.clone();
+            self.diagram_generation += 1;
         }
         let palette = markdown_preview::palette(Theme::get(cx));
         let base = path
@@ -1354,7 +1359,7 @@ impl FileView {
     }
 
     /// Renders one diagram off the UI thread: the disk cache first, then the
-    /// renderer. PlantUML waits for the app-wide turn.
+    /// renderer. PlantUML waits for the app-wide turn; a cache hit never does.
     fn render_diagram(
         &mut self,
         request: DiagramRequest,
@@ -1367,31 +1372,54 @@ impl FileView {
         if self.diagrams.get(&request.key).is_some() {
             return;
         }
-        self.diagrams
-            .insert(request.key.clone(), DiagramState::Pending);
-        let options = sirio_diagram::Options {
-            palette: palette.clone(),
-            plantuml_server: settings.plantuml_server.clone(),
-            working_dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
-            include_root: markdown_preview::include_root(file),
-        };
-        let cache_dir = settings.cache_dir.clone();
-        let queue = (request.kind == DiagramKind::PlantUml).then(|| PlantUmlQueue::get(cx));
+        self.diagrams.insert(request.key.clone(), DiagramState::Pending);
+        let generation = self.diagram_generation;
         let DiagramRequest { key, kind, source } = request;
+        let cache_dir = settings.cache_dir.clone();
+        let server = settings.plantuml_server.clone();
+        let palette = palette.clone();
+        let file = file.to_path_buf();
+        let queue = (kind == DiagramKind::PlantUml).then(|| PlantUmlQueue::get(cx));
         cx.spawn(async move |this, cx| {
+            // The disk cache first: a hit is Ready without rendering (§3) and
+            // never waits for the PlantUML turn.
+            let hit_dir = cache_dir.clone();
+            let hit_key = key.clone();
+            let hit = cx
+                .background_spawn(async move { sirio_diagram::cached(&hit_dir, &hit_key) })
+                .await;
+            if let Some((path, width)) = hit {
+                this.update(cx, |view, cx| {
+                    if view.diagram_generation == generation {
+                        view.diagrams.insert(key.clone(), DiagramState::Ready { path, width });
+                    } else {
+                        view.diagrams.remove(&key);
+                    }
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
             let _turn = match &queue {
                 Some(queue) => Some(queue.turn().await),
                 None => None,
             };
-            let task_key = key.clone();
+            // The view closed while waiting for the turn: abandon the render.
+            if this.upgrade().is_none() {
+                return;
+            }
+            let render_key = key.clone();
             let state = cx
                 .background_spawn(async move {
                     let _perf = sirio_perf::span("Preview.diagram_render", source.len() as u64);
-                    if let Some((path, width)) = sirio_diagram::cached(&cache_dir, &task_key) {
-                        return DiagramState::Ready { path, width };
-                    }
+                    let options = sirio_diagram::Options {
+                        palette,
+                        plantuml_server: server,
+                        working_dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
+                        include_root: markdown_preview::include_root(&file),
+                    };
                     match sirio_diagram::render(kind, &source, &options) {
-                        Ok(svg) => match sirio_diagram::store(&cache_dir, &task_key, &svg) {
+                        Ok(svg) => match sirio_diagram::store(&cache_dir, &render_key, &svg) {
                             Ok(path) => DiagramState::Ready {
                                 path,
                                 width: svg.logical_width,
@@ -1405,7 +1433,14 @@ impl FileView {
                 })
                 .await;
             this.update(cx, |view, cx| {
-                view.diagrams.insert(key, state);
+                // A result from before a settings change is discarded: the
+                // Pending entry goes away so the next frame requests the
+                // diagram again under the new settings.
+                if view.diagram_generation == generation {
+                    view.diagrams.insert(key.clone(), state);
+                } else {
+                    view.diagrams.remove(&key);
+                }
                 cx.notify();
             })
             .ok();
@@ -1985,12 +2020,12 @@ fn render_content(
                         return;
                     }
                     match resolve_file_link(target, &base) {
-                    Some(resolved) => {
-                        link_entity.update(cx, |_, cx| {
-                            cx.emit(FileViewEvent::OpenFile(resolved.path));
-                        });
-                    }
-                    None => cx.open_url(target),
+                        Some(resolved) => {
+                            link_entity.update(cx, |_, cx| {
+                                cx.emit(FileViewEvent::OpenFile(resolved.path));
+                            });
+                        }
+                        None => cx.open_url(target),
                     }
                 },
             );
@@ -5721,7 +5756,10 @@ mod tests {
     use markdown::BlockKind;
 
     fn diagram_cache(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sirio-diagram-cache-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "sirio-diagram-cache-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -5753,9 +5791,15 @@ mod tests {
     async fn a_mermaid_fence_renders_into_the_cache_and_the_preview(cx: &mut gpui::TestAppContext) {
         let cache = diagram_cache("one");
         cx.update(|cx| {
-            DiagramSettings::set(DiagramSettings { cache_dir: cache.clone(), plantuml_server: None }, cx)
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: cache.clone(), plantuml_server: None },
+                cx,
+            )
         });
-        let file = TempFile::with_extension("md", "# D\n\n```mermaid\nflowchart TD\n  A --> B\n```\n");
+        let file = TempFile::with_extension(
+            "md",
+            "# D\n\n```mermaid\nflowchart TD\n  A --> B\n```\n",
+        );
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         let doc = settle_preview(&mut cx, &view);
         let image = doc
@@ -5769,14 +5813,19 @@ mod tests {
         assert!(Path::new(&image.0).starts_with(&cache), "drawn from the diagram cache");
         assert!(Path::new(&image.0).exists());
         assert!(image.1.is_some_and(|width| width > 0));
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
-    /// Review Focus 2.
+    /// Both fences render as images; the dedupe itself is guarded by the
+    /// `the_same_diagram_twice_is_requested_once` unit test in markdown_preview.
     #[gpui::test]
     async fn the_same_diagram_twice_renders_once_and_shows_twice(cx: &mut gpui::TestAppContext) {
         let cache = diagram_cache("twice");
         cx.update(|cx| {
-            DiagramSettings::set(DiagramSettings { cache_dir: cache.clone(), plantuml_server: None }, cx)
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: cache.clone(), plantuml_server: None },
+                cx,
+            )
         });
         let fence = "```mermaid\nflowchart TD\n  A --> B\n```\n";
         let file = TempFile::with_extension("md", &format!("{fence}\n{fence}"));
@@ -5794,6 +5843,7 @@ mod tests {
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "svg"))
             .count();
         assert_eq!(files, 1, "rendered once");
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[gpui::test]
@@ -5810,11 +5860,19 @@ mod tests {
     /// Design §8: a drawn frame with a local image.
     #[gpui::test]
     async fn a_lone_local_image_is_a_picture_in_the_drawn_preview(cx: &mut gpui::TestAppContext) {
-        let picture = std::env::temp_dir().join(format!("sirio-preview-logo-{}.png", std::process::id()));
+        let picture = std::env::temp_dir().join(format!(
+            "sirio-preview-logo-{}.png",
+            std::process::id()
+        ));
+        // A 1×1 PNG, split so no line runs past 100 columns.
+        let pixel = concat!(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk",
+            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        );
         std::fs::write(
             &picture,
             base64::engine::general_purpose::STANDARD
-                .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+                .decode(pixel)
                 .expect("a 1×1 PNG"),
         )
         .expect("write png");
@@ -5822,11 +5880,13 @@ mod tests {
         let file = TempFile::with_extension("md", &format!("![Logo]({name})\n"));
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         let doc = settle_preview(&mut cx, &view);
-        assert!(matches!(
+        let is_picture = matches!(
             &doc.blocks[0].kind,
             BlockKind::Image { url, .. } if Path::new(url) == picture
-        ));
-        assert!(cx.debug_bounds("file-markdown-scroll").is_some(), "the Preview was drawn");
+        );
+        let drawn = cx.debug_bounds("file-markdown-scroll").is_some();
         let _ = std::fs::remove_file(&picture);
+        assert!(is_picture);
+        assert!(drawn, "the Preview was drawn");
     }
 }
