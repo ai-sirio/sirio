@@ -783,6 +783,8 @@ struct QuestionDockState {
     selected: usize,
     /// The request `selected` belongs to.
     for_request: Option<u64>,
+    /// When the current request first appeared in the dock.
+    shown_at: Option<std::time::Instant>,
 }
 
 /// A tool call nested inside a subagent task card.
@@ -2304,6 +2306,7 @@ impl Chat {
                 focus: cx.focus_handle().tab_stop(true),
                 selected: 0,
                 for_request: None,
+                shown_at: None,
             },
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
@@ -12720,6 +12723,8 @@ let answer = 42;
         let allow = cx
             .debug_bounds("permission-option-allow")
             .expect("allow button");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(allow.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -12739,6 +12744,8 @@ let answer = 42;
         let deny = cx
             .debug_bounds("permission-option-deny")
             .expect("deny button");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(deny.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -13019,6 +13026,8 @@ let answer = 42;
         let blue = cx
             .debug_bounds("permission-option-blue")
             .expect("the Blue pill is drawn");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(blue.center(), Modifiers::none());
         cx.run_until_parked();
 
@@ -13392,6 +13401,8 @@ let answer = 42;
         let approve = cx
             .debug_bounds("permission-option-approve")
             .expect("approve button");
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(approve.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -15859,6 +15870,8 @@ let answer = 42;
             "the card carries no buttons: {allow:?} inside {card:?}"
         );
 
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_click(reject.center(), Modifiers::none());
         cx.run_until_parked();
         refresh_frame(cx);
@@ -16005,6 +16018,39 @@ let answer = 42;
         }
     }
 
+    /// A key already in flight cannot answer before the user has seen the dock.
+    #[gpui::test]
+    async fn an_answer_given_before_the_dock_is_armed_is_ignored(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: None, .. })
+        )));
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(chat.read_with(&cx.cx, |chat, _| matches!(
+            chat.entries.first(),
+            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
+        )));
+    }
+
     /// A question asked while the user is in this chat takes the keyboard.
     #[gpui::test]
     async fn the_dock_takes_the_keyboard_from_the_composer(cx: &mut TestAppContext) {
@@ -16057,6 +16103,8 @@ let answer = 42;
         refresh_frame(cx);
         assert!(dock_is_focused(&chat, cx), "the question takes the keyboard");
 
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -16089,6 +16137,8 @@ let answer = 42;
         refresh_frame(cx);
         refresh_frame(cx);
 
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_keystrokes("2");
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
@@ -16114,6 +16164,7 @@ let answer = 42;
         });
         refresh_frame(cx);
         refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -16187,6 +16238,8 @@ let answer = 42;
         });
         refresh_frame(cx);
         refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
         refresh_frame(cx);

@@ -153,6 +153,9 @@ pub(super) fn badge_label(index: usize) -> Option<String> {
 /// cannot push the composer off the pane.
 pub(super) const DOCK_BODY_MAX_HEIGHT: f32 = 160.0;
 
+/// A keystroke or click already in flight when the question appears must not answer it.
+pub(super) const DOCK_ARMING_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The dock's frame colour: the composer card's own hairline
 /// (`composer_border`), so the two read as one pair — never an alert tint.
 pub(super) fn dock_border(theme: &bezel::theme::Theme) -> gpui::Hsla {
@@ -177,6 +180,7 @@ impl Chat {
         match view {
             Some(view) if self.question_dock.for_request != Some(view.request_id) => {
                 self.question_dock.for_request = Some(view.request_id);
+                self.question_dock.shown_at = Some(cx.background_executor().now());
                 self.question_dock.selected = 0;
                 let focus_in_chat = dock_or_field_focused
                     || composer.contains_focused(window, cx)
@@ -188,6 +192,7 @@ impl Chat {
             }
             None if self.question_dock.for_request.is_some() => {
                 self.question_dock.for_request = None;
+                self.question_dock.shown_at = None;
                 self.question_dock.selected = 0;
                 if dock_or_field_focused {
                     cx.defer_in(window, move |_, window, cx| composer.focus(window, cx));
@@ -492,7 +497,17 @@ impl Chat {
         };
         self.question_dock.selected = index;
         match row {
-            DockRow::Option(option) => self.respond_permission(view.request_id, &option, cx),
+            DockRow::Option(option) => {
+                let now = cx.background_executor().now();
+                if self
+                    .question_dock
+                    .shown_at
+                    .is_some_and(|at| now.saturating_duration_since(at) < DOCK_ARMING_DELAY)
+                {
+                    return;
+                }
+                self.respond_permission(view.request_id, &option, cx)
+            }
             DockRow::FreeText(input) => {
                 self.focus_question_answer(view.request_id, input.prefill, window, cx)
             }

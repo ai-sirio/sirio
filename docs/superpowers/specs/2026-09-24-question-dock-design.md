@@ -271,6 +271,14 @@ worktree the user is typing into. On the first frame that shows a new
 or the transcript), the dock focuses itself, deferred to after the frame.
 Otherwise it is drawn unfocused and reachable by click.
 
+### Arming
+
+A question's option rows ignore activation by Enter, digits, or clicks for
+500ms after the dock first shows that request. The free-text row, Dismiss, and
+Escape are not delayed. The dock takes focus from the composer and sits where
+the last question sat, so a key or click already in flight must not answer a
+question the user has not seen.
+
 ### After an answer
 
 If another question is open, the dock shows it and keeps focus. If none is,
