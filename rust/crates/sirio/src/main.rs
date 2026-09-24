@@ -6392,6 +6392,10 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.has_current_worktree() {
+            cx.propagate();
+            return;
+        }
         let movable = self
             .center_split
             .active_for_focused()
@@ -32261,6 +32265,51 @@ done
             workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.is_empty()),
             "nothing to move: nothing happens, and nothing panics"
         );
+    }
+
+    /// F-TERM-11: a stale tab retained under a deselected worktree must not
+    /// move or reveal the Secondary pane when Ctrl+Shift+M is dispatched.
+    #[gpui::test]
+    async fn ctrl_shift_m_does_nothing_without_a_current_worktree(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.secondary_pane_hidden = true;
+            workspace.select_tab(1, None, cx);
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!workspace.read_with(&cx.cx, |workspace, _| workspace.has_current_worktree()));
+        let before = workspace.read_with(&cx.cx, |workspace, _| {
+            (workspace.tabs[1].pane, workspace.secondary_pane_hidden)
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_move_tab_to_other_pane(&MoveTabToOtherPane, window, cx);
+        });
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                (workspace.tabs[1].pane, workspace.secondary_pane_hidden),
+                before,
+                "the stale movable tab and hidden-pane choice stay unchanged"
+            );
+        });
     }
 
     #[test]
