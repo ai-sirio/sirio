@@ -41,6 +41,7 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
 mod list_scroll;
+mod question_dock;
 mod thought;
 mod tool_calls;
 mod transcript;
@@ -720,10 +721,16 @@ struct AnswerTextInput {
 }
 
 impl AnswerTextInput {
-    fn placeholder(&self) -> String {
-        self.placeholder
-            .clone()
-            .unwrap_or_else(|| "Type an answer".into())
+    /// The declared placeholder; otherwise one that says where the field
+    /// sits — below listed answers it is the way to say something else.
+    fn placeholder(&self, after_options: bool) -> String {
+        self.placeholder.clone().unwrap_or_else(|| {
+            if after_options {
+                "Type something else…".into()
+            } else {
+                "Type an answer".into()
+            }
+        })
     }
 }
 
@@ -4863,30 +4870,22 @@ impl Chat {
     }
 
     /// The first unanswered question in the transcript, with its entry
-    /// index — the pending bar lives exactly while this is Some (F-CHAT-26).
+    /// index. Found through `question_dock::is_open`, the predicate the dock
+    /// uses, so the disabled composer and the dock agree by construction.
     fn pending_question(&self) -> Option<(usize, String)> {
-        self.entries
+        let (index, entry) = self
+            .entries
             .iter()
             .enumerate()
-            .find_map(|(index, entry)| match entry {
-                Entry::Permission {
-                    title,
-                    resolved: None,
-                    expired: false,
-                    ..
-                } => Some((index, title.clone())),
-                Entry::Plan {
-                    approval:
-                        Some(PlanApproval {
-                            title,
-                            resolved: None,
-                            expired: false,
-                            ..
-                        }),
-                    ..
-                } => Some((index, title.clone())),
-                _ => None,
-            })
+            .find(|(_, entry)| question_dock::is_open(entry))?;
+        match entry {
+            Entry::Permission { title, .. } => Some((index, title.clone())),
+            Entry::Plan {
+                approval: Some(approval),
+                ..
+            } => Some((index, approval.title.clone())),
+            _ => None,
+        }
     }
 
     fn clear_question_answer_focus(&mut self) {
@@ -5333,7 +5332,7 @@ impl Chat {
         let field_entity = entity.clone();
         let send_entity = entity.clone();
         let cancel_entity = entity.clone();
-        let placeholder = input.placeholder();
+        let placeholder = input.placeholder(false);
         let prefill_for_click = input.prefill.clone();
         // The bar always occupies layout, so the answer text does not shift
         // by two pixels every half second as it blinks. An empty field
