@@ -358,6 +358,7 @@ impl Chat {
                         format!("question-dock-row-{request_id}-{index}"),
                     ),
                 )
+                .when(!highlighted, |row| row.bg(gpui::transparent_black()))
                 .id(("question-dock-row", index))
                 .items_start()
                 .on_mouse_move({
@@ -386,7 +387,12 @@ impl Chat {
                                     .gap(px(2.0))
                                     // A rejection is not tinted: a red "Reject"
                                     // reads as an error on a legitimate choice.
-                                    .child(div().text_color(theme.text).child(option.label))
+                                    .child(
+                                        div()
+                                            .text_size(typography.callout)
+                                            .text_color(theme.text)
+                                            .child(option.label),
+                                    )
                                     .children(option.description.map(|description| {
                                         div()
                                             .text_size(typography.footnote)
@@ -410,7 +416,13 @@ impl Chat {
                         .into_any_element(),
                     DockRow::Dismiss => frame
                         .debug_selector(|| "question-dock-dismiss".into())
-                        .child(div().flex_1().text_color(theme.text).child("Dismiss"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(typography.callout)
+                                .text_color(theme.text)
+                                .child("Dismiss"),
+                        )
                         .into_any_element(),
                 }
             })
@@ -455,7 +467,7 @@ impl Chat {
                     .when(!view.body.is_empty(), |header| {
                         header.child(
                             div()
-                                .id("question-dock-body")
+                                .id(("question-dock-body", request_id as usize))
                                 .debug_selector(|| "question-dock-body".into())
                                 .max_h(px(DOCK_BODY_MAX_HEIGHT))
                                 .overflow_y_scroll()
