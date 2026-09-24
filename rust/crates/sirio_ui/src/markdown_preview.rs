@@ -230,18 +230,6 @@ fn hex(color: gpui::Rgba) -> String {
     )
 }
 
-/// The directory PlantUML's `!include` is confined to: the nearest ancestor
-/// holding a `.git` entry (a directory in a checkout, a file in a linked
-/// worktree), or the file's own directory outside any repository.
-pub(crate) fn include_root(file: &Path) -> PathBuf {
-    let start = file.parent().unwrap_or(file);
-    start
-        .ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(start)
-        .to_path_buf()
-}
-
 /// Whether a clicked link target is a rendered diagram. bezel treats an
 /// image block as a link to its own URL, and a diagram's URL is its cached
 /// SVG, which must not open in a tab.
@@ -553,26 +541,6 @@ mod tests {
         assert_eq!(diagrams.get("a"), Some(&DiagramState::Pending));
         assert!(diagrams.get("b").is_some());
         assert_eq!(diagrams.get("c"), None);
-    }
-
-    #[test]
-    fn the_include_root_is_the_nearest_git_ancestor() {
-        let root = std::env::temp_dir().join(format!("sirio-include-root-{}", std::process::id()));
-        let docs = root.join("docs");
-        std::fs::create_dir_all(&docs).expect("docs");
-        std::fs::write(root.join(".git"), "gitdir: elsewhere\n")
-            .expect(".git file, as in a linked worktree");
-        assert_eq!(include_root(&docs.join("a.md")), root);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn outside_a_repository_the_include_root_is_the_files_directory() {
-        let dir = std::env::temp_dir().join(format!("sirio-no-repo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let found = include_root(&dir.join("a.md"));
-        assert!(found == dir || found.join(".git").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Review Focus 5.

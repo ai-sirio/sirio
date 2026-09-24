@@ -71,7 +71,7 @@ imported only by `sirio_ui`. Its public surface:
 - `render(kind, source, &Options) -> Result<Svg, DiagramError>`, blocking —
   the caller decides which thread it runs on.
 - `Options { palette: Palette, plantuml_server: Option<String>, working_dir:
-  PathBuf, include_root: PathBuf }`. `Palette` is a small struct of colour
+  PathBuf }`. `Palette` is a small struct of colour
   strings defined here, so this crate never names bezel.
 - `Svg { markup: String, logical_width: u32, logical_height: u32 }`.
 - `DiagramError::{Syntax { message, line: Option<u32> }, NotAvailable, Timeout,
@@ -132,22 +132,14 @@ PlantUML's preprocessor reads files (`!include`), environment variables
 (`%getenv`) and URLs (`!includeurl`). The Preview runs it on any Markdown file
 the user opens, including one from a repository cloned a minute ago, so an
 unsandboxed run lets a hostile README exfiltrate data **because it was
-opened**. Requirement: the local run has **no network access**, and
-`!include` resolves only inside `include_root` (the worktree root). The
-implementation chooses the PlantUML security profile and properties that
-achieve this, and pins it with a test that includes a file outside the root
-and an `!includeurl` to a loopback listener, then asserts that the file is
-refused and the listener sees no connection.
-
-The requirement is enforced by PlantUML's own `ALLOWLIST` profile, so a
-PlantUML older than 1.2020.11 (Debian and Ubuntu ship 1.2020.2) is refused with
-a note rather than run; the child's PATH drops relative entries and its
-environment drops `PLANTUML_INCLUDE_PATH`/`plantuml.include.path`,
+opened**. The local run uses PlantUML's `SANDBOX` profile — no network and no
+local file access; `!include` works only for PlantUML's embedded standard
+library (`<C4/…>` etc.), because `ALLOWLIST`'s path check is a raw string
+prefix that `..` and symlinks escape (verified on 1.2026.8). The child's PATH
+drops relative entries and its environment drops
+`PLANTUML_INCLUDE_PATH`/`plantuml.include.path`,
 `PLANTUML_ALLOWLIST_URL`/`plantuml.allowlist.url`, `JAVA_TOOL_OPTIONS`,
 `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`; a timeout kills the whole process tree.
-Known limit, upstream: PlantUML matches the allowlist with a plain string
-prefix, so a sibling directory whose name extends the worktree's
-(`/x/app-secrets` for `/x/app`) also passes.
 
 ### The server
 

@@ -94,8 +94,6 @@ pub struct Options {
     pub plantuml_server: Option<String>,
     /// The Markdown file's directory: PlantUML's working directory.
     pub working_dir: PathBuf,
-    /// The directory PlantUML's `!include` is confined to (the worktree).
-    pub include_root: PathBuf,
 }
 
 /// A rendered diagram.
@@ -186,7 +184,7 @@ pub fn cache_dir(env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
 }
 
 /// A diagram already rendered into `dir` under `key`: its path and logical
-/// width (half the width the file states, see [`Svg::markup`]).
+/// width (the root width the file states).
 pub fn cached(dir: &Path, key: &str) -> Option<(PathBuf, u32)> {
     let path = dir.join(format!("{key}.svg"));
     let markup = std::fs::read_to_string(&path).ok()?;
@@ -305,7 +303,6 @@ pub(crate) fn test_options(root: &Path) -> Options {
         palette: test_palette(false),
         plantuml_server: None,
         working_dir: root.to_path_buf(),
-        include_root: root.to_path_buf(),
     }
 }
 

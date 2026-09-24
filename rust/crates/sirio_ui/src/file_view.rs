@@ -1416,7 +1416,6 @@ impl FileView {
                         palette,
                         plantuml_server: server,
                         working_dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
-                        include_root: markdown_preview::include_root(&file),
                     };
                     match sirio_diagram::render(kind, &source, &options) {
                         Ok(svg) => match sirio_diagram::store(&cache_dir, &render_key, &svg) {

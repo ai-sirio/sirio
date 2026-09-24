@@ -56,39 +56,6 @@ fn absolute_search_path(search_path: &OsStr) -> OsString {
     .unwrap_or_default()
 }
 
-/// The allowlist roots PlantUML checks `!include` against: the given
-/// absolute `include_root` and its canonical form, deduplicated — versions
-/// differ on whether an absolute include path is canonicalised before the
-/// check. Joined with PlantUML's own separators (`;` on Windows, `:`
-/// elsewhere). Falls back to the path as given when the worktree cannot be
-/// read.
-fn allowlist_value(options: &Options) -> OsString {
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    let mut roots = vec![normalize_allowlist_root(&options.include_root)];
-    if let Ok(canonical) = std::fs::canonicalize(&options.include_root) {
-        let text = normalize_allowlist_root(&canonical);
-        if text != roots[0] {
-            roots.push(text);
-        }
-    }
-    roots.join(separator).into()
-}
-
-/// One allowlist root as PlantUML compares it. On Windows a canonicalised
-/// root arrives with a `\\?\` prefix (devices) or a `\\?\UNC\` one
-/// (network shares); neither ever matches an include path, so both go.
-fn normalize_allowlist_root(path: &Path) -> String {
-    let mut text = path.as_os_str().to_string_lossy().into_owned();
-    if cfg!(windows) {
-        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-            text = format!(r"\\{rest}");
-        } else {
-            text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned();
-        }
-    }
-    text
-}
-
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -138,11 +105,10 @@ pub(crate) fn render_local(
 }
 
 /// The child `Command` for `<program> args`: sandboxed through the
-/// environment (design §3) — the `ALLOWLIST` security profile blocks URLs
-/// and environment variables, and the allowlist admits files only under the
-/// worktree; PlantUML reads both from the environment as well as from Java
-/// system properties, so no JVM flag has to reach the launcher — offline-safe
-/// and scrubbed of anything that would widen the sandbox again. Shared by
+/// environment (design §3) — PlantUML's `SANDBOX` profile blocks network and
+/// local file access; PlantUML reads the profile from the environment as well
+/// as from Java system properties, so no JVM flag has to reach the launcher —
+/// offline-safe and scrubbed of anything that would widen the sandbox again. Shared by
 /// `-version` and the render.
 fn plantuml_command(
     program: &Path,
@@ -150,17 +116,13 @@ fn plantuml_command(
     options: &Options,
     search_path: &OsStr,
 ) -> Command {
-    let allowed = allowlist_value(options);
     let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(&options.working_dir)
         // The launcher script finds `java` on the same PATH it was found on.
         .env("PATH", absolute_search_path(search_path))
-        .env("PLANTUML_SECURITY_PROFILE", "ALLOWLIST")
-        // `/bin/sh` launchers on dash/busybox drop env names with dots.
-        .env("plantuml.allowlist.path", &allowed)
-        .env("PLANTUML_ALLOWLIST_PATH", &allowed)
+        .env("PLANTUML_SECURITY_PROFILE", "SANDBOX")
         // Nothing the parent smuggles in may widen the sandbox again.
         .env_remove("PLANTUML_INCLUDE_PATH")
         .env_remove("plantuml.include.path")
@@ -532,7 +494,6 @@ mod tests {
         );
         let options = Options {
             working_dir: docs.clone(),
-            include_root: root.clone(),
             ..test_options(&root)
         };
         render_local("A -> B", &options, &path_with(&bin), LOCAL_TIMEOUT).expect("renders");
@@ -543,14 +504,9 @@ mod tests {
         let env = std::fs::read_to_string(out.join("env")).expect("env");
         assert!(
             env.lines()
-                .any(|line| line == "PLANTUML_SECURITY_PROFILE=ALLOWLIST")
+                .any(|line| line == "PLANTUML_SECURITY_PROFILE=SANDBOX")
         );
-        let allowed = allowlist_value(&options);
-        assert!(
-            env.lines().any(
-                |line| line == format!("PLANTUML_ALLOWLIST_PATH={}", allowed.to_string_lossy())
-            )
-        );
+        assert!(env.lines().all(|line| !line.contains("ALLOWLIST_PATH")));
         assert!(
             env.lines()
                 .all(|line| !line.starts_with("JAVA_TOOL_OPTIONS=")),
@@ -568,8 +524,7 @@ mod tests {
         );
     }
 
-    /// The sandbox as the `Command` carries it: dash drops dotted env names,
-    /// so the dotted allowlist entry is asserted here, not in the shell.
+    /// The command forces the sandbox and scrubs every environment override.
     #[test]
     fn the_child_environment_is_sandboxed() {
         let root = scratch_dir("plantuml-env");
@@ -579,16 +534,7 @@ mod tests {
         let env: HashMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
         assert_eq!(
             env.get(OsStr::new("PLANTUML_SECURITY_PROFILE")).copied(),
-            Some(Some(OsStr::new("ALLOWLIST")))
-        );
-        let allowed = allowlist_value(&options);
-        assert_eq!(
-            env.get(OsStr::new("plantuml.allowlist.path")).copied(),
-            Some(Some(allowed.as_os_str()))
-        );
-        assert_eq!(
-            env.get(OsStr::new("PLANTUML_ALLOWLIST_PATH")).copied(),
-            Some(Some(allowed.as_os_str()))
+            Some(Some(OsStr::new("SANDBOX")))
         );
         for name in [
             "PLANTUML_INCLUDE_PATH",
@@ -599,11 +545,7 @@ mod tests {
             "_JAVA_OPTIONS",
             "JDK_JAVA_OPTIONS",
         ] {
-            assert_eq!(
-                env.get(OsStr::new(name)).copied(),
-                Some(None),
-                "{name} is scrubbed"
-            );
+            assert_eq!(env.get(OsStr::new(name)).copied(), Some(None), "{name} is scrubbed");
         }
     }
 
@@ -800,43 +742,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_allowlist_holds_the_root_and_its_canonical_form() {
-        let root = scratch_dir("plantuml-allowlist");
-        let real = root.join("real");
-        std::fs::create_dir_all(&real).expect("real dir");
-        std::os::unix::fs::symlink(&real, root.join("link")).expect("symlink");
-        let linked = Options {
-            working_dir: root.join("link"),
-            include_root: root.join("link"),
-            ..test_options(&root)
-        };
-        let canonical = std::fs::canonicalize(&root).unwrap_or(root.clone());
-        assert_eq!(
-            allowlist_value(&linked),
-            std::ffi::OsString::from(format!(
-                "{}:{}/real",
-                root.join("link").display(),
-                canonical.display()
-            ))
-        );
-        // Canonicalised first, so the root truly has no symlink in it even
-        // where the temp dir is one (always on macOS).
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or(root.clone());
-        let plain = Options {
-            working_dir: canonical_root.clone(),
-            include_root: canonical_root,
-            ..test_options(&root)
-        };
-        let single = allowlist_value(&plain).to_string_lossy().into_owned();
-        assert_eq!(
-            single.split(':').count(),
-            1,
-            "a non-symlinked root is a single entry: {single}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn a_hung_plantuml_and_its_children_are_killed_at_the_timeout() {
         let root = scratch_dir("plantuml-tree");
         let bin = root.join("bin");
@@ -967,10 +872,10 @@ mod tests {
         assert!(svg.logical_width > 0);
     }
 
-    /// The design's sandbox requirement (§3): includes only inside the
-    /// worktree, and no network at all.
+    /// No local files or network; only PlantUML's embedded stdlib remains.
+    #[cfg(unix)]
     #[test]
-    fn real_plantuml_is_sandboxed_to_the_worktree_and_offline() {
+    fn real_plantuml_is_sandboxed_and_offline() {
         if !real_plantuml() {
             return;
         }
@@ -980,37 +885,29 @@ mod tests {
         std::fs::write(root.join("inside.puml"), "Alice -> Bob: INSIDE\n").expect("inside");
         let outside = scratch_dir("plantuml-outside");
         std::fs::write(outside.join("secret.puml"), "Alice -> Bob: SECRET\n").expect("secret");
+        std::os::unix::fs::symlink(outside.join("secret.puml"), docs.join("link.puml"))
+            .expect("symlink");
+        let options = Options {
+            working_dir: docs,
+            ..test_options(&root)
+        };
+        let outside_name = outside.file_name().unwrap().to_string_lossy();
+        for include in [
+            "!include ../inside.puml".to_owned(),
+            format!("!include ../../{outside_name}/secret.puml"),
+            format!("!include {}", outside.join("secret.puml").display()),
+            "!include link.puml".to_owned(),
+        ] {
+            let result = render(DiagramKind::PlantUml, &include, &options);
+            assert!(matches!(result, Err(DiagramError::Syntax { .. })), "{include}: {result:?}");
+            assert!(!format!("{result:?}").contains("SECRET"));
+            assert!(!format!("{result:?}").contains("INSIDE"));
+        }
+        assert!(render(DiagramKind::PlantUml, "!include <C4/C4_Container>\nPerson(u, \"User\")", &options).is_ok());
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         listener.set_nonblocking(true).expect("nonblocking");
         let port = listener.local_addr().expect("addr").port();
-        let options = Options {
-            working_dir: docs,
-            include_root: root.clone(),
-            ..test_options(&root)
-        };
-
-        let inside = render(
-            DiagramKind::PlantUml,
-            &format!("!include {}\n", root.join("inside.puml").display()),
-            &options,
-        )
-        .expect("an include inside the worktree renders");
-        assert!(inside.markup.contains("INSIDE"));
-
-        // An include outside the worktree is refused as a syntax error
-        // (`real_plantuml` already skipped binaries too old to sandbox).
-        assert!(
-            matches!(
-                render(
-                    DiagramKind::PlantUml,
-                    &format!("!include {}\n", outside.join("secret.puml").display()),
-                    &options,
-                ),
-                Err(DiagramError::Syntax { .. })
-            ),
-            "an include outside the worktree must be refused"
-        );
-
         let _ = render(
             DiagramKind::PlantUml,
             &format!("!includeurl http://127.0.0.1:{port}/x.puml\nA -> B\n"),
@@ -1030,7 +927,11 @@ mod tests {
         let root = scratch_dir("plantuml-real-error");
         assert!(
             matches!(
-                render(DiagramKind::PlantUml, "A -> ", &test_options(&root)),
+                render(
+                    DiagramKind::PlantUml,
+                    "A -> B: hi\\nthis is not plantuml (((",
+                    &test_options(&root),
+                ),
                 Err(DiagramError::Syntax { .. })
             ),
             "a broken diagram is a syntax error"
