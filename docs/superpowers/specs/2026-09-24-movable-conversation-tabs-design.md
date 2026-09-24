@@ -1,7 +1,7 @@
 # Terminals and chats in either centre pane — design
 
 **Date:** 2026-09-24
-**Status:** approved in chat; implementation pending
+**Status:** implemented
 **Reverses:** `2026-09-22-center-panes-design.md` §1, "Can a terminal live in
 the Secondary pane? **No.**", and the first bullet of its §8.
 **Scope of this document:** let a terminal or chat tab live in either half of
