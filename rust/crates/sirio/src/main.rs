@@ -8531,10 +8531,13 @@ impl SirioWorkspace {
             })
             .map(|(index, tab)| SidebarTab {
                 tab: SidebarTabRef::Open(tab.id),
+                persistence_id: tab.persistence_id.clone(),
                 title: tab.title.clone(),
                 selected: index == self.active_tab,
                 kind: tab.kind,
                 agent: self.tab_agent_mark(tab),
+                status: None,
+                last_event_at: None,
             })
             .collect()
     }
@@ -8583,6 +8586,7 @@ impl SirioWorkspace {
             .map(|(index, tab)| SidebarTab {
                 tab: SidebarTabRef::Parked(index),
                 kind: tab_kind_from_persisted(&tab.kind),
+                persistence_id: tab.id.clone(),
                 title: tab.title,
                 // Nothing parked is the active tab: the active tab is a live
                 // fact of the selected worktree.
@@ -8592,6 +8596,8 @@ impl SirioWorkspace {
                     .as_ref()
                     .and_then(AgentRef::adapter_id)
                     .and_then(AgentMark::for_agent_id),
+                status: None,
+                last_event_at: None,
             })
             .collect();
         self.parked_sidebar_tabs

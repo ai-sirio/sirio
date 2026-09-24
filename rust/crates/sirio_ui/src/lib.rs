@@ -36,6 +36,7 @@ pub mod right_panel;
 pub mod row_reorder;
 pub mod settings;
 pub mod sidebar;
+pub mod status;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod titlebar;
