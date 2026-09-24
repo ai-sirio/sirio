@@ -43,7 +43,7 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, ClosedChatSummary, PersistenceError, ProjectRecord,
     SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, stable_worktree_id,
 };
-use sirio_project::{DiscoveredProject, TabKind, discover_project, is_git_repository};
+use sirio_project::{DiscoveredProject, PaneRole, TabKind, discover_project, is_git_repository};
 
 /// How long a burst of changes is held before one write. 500 ms is under the
 /// reaction time between discrete user actions (a click then flushes at the
@@ -122,6 +122,13 @@ pub struct SessionTabState {
     /// that no longer exists drops the tab at restore.
     #[serde(default)]
     pub settings_project_id: String,
+    /// The half of the centre split the tab was drawn in: `"primary"`,
+    /// `"secondary"`, or empty for a session written before tabs could move
+    /// (read as the kind's home half). A string rather than an enum so a
+    /// spelling this build does not know degrades to the default instead of
+    /// failing to decode the whole tab — see `placement_for`.
+    #[serde(default)]
+    pub pane: String,
 }
 
 impl SessionTabState {
@@ -153,6 +160,7 @@ impl SessionTabState {
             commit_sha: self.commit_sha.clone(),
             changes_focus: self.changes_focus.clone(),
             settings_project_id: self.settings_project_id.clone(),
+            pane: self.pane.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -494,6 +502,30 @@ pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
         _ => return None,
     };
     Some(kind)
+}
+
+/// The persisted spelling of a half, read back by [`placement_for`].
+pub fn persisted_pane(pane: PaneRole) -> &'static str {
+    match pane {
+        PaneRole::Primary => "primary",
+        PaneRole::Secondary => "secondary",
+    }
+}
+
+/// The half a restored tab of `kind` is drawn in, from its persisted
+/// spelling. The only place a persisted value becomes a `PaneRole`, so the
+/// invariant `OpenTab::pane` carries holds for every restored tab: an empty or
+/// unknown spelling is the kind's home half, and so is anything at all for a
+/// kind that cannot move.
+pub fn placement_for(kind: TabKind, persisted: &str) -> PaneRole {
+    if !kind.can_move_between_panes() {
+        return kind.default_pane();
+    }
+    match persisted {
+        "primary" => PaneRole::Primary,
+        "secondary" => PaneRole::Secondary,
+        _ => kind.default_pane(),
+    }
 }
 
 /// The result of restoring a layout at launch.
@@ -2688,6 +2720,7 @@ mod tests {
             commit_sha: "0123456789abcdef0123456789abcdef01234567".into(),
             changes_focus: "src/lib.rs".into(),
             settings_project_id: "project-7".into(),
+            pane: "secondary".into(),
             ..SessionTabState::with_root(0)
         };
         let layout = SessionLayout {
@@ -2750,6 +2783,39 @@ mod tests {
         assert!(decoded.commit_sha.is_empty());
         assert!(decoded.changes_focus.is_empty());
         assert!(decoded.settings_project_id.is_empty());
+        assert!(decoded.pane.is_empty());
+    }
+
+    /// Spec 2026-09-24 §6: the one parse of a persisted half. A movable kind
+    /// reads its spelling; anything empty or unknown, and anything at all on
+    /// a kind that cannot move, is the kind's home half.
+    #[test]
+    fn placement_reads_a_movable_kinds_half_and_ignores_everything_else() {
+        assert_eq!(placement_for(TabKind::Terminal, ""), PaneRole::Primary);
+        assert_eq!(
+            placement_for(TabKind::Terminal, "secondary"),
+            PaneRole::Secondary
+        );
+        assert_eq!(
+            placement_for(TabKind::AgentChat, "secondary"),
+            PaneRole::Secondary
+        );
+        assert_eq!(
+            placement_for(TabKind::AgentChat, "primary"),
+            PaneRole::Primary
+        );
+        assert_eq!(
+            placement_for(TabKind::Terminal, "sideways"),
+            PaneRole::Primary
+        );
+        assert_eq!(
+            placement_for(TabKind::Editor, "primary"),
+            PaneRole::Secondary
+        );
+        assert_eq!(placement_for(TabKind::Browser, ""), PaneRole::Secondary);
+        for pane in [PaneRole::Primary, PaneRole::Secondary] {
+            assert_eq!(placement_for(TabKind::Terminal, persisted_pane(pane)), pane);
+        }
     }
 
     #[test]

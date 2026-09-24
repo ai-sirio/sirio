@@ -5817,6 +5817,7 @@ impl SirioWorkspace {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
                     state.shown_in_pane = self.center_split.active(tab.pane) == Some(tab.id);
+                    state.pane = session::persisted_pane(tab.pane).to_owned();
                     tab.panes.for_each(&mut |pane_id, content| {
                         match content {
                             TabContent::Terminal { view } => {
@@ -19066,7 +19067,7 @@ fn restore_tabs_with_terminal_cache(
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
             kind,
-            pane: kind.default_pane(),
+            pane: session::placement_for(kind, &tab_state.pane),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -19395,7 +19396,7 @@ fn restore_tabs_in_workspace(
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
             kind,
-            pane: kind.default_pane(),
+            pane: session::placement_for(kind, &tab_state.pane),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -38989,6 +38990,96 @@ browser  profile  "
                 "the saved flag wins over a stale live one"
             );
             workspace
+        });
+    }
+
+    /// Spec 2026-09-24 §6: a terminal left in the right half is saved there
+    /// and comes back there — as the tab that half shows — through the same
+    /// restore function launch uses.
+    #[gpui::test]
+    async fn a_terminal_moved_right_comes_back_right_after_a_restart(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let restored = workspace.update(&mut cx, |workspace, cx| {
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            let layout = workspace.layout(cx);
+            assert_eq!(layout.tab_states[1].pane, "secondary");
+            assert_eq!(layout.tab_states[0].pane, "primary");
+            assert!(layout.tab_states[1].shown_in_pane);
+            RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            }
+        });
+        let working_directory =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        let tabs = cx.update(|window, cx| {
+            let mut activity = AgentActivityModel::new();
+            let (tabs, _) = restore_tabs(
+                &restored,
+                &working_directory,
+                Some(window),
+                &mut activity,
+                &BTreeMap::new(),
+                false,
+                cx,
+            );
+            tabs
+        });
+
+        let back = tabs
+            .iter()
+            .find(|tab| tab.persistence_id == restored.tabs[1].id)
+            .expect("the terminal is restored");
+        assert_eq!(back.kind, TabKind::Terminal);
+        assert_eq!(
+            back.pane,
+            PaneRole::Secondary,
+            "back in the half it was left in"
+        );
+        let mut split = CenterSplit::new(&tabs);
+        seed_shown_tabs(&mut split, &tabs, &restored);
+        assert_eq!(
+            split.active(PaneRole::Secondary),
+            Some(back.id),
+            "and it is what that half shows"
+        );
+    }
+
+    /// Review Focus 3: a restart whose right half was hidden but whose active
+    /// tab is a moved terminal must bring the half back — the same repair
+    /// `restoring_an_active_secondary_tab_reopens_the_secondary_pane` pins
+    /// for an editor, now reading the stored half.
+    #[gpui::test]
+    async fn a_hidden_right_half_holding_the_active_moved_terminal_is_revealed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].pane = PaneRole::Secondary;
+            workspace.active_tab = 1;
+            workspace.secondary_pane_hidden = true;
+            workspace.rebuild_center_split();
+            workspace
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert_eq!(workspace.center_split.active(PaneRole::Secondary), Some(1));
         });
     }
 
