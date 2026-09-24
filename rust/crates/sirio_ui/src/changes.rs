@@ -691,6 +691,16 @@ impl ChangesTab {
         self.is_git && matches!(self.source, ChangesSource::WorkingTree)
     }
 
+    /// Whether this working-tree surface is backed by a known Git project.
+    pub fn is_git_capable(&self) -> bool {
+        self.is_git
+    }
+
+    /// Whether this surface follows the selected project's Git capability.
+    pub fn uses_project_git_capability(&self) -> bool {
+        matches!(self.source, ChangesSource::WorkingTree)
+    }
+
     /// Returns the status and per-file counts currently held by this mounted
     /// surface. Empty buckets are included so automation can compare all
     /// three counts directly with `git status --porcelain`.
@@ -3939,7 +3949,8 @@ mod tests {
 
         assert!(tab.read_with(cx, |tab, _| tab.git_error.is_none()));
         assert!(visual.debug_bounds("changes-error").is_none());
-        assert!(visual.debug_bounds("changes-list").is_some());
+        assert!(visual.debug_bounds("changes-empty").is_some());
+        assert!(visual.debug_bounds("changes-list").is_none());
     }
 
     #[gpui::test]
