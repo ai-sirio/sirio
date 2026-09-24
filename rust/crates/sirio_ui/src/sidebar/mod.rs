@@ -47,7 +47,9 @@ use crate::status::ActivityStatus;
 mod fade;
 mod row;
 mod section;
+mod sessions;
 
+pub use sessions::{ClosedSession, SessionList, SessionRow, SessionTarget};
 pub use row::RowStatusGlyph;
 pub use row::SidebarPill;
 use row::{RowInputs, RowView};
