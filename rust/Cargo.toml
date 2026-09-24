@@ -16,6 +16,7 @@ members = [
     "crates/sirio_claude",
     "crates/sirio_lsp",
     "crates/sirio_project",
+    "crates/sirio_icons",
     "crates/sirio_git",
     "crates/sirio_persistence",
     "crates/sirio_agents",
@@ -31,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.23.1"
+version = "0.25.1"
 edition = "2024"
 publish = false
 
@@ -92,6 +93,7 @@ sirio_ui = { path = "crates/sirio_ui" }
 sirio_terminal = { path = "crates/sirio_terminal" }
 sirio_acp = { path = "crates/sirio_acp" }
 sirio_project = { path = "crates/sirio_project" }
+sirio_icons = { path = "crates/sirio_icons" }
 sirio_git = { path = "crates/sirio_git" }
 sirio_persistence = { path = "crates/sirio_persistence" }
 sirio_agents = { path = "crates/sirio_agents" }

@@ -1152,6 +1152,28 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Waits until the `/proc` walk actually reports the fixture's agent child,
+    /// instead of guessing how long `sh` needs to fork it. A fixed sleep here is
+    /// what made both tests below fail on a loaded CI runner: the walk ran
+    /// before the fork and read the empty tree as "no agent", which is
+    /// indistinguishable from the answer they assert against. The fixture keeps
+    /// that child alive for two seconds, so this one-second deadline still
+    /// expires while the child exists -- a timeout means the walk never saw it,
+    /// and the caller's own assertion then says so in its own terms.
+    #[cfg(target_os = "linux")]
+    fn wait_for_foreground_agent(shell_pid: u32) -> std::io::Result<Option<&'static str>> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let snapshot = sirio_activity::process::take_snapshot()?;
+            let observation =
+                sirio_activity::process::inspect_foreground_agent_in(&snapshot, shell_pid);
+            if matches!(observation, Ok(Some(_))) || Instant::now() >= deadline {
+                return observation;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn process_refresh_preserves_process_ownership_until_process_gone() {
@@ -1171,7 +1193,7 @@ mod tests {
             .args(["-c", &format!("{} 2; true", agent.display())])
             .spawn()
             .expect("spawn shell with a real matching child");
-        std::thread::sleep(Duration::from_millis(50));
+        wait_for_foreground_agent(child.id()).expect("walk the fixture's process tree");
 
         let mut activity = AgentActivityModel::new();
         let transition = activity
@@ -1224,15 +1246,10 @@ mod tests {
             .args(["-c", &format!("{} 2; true", agent.display())])
             .spawn()
             .expect("spawn shell with a real matching child");
-        std::thread::sleep(Duration::from_millis(50));
-
         let shell_pid = child.id();
-        let observation = std::thread::spawn(move || {
-            let snapshot = sirio_activity::process::take_snapshot().unwrap();
-            sirio_activity::process::inspect_foreground_agent_in(&snapshot, shell_pid)
-        })
-        .join()
-        .expect("join process observation thread");
+        let observation = std::thread::spawn(move || wait_for_foreground_agent(shell_pid))
+            .join()
+            .expect("join process observation thread");
         let mut activity = AgentActivityModel::new();
         let transition = activity
             .apply_process_signal("pane-x", observation)

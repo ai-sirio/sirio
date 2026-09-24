@@ -68,6 +68,8 @@ use sirio_ui::{
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
+use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
+use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
@@ -3837,7 +3839,7 @@ fn tab_has_terminal(tab: &OpenTab) -> bool {
 /// and it outranks the agent mark, as the old has-file flag did.
 fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Icon {
     if let Some(path) = file {
-        return file_glyph(path, false);
+        return file_glyph(path);
     }
     if let Some(agent_icon) = agent_icon {
         return agent_icon;
@@ -3912,14 +3914,7 @@ fn activity_rank(status: ActivityStatus) -> u8 {
 /// can never disagree about what a stored "chat" is. Unknown kinds are
 /// terminals, as restore has always treated them.
 fn tab_kind_from_persisted(kind: &str) -> TabKind {
-    match kind {
-        "chat" => TabKind::AgentChat,
-        "diff" => TabKind::Diff,
-        "browser" => TabKind::Browser,
-        "file" => TabKind::Editor,
-        "settings" => TabKind::ProjectSettings,
-        _ => TabKind::Terminal,
-    }
+    session::kind_from_persisted(kind).unwrap_or(TabKind::Terminal)
 }
 
 fn pane_close_needs_confirmation(status: ActivityStatus) -> bool {
@@ -3995,6 +3990,19 @@ struct WorktreeContext {
     is_git: bool,
 }
 
+/// What a tile in an empty pane's launcher does. Tiles report this, not a
+/// string, so `handle_launcher_action` matches exhaustively.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LauncherAction {
+    NewTerminal,
+    NewChat,
+    NewBrowser,
+    Changes,
+    OpenFile,
+    ProjectSettings,
+    HidePane,
+}
+
 /// Resolves the labels shown by the running shell from its selected checkout,
 /// not from the fixture values used by the standalone UI demos.
 fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> WorktreeContext {
@@ -4034,6 +4042,22 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         activity_label: format!("{project}/{branch}"),
         is_git,
     }
+}
+
+/// Every worktree of every project, in catalog (= sidebar) order, as the
+/// centre's worktree picker lists them.
+fn worktree_choices(catalog: &ProjectCatalog) -> Vec<WorktreeChoice> {
+    catalog
+        .projects()
+        .iter()
+        .flat_map(|project| {
+            project.worktrees.iter().map(move |worktree| WorktreeChoice {
+                project: project.name.clone().into(),
+                branch: worktree.branch.clone().into(),
+                path: worktree.path.clone(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -4226,10 +4250,10 @@ struct SirioWorkspace {
     /// width: `panel_layout::resolve_center_split` clamps it at render time
     /// and never writes the clamp back.
     center_split_ratio: i64,
-    /// #323: whether this worktree's Secondary pane is open. The one piece of
-    /// the centre split that is stored rather than derived -- see
-    /// `WorktreeRecord::secondary_pane_open` for why it has to be.
-    secondary_pane_open: bool,
+    /// Whether this worktree's Secondary pane is hidden (v19). The one piece
+    /// of the centre split that is stored rather than derived -- see
+    /// `WorktreeRecord::secondary_pane_hidden` for why it has to be.
+    secondary_pane_hidden: bool,
     /// Where the centre divider was grabbed, and the ratio it held then.
     center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
@@ -4338,7 +4362,7 @@ struct SirioWorkspace {
     /// holds keyboard focus -- so a global keybinding like `ctrl-t` is
     /// silently unreachable, not merely unhandled, the moment focus has
     /// nowhere live to land (e.g. a worktree with zero terminal tabs, whose
-    /// "No Terminals" placeholder has no focusable element of its own).
+    /// empty-pane launcher has no focusable element of its own).
     /// This handle gives the workspace root itself a permanent, always-
     /// mounted focus target so `render` can reclaim focus whenever it goes
     /// missing, keeping every root-level keybinding reachable regardless of
@@ -4471,6 +4495,10 @@ struct SirioWorkspace {
     /// the moment it gets one back, so `render_group_surfaces` can just
     /// look one up instead of deciding whether to build one mid-render.
     empty_pane_prompts: BTreeMap<usize, Entity<TerminalView>>,
+    /// The select the no-worktree state draws. Kept alive across frames so
+    /// an open menu survives a re-render; `sync_worktree_picker` keeps its
+    /// list in step with the catalog.
+    worktree_picker: Entity<WorktreePicker>,
     /// F-TERM-PTY-08: records where every live terminal pane in this
     /// worktree currently sits, keyed by the same `terminal-{pane_id}`
     /// content id `bind_terminal` gives its `TerminalIdentity`. Kept in step
@@ -5107,6 +5135,7 @@ impl SirioWorkspace {
             .collect();
         let active_tab_id = tabs.get(active_tab).map(|tab| tab.id);
         let mut center_split = CenterSplit::new(&tabs);
+        seed_shown_tabs(&mut center_split, &tabs, &launch_snapshot);
         // `CenterSplit::new` takes each role's *first* tab, which is right for
         // a fresh workspace and wrong for a restored one: the session knows
         // which tab was active, and selecting it also focuses the half it
@@ -5140,15 +5169,28 @@ impl SirioWorkspace {
         settings.update(cx, |settings, _| {
             settings.set_lsp_store_root(lsp_store_root.clone())
         });
-        let persisted_secondary_pane_open = session.secondary_pane_open_for(&working_directory);
+        let persisted_secondary_pane_hidden = session.secondary_pane_hidden_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
             .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary);
-        if restored_active_secondary && !persisted_secondary_pane_open {
+        if restored_active_secondary && persisted_secondary_pane_hidden {
             // Keep the restored active surface visible and make the repaired
             // state survive the next restart as well.
-            session.save_secondary_pane_open(&working_directory, true);
+            session.save_secondary_pane_hidden(&working_directory, false);
         }
+        let worktree_picker =
+            cx.new(|cx| WorktreePicker::new(worktree_choices(&project_catalog), cx));
+        cx.subscribe(
+            &worktree_picker,
+            |workspace, _, event: &WorktreePickerEvent, cx| match event {
+                // The sidebar's own selection path, so a failed selection
+                // restores the sidebar highlight the same way.
+                WorktreePickerEvent::Selected(path) => {
+                    workspace.select_worktree_from_sidebar(path.clone(), cx)
+                }
+            },
+        )
+        .detach();
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -5163,7 +5205,7 @@ impl SirioWorkspace {
             right_panel_width,
             dragging_panel: None,
             center_split_ratio,
-            secondary_pane_open: persisted_secondary_pane_open || restored_active_secondary,
+            secondary_pane_hidden: persisted_secondary_pane_hidden && !restored_active_secondary,
             center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
@@ -5241,6 +5283,7 @@ impl SirioWorkspace {
             last_verified: None,
             auto_naming_throttle: BTreeMap::new(),
             empty_pane_prompts: BTreeMap::new(),
+            worktree_picker,
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
             retained_worktree_chats: BTreeMap::new(),
@@ -5276,6 +5319,11 @@ impl SirioWorkspace {
         // language servers, now that there is a workspace to do it with.
         for (path, view) in restored_files {
             workspace.adopt_file_view(&path, &view, cx);
+        }
+        // Settings tabs wait for the sidebar their seed comes from.
+        let launch_snapshot = workspace.launch_snapshot.clone();
+        if workspace.restore_project_settings_tabs(&launch_snapshot, cx) {
+            workspace.rebuild_center_split();
         }
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
@@ -5647,15 +5695,13 @@ impl SirioWorkspace {
             .tabs
             .iter()
             .filter(|tab| {
-                // Project-settings tabs are ephemeral scratch: their edits
-                // persist live to the catalog on every keystroke, so there
-                // is nothing to restore, and the restore path rejects
-                // unknown kinds outright.
-                tab.kind != TabKind::ProjectSettings
-                    && paths_name_the_same_document(
-                        &self.tab_worktree_path(tab.id),
-                        &self.working_directory,
-                    )
+                // Every kind is saved, Project Settings included: its edits
+                // already persist live to the catalog, so only the tab itself
+                // -- which project, where in the strip -- is restored.
+                paths_name_the_same_document(
+                    &self.tab_worktree_path(tab.id),
+                    &self.working_directory,
+                )
             })
             .collect();
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -5667,18 +5713,7 @@ impl SirioWorkspace {
                 .map(|tab| SessionTab {
                     id: tab.persistence_id.clone(),
                     title: tab.title.clone(),
-                    kind: match tab.kind {
-                        TabKind::Editor => "file",
-                        TabKind::AgentChat => "chat",
-                        TabKind::Terminal => "terminal",
-                        TabKind::Browser => "browser",
-                        TabKind::Diff => "diff",
-                        // Unreachable while `layout` filters settings tabs
-                        // out of `owned_tabs` above; kept so a future
-                        // persistence change fails at restore, not here.
-                        TabKind::ProjectSettings => "settings",
-                    }
-                    .to_string(),
+                    kind: session::persisted_kind(tab.kind).to_string(),
                     // The live tab holds the bare adapter id it was opened
                     // with; the persisted form is qualified, so wrap it at
                     // the persistence boundary.
@@ -5705,6 +5740,8 @@ impl SirioWorkspace {
                 .map(|tab| {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
+                    state.shown_in_pane =
+                        self.center_split.active(tab.kind.pane_role()) == Some(tab.id);
                     tab.panes.for_each(&mut |pane_id, content| {
                         match content {
                             TabContent::Terminal { view } => {
@@ -5732,7 +5769,19 @@ impl SirioWorkspace {
                                 state.editor_path =
                                     view.read(cx).path().to_string_lossy().into_owned();
                             }
-                            TabContent::Changes(_) | TabContent::ProjectSettings(_) => {}
+                            // Same live read: a commit tab keeps its commit
+                            // and a focused Changes tab its file.
+                            TabContent::Changes(changes) => {
+                                let changes = changes.read(cx);
+                                state.commit_sha = changes.commit().unwrap_or_default().to_owned();
+                                state.changes_focus = changes
+                                    .focused_path()
+                                    .map(|path| path.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                            }
+                            TabContent::ProjectSettings(view) => {
+                                state.settings_project_id = view.read(cx).project_id().to_string();
+                            }
                         }
                     });
                     state
@@ -6225,19 +6274,33 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// #324: hides or shows the Secondary pane, *keeping* its tabs. This is
-    /// the gesture the persisted flag exists for -- the `×` at the end of the
-    /// Secondary strip closes the tabs instead, and the two must not be
-    /// conflated: if `×` merely hid the pane it would duplicate this and
-    /// should not exist.
+    /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane.
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
-        self.secondary_pane_open = !self.secondary_pane_open;
+        self.set_secondary_pane_hidden(!self.secondary_pane_hidden, cx);
+    }
+
+    /// Hides or shows the Secondary pane, *keeping* its tabs, and persists
+    /// the choice for the current worktree. Every gesture that closes the
+    /// pane lands here — Ctrl+Shift+B, the strip's `×`, the launcher's
+    /// Hide Pane tile — so they cannot drift apart. Without a worktree
+    /// there is nothing to own the flag, and nothing happens.
+    fn set_secondary_pane_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if !self.has_current_worktree() {
+            return;
+        }
+        self.secondary_pane_hidden = hidden;
         self.session
-            .save_secondary_pane_open(&self.working_directory, self.secondary_pane_open);
+            .save_secondary_pane_hidden(&self.working_directory, self.secondary_pane_hidden);
         // Hiding the pane the user was typing in would otherwise leave focus
         // on a half that is no longer drawn.
-        if !self.secondary_pane_open && self.center_split.focused() == PaneRole::Secondary {
+        if self.secondary_pane_hidden && self.center_split.focused() == PaneRole::Secondary {
             self.set_focused_pane(PaneRole::Primary);
+            if let Some(primary) = self.center_split.active(PaneRole::Primary)
+                && let Some(index) =
+                    self.tabs.iter().position(|tab| tab.id == primary)
+            {
+                self.active_tab = index;
+            }
         }
         cx.notify();
     }
@@ -8772,7 +8835,7 @@ impl SirioWorkspace {
         } else {
             None
         };
-        let mut restored_secondary_pane_open = None;
+        let mut restored_secondary_pane_hidden = None;
         self.evict_over_capacity_worktrees(&selected_path, cx);
 
         // CENTER-01: `self.tabs` is this window's single, un-scoped-to-worktree
@@ -8891,13 +8954,18 @@ impl SirioWorkspace {
             self.next_tab_id = self.tabs.len();
             self.next_pane_id = next_pane_id(&self.tabs);
             self.active_tab = active.min(self.tabs.len().saturating_sub(1));
-            // `rebuild_center_split` can reveal a restored Secondary tab.
-            // Point the workspace at the destination before that side effect
-            // so its persisted flag is written to the right worktree.
+            // The restored-settings tagging and `rebuild_center_split`
+            // need the destination set first: the former tags each
+            // restored tab with the destination worktree, the latter can
+            // reveal a restored Secondary tab whose persisted flag must
+            // be written to the right worktree.
             self.working_directory = selected_path.clone();
-            self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
+            self.secondary_pane_hidden = self.session.secondary_pane_hidden_for(&selected_path);
+            self.restore_project_settings_tabs(&restored, cx);
+            self.center_split = CenterSplit::new(&self.tabs);
+            seed_shown_tabs(&mut self.center_split, &self.tabs, &restored);
             self.rebuild_center_split();
-            restored_secondary_pane_open = Some(self.secondary_pane_open);
+            restored_secondary_pane_hidden = Some(self.secondary_pane_hidden);
         }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
@@ -8913,9 +8981,9 @@ impl SirioWorkspace {
         // same way the tabs above just did. The safe restore branch above
         // preserves a newly revealed active Secondary tab; an unsafe switch
         // still reads only the selected worktree's persisted flag.
-        let restored_secondary_pane_was_loaded = restored_secondary_pane_open.is_some();
-        self.secondary_pane_open = restored_secondary_pane_open
-            .unwrap_or_else(|| self.session.secondary_pane_open_for(&selected_path));
+        let restored_secondary_pane_was_loaded = restored_secondary_pane_hidden.is_some();
+        self.secondary_pane_hidden = restored_secondary_pane_hidden
+            .unwrap_or_else(|| self.session.secondary_pane_hidden_for(&selected_path));
         if restored_secondary_pane_was_loaded
             || paths_name_the_same_document(&selected_path, &old_path)
         {
@@ -10295,6 +10363,20 @@ impl SirioWorkspace {
         )
         .detach();
         self.empty_pane_prompts.insert(0, prompt);
+    }
+
+    /// Keeps the no-worktree picker's list equal to the catalog. Called every
+    /// render like `sync_empty_pane_prompts`, but only with no worktree
+    /// selected — the picker is only drawn then. `set_choices` is a no-op
+    /// when nothing changed, so an open menu is not rebuilt under the
+    /// pointer.
+    fn sync_worktree_picker(&mut self, cx: &mut Context<Self>) {
+        if self.has_current_worktree() {
+            return;
+        }
+        let choices = worktree_choices(&self.project_catalog);
+        self.worktree_picker
+            .update(cx, |picker, cx| picker.set_choices(choices, cx));
     }
 
     fn set_focused_pane(&mut self, role: PaneRole) {
@@ -11867,6 +11949,15 @@ impl SirioWorkspace {
             .detach();
     }
 
+    /// A Project Settings tab's title: one spelling for opening the tab
+    /// and for rebuilding it at restore.
+    fn project_settings_title(seed: &ProjectSettingsSeed) -> String {
+        format!(
+            "Project Settings · {}",
+            ProjectSettingsView::title_name(seed)
+        )
+    }
+
     /// Opens a project's settings as a tab in the Secondary pane, reusing
     /// the existing tab for that project when there is one (and opening
     /// the pane when it was hidden), like every other Secondary surface.
@@ -11890,10 +11981,7 @@ impl SirioWorkspace {
         let Some(seed) = self.sidebar.read(cx).project_settings_seed(project_id) else {
             return;
         };
-        let title = format!(
-            "Project Settings · {}",
-            ProjectSettingsView::title_name(&seed)
-        );
+        let title = Self::project_settings_title(&seed);
         let seed_title = title.clone();
         let view = cx.new(|cx| ProjectSettingsView::new(seed, cx));
         Self::subscribe_project_settings_tab(&view, cx);
@@ -11923,6 +12011,84 @@ impl SirioWorkspace {
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
+    }
+
+    /// Project Settings tabs are the one kind the free `restore_tabs*`
+    /// functions cannot build: the seed comes from the sidebar, which does
+    /// not exist yet at boot. They are rebuilt here once it does, each at
+    /// the strip position the session gave it -- the number of tabs already
+    /// rebuilt that the session listed before it. A project that no longer
+    /// exists drops its tab, the way a missing file drops an Editor tab.
+    /// Returns whether a tab was inserted; the caller rebuilds the split.
+    fn restore_project_settings_tabs(
+        &mut self,
+        restored: &RestoredSession,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let mut inserted = false;
+        for (index, saved) in restored.tabs.iter().enumerate() {
+            if session::kind_from_persisted(&saved.kind) != Some(TabKind::ProjectSettings) {
+                continue;
+            }
+            let mut state = restored.tab_states.get(index).cloned().unwrap_or_default();
+            let Some(seed) = self
+                .sidebar
+                .read(cx)
+                .project_settings_seed(&state.settings_project_id)
+            else {
+                continue;
+            };
+            let listed_before: HashSet<&str> = restored.tabs[..index]
+                .iter()
+                .map(|tab| tab.id.as_str())
+                .collect();
+            let position = self
+                .tabs
+                .iter()
+                .filter(|tab| listed_before.contains(tab.persistence_id.as_str()))
+                .count();
+            let title = Self::project_settings_title(&seed);
+            let view = cx.new(|cx| ProjectSettingsView::new(seed, cx));
+            Self::subscribe_project_settings_tab(&view, cx);
+            let tab_id = self.next_tab_id;
+            let pane_id = self.next_pane_id;
+            state.root_id = Some(pane_id);
+            let shown = state.shown_in_pane;
+            self.tabs.insert(
+                position,
+                OpenTab {
+                    id: tab_id,
+                    persistence_id: saved.id.clone(),
+                    title,
+                    kind: TabKind::ProjectSettings,
+                    agent_icon: None,
+                    agent_id: None,
+                    session_state: state,
+                    panes: PaneNode::leaf(pane_id, TabContent::ProjectSettings(view)),
+                    focused_pane: pane_id,
+                    title_is_auto_named: true,
+                },
+            );
+            self.tab_worktree_paths
+                .insert(tab_id, self.working_directory.clone());
+            self.next_tab_id += 1;
+            self.next_pane_id += 1;
+            if shown {
+                self.center_split
+                    .set_active(PaneRole::Secondary, Some(tab_id));
+            }
+            if saved.active {
+                active_id = Some(tab_id);
+            }
+            inserted = true;
+        }
+        if let Some(position) =
+            active_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+        {
+            self.active_tab = position;
+        }
+        inserted
     }
 
     fn subscribe_project_settings_tab(tab: &Entity<ProjectSettingsView>, cx: &mut Context<Self>) {
@@ -12797,6 +12963,111 @@ impl SirioWorkspace {
             NewTabAction::NewBrowser => {
                 self.add_browser_tab("https://example.com", window, cx);
             }
+        }
+    }
+
+    /// The Secondary pane's launcher: every surface that lives in that half,
+    /// then the pane's own close. Changes needs git and Project Settings a
+    /// project; each says why when it cannot be used.
+    fn secondary_launcher_items(&self) -> Vec<LauncherItem<LauncherAction>> {
+        let project = self.current_catalog_project();
+        vec![
+            LauncherItem {
+                id: "launcher-browser",
+                action: LauncherAction::NewBrowser,
+                icon: Icon::Globe,
+                label: "Browser".into(),
+                shortcut: Some(window_shortcut_hint(WindowCommand::NewBrowser).into()),
+                disabled: None,
+            },
+            LauncherItem {
+                id: "launcher-changes",
+                action: LauncherAction::Changes,
+                icon: Icon::Diff,
+                label: "Changes".into(),
+                shortcut: None,
+                disabled: (!project.is_some_and(|project| project.is_git))
+                    .then(|| "This worktree is not a git repository".into()),
+            },
+            LauncherItem {
+                id: "launcher-open-file",
+                action: LauncherAction::OpenFile,
+                icon: Icon::File,
+                label: "Open File".into(),
+                shortcut: Some(window_shortcut_hint(WindowCommand::OpenFile).into()),
+                disabled: None,
+            },
+            LauncherItem {
+                id: "launcher-project-settings",
+                action: LauncherAction::ProjectSettings,
+                icon: Icon::Settings,
+                label: "Project Settings".into(),
+                shortcut: None,
+                disabled: project
+                    .is_none()
+                    .then(|| "This worktree belongs to no project".into()),
+            },
+            LauncherItem {
+                id: "launcher-hide-pane",
+                action: LauncherAction::HidePane,
+                icon: Icon::Close,
+                label: "Hide Pane".into(),
+                shortcut: Some(window_shortcut_hint(WindowCommand::ToggleSecondaryPane).into()),
+                disabled: None,
+            },
+        ]
+    }
+
+    /// The Primary pane's launcher. Chat opens the agent picker drawn under
+    /// the row rather than guessing an agent.
+    fn primary_launcher_items() -> Vec<LauncherItem<LauncherAction>> {
+        vec![
+            LauncherItem {
+                id: "empty-worktree-new-terminal",
+                action: LauncherAction::NewTerminal,
+                icon: Icon::SquareTerminal,
+                label: "Terminal".into(),
+                shortcut: Some(window_shortcut_hint(WindowCommand::NewTerminalTab).into()),
+                disabled: None,
+            },
+            LauncherItem {
+                id: "empty-worktree-new-chat",
+                action: LauncherAction::NewChat,
+                icon: Icon::MessageSquare,
+                label: "Chat".into(),
+                shortcut: None,
+                disabled: None,
+            },
+        ]
+    }
+
+    /// One door for every launcher tile, in either pane. Each arm is the
+    /// path the same surface already opens through elsewhere — the `+`
+    /// menu, `ctrl-o`, the sidebar — never a second implementation.
+    fn handle_launcher_action(
+        &mut self,
+        action: LauncherAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            LauncherAction::NewTerminal => self.open_action(NewTabAction::NewTerminal, window, cx),
+            LauncherAction::NewChat => {
+                self.empty_chat_picker_open = !self.empty_chat_picker_open;
+                cx.notify();
+            }
+            LauncherAction::NewBrowser => self.open_action(NewTabAction::NewBrowser, window, cx),
+            LauncherAction::Changes => self.open_action(NewTabAction::NewChanges, window, cx),
+            LauncherAction::OpenFile => self.handle_open_file(&OpenFile, window, cx),
+            LauncherAction::ProjectSettings => {
+                if let Some(project_id) = self
+                    .current_catalog_project()
+                    .map(|project| project.id.clone())
+                {
+                    self.add_project_settings_tab(&project_id, cx);
+                }
+            }
+            LauncherAction::HidePane => self.set_secondary_pane_hidden(true, cx),
         }
     }
 
@@ -13964,15 +14235,9 @@ impl SirioWorkspace {
         ))
     }
 
-    /// Renders the active tab surface of the focused center pane.
-    ///
-    /// #319: still one surface on purpose. The two-pane layout — Primary
-    /// stack | divider | Secondary stack — is the next step; what changes
-    /// here is only *how the surface is chosen*: by `PaneRole` off
-    /// `center_split`, never by a pane-group id. The old doc claimed an
-    /// empty group had to stay visible to give "Move Existing Tab" a
-    /// destination; that gesture no longer exists, so the only empty state
-    /// left is a worktree with no Primary tab.
+    /// Renders the active tab surface of one centre pane, or that pane's
+    /// empty state: a launcher when the worktree has nothing open in it, a
+    /// placeholder when there is no worktree at all.
     fn render_group_surfaces(
         &self,
         role: PaneRole,
@@ -13980,9 +14245,14 @@ impl SirioWorkspace {
         entity: Entity<Self>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // With no worktree selected the Secondary half shows its placeholder,
+        // never a tab left over from the worktree that was deselected --
+        // the Primary half gets the same treatment one level up (F-TERM-11).
+        let shows_tabs = role == PaneRole::Primary || self.has_current_worktree();
         let surface = self
             .center_split
             .active(role)
+            .filter(|_| shows_tabs)
             .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
             .map(|tab_index| {
                 div()
@@ -14001,12 +14271,43 @@ impl SirioWorkspace {
                     .into_any_element()
             })
             .unwrap_or_else(|| {
-                // #320: the empty prompt is Primary-only. The Secondary pane
-                // auto-closes with its last tab, so it is never drawn empty;
-                // the Primary pane does not, and can be.
-                if role == PaneRole::Primary && self.has_current_worktree() {
-                    let new_terminal_entity = entity.clone();
-                    let new_chat_entity = entity.clone();
+                // No tab to show: the Secondary launcher and its
+                // no-worktree placeholder are drawn just below, the
+                // Primary launcher further below.
+                if role == PaneRole::Secondary && !self.has_current_worktree() {
+                    div()
+                        .id("secondary-no-worktree")
+                        .debug_selector(|| "secondary-no-worktree".to_owned())
+                        .flex_1()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.text_faint)
+                        .child("No worktree")
+                        .into_any_element()
+                } else if role == PaneRole::Secondary {
+                    let launcher_entity = entity.clone();
+                    div()
+                        .id("secondary-empty")
+                        .flex_1()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(theme.spacing.card_gap)
+                        .child(pane_launcher(
+                            "secondary-launcher",
+                            &self.secondary_launcher_items(),
+                            theme,
+                            move |action, window, cx| {
+                                launcher_entity.update(cx, |workspace, cx| {
+                                    workspace.handle_launcher_action(action, window, cx)
+                                });
+                            },
+                        ))
+                        .into_any_element()
+                } else if role == PaneRole::Primary && self.has_current_worktree() {
                     let dismiss_chat_picker_entity = entity.clone();
                     let picker_open = self.empty_chat_picker_open;
                     // The same resolved-source gate the tab bar's New Chat
@@ -14019,6 +14320,7 @@ impl SirioWorkspace {
                         })
                         .map(|adapter| (adapter.id(), adapter.display_name()))
                         .collect();
+                    let launcher_entity = entity.clone();
                     let mut empty = div()
                         .id("empty-worktree")
                         .debug_selector(|| "empty-worktree".to_owned())
@@ -14029,69 +14331,17 @@ impl SirioWorkspace {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(theme.spacing.card_gap)
-                        .text_color(theme.text_faint)
-                        .child(orbit(
-                            "empty-worktree-orbit",
-                            EMPTY_SURFACE_MARK,
-                            theme.text_faint,
-                        ))
-                        .child(
-                            div()
-                                .text_size(theme.typography.headline)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child("No Terminals or Chats"),
-                        )
-                        .child("Open a new terminal or chat to get started.")
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .gap(theme.spacing.card_gap)
-                                .mt(theme.spacing.titlebar_control_spacing)
-                                .child(
-                                    div()
-                                        .id("empty-worktree-new-terminal")
-                                        .debug_selector(|| "empty-worktree-new-terminal".to_owned())
-                                        .px(theme.spacing.card_gap)
-                                        .py(theme.spacing.titlebar_control_spacing)
-                                        .rounded(theme.radii.control)
-                                        .bg(theme.solid)
-                                        .text_size(theme.typography.footnote)
-                                        .text_color(theme.on_solid)
-                                        .hover(|style| style.opacity(0.9))
-                                        .on_click(move |_, _, cx| {
-                                            new_terminal_entity.update(cx, |workspace, cx| {
-                                                workspace.add_terminal_tab("Terminal", cx);
-                                            });
-                                        })
-                                        .child("New Terminal"),
-                                )
-                                .child(
-                                    div()
-                                        .id("empty-worktree-new-chat")
-                                        .debug_selector(|| "empty-worktree-new-chat".to_owned())
-                                        .px(theme.spacing.card_gap)
-                                        .py(theme.spacing.titlebar_control_spacing)
-                                        .rounded(theme.radii.control)
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .text_size(theme.typography.footnote)
-                                        .text_color(theme.text)
-                                        .hover(|style| style.bg(theme.element_hover))
-                                        .on_click(move |_, _, cx| {
-                                            new_chat_entity.update(cx, |workspace, cx| {
-                                                workspace.empty_chat_picker_open =
-                                                    !workspace.empty_chat_picker_open;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child("New Chat"),
-                                ),
-                        );
+                        .p(theme.spacing.card_gap)
+                        .child(pane_launcher(
+                            "primary-launcher",
+                            &Self::primary_launcher_items(),
+                            theme,
+                            move |action, window, cx| {
+                                launcher_entity.update(cx, |workspace, cx| {
+                                    workspace.handle_launcher_action(action, window, cx)
+                                });
+                            },
+                        ));
                     if picker_open {
                         let mut menu = div()
                             .id("empty-chat-agent-menu")
@@ -14241,6 +14491,15 @@ impl SirioWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .current_workspace()
             .is_some()
+    }
+
+    /// The catalog project the current worktree belongs to, if any.
+    fn current_catalog_project(&self) -> Option<&session::CatalogProject> {
+        self.project_catalog.projects().iter().find(|project| {
+            project.worktrees.iter().any(|worktree| {
+                paths_name_the_same_document(&worktree.path, &self.working_directory)
+            })
+        })
     }
 
     fn render_open_tab(
@@ -14590,11 +14849,13 @@ impl SirioWorkspace {
             })
     }
 
-    /// #320: the `×` at the end of the Secondary strip. It **closes the
-    /// pane's tabs**, and the pane disappears because it has none left — it
-    /// does not hide the pane. That distinction is the whole reason this
-    /// control is allowed to exist beside `ctrl-shift-b`, which hides and
-    /// keeps: a `×` that merely hid would be a second spelling of the toggle.
+    /// The `×` at the end of the Secondary strip: it closes the pane, the
+    /// same hide Ctrl+Shift+B does, and the tabs stay for when the pane comes
+    /// back. Until 0.25 it closed every Secondary tab and left the pane on
+    /// its launcher (#320); with the pane drawn from the first frame, the
+    /// thing a user reaches for in its header is the pane's own close. Drawn
+    /// even over an empty strip, since the pane is there to close. The
+    /// tooltip names the chord, which is also the way back.
     fn render_secondary_pane_close(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
         div()
             .id("secondary-pane-close")
@@ -14610,27 +14871,20 @@ impl SirioWorkspace {
             .rounded(theme.radii.control)
             .text_color(theme.text_faint)
             .hover(|style| style.bg(theme.element_hover))
-            .on_click(move |_, window, cx| {
+            .tooltip(|window, cx| {
+                bezel::ui::tooltip::Tooltip::with_keystroke(
+                    "Hide Pane",
+                    window_shortcut_hint(WindowCommand::ToggleSecondaryPane),
+                    window,
+                    cx,
+                )
+            })
+            .on_click(move |_, _, cx| {
                 entity.update(cx, |workspace, cx| {
-                    workspace.close_secondary_pane_tabs(window, cx);
+                    workspace.set_secondary_pane_hidden(true, cx);
                 });
             })
             .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text_faint))
-    }
-
-    /// Closes every Secondary tab, one real close each — the same path a tab's
-    /// own `×` takes, so a dirty editor's guard and a browser's native
-    /// teardown are not skipped by closing the pane instead of its tabs.
-    fn close_secondary_pane_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<usize> = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
-            .map(|tab| tab.id)
-            .collect();
-        for id in ids {
-            self.close_tab_by_id(id, Some(window), cx);
-        }
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -15340,14 +15594,8 @@ impl SirioWorkspace {
         );
     }
 
-    /// How wide one half of the center is.
-    ///
-    /// #320: the Secondary pane exists only while it holds tabs — it opens
-    /// with the first and auto-closes with the last — so a Primary-only
-    /// workspace gives the whole center to the Primary strip. The halves are
-    /// even for now; the draggable ratio is its own step, and putting a
-    /// placeholder constant here would be a second definition of a number
-    /// that will shortly have exactly one.
+    /// How wide one half of the center is. The Secondary half is drawn unless
+    /// hidden, so a Primary-only workspace still splits the centre.
     fn center_pane_width(&self, role: PaneRole, window: &Window, theme: Theme) -> f32 {
         let (primary, secondary) = self.center_pane_widths(window, theme);
         match role {
@@ -15367,27 +15615,26 @@ impl SirioWorkspace {
         )
     }
 
-    /// Whether the Secondary half is drawn at all: it holds tabs *and* has
-    /// not been hidden. Membership stays derived -- which half a tab belongs
-    /// to comes from its kind -- but "open" cannot be, because hiding the
-    /// pane leaves its tabs in place (#323).
+    /// Whether the Secondary half is drawn: always, unless the user hid it
+    /// with `ctrl-shift-b` (#323). It no longer depends on holding tabs --
+    /// the pane is part of the layout from the first frame, and an empty one
+    /// shows its launcher.
     fn secondary_pane_visible(&self) -> bool {
-        self.secondary_pane_open
-            && self
-                .tabs
-                .iter()
-                .any(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+        if !self.has_current_worktree() {
+            return true;
+        }
+        !self.secondary_pane_hidden
     }
 
     /// #323: opening any Secondary surface opens the pane, even if it was
     /// hidden -- the alternative is a tab that exists and is drawn nowhere.
     fn open_secondary_pane(&mut self) {
-        if self.secondary_pane_open {
+        if !self.secondary_pane_hidden {
             return;
         }
-        self.secondary_pane_open = true;
+        self.secondary_pane_hidden = false;
         self.session
-            .save_secondary_pane_open(&self.working_directory, true);
+            .save_secondary_pane_hidden(&self.working_directory, false);
     }
 
     fn reveal_secondary_for_active_tab(&mut self) {
@@ -15688,7 +15935,7 @@ impl SirioWorkspace {
                 .child(self.render_group_surfaces(PaneRole::Primary, *theme, entity.clone(), cx))
                 .into_any_element()
         } else {
-            div()
+            let mut no_worktree = div()
                 .id("no-worktree-selected")
                 .debug_selector(|| "no-worktree-selected".to_owned())
                 // The same P117 trap the sibling branch above documents: this
@@ -15708,16 +15955,50 @@ impl SirioWorkspace {
                     "no-worktree-selected-orbit",
                     EMPTY_SURFACE_MARK,
                     theme.text_faint,
-                ))
-                .child(
-                    div()
-                        .text_size(theme.typography.headline)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("No worktree selected"),
-                )
-                .child("Add a project, then select a worktree.")
-                .into_any_element()
+                ));
+            if self.project_catalog.projects().is_empty() {
+                let add_project_entity = entity.clone();
+                no_worktree = no_worktree
+                    .child(
+                        div()
+                            .text_size(theme.typography.headline)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("No projects yet"),
+                    )
+                    .child("Add a project, then select a worktree.")
+                    .child(
+                        div()
+                            .id("no-worktree-add-project")
+                            .debug_selector(|| "no-worktree-add-project".to_owned())
+                            .px(theme.spacing.card_gap)
+                            .py(theme.spacing.titlebar_control_spacing)
+                            .rounded(theme.radii.control)
+                            .bg(theme.solid)
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.on_solid)
+                            .hover(|style| style.opacity(0.9))
+                            .on_click(move |_, window, cx| {
+                                add_project_entity.update(cx, |workspace, cx| {
+                                    workspace.sidebar.update(cx, |sidebar, cx| {
+                                        sidebar.start_open_project(window, cx)
+                                    });
+                                });
+                            })
+                            .child("Add Project"),
+                    );
+            } else {
+                no_worktree = no_worktree
+                    .child(
+                        div()
+                            .text_size(theme.typography.headline)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Select a worktree"),
+                    )
+                    .child(self.worktree_picker.clone());
+            }
+            no_worktree.into_any_element()
         };
 
         let primary_surface = div()
@@ -15866,6 +16147,10 @@ impl SirioWorkspace {
                                 .relative()
                                 .h(px(TAB_BAR_HEIGHT))
                                 .w_full()
+                                // The tabs paint `surface` only up to the `×`
+                                // slot; without this the `×` sits on the
+                                // darker window behind the strip.
+                                .bg(theme.surface)
                                 .border_b_1()
                                 .border_color(theme.border)
                                 .child(self.render_open_tabs(
@@ -15875,7 +16160,11 @@ impl SirioWorkspace {
                                     window,
                                     cx,
                                 ))
-                                .child(self.render_secondary_pane_close(*theme, entity.clone()))
+                                .when(self.has_current_worktree(), |this| {
+                                    this.child(
+                                        self.render_secondary_pane_close(*theme, entity.clone()),
+                                    )
+                                })
                                 .when(
                                     self.tab_menu_open && menu_role == Some(PaneRole::Secondary),
                                     |this| {
@@ -17119,6 +17408,8 @@ impl SirioWorkspace {
                     workspace.palette_focus.focus(window, cx);
                 });
             })
+            // The always-drawn launcher can sit under it.
+            .occlude()
             .flex()
             .flex_col()
             .absolute()
@@ -17542,6 +17833,7 @@ impl Render for SirioWorkspace {
         self.frames_rendered = self.frames_rendered.wrapping_add(1);
         self.sync_activity(cx);
         self.sync_empty_pane_prompts(cx);
+        self.sync_worktree_picker(cx);
         self.hide_offscreen_browsers(self.show_settings, cx);
         self.sync_browser_overlay_obscured(cx);
 
@@ -18304,8 +18596,8 @@ fn restore_tabs_with_terminal_cache(
                 agent_id.as_deref()
             },
         );
-        let content = match tab.kind.as_str() {
-            "chat" => {
+        let content = match session::kind_from_persisted(&tab.kind) {
+            Some(TabKind::AgentChat) => {
                 let chat = cx.new(|cx| {
                     if let Some(reason) = unavailable {
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
@@ -18329,7 +18621,7 @@ fn restore_tabs_with_terminal_cache(
                 }
                 TabContent::Chat(chat)
             }
-            "terminal" => {
+            Some(TabKind::Terminal) => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
@@ -18365,14 +18657,13 @@ fn restore_tabs_with_terminal_cache(
                 };
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(cx.new(|cx| {
-                ChangesTab::new_with_git_capability(
-                    working_directory.to_path_buf(),
-                    is_git,
-                    cx,
-                )
-            })),
-            "browser" => {
+            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(
+                &tab_state,
+                working_directory,
+                is_git,
+                cx,
+            )),
+            Some(TabKind::Browser) => {
                 let Some(window) = window.as_deref_mut() else {
                     continue;
                 };
@@ -18380,7 +18671,7 @@ fn restore_tabs_with_terminal_cache(
                 let browser = cx.new(|cx| BrowserSurface::new(&address, window, cx));
                 TabContent::Browser(browser)
             }
-            "file" => {
+            Some(TabKind::Editor) => {
                 // #323: an Editor tab comes back only when its file still
                 // does; see `restored_editor_path`.
                 let Some(path) = restored_editor_path(&tab_state) else {
@@ -18393,8 +18684,10 @@ fn restore_tabs_with_terminal_cache(
                 let view = cx.new(|cx| FileView::new(path, cx));
                 TabContent::File { view }
             }
-            // restore() only returns chat and terminal tabs.
-            _ => unreachable!("unexpected restored tab kind {}", tab.kind),
+            // Built by `restore_project_settings_tabs` once a workspace
+            // exists: the seed comes from the sidebar.
+            Some(TabKind::ProjectSettings) => continue,
+            None => continue,
         };
         let panes = match content {
             TabContent::Chat(chat) => replay_pane_events(
@@ -18531,6 +18824,59 @@ fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The Changes surface a restored "diff" tab rebuilds: on the commit it was
+/// opened on when it had one, focused on the file it was focused on. A SHA
+/// that no longer resolves is not checked here; the tab shows the git error
+/// `ChangesTab` already draws for it. Both restore paths go through here.
+fn restored_changes_tab(
+    state: &SessionTabState,
+    working_directory: &Path,
+    is_git: bool,
+    cx: &mut App,
+) -> Entity<ChangesTab> {
+    let root = working_directory.to_path_buf();
+    let changes = if state.commit_sha.is_empty() {
+        cx.new(|cx| ChangesTab::new_with_git_capability(root, is_git, cx))
+    } else {
+        let sha = state.commit_sha.clone();
+        cx.new(|cx| ChangesTab::for_commit(root, sha, cx))
+    };
+    if !state.changes_focus.is_empty() {
+        let path = PathBuf::from(&state.changes_focus);
+        changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
+    }
+    changes
+}
+
+/// The tab each pane was showing when the session was written, read from
+/// the saved session rather than the live tabs. Live `shown_in_pane` flags
+/// go stale across a worktree switch (a kept-alive chat keeps its boot
+/// flag), and seeding from the previous worktree's split can leak an old
+/// tab id through, so the saved pair whose live tab still exists wins.
+/// `rebuild_center_split` and `CenterSplit::select_tab` keep a role's
+/// remembered tab while it still exists, so seeding it before them brings
+/// the unfocused pane back on that tab instead of its first one. Which pane
+/// has *focus* is still the `active` flag's call.
+fn seed_shown_tabs(
+    center_split: &mut CenterSplit,
+    tabs: &[OpenTab],
+    restored: &RestoredSession,
+) {
+    for role in [PaneRole::Primary, PaneRole::Secondary] {
+        for (saved_tab, saved_state) in restored.tabs.iter().zip(&restored.tab_states) {
+            if !saved_state.shown_in_pane {
+                continue;
+            }
+            if let Some(tab) = tabs.iter().find(|tab| {
+                tab.persistence_id == saved_tab.id && tab.kind.pane_role() == role
+            }) {
+                center_split.set_active(role, Some(tab.id));
+                break;
+            }
+        }
+    }
+}
+
 fn restored_browser_url(state: &SessionTabState) -> &str {
     if state.browser_url.is_empty() {
         "https://example.com"
@@ -18635,8 +18981,8 @@ fn restore_tabs_in_workspace(
                 agent_id.as_deref()
             },
         );
-        let content = match tab.kind.as_str() {
-            "chat" => {
+        let content = match session::kind_from_persisted(&tab.kind) {
+            Some(TabKind::AgentChat) => {
                 let chat = cx.new(|cx| {
                     if let Some(reason) = unavailable {
                         return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
@@ -18660,7 +19006,7 @@ fn restore_tabs_in_workspace(
                 }
                 TabContent::Chat(chat)
             }
-            "terminal" => {
+            Some(TabKind::Terminal) => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
@@ -18688,18 +19034,17 @@ fn restore_tabs_in_workspace(
                 });
                 TabContent::Terminal { view }
             }
-            "diff" => TabContent::Changes(cx.new(|cx| {
-                ChangesTab::new_with_git_capability(
-                    working_directory.to_path_buf(),
-                    is_git,
-                    cx,
-                )
-            })),
-            "browser" => {
+            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(
+                &tab_state,
+                working_directory,
+                is_git,
+                cx,
+            )),
+            Some(TabKind::Browser) => {
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
             }
-            "file" => {
+            Some(TabKind::Editor) => {
                 // #323: see the matching arm in `restore_tabs`.
                 let Some(path) = restored_editor_path(&tab_state) else {
                     continue;
@@ -18709,7 +19054,10 @@ fn restore_tabs_in_workspace(
                 let view = cx.new(|cx| FileView::new(path, cx));
                 TabContent::File { view }
             }
-            _ => continue,
+            // Built by `restore_project_settings_tabs` once a workspace
+            // exists: the seed comes from the sidebar.
+            Some(TabKind::ProjectSettings) => continue,
+            None => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
             let cwd = working_directory.to_path_buf();
@@ -18726,17 +19074,8 @@ fn restore_tabs_in_workspace(
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: if tab.kind == "chat" {
-                TabKind::AgentChat
-            } else if tab.kind == "diff" {
-                TabKind::Diff
-            } else if tab.kind == "browser" {
-                TabKind::Browser
-            } else if tab.kind == "file" {
-                TabKind::Editor
-            } else {
-                TabKind::Terminal
-            },
+            kind: session::kind_from_persisted(&tab.kind)
+                .expect("settings and unknown kinds continue above"),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -19553,6 +19892,7 @@ fn main() {
         Theme::init(cx);
         init_motion(cx);
         bezel::ui::input::init(cx);
+        bezel::ui::combobox::init(cx);
         bezel::ui::tree::init(cx);
         sirio_ui::chat::init(cx);
         sirio_ui::file_view::init(cx);
@@ -22839,6 +23179,7 @@ done
         translucency_enabled: bool,
     ) -> SirioWorkspace {
         bezel::ui::input::init(cx);
+        bezel::ui::combobox::init(cx);
         sirio_ui::file_view::init(cx);
         if let Some(theme) = cx.try_global::<Theme>().copied() {
             theme.install_into_bezel(cx);
@@ -27768,8 +28109,9 @@ done
 
         // `palette_test_workspace_with_tab_count` builds a catalog with one
         // worktree but does not auto-select it -- without this, the centre
-        // surface renders the "No worktree selected" empty state instead of
-        // any pane content, and every `pane-*` id below is silently absent.
+        // surface renders the no-worktree state (`no-worktree-selected`)
+        // with its picker instead of any pane content, and every `pane-*`
+        // id below is silently absent.
         let working_directory =
             workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
         cx.update(|window, cx| {
@@ -29411,7 +29753,12 @@ done
         // unconditionally would still hide the third tab behind a chevron
         // nothing actually needs.
         cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            // Measures the Primary pane alone; the Secondary one would halve it.
+            workspace.secondary_pane_hidden = true;
+            workspace
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1230.0), px(600.0)));
         cx.run_until_parked();
@@ -33976,10 +34323,10 @@ done
     fn file_tabs_wear_the_files_tree_glyph() {
         let cases: &[(&str, Icon)] = &[
             ("/repo/src/lib.rs", Icon::file_type("rust")),
-            ("/repo/CLAUDE.md", Icon::file_type("markdown")),
+            ("/repo/CLAUDE.md", Icon::file_type("claude")),
             ("/repo/Cargo.toml", Icon::file_type("toml")),
-            ("/repo/deploy.sh", Icon::SquareTerminal),
-            ("/repo/README", Icon::File),
+            ("/repo/deploy.sh", Icon::file_type("console")),
+            ("/repo/README", Icon::file_type("readme")),
         ];
         for (path, expected) in cases {
             assert_eq!(
@@ -34102,24 +34449,35 @@ done
     }
 
     #[gpui::test]
-    async fn primary_pane_fills_center_panel_without_a_background_strip(cx: &mut TestAppContext) {
+    async fn the_last_pane_fills_center_panel_without_a_background_strip(
+        cx: &mut TestAppContext,
+    ) {
         cx.set_global(Theme::dark());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
-        let primary = cx.debug_bounds("pane-primary").expect("primary pane");
-
+        let secondary = cx.debug_bounds("pane-secondary").expect("secondary pane");
         assert!(
-            primary.right() >= center.right(),
-            "the primary pane must paint through the center panel's right edge: \
-             primary={primary:?}, center={center:?}"
+            secondary.right() >= center.right() && secondary.right() - center.right() <= px(1.0),
+            "the Secondary pane paints through the centre panel's right edge, \
+             overlapping at most its one-pixel border: secondary={secondary:?}, center={center:?}"
         );
+
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx));
+        cx.run_until_parked();
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        let primary = cx.debug_bounds("pane-primary").expect("primary pane");
         assert!(
-            primary.right() - center.right() <= px(1.0),
-            "the primary pane may overlap only the panel's one-pixel border: \
-             primary={primary:?}, center={center:?}"
+            primary.right() >= center.right() && primary.right() - center.right() <= px(1.0),
+            "hidden, the Primary pane takes the edge back: primary={primary:?}, center={center:?}"
         );
     }
 
@@ -36527,7 +36885,7 @@ done
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
             workspace.tabs[1].kind = TabKind::Editor;
             workspace.active_tab = 1;
-            workspace.secondary_pane_open = false;
+            workspace.secondary_pane_hidden = true;
             workspace.rebuild_center_split();
             workspace
         });
@@ -36673,9 +37031,36 @@ done
         );
     }
 
+    /// The Primary empty state is the launcher both panes share: tiles, no
+    /// headline. The old "No Terminals or Chats" copy is gone.
+    #[gpui::test]
+    async fn drawn_selected_worktree_without_tabs_uses_the_launcher(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_center_split();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("primary-launcher").is_some(), "the launcher row is drawn");
+        assert!(
+            cx.debug_bounds("empty-worktree-orbit").is_none(),
+            "the old headline block is gone"
+        );
+    }
+
     /// F-SID-19: `ctrl-t` (`WindowCommand::NewTerminalTab`) must reach the
-    /// workspace even when the "No Terminals" empty state holds no
-    /// focusable element of its own. GPUI's key dispatch falls back to the
+    /// workspace even when the empty-pane launcher holds no focusable
+    /// element of its own. GPUI's key dispatch falls back to the
     /// true window root -- above every `on_action`/`capture_key_down` this
     /// workspace registers on its own root element -- whenever nothing at
     /// all holds focus, so this reproduces the live-drive finding: land on
@@ -36773,19 +37158,259 @@ done
         );
     }
 
-    /// F-TERM-02: a pane group that lost its last tab to a move -- distinct
-    /// from F-SID-18's group-0-with-a-worktree case above, which the comment
-    /// on `drawn_selected_worktree_without_tabs_offers_a_new_terminal`
-    /// explicitly calls out as a different state -- must fall back to the
-    /// real `TerminalView::empty_prompt` surface, not the bare "No tabs in
-    /// this pane" label the code used to draw with no way back into the
-    /// group at all.
+    /// The Secondary pane is part of the layout from the first frame: a
+    /// worktree holding only Primary tabs draws it anyway, showing the
+    /// launcher of the surfaces that live there — and the way to close it,
+    /// both as the launcher's last tile and as the strip's `×`.
     #[gpui::test]
-    async fn drawn_detached_pane_group_offers_the_real_empty_prompt(cx: &mut TestAppContext) {
-        // Center split (#319-#325): groups are derived, the detached empty-group
-        // invariant is reversed (Secondary auto-closes). Stubbed to keep CI green
-        // while the new empty-prompt placement (Primary-only) is pinned elsewhere.
-        let _ = cx;
+    async fn drawn_empty_secondary_pane_offers_its_launcher(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("pane-secondary").is_some(),
+            "the Secondary pane is drawn with no Secondary tab"
+        );
+        for selector in [
+            "secondary-launcher",
+            "launcher-browser",
+            "launcher-changes",
+            "launcher-open-file",
+            "launcher-project-settings",
+            "launcher-hide-pane",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector} is drawn");
+        }
+        assert!(
+            cx.debug_bounds("secondary-pane-close").is_some(),
+            "the `×` closes the pane itself, so an empty strip draws it too"
+        );
+    }
+
+    /// The strip's `×` closes the Secondary pane the way Ctrl+Shift+B does:
+    /// the pane goes, its tabs stay, and bringing the pane back brings them
+    /// back rather than the launcher.
+    #[gpui::test]
+    async fn the_secondary_close_hides_the_pane_and_keeps_its_tabs(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let project_settings = cx
+            .debug_bounds("launcher-project-settings")
+            .expect("the launcher offers Project Settings");
+        cx.simulate_click(project_settings.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("secondary-launcher").is_none(),
+            "the new settings tab replaces the launcher"
+        );
+
+        let close = cx
+            .debug_bounds("secondary-pane-close")
+            .expect("the strip draws its `×`");
+        cx.simulate_click(close.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("pane-secondary").is_none(),
+            "the `×` closes the pane"
+        );
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.secondary_pane_hidden, "closed is the persisted hide");
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.kind == TabKind::ProjectSettings),
+                "the pane's tab survives the close"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-secondary").is_some(),
+            "Ctrl+Shift+B brings the pane back"
+        );
+        assert!(
+            cx.debug_bounds("secondary-launcher").is_none(),
+            "with its settings tab, not the launcher"
+        );
+    }
+
+    /// The launcher's own Hide Pane tile hides the empty pane.
+    #[gpui::test]
+    async fn the_launcher_hide_tile_hides_the_empty_secondary_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let tile = cx
+            .debug_bounds("launcher-hide-pane")
+            .expect("the launcher offers Hide Pane");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("pane-secondary").is_none(),
+            "the tile closes the pane"
+        );
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.secondary_pane_hidden, "closed is the persisted hide");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_click_on_the_command_palette_does_not_reach_the_launcher_beneath(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1280.0), px(800.0)));
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert!(
+            cx.debug_bounds("launcher-browser").is_some(),
+            "the Secondary launcher is drawn"
+        );
+
+        open_palette_for_test(&mut cx, &workspace);
+        // Filter every row away: a palette row is itself a button, and one
+        // that happened to lie over the tile — "New Browser Tab" does at
+        // this size — would open a Browser through the palette and hide the
+        // very leak this test is for. With no row left, a Browser tab can
+        // only come from the click reaching the launcher.
+        cx.simulate_input("no command matches this");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("command-palette-empty").is_some(),
+            "the palette shows no row to click"
+        );
+        let launcher_center = cx
+            .debug_bounds("launcher-browser")
+            .expect("the launcher is still drawn under the palette")
+            .center();
+        let palette = cx
+            .debug_bounds("command-palette")
+            .expect("the palette is open");
+        assert!(
+            palette.contains(&launcher_center),
+            "the palette must cover the launcher tile in the test window"
+        );
+        cx.simulate_click(launcher_center, Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                !workspace.tabs.iter().any(|tab| tab.kind == TabKind::Browser),
+                "clicking the palette must not open a Browser tab"
+            );
+        });
+    }
+
+    /// Changes needs a git repository; outside one the tile says so instead
+    /// of opening a surface that can only show an error.
+    #[gpui::test]
+    async fn the_changes_tile_is_disabled_outside_git(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let mut projects = workspace.project_catalog.projects().to_vec();
+            projects[0].is_git = false;
+            workspace.project_catalog = ProjectCatalog::from_projects(projects);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let changes = cx
+            .debug_bounds("launcher-changes")
+            .expect("the tile is still drawn");
+        cx.simulate_click(changes.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().all(|tab| tab.kind != TabKind::Diff)
+            }),
+            "a disabled Changes tile opens nothing"
+        );
+    }
+
+    /// With no worktree selected the right pane is still drawn, and says so.
+    /// A Secondary tab left over from the deselected worktree must not stay
+    /// on screen, for the same reason F-TERM-11 covers the Primary one.
+    #[gpui::test]
+    async fn a_deselected_worktree_leaves_the_secondary_pane_on_its_placeholder(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            workspace.add_project_settings_tab("palette-project", cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("pane-secondary").is_some(), "still drawn");
+        assert!(
+            cx.debug_bounds("secondary-no-worktree").is_some(),
+            "the right pane says there is no worktree"
+        );
+        assert!(
+            cx.debug_bounds("secondary-launcher").is_none(),
+            "nothing can be launched without a worktree"
+        );
+        assert!(
+            cx.debug_bounds("secondary-pane-close").is_none(),
+            "nor closed: the hidden flag is kept per worktree, and there is none"
+        );
     }
 
     /// F-TERM-11: a deselected workspace must cover retained terminal tabs
@@ -36824,6 +37449,61 @@ done
             cx.debug_bounds("pane-0").is_none(),
             "retained terminal output must not remain visible without a worktree"
         );
+    }
+
+    /// With no worktree selected the left pane offers every worktree, and
+    /// choosing one selects it through the sidebar's own path.
+    #[gpui::test]
+    async fn a_deselected_worktree_can_be_picked_again_from_the_centre(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let path = workspace.update(&mut cx, |workspace, cx| {
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            cx.notify();
+            path
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("worktree-picker").is_some(),
+            "the no-worktree state offers the picker"
+        );
+
+        let picker = workspace.read_with(&cx.cx, |workspace, _| workspace.worktree_picker.clone());
+        picker.update(&mut cx, |_, cx| cx.emit(WorktreePickerEvent::Selected(path)));
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.has_current_worktree()),
+            "picking a worktree selects it"
+        );
+        assert!(cx.debug_bounds("no-worktree-selected").is_none());
+    }
+
+    /// With no project at all there is nothing to pick; the centre offers
+    /// the sidebar's Add Project flow instead.
+    #[gpui::test]
+    async fn an_empty_catalog_offers_add_project_instead_of_the_picker(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| empty_catalog_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("no-worktree-add-project").is_some());
+        assert!(cx.debug_bounds("worktree-picker").is_none());
     }
 
     /// F-CHG-02: closing the selected worktree must clear the panel's bound
@@ -37280,6 +37960,7 @@ done
                 chat_draft: "an idea I never sent".into(),
                 browser_url: String::new(),
                 editor_path: String::new(),
+                ..SessionTabState::default()
             }],
             diagnostics: Vec::new(),
         };
@@ -37470,8 +38151,8 @@ browser  profile  "
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// #324: the toggle hides the pane and *keeps* its tabs. Conflating it
-    /// with the strip's `×`, which closes them, is the mistake this guards.
+    /// #324: the toggle hides the pane and *keeps* its tabs — as does the
+    /// strip's `×`, which shares its path (`set_secondary_pane_hidden`).
     #[gpui::test]
     async fn the_toggle_hides_the_secondary_pane_without_closing_its_tabs(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -37516,6 +38197,65 @@ browser  profile  "
                 workspace.secondary_pane_visible(),
                 "the same chord brings it back, tabs intact"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn hiding_the_secondary_pane_moves_the_active_tab_to_the_primary_one(
+        cx: &mut TestAppContext,
+    ) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.rebuild_center_split();
+            let browser_id = workspace.tabs[1].id;
+            workspace.select_tab(browser_id, None, cx);
+            workspace.toggle_secondary_pane(cx);
+            assert_eq!(
+                workspace.active_tab, 0,
+                "hiding must leave the active tab on the Primary pane"
+            );
+            let layout = workspace.layout(cx);
+            assert!(
+                layout.tabs[0].active,
+                "the layout must mark the Terminal tab active"
+            );
+            workspace
+        });
+    }
+
+    #[gpui::test]
+    fn toggling_the_secondary_pane_without_a_worktree_changes_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            assert!(
+                !workspace.has_current_worktree(),
+                "the fixture must have no worktree selected"
+            );
+            // Hidden in the deselected worktree: the no-worktree state
+            // must still show the pane.
+            workspace.secondary_pane_hidden = true;
+            let before = workspace.secondary_pane_hidden;
+            workspace.toggle_secondary_pane(cx);
+            assert_eq!(
+                workspace.secondary_pane_hidden, before,
+                "toggling with no worktree must not flip the flag"
+            );
+            assert!(
+                workspace.secondary_pane_visible(),
+                "the pane shows by default with no worktree selected"
+            );
+            workspace
         });
     }
 
@@ -37567,6 +38307,332 @@ browser  profile  "
             "the open file must reach the session snapshot"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A commit tab and a focused Changes tab are saved with what they show
+    /// and rebuilt showing it, not as a generic working-tree view.
+    #[gpui::test]
+    fn changes_tabs_come_back_on_their_commit_and_their_file(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("changes-tabs-restore");
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf-8 sha")
+        .trim()
+        .to_owned();
+
+        cx.new(|cx| {
+            let mut workspace = test_workspace_for_repo(cx, repo.clone(), false);
+            // Changes first: `add_changes_tab` reuses any Changes surface of
+            // this worktree, and a commit tab is one.
+            workspace.add_changes_tab(Some(PathBuf::from("README.md")), cx);
+            workspace.add_commit_tab(head.clone(), cx);
+
+            let layout = workspace.layout(cx);
+            assert!(
+                layout.tab_states.iter().any(|state| state.commit_sha == head),
+                "the commit is saved"
+            );
+            assert!(
+                layout.tab_states.iter().any(|state| state.changes_focus == "README.md"),
+                "the focused file is saved"
+            );
+
+            // Only the two Changes tabs: restoring the fixture's terminal
+            // would spawn a real shell for nothing this test reads.
+            let (tabs_saved, states_saved): (Vec<_>, Vec<_>) = layout
+                .tabs
+                .iter()
+                .cloned()
+                .zip(layout.tab_states.iter().cloned())
+                .filter(|(tab, _)| tab.kind == "diff")
+                .unzip();
+            assert_eq!(tabs_saved.len(), 2, "both Changes tabs are saved");
+            let restored = RestoredSession {
+                working_directory: repo.clone(),
+                tabs: tabs_saved,
+                tab_states: states_saved,
+                diagnostics: Vec::new(),
+            };
+            let (tabs, _) = restore_tabs(
+                &restored,
+                &repo,
+                None,
+                &mut AgentActivityModel::new(),
+                &BTreeMap::new(),
+                false,
+                cx,
+            );
+            let mut commits = Vec::new();
+            let mut focuses = Vec::new();
+            for tab in &tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Changes(changes) = content {
+                        let changes = changes.read(cx);
+                        commits.push(changes.commit().map(str::to_owned));
+                        focuses.push(changes.focused_path().map(Path::to_path_buf));
+                    }
+                });
+            }
+            assert!(commits.contains(&Some(head.clone())), "the commit tab is back on {head}");
+            assert!(
+                focuses.contains(&Some(PathBuf::from("README.md"))),
+                "the Changes tab is back on README.md"
+            );
+            workspace
+        });
+    }
+
+    /// Both panes' current tabs are saved, not only the focused one.
+    #[gpui::test]
+    fn layout_marks_the_tab_each_pane_shows(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.active_tab = 0;
+            workspace.rebuild_center_split();
+            workspace
+                .center_split
+                .set_active(PaneRole::Secondary, Some(workspace.tabs[2].id));
+
+            let shown: Vec<bool> = workspace
+                .layout(cx)
+                .tab_states
+                .iter()
+                .map(|state| state.shown_in_pane)
+                .collect();
+            assert_eq!(
+                shown,
+                vec![true, false, true],
+                "the focused Primary tab and the Secondary pane's current tab"
+            );
+            workspace
+        });
+    }
+
+    /// Restore seeds the unfocused pane from the saved flag instead of
+    /// falling back to its first tab.
+    #[gpui::test]
+    fn the_unfocused_pane_comes_back_on_its_shown_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.active_tab = 0;
+            workspace.center_split = CenterSplit::new(&workspace.tabs);
+
+            let layout = workspace.layout(cx);
+            let mut restored = RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            };
+            for state in &mut restored.tab_states {
+                state.shown_in_pane = false;
+            }
+            restored.tab_states[2].shown_in_pane = true;
+
+            seed_shown_tabs(
+                &mut workspace.center_split,
+                &workspace.tabs,
+                &restored,
+            );
+            workspace.rebuild_center_split();
+
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(workspace.tabs[2].id),
+                "the Secondary pane is back on the tab it showed, not its first"
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+            workspace
+        });
+    }
+
+    #[gpui::test]
+    fn a_stale_live_shown_flag_does_not_override_the_saved_one(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].session_state.shown_in_pane = true;
+            workspace.active_tab = 0;
+            workspace.center_split = CenterSplit::new(&workspace.tabs);
+
+            let layout = workspace.layout(cx);
+            let mut restored = RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            };
+            for state in &mut restored.tab_states {
+                state.shown_in_pane = false;
+            }
+            restored.tab_states[2].shown_in_pane = true;
+
+            seed_shown_tabs(
+                &mut workspace.center_split,
+                &workspace.tabs,
+                &restored,
+            );
+            workspace.rebuild_center_split();
+
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(workspace.tabs[2].id),
+                "the saved flag wins over a stale live one"
+            );
+            workspace
+        });
+    }
+
+    /// A Project Settings tab is saved with its project and rebuilt at the
+    /// strip position it had, once the workspace (and its sidebar) exists.
+    #[gpui::test]
+    fn a_project_settings_tab_survives_a_restart(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            workspace.add_project_settings_tab("palette-project", cx);
+            let layout = workspace.layout(cx);
+            let saved = layout
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == "settings")
+                .expect("the settings tab is saved");
+            assert_eq!(layout.tab_states[saved].settings_project_id, "palette-project");
+
+            // A restart: the free restore functions skip settings tabs, so
+            // start from the strip without it.
+            workspace
+                .tabs
+                .retain(|tab| tab.kind != TabKind::ProjectSettings);
+            workspace.active_tab = 0;
+            let restored = RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            };
+            assert!(workspace.restore_project_settings_tabs(&restored, cx));
+
+            let index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::ProjectSettings)
+                .expect("the settings tab is back");
+            assert_eq!(index, saved, "at the strip position it was saved at");
+            assert_eq!(workspace.active_tab, index, "and still the active tab");
+            workspace
+        });
+    }
+
+    /// A project that no longer exists drops its settings tab silently, the
+    /// way a deleted file drops its Editor tab.
+    #[gpui::test]
+    fn a_settings_tab_for_a_vanished_project_is_dropped(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let before = workspace.tabs.len();
+            let restored = RestoredSession {
+                working_directory: workspace.working_directory.clone(),
+                tabs: vec![SessionTab {
+                    id: "settings-gone".into(),
+                    title: "Project Settings · Gone".into(),
+                    kind: "settings".into(),
+                    agent_id: None,
+                    agent_session_id: None,
+                    active: false,
+                }],
+                tab_states: vec![SessionTabState {
+                    settings_project_id: "gone".into(),
+                    ..SessionTabState::default()
+                }],
+                diagnostics: Vec::new(),
+            };
+            assert!(!workspace.restore_project_settings_tabs(&restored, cx));
+            assert_eq!(workspace.tabs.len(), before);
+            workspace
+        });
+    }
+
+    #[gpui::test]
+    async fn a_settings_tab_restored_on_a_worktree_switch_belongs_to_that_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("settings-switch-owner");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt_a = worktrees[0].clone();
+        let wt_b = worktrees[1].clone();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt_b.clone(), None, cx)
+                .expect("select worktree B");
+            workspace.add_project_settings_tab("urgency-project", cx);
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.kind == TabKind::ProjectSettings),
+                "the settings tab opens on worktree B"
+            );
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt_a.clone(), None, cx)
+                .expect("select worktree A");
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt_b.clone(), None, cx)
+                .expect("select worktree B again");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, cx| {
+            let settings = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.kind == TabKind::ProjectSettings)
+                .expect("the settings tab exists on B");
+            assert!(
+                paths_name_the_same_document(&workspace.tab_worktree_path(settings.id), &wt_b),
+                "the restored settings tab belongs to B"
+            );
+            assert!(
+                workspace
+                    .layout(cx)
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.kind == "settings"),
+                "the layout still contains the settings tab"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #125 (spec R6.5), the save half: a browser tab's live address is read
@@ -37633,6 +38699,7 @@ browser  profile  "
                 chat_draft: String::new(),
                 browser_url: "https://example.org/probe".into(),
                 editor_path: String::new(),
+                ..SessionTabState::default()
             }],
             diagnostics: Vec::new(),
         };
@@ -37689,6 +38756,7 @@ browser  profile  "
                 chat_draft: String::new(),
                 browser_url: String::new(),
                 editor_path: String::new(),
+                ..SessionTabState::default()
             }],
             diagnostics: Vec::new(),
         };

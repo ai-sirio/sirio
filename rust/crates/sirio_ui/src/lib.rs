@@ -19,6 +19,7 @@ pub mod controls;
 pub mod editor;
 pub mod file_context_menu;
 pub mod file_view;
+mod horizontal_scroll;
 // F-CHG-06: the single git-status -> colour resolver. Deliberately its own
 // module rather than a helper inside right_panel or changes, because those two
 // each having their own copy is the defect it exists to make impossible.
@@ -27,6 +28,7 @@ pub mod loading;
 pub mod modal;
 pub mod orbit;
 pub mod outline;
+pub mod pane_launcher;
 pub mod project_forms;
 pub mod project_identity;
 pub mod right_panel;
@@ -36,6 +38,7 @@ pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod titlebar;
+pub mod worktree_picker;
 
 // P32: visual-bar conformance suite — test-only module, no rendering code.
 #[cfg(test)]

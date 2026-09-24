@@ -246,6 +246,10 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
         })
         .absolute()
         .inset_0()
+        // A modal blocks every pointer event to what lies beneath it --
+        // the Secondary launcher is now always drawn under it -- while
+        // its own buttons stay clickable as its children.
+        .occlude()
         .flex()
         .items_center()
         .justify_center()
