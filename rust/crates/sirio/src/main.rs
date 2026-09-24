@@ -13027,7 +13027,7 @@ impl SirioWorkspace {
                 action: LauncherAction::NewBrowser,
                 icon: Icon::Globe,
                 label: "Browser".into(),
-                shortcut: Some(window_shortcut_hint(WindowCommand::NewBrowser).into()),
+                shortcut: None,
                 disabled: None,
             },
             LauncherItem {
@@ -13044,7 +13044,7 @@ impl SirioWorkspace {
                 action: LauncherAction::OpenFile,
                 icon: Icon::File,
                 label: "Open File".into(),
-                shortcut: Some(window_shortcut_hint(WindowCommand::OpenFile).into()),
+                shortcut: None,
                 disabled: None,
             },
             LauncherItem {
@@ -13062,7 +13062,7 @@ impl SirioWorkspace {
                 action: LauncherAction::HidePane,
                 icon: Icon::Close,
                 label: "Hide Pane".into(),
-                shortcut: Some(window_shortcut_hint(WindowCommand::ToggleSecondaryPane).into()),
+                shortcut: None,
                 disabled: None,
             },
         ]
@@ -13077,7 +13077,7 @@ impl SirioWorkspace {
                 action: LauncherAction::NewTerminal,
                 icon: Icon::SquareTerminal,
                 label: "Terminal".into(),
-                shortcut: Some(window_shortcut_hint(WindowCommand::NewTerminalTab).into()),
+                shortcut: None,
                 disabled: None,
             },
             LauncherItem {
@@ -37127,6 +37127,30 @@ done
             cx.debug_bounds("empty-worktree-orbit").is_none(),
             "the old headline block is gone"
         );
+    }
+
+    #[gpui::test]
+    async fn launcher_tiles_do_not_display_shortcut_hints(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let primary = SirioWorkspace::primary_launcher_items();
+        let secondary =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.secondary_launcher_items());
+
+        for item in primary.into_iter().chain(secondary) {
+            assert!(
+                item.shortcut.is_none(),
+                "{} displays a shortcut hint",
+                item.id
+            );
+        }
     }
 
     /// F-SID-19: `ctrl-t` (`WindowCommand::NewTerminalTab`) must reach the
