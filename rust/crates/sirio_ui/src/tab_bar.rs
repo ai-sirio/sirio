@@ -174,6 +174,45 @@ pub fn render_tab_context_menu<T: 'static>(
     menu
 }
 
+/// Whether an agent whose source resolved to `source` can open a chat
+/// today: a Builtin or Installed source. The one gate both New Chat pickers
+/// apply, the + menu's and the sidebar worktree menu's, so they never offer
+/// different agents.
+pub(crate) fn launches_a_chat(source: Option<&LaunchSource>) -> bool {
+    matches!(
+        source,
+        Some(LaunchSource::Builtin { .. } | LaunchSource::Installed(_))
+    )
+}
+
+/// One agent row of a New Chat picker: the agent's tinted mark and its
+/// name, drawn under `selector`. The caller owns the click.
+pub(crate) fn chat_agent_row(
+    id: &'static str,
+    display_name: &'static str,
+    selector: String,
+    theme: Theme,
+    bezel_theme: &bezel::theme::Theme,
+    painter: Painter,
+) -> gpui::Stateful<gpui::Div> {
+    let selector_for_debug = selector.clone();
+    let label_id = format!("{selector}-label");
+    let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
+    let mut mark = IconElement::new(icon, IconSize::Small);
+    if let Some(tint) = icon.agent_mark_color(theme.text) {
+        mark = mark.text_color(tint);
+    }
+    popover::menu_row(bezel_theme, false, Fade::new(painter, selector.clone()))
+        .id(selector)
+        .debug_selector(move || selector_for_debug.clone())
+        .w_full()
+        .h(px(29.0))
+        .gap(px(7.0))
+        .text_color(bezel_theme.text)
+        .child(mark)
+        .child(text!(id = label_id, display_name))
+}
+
 /// A horizontal tab strip with a callback-driven new-tab menu.
 pub struct TabBar {
     menu_open: Popup<()>,
@@ -468,25 +507,15 @@ impl TabBar {
         painter: Painter,
     ) -> impl IntoElement {
         let id = agent.id;
-        let selector = format!("new-tab-chat-agent-{id}");
-        let selector_for_debug = selector.clone();
-        let display_name = agent.display_name;
-        let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
-        let mut mark = IconElement::new(icon, IconSize::Small);
-        if let Some(tint) = icon.agent_mark_color(theme.text) {
-            mark = mark.text_color(tint);
-        }
-        let mark_element = mark;
-        popover::menu_row(bezel_theme, false, Fade::new(painter, selector.clone()))
-            .id(selector.clone())
-            .debug_selector(move || selector_for_debug.clone())
-            .w_full()
-            .h(px(29.0))
-            .gap(px(7.0))
-            .text_color(bezel_theme.text)
-            .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
-            .child(mark_element)
-            .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
+        chat_agent_row(
+            id,
+            agent.display_name,
+            format!("new-tab-chat-agent-{id}"),
+            theme,
+            bezel_theme,
+            painter,
+        )
+        .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
     }
 
     /// F-TAB-08: this was a bare static label with no `entity`/`cx` capture
@@ -574,12 +603,7 @@ impl Render for TabBar {
         let available_chat_agents = self
             .chat_agents
             .iter()
-            .filter(|agent| {
-                matches!(
-                    self.chat_launch_sources.get(agent.id),
-                    Some(LaunchSource::Builtin { .. } | LaunchSource::Installed(_))
-                )
-            })
+            .filter(|agent| launches_a_chat(self.chat_launch_sources.get(agent.id)))
             .collect::<Vec<_>>();
         let mut chat_agent_menu = div()
             .id("new-chat-agent-menu")
