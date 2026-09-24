@@ -48,7 +48,7 @@ record of the question and its outcome, with no buttons.
 │ Which layout should the panel use?                   │  callout · text, wraps
 │                                                      │
 │ ┌──────────────────────────────────────────────────┐ │
-│ │ [1]  Docked                                      │ │  selected: element_hover
+│ │ [1]  Docked                                      │ │  selected: menu_row_nav highlight
 │ │      Sits above the composer                     │ │  footnote · text_muted
 │ └──────────────────────────────────────────────────┘ │
 │  [2]  Floating                                       │
@@ -142,7 +142,9 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView>
 `question_view` selects the same entry `pending_question()` does — the
 **first** unanswered, unexpired `Entry::Permission` or `Entry::Plan` approval
 — so the dock, `composer_disabled` and `composer_placeholder` cannot
-disagree. `pending_question()` stays as it is.
+disagree. The agreement is structural, not a convention: both find the entry
+through one predicate, `question_dock::is_open(&Entry)`, and
+`pending_question()` keeps its signature and callers.
 
 Caption and body:
 
@@ -176,16 +178,19 @@ The free-text row's placeholder is the declared one; otherwise
   before the queue and the composer, `w_full().max_w(TRANSCRIPT_WIDTH)`,
   `mb(8px)`. Drawn only while `question_view` is `Some`. Element id and debug
   selector `question-dock`.
-- **Container:** `radii.composer` (the composer's own radius, so the two read
-  as a pair), `surface_raised` background, `border_1` in `theme.border`,
-  padding `CARD_H_PADDING` × `CARD_V_PADDING`. **No `theme.warning`
-  anywhere**, and no `?` glyph.
+- **Container:** the composer card's own frame, so the two read as a pair —
+  `bezel::theme::Theme::surface_radius()`, `border_1` in the bezel theme's
+  `border` (the same `composer_border` hairline), `card_glass_bg()`, 4px
+  padding. Bezel first, as `CLAUDE.md` requires: nothing here is a
+  hand-picked colour. **No `theme.warning` anywhere**, and no `?` glyph.
 - **Caption:** `footnote`, `text_muted`.
 - **Body:** `callout`, `text`, wrapping, never truncated. Capped at 160px with
   its own vertical scroll, so a multi-line Bash command cannot push the
   composer off the pane.
-- **Rows:** a vertical list, full width, 2px apart. Each row: `radii.control`,
-  padding 10 × 6, `debug_selector` `permission-option-{id}` for an option
+- **Rows:** a vertical list, full width, 2px apart. Each row is bezel's own
+  menu row, `bezel::ui::popover::menu_row_nav(theme, false, highlighted,
+  fade)` — the row the chat's pickers already use, with its padding, inset
+  radius and hover fade — with `debug_selector` `permission-option-{id}` for an option
   (the selector the inline buttons used to carry, so existing tests find the
   one clickable surface), `question-dock-other` for the free-text row,
   `question-dock-dismiss` for Dismiss.
@@ -194,8 +199,9 @@ The free-text row's placeholder is the declared one; otherwise
     past the ninth have no badge.
   - Label: `callout`, `text`. Description, when present, below it in
     `footnote`, `text_muted`, aligned with the label.
-  - The selected row and the hovered row share one background,
-    `element_hover` — and hovering selects (§3), so there is only ever one.
+  - The selected row is `menu_row_nav`'s `highlighted` row (bezel's
+    `card_selected_bg`), and hovering selects (§3), so there is only ever
+    one lit row.
   - **Rejections are not tinted.** `is_rejection` stays in the data; the
     colour goes. A red "Reject" reads as an error on a legitimate choice.
 - **Free-text row:** its badge, then the existing hand-rolled answer field
