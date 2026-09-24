@@ -299,6 +299,7 @@ impl PanelView {
 /// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
     repo_root: PathBuf,
+    project_is_git: bool,
     /// Filesystem roots the panel may inspect. Startup supplies the project
     /// roots and linked worktrees; a panel created for one runtime selection
     /// uses that worktree as its only root.
@@ -385,6 +386,7 @@ impl RightPanel {
         let repo_root = repo_root.into();
         Self {
             repo_root: repo_root.clone(),
+            project_is_git: true,
             allowed_roots: vec![repo_root],
             worktree_selected: true,
             file_tree: Vec::new(),
@@ -468,6 +470,18 @@ impl RightPanel {
             panel.updating = false;
             panel.refresh_loop_started = snapshot_is_fresh;
         }
+        panel
+    }
+
+    /// Creates the startup panel while carrying the catalog's Git capability.
+    pub fn with_activity_and_snapshot_for_project(
+        repo_root: impl Into<PathBuf>,
+        project_is_git: bool,
+        activity: Vec<ActivitySurface>,
+        snapshot: Option<FilesSnapshot>,
+    ) -> Self {
+        let mut panel = Self::with_activity_and_snapshot(repo_root, activity, snapshot);
+        panel.project_is_git = project_is_git;
         panel
     }
 
@@ -570,9 +584,21 @@ impl RightPanel {
     /// bound path actually changed, so a tree the user has been expanding is
     /// left alone on the other 44-and-counting call sites that were already
     /// unrelated to worktree selection.
-    pub fn bind_worktree(&mut self, repo_root: impl Into<PathBuf>, cx: &mut Context<Self>) {
+    pub fn bind_worktree(
+        &mut self,
+        repo_root: impl Into<PathBuf>,
+        project_is_git: bool,
+        cx: &mut Context<Self>,
+    ) {
         let repo_root = repo_root.into();
+        let capability_changed = self.project_is_git != project_is_git;
+        self.project_is_git = project_is_git;
         if self.worktree_selected && self.repo_root == repo_root {
+            if capability_changed {
+                self.changes = None;
+                self.changes_subscriptions.clear();
+                cx.notify();
+            }
             return;
         }
         if !self.allowed_roots.iter().any(|root| root == &repo_root) {
@@ -746,7 +772,13 @@ impl RightPanel {
             return changes;
         }
         let repo_root = self.repo_root.clone();
-        let changes = cx.new(|cx| crate::changes::ChangesTab::in_right_panel(repo_root, cx));
+        let changes = cx.new(|cx| {
+            crate::changes::ChangesTab::in_right_panel_with_git_capability(
+                repo_root,
+                self.project_is_git,
+                cx,
+            )
+        });
         self.changes_subscriptions = vec![
             cx.subscribe(&changes, |_, _, event: &ChangesTabEvent, cx| match event {
                 ChangesTabEvent::OpenFile(path) => cx.emit(RightPanelEvent::OpenFile(path.clone())),
@@ -1091,7 +1123,7 @@ mod tests {
         let panel =
             cx.update(|window, _cx| window.root::<RightPanel>().flatten().expect("panel root"));
         panel.update(&mut cx, |panel, cx| {
-            panel.bind_worktree(dir.0.clone(), cx);
+            panel.bind_worktree(dir.0.clone(), true, cx);
         });
         cx.update(|_window, cx| PanelView::set(PanelView::History, cx));
         cx.run_until_parked();
@@ -1132,7 +1164,7 @@ mod tests {
         let panel =
             cx.update(|window, _cx| window.root::<RightPanel>().flatten().expect("panel root"));
         panel.update(&mut cx, |panel, cx| {
-            panel.bind_worktree(dir.0.clone(), cx);
+            panel.bind_worktree(dir.0.clone(), true, cx);
         });
         cx.update(|_window, cx| PanelView::set(PanelView::Files, cx));
         cx.run_until_parked();
@@ -1183,7 +1215,9 @@ mod tests {
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
 
         cx.update(|cx| PanelView::set(PanelView::Diff, cx));
-        panel.update(cx, |panel, cx| panel.bind_worktree(other.0.clone(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.bind_worktree(other.0.clone(), true, cx)
+        });
 
         cx.update(|cx| assert_eq!(PanelView::get(cx), PanelView::Diff));
     }
@@ -1246,12 +1280,45 @@ mod tests {
 
         panel.update(cx, |panel, cx| {
             panel.ensure_changes(cx);
-            panel.bind_worktree(other.0.clone(), cx);
+            panel.bind_worktree(other.0.clone(), true, cx);
             assert!(
                 panel.changes.is_none(),
                 "a stale checkout's diff must not survive"
             );
         });
+    }
+
+    #[gpui::test]
+    fn rebinding_same_path_with_new_git_capability_rebuilds_changes(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel = cx.new(|_| {
+            RightPanel::with_activity_and_snapshot_for_project(
+                dir.0.clone(),
+                false,
+                Vec::new(),
+                None,
+            )
+        });
+
+        let old_changes = panel.update(cx, |panel, cx| panel.ensure_changes(cx));
+        assert!(!old_changes.read_with(cx, |changes, _| changes.allows_staging()));
+
+        panel.update(cx, |panel, cx| {
+            panel.bind_worktree(dir.0.clone(), true, cx);
+            assert!(
+                panel.changes.is_none(),
+                "a capability change must drop the cached Diff surface"
+            );
+            assert!(
+                panel.changes_subscriptions.is_empty(),
+                "a dropped Diff surface must release its subscriptions"
+            );
+        });
+
+        let new_changes = panel.update(cx, |panel, cx| panel.ensure_changes(cx));
+        assert_ne!(old_changes.entity_id(), new_changes.entity_id());
+        assert!(new_changes.read_with(cx, |changes, _| changes.allows_staging()));
     }
 
     fn settled_snapshot(

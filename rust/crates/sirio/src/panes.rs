@@ -420,6 +420,20 @@ impl<T> PaneNode<T> {
         }
     }
 
+    pub(crate) fn for_each_mut(&mut self, f: &mut impl FnMut(usize, &mut T)) {
+        match self {
+            Self::Leaf {
+                id,
+                content: Some(content),
+            } => f(*id, content),
+            Self::Leaf { content: None, .. } => {}
+            Self::Split { first, second, .. } => {
+                first.for_each_mut(f);
+                second.for_each_mut(f);
+            }
+        }
+    }
+
     pub(crate) fn leaf_ids(&self) -> Vec<usize> {
         let mut result = Vec::new();
         self.push_leaf_ids(&mut result);

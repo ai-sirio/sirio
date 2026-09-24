@@ -508,6 +508,7 @@ type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'stat
 /// The full-width git changes surface.
 pub struct ChangesTab {
     repo_root: PathBuf,
+    is_git: bool,
     /// What this surface reads and whether it may mutate it.
     source: ChangesSource,
     entries: Vec<StatusEntry>,
@@ -629,28 +630,52 @@ impl ChangesTab {
     /// Creates the tab for one checkout and starts its first refresh. The
     /// poll loop then re-checks on the interval after the first render.
     pub fn new(repo_root: PathBuf, cx: &mut Context<Self>) -> Self {
-        Self::with_source(repo_root, ChangesSource::WorkingTree, cx)
+        Self::new_with_git_capability(repo_root, true, cx)
+    }
+
+    /// Creates a working-tree surface with the project's known Git capability.
+    pub fn new_with_git_capability(
+        repo_root: PathBuf,
+        is_git: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_source(repo_root, ChangesSource::WorkingTree, is_git, cx)
     }
 
     /// Creates a read-only tab showing one commit's files and diffs. The
     /// surface is immutable: every stage/unstage/discard entry point
     /// refuses to run and the mutation buttons are not drawn.
     pub fn for_commit(repo_root: PathBuf, sha: String, cx: &mut Context<Self>) -> Self {
-        Self::with_source(repo_root, ChangesSource::Commit(sha), cx)
+        Self::with_source(repo_root, ChangesSource::Commit(sha), true, cx)
     }
 
     /// Creates the surface the right panel's Diff view embeds. Identical to
     /// `new` except that it draws `Open diff`, which reveals the Changes tab
     /// — something only a host that is not that tab can ask for (#217).
     pub fn in_right_panel(repo_root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut tab = Self::with_source(repo_root, ChangesSource::WorkingTree, cx);
+        Self::in_right_panel_with_git_capability(repo_root, true, cx)
+    }
+
+    /// Creates the right-panel surface with the project's known Git capability.
+    pub fn in_right_panel_with_git_capability(
+        repo_root: PathBuf,
+        is_git: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut tab = Self::with_source(repo_root, ChangesSource::WorkingTree, is_git, cx);
         tab.embedded_in_panel = true;
         tab
     }
 
-    fn with_source(repo_root: PathBuf, source: ChangesSource, cx: &mut Context<Self>) -> Self {
+    fn with_source(
+        repo_root: PathBuf,
+        source: ChangesSource,
+        is_git: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut tab = Self {
             repo_root,
+            is_git,
             source,
             entries: Vec::new(),
             diffs: HashMap::new(),
@@ -700,6 +725,16 @@ impl ChangesTab {
     /// Whether this surface may mutate the repository. The working tree
     /// can; a commit view is immutable by definition.
     pub fn allows_staging(&self) -> bool {
+        self.is_git && matches!(self.source, ChangesSource::WorkingTree)
+    }
+
+    /// Whether this working-tree surface is backed by a known Git project.
+    pub fn is_git_capable(&self) -> bool {
+        self.is_git
+    }
+
+    /// Whether this surface follows the selected project's Git capability.
+    pub fn uses_project_git_capability(&self) -> bool {
         matches!(self.source, ChangesSource::WorkingTree)
     }
 
@@ -801,6 +836,17 @@ impl ChangesTab {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.is_git {
+            self.has_loaded = true;
+            self.git_error = None;
+            self.git_error_from_mutation = false;
+            self.entries.clear();
+            self.diffs.clear();
+            self.stats.clear();
+            self.diff_errors.clear();
+            cx.notify();
+            return;
+        }
         if self.git_task.is_some() {
             return;
         }
@@ -3530,6 +3576,7 @@ mod tests {
             .entries;
         ChangesTab {
             repo_root,
+            is_git: true,
             source: ChangesSource::WorkingTree,
             entries,
             diffs: HashMap::new(),
@@ -4385,6 +4432,42 @@ mod tests {
                     && tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
             })
         });
+    }
+
+    #[gpui::test]
+    async fn a_known_non_git_project_shows_the_empty_changes_state(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            ChangesTab::in_right_panel_with_git_capability(dir.0.clone(), false, cx)
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let tab = visual.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.has_loaded));
+        cx.run_until_parked();
+
+        assert!(tab.read_with(cx, |tab, _| tab.git_error.is_none()));
+        assert!(visual.debug_bounds("changes-error").is_none());
+        assert!(visual.debug_bounds("changes-empty").is_some());
+        assert!(visual.debug_bounds("changes-list").is_none());
+    }
+
+    #[gpui::test]
+    async fn a_non_git_changes_tab_has_no_git_error_state(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let tab = cx.new(|cx| ChangesTab::new_with_git_capability(dir.0.clone(), false, cx));
+
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.has_loaded));
+
+        assert!(tab.read_with(cx, |tab, _| {
+            tab.git_error.is_none() && tab.entries.is_empty() && !tab.allows_staging()
+        }));
     }
 
     /// The error state is actually rendered — a panel with the detail and
@@ -5326,6 +5409,7 @@ mod tests {
     fn an_expanded_file_whose_diff_failed_says_unavailable() {
         let tab = ChangesTab {
             repo_root: PathBuf::from("/tmp"),
+            is_git: true,
             source: ChangesSource::WorkingTree,
             entries: vec![StatusEntry {
                 path: PathBuf::from("x.rs"),
@@ -5401,6 +5485,7 @@ mod tests {
     fn an_expanded_binary_file_says_binary_diff_unavailable() {
         let tab = ChangesTab {
             repo_root: PathBuf::from("/tmp"),
+            is_git: true,
             source: ChangesSource::WorkingTree,
             entries: vec![StatusEntry {
                 path: PathBuf::from("image.bin"),
@@ -5712,6 +5797,7 @@ mod tests {
         let path = PathBuf::from("src/conflicted file.txt");
         let window = cx.add_window(|_window, _cx| ChangesTab {
             repo_root: PathBuf::from("/repo"),
+            is_git: true,
             source: ChangesSource::WorkingTree,
             entries: vec![StatusEntry {
                 path: path.clone(),
@@ -6223,6 +6309,7 @@ mod tests {
         let window = cx.open_window(gpui::size(px(330.0), px(600.0)), move |_window, _cx| {
             ChangesTab {
                 repo_root: PathBuf::from("/repo"),
+                is_git: true,
                 source: ChangesSource::WorkingTree,
                 entries: vec![StatusEntry {
                     path: path.clone(),
@@ -6639,6 +6726,7 @@ mod tests {
         );
         ChangesTab {
             repo_root: PathBuf::from("."),
+            is_git: true,
             source: ChangesSource::Commit("synthetic".to_owned()),
             entries: vec![entry],
             diffs,

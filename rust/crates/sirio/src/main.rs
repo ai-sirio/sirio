@@ -3987,6 +3987,7 @@ struct WorktreeContext {
     branch: String,
     path: String,
     activity_label: String,
+    is_git: bool,
 }
 
 /// What a tile in an empty pane's launcher does. Tiles report this, not a
@@ -4015,6 +4016,7 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
                     project.name.clone(),
                     worktree.branch.clone(),
                     worktree.is_primary,
+                    project.is_git,
                 )
             })
     });
@@ -4023,8 +4025,12 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| working_directory.to_string_lossy().into_owned());
-    let (project, catalog_branch, is_primary) =
-        catalog_entry.unwrap_or((fallback_project, String::new(), false));
+    let (project, catalog_branch, is_primary, is_git) = catalog_entry.unwrap_or((
+        fallback_project,
+        String::new(),
+        false,
+        is_git_repository(working_directory),
+    ));
     let branch = read_head_label(working_directory)
         .or_else(|| (is_primary && !catalog_branch.is_empty()).then_some(catalog_branch.clone()))
         .or_else(|| (!catalog_branch.is_empty()).then_some(catalog_branch))
@@ -4034,6 +4040,7 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         branch: branch.clone(),
         path: display_path(working_directory),
         activity_label: format!("{project}/{branch}"),
+        is_git,
     }
 }
 
@@ -6147,6 +6154,7 @@ impl SirioWorkspace {
         let changed = self.project_catalog != before;
         if changed {
             self.session.schedule_catalog(&self.project_catalog);
+            self.mark_activity_dirty();
         }
         // The sidebar can have performed a local optimistic mutation before
         // this discovery completes, while control state can also be stale
@@ -8880,6 +8888,7 @@ impl SirioWorkspace {
                     ids
                 })
                 .unwrap_or_default();
+            let selected_is_git = worktree_context(&self.project_catalog, &selected_path).is_git;
             let restored = self.restore_tabs_for_mounted_worktree(
                 &selected_path,
                 self.session.restore_tabs_for(&selected_path),
@@ -8894,6 +8903,7 @@ impl SirioWorkspace {
             let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
                 &restored,
                 &selected_path,
+                selected_is_git,
                 window,
                 &mut self.activity,
                 &saved_session_refs,
@@ -9012,8 +9022,9 @@ impl SirioWorkspace {
         let selected_path_for_panel = selected_path.clone();
         let files_snapshot = self.files_snapshots.get(&selected_path).cloned();
         self.right_panel = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot(
+            RightPanel::with_activity_and_snapshot_for_project(
                 selected_path_for_panel,
+                context.is_git,
                 activity,
                 files_snapshot,
             )
@@ -9331,6 +9342,7 @@ impl SirioWorkspace {
             let (tabs, _) = restore_tabs_in_workspace(
                 &restored,
                 &self.working_directory,
+                worktree_context(&self.project_catalog, &self.working_directory).is_git,
                 self.next_tab_id,
                 self.next_pane_id,
                 &mut self.activity,
@@ -9516,14 +9528,19 @@ impl SirioWorkspace {
         // the gate and render performs the next reconciliation.
         let has_worktree = self.has_current_worktree();
         let working_directory = self.working_directory.clone();
+        let working_directory_is_git =
+            worktree_context(&self.project_catalog, &working_directory).is_git;
         self.right_panel.update(cx, |panel, cx| {
             panel.set_activity(activity, cx);
             if has_worktree {
-                panel.bind_worktree(working_directory, cx);
+                panel.bind_worktree(working_directory, working_directory_is_git, cx);
             } else {
                 panel.clear_worktree(cx);
             }
         });
+        if has_worktree {
+            self.reconcile_changes_tabs(working_directory_is_git, cx);
+        }
 
         self.sync_sidebar_tabs(ParkedRows::Read, cx);
         self.sync_worktree_activity(cx);
@@ -10414,17 +10431,49 @@ impl SirioWorkspace {
     }
 
     fn rebind_changes_tabs(&mut self, cx: &mut Context<Self>) {
+        self.reconcile_changes_tabs(true, cx);
+    }
+
+    fn reconcile_changes_tabs(&mut self, force: bool, cx: &mut Context<Self>) {
         let working_directory = self.working_directory.clone();
+        let is_git = worktree_context(&self.project_catalog, &working_directory).is_git;
         let current_tab_ids: HashSet<usize> =
             self.tab_ids_for_worktree(&working_directory).collect();
         for tab in &mut self.tabs {
             if tab.kind != TabKind::Diff || !current_tab_ids.contains(&tab.id) {
                 continue;
             }
-            let pane_id = tab.focused_pane;
-            let changes = cx.new(|cx| ChangesTab::new(working_directory.clone(), cx));
-            Self::subscribe_changes_tab(&changes, cx);
-            tab.panes = PaneNode::leaf(pane_id, TabContent::Changes(changes));
+            let mut needs_rebind = force;
+            if !needs_rebind {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Changes(changes) = content {
+                        let changes = changes.read(cx);
+                        needs_rebind |= changes.uses_project_git_capability()
+                            && changes.is_git_capable() != is_git;
+                    }
+                });
+            }
+            if !needs_rebind {
+                continue;
+            }
+            tab.panes.for_each_mut(&mut |_, content| {
+                let TabContent::Changes(existing) = content else {
+                    return;
+                };
+                let existing = existing.read(cx);
+                let should_rebind = force
+                    || (existing.uses_project_git_capability()
+                        && existing.is_git_capable() != is_git);
+                drop(existing);
+                if !should_rebind {
+                    return;
+                }
+                let changes = cx.new(|cx| {
+                    ChangesTab::new_with_git_capability(working_directory.clone(), is_git, cx)
+                });
+                Self::subscribe_changes_tab(&changes, cx);
+                *content = TabContent::Changes(changes);
+            });
         }
     }
 
@@ -12228,7 +12277,10 @@ impl SirioWorkspace {
             return;
         }
 
-        let changes = cx.new(|cx| ChangesTab::new(self.working_directory.clone(), cx));
+        let is_git = worktree_context(&self.project_catalog, &self.working_directory).is_git;
+        let changes = cx.new(|cx| {
+            ChangesTab::new_with_git_capability(self.working_directory.clone(), is_git, cx)
+        });
         Self::subscribe_changes_tab(&changes, cx);
         // F-CHG-13: OpenDiff(path) expects the Changes tab to do something
         // path-specific with that file, not just open the generic multi-file
@@ -18303,6 +18355,7 @@ fn restore_tabs(
     let (tabs, active, _) = restore_tabs_with_terminal_cache(
         restored,
         working_directory,
+        is_git_repository(working_directory),
         window,
         activity,
         saved_session_refs,
@@ -18403,6 +18456,7 @@ fn cached_terminal_view(
 fn restore_tabs_with_terminal_cache(
     restored: &RestoredSession,
     working_directory: &std::path::Path,
+    is_git: bool,
     mut window: Option<&mut Window>,
     activity: &mut AgentActivityModel,
     saved_session_refs: &BTreeMap<String, String>,
@@ -18603,9 +18657,12 @@ fn restore_tabs_with_terminal_cache(
                 };
                 TabContent::Terminal { view }
             }
-            Some(TabKind::Diff) => {
-                TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx))
-            }
+            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(
+                &tab_state,
+                working_directory,
+                is_git,
+                cx,
+            )),
             Some(TabKind::Browser) => {
                 let Some(window) = window.as_deref_mut() else {
                     continue;
@@ -18774,11 +18831,12 @@ fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
 fn restored_changes_tab(
     state: &SessionTabState,
     working_directory: &Path,
+    is_git: bool,
     cx: &mut App,
 ) -> Entity<ChangesTab> {
     let root = working_directory.to_path_buf();
     let changes = if state.commit_sha.is_empty() {
-        cx.new(|cx| ChangesTab::new(root, cx))
+        cx.new(|cx| ChangesTab::new_with_git_capability(root, is_git, cx))
     } else {
         let sha = state.commit_sha.clone();
         cx.new(|cx| ChangesTab::for_commit(root, sha, cx))
@@ -18830,6 +18888,7 @@ fn restored_browser_url(state: &SessionTabState) -> &str {
 fn restore_tabs_in_workspace(
     restored: &RestoredSession,
     working_directory: &std::path::Path,
+    is_git: bool,
     tab_id_start: usize,
     pane_id_start: usize,
     activity: &mut AgentActivityModel,
@@ -18975,9 +19034,12 @@ fn restore_tabs_in_workspace(
                 });
                 TabContent::Terminal { view }
             }
-            Some(TabKind::Diff) => {
-                TabContent::Changes(restored_changes_tab(&tab_state, working_directory, cx))
-            }
+            Some(TabKind::Diff) => TabContent::Changes(restored_changes_tab(
+                &tab_state,
+                working_directory,
+                is_git,
+                cx,
+            )),
             Some(TabKind::Browser) => {
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
@@ -20054,13 +20116,17 @@ fn main() {
             },
             move |window, cx| {
                 let mut activity_model = AgentActivityModel::new();
-                let (tabs, active_tab) = restore_tabs(
+                let (tabs, active_tab, _) = restore_tabs_with_terminal_cache(
                     &restored,
                     &working_directory,
+                    worktree_context(&project_catalog, &working_directory).is_git,
                     Some(window),
                     &mut activity_model,
                     &saved_session_refs_for_restore,
                     resume_agent_sessions,
+                    None,
+                    None,
+                    None,
                     cx,
                 );
                 let activity = tabs
@@ -21817,6 +21883,7 @@ done
             let (tabs, _) = restore_tabs_in_workspace(
                 &restored,
                 &repo,
+                true,
                 1000,
                 2000,
                 &mut activity,
@@ -22563,6 +22630,293 @@ done
             workspace.add_changes_tab(None, cx);
         }
         workspace
+    }
+
+    #[gpui::test]
+    fn activity_sync_rebuilds_open_changes_when_git_capability_changes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = std::env::temp_dir().join(format!(
+            "sirio-changes-capability-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).expect("create non-git project");
+        let catalog = |is_git| {
+            ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "capability-project".into(),
+                name: "Capability Project".into(),
+                root_path: repo.clone(),
+                is_git,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            }])
+        };
+        let changes_entity = |workspace: &mut SirioWorkspace| {
+            let mut changes = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Changes(tab) = content {
+                    changes = Some(tab.clone());
+                }
+            });
+            changes.expect("Changes surface")
+        };
+
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+            workspace.working_directory = repo.clone();
+            workspace.project_catalog = catalog(false);
+            workspace.right_panel = cx.new(|_| RightPanel::new(repo.clone()));
+            let right_panel = workspace.right_panel.clone();
+            SirioWorkspace::subscribe_right_panel(&right_panel, cx);
+            workspace.add_changes_tab(None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let old_changes = workspace.update(&mut cx, |workspace, _| changes_entity(workspace));
+        assert!(!old_changes.read_with(&cx.cx, |changes, _| changes.allows_staging()));
+
+        workspace.update(&mut cx, |workspace, cx| {
+            let before = workspace.project_catalog.clone();
+            workspace.project_catalog.replace_projects(catalog(true));
+            assert!(workspace.apply_catalog_refresh(
+                before,
+                Ok(()),
+                Some(repo.clone()),
+                cx,
+            ));
+            assert!(workspace.activity_dirty);
+            workspace.sync_activity(cx);
+        });
+
+        let git_changes = workspace.update(&mut cx, |workspace, _| changes_entity(workspace));
+        assert_ne!(old_changes.entity_id(), git_changes.entity_id());
+        assert!(git_changes.read_with(&cx.cx, |changes, _| changes.allows_staging()));
+
+        workspace.update(&mut cx, |workspace, cx| {
+            let before = workspace.project_catalog.clone();
+            workspace.project_catalog.replace_projects(catalog(false));
+            assert!(workspace.apply_catalog_refresh(
+                before,
+                Ok(()),
+                Some(repo.clone()),
+                cx,
+            ));
+            assert!(workspace.activity_dirty);
+            workspace.sync_activity(cx);
+        });
+
+        let non_git_changes = workspace.update(&mut cx, |workspace, _| changes_entity(workspace));
+        assert_ne!(git_changes.entity_id(), non_git_changes.entity_id());
+        assert!(!non_git_changes.read_with(&cx.cx, |changes, _| changes.allows_staging()));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[gpui::test]
+    fn capability_sync_rebinds_only_the_changes_leaf_in_a_split_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = std::env::temp_dir().join(format!(
+            "sirio-split-changes-capability-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).expect("create non-git project");
+        let catalog = |is_git| {
+            ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "split-capability-project".into(),
+                name: "Split Capability Project".into(),
+                root_path: repo.clone(),
+                is_git,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            }])
+        };
+
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+            workspace.working_directory = repo.clone();
+            workspace.project_catalog = catalog(false);
+            workspace.right_panel = cx.new(|_| RightPanel::new(repo.clone()));
+            let right_panel = workspace.right_panel.clone();
+            SirioWorkspace::subscribe_right_panel(&right_panel, cx);
+            workspace.add_changes_tab(None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let (leaf_ids, focused_pane, pane_events, terminal_id, terminal_is_live) =
+            workspace.update(&mut cx, |workspace, cx| {
+                workspace.split_focused_terminal_with_placement(
+                    SplitDirection::Horizontal,
+                    SplitPlacement::After,
+                    None,
+                    cx,
+                );
+                let tab = &workspace.tabs[0];
+                let mut terminal = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        terminal = Some(view.clone());
+                    }
+                });
+                let terminal = terminal.expect("split terminal sibling");
+                (
+                    tab.panes.leaf_ids(),
+                    tab.focused_pane,
+                    tab.session_state.pane_events.clone(),
+                    terminal.entity_id(),
+                    terminal.read(cx).is_host_mounted(),
+                )
+            });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.project_catalog.replace_projects(catalog(true));
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+
+        let (
+            new_leaf_ids,
+            new_focused_pane,
+            new_pane_events,
+            new_terminal_id,
+            new_terminal_is_live,
+            changes_id,
+            changes_allow_staging,
+        ) = workspace.update(&mut cx, |workspace, cx| {
+                let tab = &workspace.tabs[0];
+                let mut terminal = None;
+                let mut changes = None;
+                tab.panes.for_each(&mut |_, content| match content {
+                    TabContent::Terminal { view } => terminal = Some(view.clone()),
+                    TabContent::Changes(view) => changes = Some(view.clone()),
+                    _ => {}
+                });
+                let terminal = terminal.expect("terminal sibling survives rebind");
+                let changes = changes.expect("rebound Changes leaf");
+                (
+                    tab.panes.leaf_ids(),
+                    tab.focused_pane,
+                    tab.session_state.pane_events.clone(),
+                    terminal.entity_id(),
+                    terminal.read(cx).is_host_mounted(),
+                    changes.entity_id(),
+                    changes.read(cx).allows_staging(),
+                )
+            });
+
+        assert_eq!(new_leaf_ids, leaf_ids);
+        assert_eq!(new_focused_pane, focused_pane);
+        assert_eq!(new_pane_events, pane_events);
+        assert_eq!(new_terminal_id, terminal_id);
+        assert_eq!(new_terminal_is_live, terminal_is_live);
+        assert_ne!(changes_id, terminal_id);
+        assert!(changes_allow_staging);
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[gpui::test]
+    fn restored_changes_use_known_capability_when_git_metadata_is_missing(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = test_repo("restore-capability-missing-git");
+        std::fs::remove_dir_all(repo.join(".git")).expect("remove Git metadata");
+        let restored = session::RestoredSession {
+            working_directory: repo.clone(),
+            tabs: vec![session::SessionTab {
+                id: "restored-changes".into(),
+                title: "Changes".into(),
+                kind: "diff".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![session::SessionTabState::default()],
+            diagnostics: Vec::new(),
+        };
+
+        let mut activity = AgentActivityModel::new();
+        let (git_tabs, _) = cx.update(|cx| {
+            restore_tabs_with_terminal_cache(
+                &restored,
+                &repo,
+                true,
+                None,
+                &mut activity,
+                &BTreeMap::new(),
+                false,
+                None,
+                None,
+                None,
+                cx,
+            )
+        });
+        let git_changes = cx.update(|cx| {
+            let mut changes = None;
+            git_tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Changes(tab) = content {
+                    changes = Some(tab.clone());
+                }
+            });
+            changes.expect("restored Git Changes surface").read(cx).allows_staging()
+        });
+        assert!(git_changes);
+
+        let (non_git_tabs, _) = cx.update(|cx| {
+            restore_tabs_with_terminal_cache(
+                &restored,
+                &repo,
+                false,
+                None,
+                &mut activity,
+                &BTreeMap::new(),
+                false,
+                None,
+                None,
+                None,
+                cx,
+            )
+        });
+        let non_git_changes = cx.update(|cx| {
+            let mut changes = None;
+            non_git_tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Changes(tab) = content {
+                    changes = Some(tab.clone());
+                }
+            });
+            changes
+                .expect("restored non-Git Changes surface")
+                .read(cx)
+                .allows_staging()
+        });
+        assert!(!non_git_changes);
+
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     fn git_test(repo: &Path, args: &[&str]) {
