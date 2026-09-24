@@ -696,14 +696,17 @@ actions!(
 
 actions!(chat_question_answer, [SendAnswer, CancelAnswer]);
 
-/// One option rendered on a question or plan-approval card.
+/// One option offered by an open question, drawn as a row of the dock.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AnswerOption {
     /// Protocol option id sent back to the agent.
     id: String,
     /// Human-readable label.
     label: String,
-    /// Whether the option declines the request, tinted distinctly.
+    /// What choosing it means, shown under the label. Only a native
+    /// `AskUserQuestion` option carries one; never persisted.
+    description: Option<String>,
+    /// Whether the option declines the request.
     is_rejection: bool,
 }
 
@@ -847,6 +850,10 @@ enum Entry {
         options: Vec<AnswerOption>,
         /// Free-text input when the question offers one.
         text_input: Option<AnswerTextInput>,
+        /// Whether the request carried a structured question rather than a
+        /// plain tool gate: a Pi question (prompt blanked because it repeats
+        /// its header) and a permission (no prompt) look alike otherwise.
+        is_question: bool,
         resolved: Option<String>,
         expired: bool,
         /// The user dismissed an unrenderable request; distinct from denial.
@@ -1299,9 +1306,11 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                         is_rejection: option.kind == "reject",
                         id: option.id,
                         label: option.name,
+                        description: None,
                     })
                     .collect(),
                 text_input: None,
+                is_question: false,
                 resolved,
                 expired,
                 dismissed,
@@ -2927,6 +2936,7 @@ impl Chat {
                         is_rejection: option.kind.contains("Reject"),
                         id: option.id,
                         label: option.name,
+                        description: option.description,
                     })
                     .collect::<Vec<_>>();
                 let is_plan_approval = title.to_ascii_lowercase().contains("plan")
@@ -2947,11 +2957,19 @@ impl Chat {
                         });
                     }
                 } else {
-                    let has_structured_question = question.is_some();
+                    let is_question = question.is_some();
                     let structured_prompt = question
                         .as_ref()
                         .map(|question| question.prompt.clone())
                         .unwrap_or_default();
+                    // A structured question names itself: its header, not
+                    // the asking tool's title (`Question` on the native
+                    // transport). The header always exists — it falls back
+                    // to the prompt — so Pi's title stays the question text.
+                    let title = question
+                        .as_ref()
+                        .map(|question| question.header.clone())
+                        .unwrap_or(title);
                     let text_input = question
                         .and_then(|question| question.text_input)
                         .map(|input| AnswerTextInput {
@@ -2964,7 +2982,7 @@ impl Chat {
                             // plain permission with no choices is different:
                             // its wire request has no renderable answer, so it
                             // gets Dismiss below instead of a fake option.
-                            (has_structured_question && answer_options.is_empty()).then_some(
+                            (is_question && answer_options.is_empty()).then_some(
                                 AnswerTextInput {
                                     placeholder: None,
                                     prefill: None,
@@ -2977,6 +2995,7 @@ impl Chat {
                         prompt: structured_prompt,
                         options: answer_options,
                         text_input,
+                        is_question,
                         resolved: None,
                         expired: false,
                         dismissed: false,
@@ -6077,6 +6096,7 @@ impl Chat {
                 prompt,
                 options,
                 text_input,
+                is_question: _,
                 resolved,
                 expired,
                 dismissed,
@@ -13107,9 +13127,9 @@ let answer = 42;
         assert!(
             chat.read_with(&cx.cx, |chat, _| {
                 chat.pending_question()
-                    .is_some_and(|(_, title)| title == "Ask user question")
+                    .is_some_and(|(_, title)| title == "Which color?")
             }),
-            "the pending bar names the asking tool"
+            "the question is named by its own header, not the asking tool"
         );
 
         // Click the Blue pill.
@@ -13200,9 +13220,9 @@ let answer = 42;
         assert!(
             chat.read_with(&cx.cx, |chat, _| {
                 chat.pending_question()
-                    .is_some_and(|(_, title)| title == "Ask user question")
+                    .is_some_and(|(_, title)| title == "Which color?")
             }),
-            "the pending bar names the asking tool"
+            "the question is named by its own header, not the asking tool"
         );
 
         // Focus the field, type the answer, send it with Enter.
@@ -15817,6 +15837,87 @@ let answer = 42;
         );
     }
 
+    /// A structured question is named by its own header, not by the asking
+    /// tool (the native transport's title for every question is the
+    /// constant `Question`), and its options keep their descriptions; a
+    /// plain permission keeps the tool's title and is not a question.
+    #[gpui::test]
+    async fn a_question_is_ingested_with_its_header_and_descriptions(cx: &mut TestAppContext) {
+        let chat = chat_with_transport(
+            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            cx,
+        );
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::PermissionRequest {
+                    request_id: 7,
+                    session_id: "session".into(),
+                    title: "Question".into(),
+                    options: vec![sirio_acp::PermissionOption {
+                        id: "Docked".into(),
+                        name: "Docked".into(),
+                        kind: "AllowOnce".into(),
+                        description: Some("Sits above the composer".into()),
+                    }],
+                    question: Some(sirio_acp::PermissionQuestion {
+                        header: "Approach".into(),
+                        prompt: "Which layout should the panel use?".into(),
+                        text_input: Some(sirio_acp::PermissionTextInput {
+                            placeholder: None,
+                            prefill: None,
+                        }),
+                    }),
+                },
+                cx,
+            );
+            chat.handle_event(
+                AcpEvent::PermissionRequest {
+                    request_id: 8,
+                    session_id: "session".into(),
+                    title: "/repo/src/main.rs".into(),
+                    options: vec![sirio_acp::PermissionOption {
+                        id: "allow_once".into(),
+                        name: "Allow".into(),
+                        kind: "AllowOnce".into(),
+                        description: None,
+                    }],
+                    question: None,
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            let Some(Entry::Permission {
+                title,
+                prompt,
+                options,
+                text_input,
+                is_question,
+                ..
+            }) = chat.entries.first()
+            else {
+                panic!("the question is recorded: {:?}", chat.entries);
+            };
+            assert_eq!(title, "Approach");
+            assert_eq!(prompt, "Which layout should the panel use?");
+            assert!(*is_question);
+            assert_eq!(
+                options[0].description.as_deref(),
+                Some("Sits above the composer")
+            );
+            assert!(text_input.is_some());
+
+            let Some(Entry::Permission {
+                title, is_question, ..
+            }) = chat.entries.get(1)
+            else {
+                panic!("the permission is recorded: {:?}", chat.entries);
+            };
+            assert_eq!(title, "/repo/src/main.rs");
+            assert!(!*is_question);
+        });
+    }
+
     /// The pending-question bar's title never shrank below min-content, so
     /// a long question title (Pi sends the question text itself as the
     /// title) ran past the bar's border and pushed Show out of the card.
@@ -15844,6 +15945,7 @@ let answer = 42;
                 prompt: String::new(),
                 options: Vec::new(),
                 text_input: None,
+                is_question: false,
                 resolved: None,
                 expired: false,
                 dismissed: false,
@@ -15889,18 +15991,21 @@ let answer = 42;
                     AnswerOption {
                         id: "allow-once".into(),
                         label: "Yes, allow this time only and remember my choice for later".into(),
+                        description: None,
                         is_rejection: false,
                     },
                     AnswerOption {
                         id: "allow-always".into(),
                         label: "Yes, and do not ask again for this session or any future one"
                             .into(),
+                        description: None,
                         is_rejection: false,
                     },
                     AnswerOption {
                         id: "allow-session".into(),
                         label: "Yes, and do not ask again for this session regardless of file"
                             .into(),
+                        description: None,
                         is_rejection: false,
                     },
                     AnswerOption {
@@ -15908,10 +16013,12 @@ let answer = 42;
                         label:
                             "No, never allow this tool call to modify anything in this directory"
                                 .into(),
+                        description: None,
                         is_rejection: true,
                     },
                 ],
                 text_input: None,
+                is_question: false,
                 resolved: None,
                 expired: false,
                 dismissed: false,
