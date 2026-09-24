@@ -1213,6 +1213,10 @@ enum WorkspaceAction {
     /// comment for the race this closes.
     NewTabForWorktree(PathBuf, NewTabAction),
     NewChatAgent(&'static str),
+    /// An agent chosen under the sidebar worktree menu's New Chat, carrying
+    /// the right-clicked worktree for the same F-SID-14 reason as
+    /// `NewTabForWorktree`.
+    NewChatAgentForWorktree(PathBuf, &'static str),
     InstallSkill(sirio_project::SkillInstallCommand),
     /// Settings → Install Hooks: the host writes every agent's user-global
     /// sirioctl hooks (`sirio_agents::install_global_hooks`) off the UI
@@ -4647,6 +4651,9 @@ impl SirioWorkspace {
         self.tab_bar.update(cx, |tab_bar, _| {
             tab_bar.apply_chat_launch_sources(sources.clone())
         });
+        self.sidebar.update(cx, |sidebar, _| {
+            sidebar.apply_chat_launch_sources(sources.clone())
+        });
         let transport_notes = vec![(
             sirio_agents::ClaudeCodeAdapter.id().to_string(),
             self.launch.claude.note(),
@@ -4770,6 +4777,21 @@ impl SirioWorkspace {
                                     workspace.open_action(action, window, cx)
                                 }
                                 WorkspaceAction::NewChatAgent(id) => {
+                                    workspace.open_chat_agent(id, window, cx);
+                                }
+                                WorkspaceAction::NewChatAgentForWorktree(path, id) => {
+                                    // The same re-assertion as
+                                    // `NewTabForWorktree` above.
+                                    if !paths_name_the_same_document(
+                                        &workspace.working_directory,
+                                        &path,
+                                    )
+                                        && workspace
+                                            .select_worktree(path, Some(window), cx)
+                                            .is_err()
+                                    {
+                                        continue;
+                                    }
                                     workspace.open_chat_agent(id, window, cx);
                                 }
                                 WorkspaceAction::InstallSkill(command) => {
@@ -7772,6 +7794,24 @@ impl SirioWorkspace {
                     actions.push(WorkspaceAction::NewTabForWorktree(path.clone(), action));
                 }
             }
+            (
+                SidebarContextTarget::Worktree { path, .. },
+                SidebarContextAction::NewChatAgent(id),
+            ) => {
+                if !paths_name_the_same_document(path, &self.working_directory)
+                    && self.select_worktree(path.clone(), None, cx).is_err()
+                {
+                    return;
+                }
+                // F-SID-14, as for `NewTab` above: the worktree travels with
+                // the agent instead of being read back at drain time.
+                if let Ok(mut actions) = self.pending_actions.lock() {
+                    actions.push(WorkspaceAction::NewChatAgentForWorktree(path.clone(), id));
+                }
+            }
+            (_, SidebarContextAction::OpenAgentSettings) => {
+                self.open_settings(Some(SettingsCategory::Agents), cx);
+            }
             (_, SidebarContextAction::RemoveProject) => {}
             // Both worktree removals are intercepted inside
             // Sidebar::dispatch_context_action (a real removal there, the
@@ -7783,7 +7823,7 @@ impl SirioWorkspace {
                 | SidebarContextAction::RemoveWorktreeAndRemoteBranch,
             ) => {}
             (_, SidebarContextAction::SetPrimary | SidebarContextAction::UnsetPrimary) => {}
-            (_, SidebarContextAction::NewTab(_)) => {}
+            (_, SidebarContextAction::NewTab(_) | SidebarContextAction::NewChatAgent(_)) => {}
             (
                 _,
                 SidebarContextAction::ProjectSettings
@@ -39824,6 +39864,80 @@ browser  profile  "
         );
 
         let _ = std::fs::remove_dir_all(&path_b);
+    }
+
+    /// An agent chosen under the worktree menu's New Chat travels with the
+    /// right-clicked worktree, for the same F-SID-14 reason New Terminal
+    /// does: a bare `NewChatAgent(id)` would trust `working_directory` at
+    /// drain time.
+    #[gpui::test]
+    async fn sidebar_chat_agent_choice_queues_the_agent_with_its_worktree(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let path = workspace.update(&mut cx.cx, |workspace, cx| {
+            let path = workspace.working_directory.clone();
+            workspace.handle_sidebar_context_action(
+                &SidebarContextTarget::Worktree {
+                    path: path.clone(),
+                    is_primary: false,
+                },
+                SidebarContextAction::NewChatAgent("codex"),
+                cx,
+            );
+            path
+        });
+
+        let queued = workspace.update(&mut cx.cx, |workspace, _| {
+            std::mem::take(&mut *workspace.pending_actions.lock().unwrap())
+        });
+        assert_eq!(queued.len(), 1, "exactly one action is queued");
+        match queued.into_iter().next().unwrap() {
+            WorkspaceAction::NewChatAgentForWorktree(queued_path, id) => {
+                assert_eq!(queued_path, path, "the right-clicked worktree");
+                assert_eq!(id, "codex", "the agent chosen in the menu");
+            }
+            _ => panic!("the chosen agent must be queued with its worktree"),
+        }
+    }
+
+    /// "Other agents…" under the worktree menu's New Chat leads to the same
+    /// place as the + menu's: Settings, on its Agents screen.
+    #[gpui::test]
+    async fn sidebar_other_agents_opens_settings(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            assert!(
+                !workspace.show_settings,
+                "the fixture starts outside Settings"
+            );
+            let path = workspace.working_directory.clone();
+            workspace.handle_sidebar_context_action(
+                &SidebarContextTarget::Worktree {
+                    path,
+                    is_primary: false,
+                },
+                SidebarContextAction::OpenAgentSettings,
+                cx,
+            );
+            assert!(workspace.show_settings, "Settings covers the workspace");
+        });
     }
 
     /// Right-clicks the fixture's first worktree row (id 1) and parks.

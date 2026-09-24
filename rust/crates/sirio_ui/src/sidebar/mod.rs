@@ -27,6 +27,7 @@ use sirio_git::{
     remove_worktree_and_remote_branch, resolve_parent_directory, upstream_of,
 };
 use sirio_project::{TabKind, display_absolute_path};
+use sirio_registry::LaunchSource;
 use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
@@ -34,7 +35,7 @@ use crate::loading;
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
-use crate::tab_bar::NewTabAction;
+use crate::tab_bar::{NewTabAction, chat_agent_row, launches_a_chat};
 
 #[path = "../icons.rs"]
 pub mod icons;
@@ -326,6 +327,11 @@ pub enum SidebarContextAction {
     /// unknown or absent.
     RemoveWorktreeAndRemoteBranch,
     NewTab(NewTabAction),
+    /// A chat with this agent (its adapter id) in the target worktree: one
+    /// of the rows the worktree menu's New Chat expands into.
+    NewChatAgent(&'static str),
+    /// "Other agents…" under New Chat: Settings, on its Agents screen.
+    OpenAgentSettings,
 }
 
 /// Typed explanation for an unavailable context-menu command. Only the
@@ -365,6 +371,8 @@ struct OpenContextMenu {
     /// Resolved off the render thread after the menu opens; only read for
     /// a worktree target.
     remote_tracking: RemoteTracking,
+    /// Whether New Chat is expanded into its agents.
+    chat_picker_open: bool,
 }
 
 /// Whether a worktree's branch tracks a remote branch — resolved off the
@@ -583,6 +591,10 @@ pub struct Sidebar {
     /// The hover-x's closure menu; shares `context_menu_focus` for Escape.
     worktree_close_menu: Popup<OpenWorktreeCloseMenu>,
     add_project_menu: Popup<()>,
+    /// The resolved launch source per adapter id, pushed by the host beside
+    /// the tab bar's copy, so the worktree menu's New Chat offers exactly
+    /// the agents the + menu does.
+    chat_launch_sources: std::collections::BTreeMap<String, LaunchSource>,
     project_form: Option<ProjectFormSurface>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
     /// The panel's current width, pushed in by the host each render — the
@@ -737,6 +749,7 @@ impl Sidebar {
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
+            chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
@@ -822,6 +835,7 @@ impl Sidebar {
             context_menu_focus: cx.focus_handle().tab_stop(true),
             worktree_close_menu: Popup::default(),
             add_project_menu: Popup::default(),
+            chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
@@ -1018,6 +1032,31 @@ impl Sidebar {
         });
     }
 
+    /// Applies a fresh launch-source sweep from the host — the same one the
+    /// tab bar receives.
+    pub fn apply_chat_launch_sources(&mut self, sources: Vec<(String, LaunchSource)>) {
+        self.chat_launch_sources = sources.into_iter().collect();
+    }
+
+    /// The agents New Chat expands into, as `(id, display name)`: every
+    /// adapter whose resolved source can launch a chat today.
+    fn chat_agents(&self) -> Vec<(&'static str, &'static str)> {
+        sirio_agents::ALL
+            .iter()
+            .filter(|adapter| launches_a_chat(self.chat_launch_sources.get(adapter.id())))
+            .map(|adapter| (adapter.id(), adapter.display_name()))
+            .collect()
+    }
+
+    /// New Chat is a heading, not a command: it folds its agents in and
+    /// out and leaves the menu open.
+    fn toggle_context_chat_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.context_menu.open_mut() {
+            menu.chat_picker_open = !menu.chat_picker_open;
+            cx.notify();
+        }
+    }
+
     /// Returns the complete context menu contract for a project or worktree.
     /// Disabled rows stay visible with their typed reason so the user can
     /// distinguish an unavailable transition from a missing affordance.
@@ -1099,7 +1138,7 @@ impl Sidebar {
                     // main worktree and deleting its directory would destroy
                     // the repository — so both stay visible but disabled,
                     // without a reason: the sentence did not fit beside the
-                    // label in the 240px menu. The remote variant also needs
+                    // label in the menu. The remote variant also needs
                     // a known upstream.
                     item(
                         "Remove Worktree",
@@ -1158,6 +1197,7 @@ impl Sidebar {
                 } else {
                     RemoteTracking::Untracked
                 },
+                chat_picker_open: false,
             });
             self.worktree_close_menu.close();
             self.context_menu_focus.focus(window, cx);
@@ -2702,6 +2742,8 @@ impl Sidebar {
             SidebarContextAction::NewTab(NewTabAction::NewChat) => "new-chat",
             SidebarContextAction::NewTab(NewTabAction::NewChanges)
             | SidebarContextAction::NewTab(NewTabAction::NewBrowser) => "unsupported",
+            SidebarContextAction::NewChatAgent(_) => "new-chat-agent",
+            SidebarContextAction::OpenAgentSettings => "open-agent-settings",
         }
     }
 
@@ -2821,6 +2863,7 @@ impl Sidebar {
 
     fn render_context_menu(
         popup: &Popup<OpenContextMenu>,
+        chat_agents: Vec<(&'static str, &'static str)>,
         entity: gpui::Entity<Self>,
         theme: Theme,
         painter: Painter,
@@ -2828,13 +2871,16 @@ impl Sidebar {
         let menu = popup.get().expect("mounted context menu").clone();
         let closing = popup.closing_since();
         let remote_tracking = menu.remote_tracking.clone();
+        let chat_picker_open = menu.chat_picker_open;
         let target = menu.target;
         let position = menu.position;
         let bezel_theme = theme.to_bezel_theme();
+        // The hover-x's closure menu is 280px for the same pair of removals;
+        // at 240 "Remove Worktree and Remote Branch" did not fit.
         let mut card = popover::popover_card(&bezel_theme)
             .id("sidebar-context-menu")
             .debug_selector(|| "sidebar-context-menu".to_owned())
-            .w(px(240.0));
+            .w(px(280.0));
 
         for item in Self::context_menu_items(&target, &remote_tracking) {
             let selector = format!(
@@ -2860,7 +2906,12 @@ impl Sidebar {
                     .when(!enabled, |this| {
                         this.cursor_default().bg(gpui::transparent_black())
                     });
-            if enabled {
+            let is_new_chat = action == SidebarContextAction::NewTab(NewTabAction::NewChat);
+            if enabled && is_new_chat {
+                row = row.on_click(move |_, _, cx| {
+                    item_entity.update(cx, |sidebar, cx| sidebar.toggle_context_chat_picker(cx));
+                });
+            } else if enabled {
                 row = row.on_click(move |_, window, cx| {
                     item_entity.update(cx, |sidebar, cx| {
                         sidebar.dispatch_context_action(item_target.clone(), action, window, cx)
@@ -2871,7 +2922,30 @@ impl Sidebar {
             // beside the label in this card. The command palette still
             // shows it.
             row = row.child(item.label);
+            if is_new_chat {
+                row = row.child(
+                    IconElement::new(
+                        if chat_picker_open {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronRight
+                        },
+                        IconSize::XSmall,
+                    )
+                    .text_color(theme.text_faint),
+                );
+            }
             card = card.child(row);
+            if is_new_chat && chat_picker_open {
+                card = card.child(Self::render_context_chat_agents(
+                    &target,
+                    &chat_agents,
+                    entity.clone(),
+                    theme,
+                    &bezel_theme,
+                    painter,
+                ));
+            }
         }
         // F-SID-15: `menu_at` owns the deferred priority-1 layer, so later
         // sidebar siblings cannot paint over the menu or intercept its rows.
@@ -2885,6 +2959,84 @@ impl Sidebar {
             position,
             card.into_any_element(),
             closing,
+        )
+    }
+
+    /// The agents New Chat expands into, indented under it as the + menu
+    /// draws its own, then the route to another agent. With no agent able
+    /// to launch a chat, only that route, saying why.
+    fn render_context_chat_agents(
+        target: &SidebarContextTarget,
+        agents: &[(&'static str, &'static str)],
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        bezel_theme: &bezel::theme::Theme,
+        painter: Painter,
+    ) -> impl IntoElement {
+        let on_choose = |action: SidebarContextAction| {
+            let entity = entity.clone();
+            let target = target.clone();
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                entity.update(cx, |sidebar, cx| {
+                    sidebar.dispatch_context_action(target.clone(), action, window, cx)
+                });
+            }
+        };
+        let mut list = div()
+            .id("sidebar-context-chat-agents")
+            .w_full()
+            .pl(theme.spacing.titlebar_control_spacing)
+            .flex()
+            .flex_col();
+        if agents.is_empty() {
+            return list.child(
+                popover::menu_row(
+                    bezel_theme,
+                    false,
+                    Fade::new(painter, "sidebar-context-chat-empty"),
+                )
+                .id("sidebar-context-chat-empty")
+                .debug_selector(|| "sidebar-context-chat-empty".to_owned())
+                .w_full()
+                .flex_col()
+                .items_start()
+                .gap(theme.spacing.titlebar_control_spacing)
+                .text_color(bezel_theme.text_faint)
+                .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
+                .child("Other agents…")
+                .child(
+                    div()
+                        .text_size(theme.typography.caption2)
+                        .child("No supported agent found on PATH"),
+                ),
+            );
+        }
+        for &(id, display_name) in agents {
+            list = list.child(
+                chat_agent_row(
+                    id,
+                    display_name,
+                    format!("sidebar-context-chat-agent-{id}"),
+                    theme,
+                    bezel_theme,
+                    painter,
+                )
+                .on_click(on_choose(SidebarContextAction::NewChatAgent(id))),
+            );
+        }
+        list.child(
+            popover::menu_row(
+                bezel_theme,
+                false,
+                Fade::new(painter, "sidebar-context-chat-other-agents"),
+            )
+            .id("sidebar-context-chat-other-agents")
+            .debug_selector(|| "sidebar-context-chat-other-agents".to_owned())
+            .w_full()
+            .min_h(px(29.0))
+            .text_color(bezel_theme.text_faint)
+            .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
+            .child("Other agents…"),
         )
     }
 
@@ -3167,8 +3319,14 @@ impl Render for Sidebar {
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {
-            Self::render_context_menu(&self.context_menu, entity.clone(), theme, Painter::of(cx))
-                .into_any_element()
+            Self::render_context_menu(
+                &self.context_menu,
+                self.chat_agents(),
+                entity.clone(),
+                theme,
+                Painter::of(cx),
+            )
+            .into_any_element()
         });
         let worktree_close_menu = self.worktree_close_menu.get().map(|_| {
             Self::render_worktree_close_menu(
@@ -4919,7 +5077,7 @@ mod tests {
             );
             assert!(
                 item.disabled_reason.is_none(),
-                "the disabled primary entry carries no reason: it does not fit the 240px menu (#372)"
+                "the disabled primary entry carries no reason: it does not fit the menu (#372)"
             );
         }
 
@@ -5141,6 +5299,199 @@ mod tests {
                 action: SidebarContextAction::NewTab(NewTabAction::NewTerminal),
             }
         )));
+    }
+
+    /// Right-clicks the drawn row `selector` and settles the menu it opens.
+    fn right_click_row(cx: &mut VisualTestContext, selector: &'static str) {
+        let row = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// New Chat in a worktree's context menu used to open a chat with
+    /// whichever agent resolved first. It now expands in place into the
+    /// agents that can launch a chat — the + menu's gate, a Builtin or
+    /// Installed source — and the row clicked names the agent to open.
+    #[gpui::test]
+    async fn context_menu_new_chat_expands_into_launchable_agents_and_emits_the_chosen_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("context-menu-chat-agents");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = Sidebar::new_with_repo(cx, Some(repo.clone()));
+            sidebar.apply_chat_launch_sources(vec![
+                (
+                    "codex".to_string(),
+                    sirio_registry::LaunchSource::Builtin {
+                        program: "codex-acp".into(),
+                        args: vec![],
+                    },
+                ),
+                (
+                    "pi".to_string(),
+                    sirio_registry::LaunchSource::Installed(sirio_registry::InstalledAgent {
+                        id: "pi-acp".into(),
+                        version: "1.0.0".into(),
+                        executable: "/data/pi-acp/bin/pi-acp".into(),
+                        args: vec![],
+                        integrity: sirio_registry::Integrity::Sha256,
+                    }),
+                ),
+                (
+                    "claude".to_string(),
+                    sirio_registry::LaunchSource::Unavailable(
+                        sirio_registry::UnavailableReason::NotInRegistry,
+                    ),
+                ),
+            ]);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar_entity, &mut cx);
+
+        right_click_row(&mut cx, "sidebar-row-1");
+        assert!(
+            cx.debug_bounds("sidebar-context-chat-agent-codex")
+                .is_none(),
+            "the agents stay folded until New Chat is chosen"
+        );
+
+        let new_chat = cx
+            .debug_bounds("sidebar-context-item-new-chat")
+            .expect("the context menu exposes New Chat");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("sidebar-context-menu").is_some(),
+            "New Chat expands the menu instead of closing it"
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::ContextAction { .. })),
+            "expanding New Chat opens nothing yet"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-chat-agent-codex")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-chat-agent-pi").is_some(),
+            "a Sirio-managed install is offered"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-chat-agent-claude")
+                .is_none(),
+            "an agent with no launchable source is not offered"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-chat-agent-opencode")
+                .is_none(),
+            "an agent the host reported nothing for is not offered"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-chat-other-agents")
+                .is_some(),
+            "the route to another agent stays under the ones available"
+        );
+
+        let codex = cx
+            .debug_bounds("sidebar-context-chat-agent-codex")
+            .expect("Codex is drawn");
+        cx.simulate_click(codex.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ContextAction {
+                    target: SidebarContextTarget::Worktree { path, .. },
+                    action: SidebarContextAction::NewChatAgent("codex"),
+                } if *path == repo
+            )),
+            "choosing an agent names it and the right-clicked worktree"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-menu").is_none(),
+            "a chosen agent closes the menu"
+        );
+    }
+
+    /// With no agent able to launch a chat, New Chat still expands — to the
+    /// "Other agents…" route the + menu offers, which asks the host for
+    /// Settings → Agents instead of leaving an empty list.
+    #[gpui::test]
+    async fn context_menu_new_chat_without_launchable_agents_routes_to_agent_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("context-menu-chat-empty");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar_entity, &mut cx);
+
+        right_click_row(&mut cx, "sidebar-row-1");
+        let new_chat = cx
+            .debug_bounds("sidebar-context-item-new-chat")
+            .expect("the context menu exposes New Chat");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for selector in [
+            "sidebar-context-chat-agent-claude",
+            "sidebar-context-chat-agent-codex",
+            "sidebar-context-chat-agent-opencode",
+            "sidebar-context-chat-agent-pi",
+            "sidebar-context-chat-agent-omp",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "{selector} is offered with no launch source"
+            );
+        }
+        let empty = cx
+            .debug_bounds("sidebar-context-chat-empty")
+            .expect("the empty state names the way to another agent");
+        cx.simulate_click(empty.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ContextAction {
+                    target: SidebarContextTarget::Worktree { .. },
+                    action: SidebarContextAction::OpenAgentSettings,
+                }
+            )),
+            "the empty state asks the host for Settings → Agents"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-context-menu").is_none(),
+            "leaving for Settings closes the menu"
+        );
     }
 
     #[gpui::test]
