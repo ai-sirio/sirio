@@ -3969,6 +3969,15 @@ fn tab_status_name(status: ActivityStatus) -> &'static str {
     }
 }
 
+/// Wall-clock now in Unix milliseconds — the unit `tab.last_event_at` uses.
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 fn tab_primary_pane_id(tab: &OpenTab) -> Option<usize> {
     tab.session_state
         .root_id
@@ -4324,6 +4333,16 @@ struct SirioWorkspace {
     retained_chats: Vec<RetainedChat>,
     next_pane_id: usize,
     working_directory: PathBuf,
+    /// The last resolved status each session tab was seen in, by
+    /// `persistence_id` — the other half of event detection in
+    /// `sync_sidebar_tabs`.
+    session_last_seen: HashMap<String, ActivityStatus>,
+    /// When each session tab last did something (Unix ms), seeded from
+    /// `tab.last_event_at` at startup. The Sessions view sorts by it.
+    session_event_at: HashMap<String, i64>,
+    /// Events not yet written because their tab had no row (a tab younger
+    /// than one save debounce). Retried by `flush_session_event_writes`.
+    pending_event_writes: BTreeMap<String, i64>,
     session: SessionStore,
     project_catalog: ProjectCatalog,
     worktree_label: String,
@@ -5260,6 +5279,9 @@ impl SirioWorkspace {
             retained_chats: Vec::new(),
             next_pane_id,
             working_directory,
+            session_last_seen: HashMap::new(),
+            session_event_at: session.tab_event_times(),
+            pending_event_writes: BTreeMap::new(),
             session,
             project_catalog,
             worktree_label,
@@ -9653,13 +9675,111 @@ impl SirioWorkspace {
                     }
                 };
             }
+            let now_ms = unix_now_ms();
+            for tab in &mut tabs {
+                tab.status = match tab.tab {
+                    SidebarTabRef::Open(id) => self
+                        .tabs
+                        .iter()
+                        .find(|open| open.id == id)
+                        .and_then(|open| self.tab_status(open, cx)),
+                    SidebarTabRef::Parked(_) => {
+                        self.parked_tab_status(&path, &tab.persistence_id)
+                    }
+                };
+                if let Some(status) = tab.status {
+                    self.note_session_status(&tab.persistence_id, status, now_ms);
+                }
+                tab.last_event_at = self.session_event_at.get(&tab.persistence_id).copied();
+            }
             sidebar_updates.push((worktree_id, tabs));
         }
+        self.flush_session_event_writes();
         self.sidebar.update(cx, |sidebar, cx| {
             for (worktree_id, tabs) in sidebar_updates {
                 sidebar.set_worktree_tabs(worktree_id, tabs, cx);
             }
         });
+    }
+
+    /// A session created in this run enters the Sessions view at the top.
+    fn stamp_session_created(&mut self, persistence_id: &str) {
+        let now_ms = unix_now_ms();
+        self.session_event_at
+            .insert(persistence_id.to_owned(), now_ms);
+        self.pending_event_writes
+            .insert(persistence_id.to_owned(), now_ms);
+    }
+
+    /// Event detection: a change **into** running, needs-input, done or error
+    /// is an event; a move to idle is silence; the first status seen for a
+    /// tab (a restored or newly mounted one) is not something that just
+    /// happened.
+    fn note_session_status(&mut self, persistence_id: &str, status: ActivityStatus, now_ms: i64) {
+        let previous = self
+            .session_last_seen
+            .insert(persistence_id.to_owned(), status);
+        if status != ActivityStatus::Idle && previous.is_some_and(|previous| previous != status) {
+            self.session_event_at
+                .insert(persistence_id.to_owned(), now_ms);
+            self.pending_event_writes
+                .insert(persistence_id.to_owned(), now_ms);
+        }
+    }
+
+    /// A tab of a mounted, parked strip: the most urgent status among its
+    /// panes, found by persistence id (the sidebar's parked index counts
+    /// only sidebar tabs, the layout counts all). `None` when the worktree is
+    /// not mounted.
+    fn parked_tab_status(
+        &self,
+        worktree_path: &Path,
+        persistence_id: &str,
+    ) -> Option<ActivityStatus> {
+        let parked = self
+            .parked_worktree_tabs
+            .get(worktree_path.to_string_lossy().as_ref())?;
+        let index = parked
+            .layout
+            .tabs
+            .iter()
+            .position(|tab| tab.id == persistence_id)?;
+        Some(
+            parked
+                .terminal_panes_by_tab
+                .get(index)
+                .into_iter()
+                .flatten()
+                .chain(parked.chat_panes_by_tab.get(index).into_iter().flatten())
+                .filter_map(|pane_id| {
+                    self.activity
+                        .status(&format!("pane-{pane_id}"))
+                        .map(activity_status_for_agent)
+                })
+                .min_by_key(|status| activity_rank(*status))
+                .unwrap_or(ActivityStatus::Idle),
+        )
+    }
+
+    /// Writes pending events; keeps those whose tab has no row yet, as long
+    /// as the tab is still open.
+    fn flush_session_event_writes(&mut self) {
+        if self.pending_event_writes.is_empty() {
+            return;
+        }
+        let touches: Vec<(String, i64)> = self
+            .pending_event_writes
+            .iter()
+            .map(|(id, at)| (id.clone(), *at))
+            .collect();
+        let unmatched: HashSet<String> = self.session.touch_tabs(&touches).into_iter().collect();
+        let open: HashSet<&str> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.persistence_id.as_str())
+            .collect();
+        self.pending_event_writes
+            .retain(|id, _| unmatched.contains(id) && open.contains(id.as_str()));
     }
 
     /// F-CORE-ACT-17/18/22: everything a worktree row draws about its live
@@ -10839,6 +10959,7 @@ impl SirioWorkspace {
         let persistence_id = self
             .session
             .new_tab_id(&self.working_directory, self.next_tab_id);
+        self.stamp_session_created(&persistence_id);
         // F-CHAT-34/F-PER-01: every chat tab is launched with durable
         // transcript persistence (database path + this tab's own id + its
         // worktree id) so completed turns are saved as they settle and the
@@ -10994,6 +11115,7 @@ impl SirioWorkspace {
         let persistence_id = self
             .session
             .new_tab_id(&self.working_directory, self.next_tab_id);
+        self.stamp_session_created(&persistence_id);
         let chat = cx.new(|cx| match unavailable {
             // No transcript: the box is the whole point, and a conversation
             // shown above an explanation of why it cannot continue invites
@@ -11150,6 +11272,7 @@ impl SirioWorkspace {
         let pane_id = self.next_pane_id;
         let title = title.into();
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        self.stamp_session_created(&persistence_id);
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
@@ -25450,6 +25573,129 @@ done
             "the empty selected worktree does not inherit the running indicator"
         );
 
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_status_transition_stamps_the_tabs_last_event(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-event-stamp");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        // First observation: recorded, not an event.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.session_event_at.clear();
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert_eq!(workspace.session_event_at.get("urgency-terminal"), None);
+        });
+        // Idle -> Running is an event.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.activity.agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert!(workspace.session_event_at.contains_key("urgency-terminal"));
+            let pills = workspace.sidebar.read(cx).worktree_pills(1);
+            assert_eq!(pills[0].status, Some(ActivityStatus::Running));
+            assert_eq!(
+                pills[0].last_event_at,
+                workspace.session_event_at.get("urgency-terminal").copied()
+            );
+        });
+        // Running -> Done is an event; staying Done is not; losing the
+        // status (the pane reads idle) is not. Each step clears the entry
+        // first, so presence afterwards means "stamped by this step" —
+        // two stamps in the same millisecond cannot fool the check.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.session_event_at.remove("urgency-terminal");
+            workspace.activity.notify("pane-0", AgentStatus::Done, Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert!(workspace.session_event_at.contains_key("urgency-terminal"), "done is an event");
+
+            workspace.session_event_at.remove("urgency-terminal");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert!(!workspace.session_event_at.contains_key("urgency-terminal"), "no change, no event");
+
+            workspace.activity.pane_closed("pane-0");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert!(
+                !workspace.session_event_at.contains_key("urgency-terminal"),
+                "a move to idle is silence"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_parked_mounted_strip_keeps_reporting_its_tab_status(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-parked-status");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.activity.agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("select the empty worktree");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            let pills = workspace.sidebar.read(cx).worktree_pills(1);
+            assert_eq!(pills.len(), 1, "wt-0's strip is listed as parked");
+            assert_eq!(pills[0].status, Some(ActivityStatus::Running));
+            assert_eq!(pills[0].persistence_id, "urgency-terminal");
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn agent_events_reach_the_database_once_the_tab_row_exists(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-event-persist");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // A tab with no row that is no longer open is not retried forever.
+            workspace.stamp_session_created("closed-before-its-first-save");
+            workspace.flush_session_event_writes();
+            assert!(workspace.pending_event_writes.is_empty());
+
+            // An open tab's event lands once its row exists. (Whether the
+            // background flusher already wrote the row is timing; saving the
+            // layout now makes it certain.)
+            workspace.session.save_layout_now(&workspace.layout(cx));
+            workspace.stamp_session_created("urgency-terminal");
+            workspace.flush_session_event_writes();
+            assert!(workspace.pending_event_writes.is_empty());
+            assert!(workspace.session.tab_event_times().contains_key("urgency-terminal"));
+        });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
     }
