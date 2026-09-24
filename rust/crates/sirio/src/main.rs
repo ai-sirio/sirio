@@ -29051,6 +29051,77 @@ done
         });
     }
 
+    /// M6: a tab drag released on a sidebar row has no pane target, and the
+    /// render-time cleanup leaves neither drag marker nor target behind.
+    #[gpui::test]
+    async fn drawn_tab_drop_on_sidebar_clears_its_drag_state(cx: &mut TestAppContext) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source tab is drawn")
+            .center();
+        let sidebar = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the selected worktree row is drawn");
+        let target = sidebar.center();
+        let before = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut placements = workspace
+                .tabs
+                .iter()
+                .map(|tab| (tab.id, tab.pane))
+                .collect::<Vec<_>>();
+            placements.sort_by_key(|(id, _)| *id);
+            (
+                workspace.center_split.active(PaneRole::Primary),
+                workspace.center_split.active(PaneRole::Secondary),
+                placements,
+            )
+        });
+
+        begin_tab_drag(&mut cx, source, target);
+        for selector in [
+            "tab-drop-indicator-0",
+            "tab-drop-indicator-1",
+            "tab-drop-indicator-2",
+            "tab-drop-indicator-3",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "{selector} is not drawn"
+            );
+        }
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_some());
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_none(),
+            "the sidebar is not a pane-body target"
+        );
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.pane_drop_target.is_none()));
+
+        release_tab_drag(&mut cx, target);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(workspace.tab_drag_snapshot.is_none());
+            assert!(workspace.pane_drop_target.is_none());
+            assert_eq!(
+                (
+                    workspace.center_split.active(PaneRole::Primary),
+                    workspace.center_split.active(PaneRole::Secondary),
+                    {
+                        let mut placements = workspace
+                            .tabs
+                            .iter()
+                            .map(|tab| (tab.id, tab.pane))
+                            .collect::<Vec<_>>();
+                        placements.sort_by_key(|(id, _)| *id);
+                        placements
+                    },
+                ),
+                before,
+                "the sidebar drop does not change either pane's tabs or shown tab"
+            );
+        });
+    }
+
     /// F-TAB-24: `preview_tab_reorder` mutates the live tab vector on every
     /// hover crossing, with no on-drop commit step and (until this fix) no
     /// Escape handling and no pre-drag snapshot anywhere in the drag path --
@@ -40221,6 +40292,7 @@ browser  profile  "
             .iter()
             .find(|tab| tab.persistence_id == restored.tabs[1].id)
             .expect("the terminal is restored");
+        let restored_tab_id = back.id;
         assert_eq!(back.kind, TabKind::Terminal);
         assert_eq!(
             back.pane,
@@ -40233,6 +40305,23 @@ browser  profile  "
             split.active(PaneRole::Secondary),
             Some(back.id),
             "and it is what that half shows"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs = tabs;
+            workspace.active_tab = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.id == restored_tab_id)
+                .expect("the restored terminal is in the strip");
+            workspace.rebuild_center_split();
+            workspace.sync_sidebar_tabs(ParkedRows::Read, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-pill-1-1").is_some(),
+            "the moved terminal is listed under its worktree after restore"
         );
     }
 
