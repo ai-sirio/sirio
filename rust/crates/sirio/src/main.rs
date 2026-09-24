@@ -25590,25 +25590,24 @@ done
             window.root::<SirioWorkspace>().flatten().expect("workspace root")
         });
 
-        // First observation: recorded, not an event.
+        // The first observed non-idle status is a baseline, not an event.
         workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.session_last_seen.clear();
             workspace.session_event_at.clear();
-            workspace.mark_activity_dirty();
-            workspace.sync_activity(cx);
-            assert_eq!(workspace.session_event_at.get("urgency-terminal"), None);
-        });
-        // Idle -> Running is an event.
-        workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.activity.agent_spawned("pane-0", "claude", Instant::now());
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
-            assert!(workspace.session_event_at.contains_key("urgency-terminal"));
+            assert_eq!(
+                workspace.session_last_seen.get("urgency-terminal"),
+                Some(&ActivityStatus::Running)
+            );
+            assert!(
+                !workspace.session_event_at.contains_key("urgency-terminal"),
+                "a first non-idle observation is not an event"
+            );
             let pills = workspace.sidebar.read(cx).worktree_pills(1);
             assert_eq!(pills[0].status, Some(ActivityStatus::Running));
-            assert_eq!(
-                pills[0].last_event_at,
-                workspace.session_event_at.get("urgency-terminal").copied()
-            );
+            assert_eq!(pills[0].last_event_at, None);
         });
         // Running -> Done is an event; staying Done is not; losing the
         // status (the pane reads idle) is not. Each step clears the entry
