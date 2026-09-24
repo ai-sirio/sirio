@@ -1,6 +1,6 @@
 ---
 name: sirio
-description: Use when running inside a Sirio pane to create and manage terminal panels, dispatch worker agents, wait for completion, read output, report status, or leave worktree progress comments through sirioctl.
+description: Use when running inside a Sirio pane to create and manage terminal panels, dispatch worker agents, wait for completion, read output, report status, leave worktree progress comments, or inspect and drive a web page in Sirio's browser through sirioctl.
 ---
 <!-- Machine-managed by Sirio. Do not edit this installed copy. -->
 
@@ -14,7 +14,7 @@ sirioctl ping
 sirioctl identify --json
 ```
 
-Treat returned UUIDs as the only orchestration state. Never infer a target from Sirio's visually selected worktree, tab, pane, focus, or layout.
+Treat returned UUIDs as the only orchestration state. Never infer a target from Sirio's visually selected worktree, tab, pane, focus, or layout: the user can change any of them while you work, so a target read from the screen can point somewhere else by the time you act on it.
 
 ## Create panels and capture UUIDs
 
@@ -25,7 +25,7 @@ TAB_ID=$(sirioctl panel create --cmd 'codex')
 SPLIT_ID=$(sirioctl panel split right --from "$TAB_ID" --cmd 'pi')
 ```
 
-`panel split --from` only accepts a UUID that `panel create` or `panel split` itself returned — never `$SIRIO_PANE_ID` or any other static pane/tab id, not even the caller's own current pane; passing one fails with `unknown pane`. It does not authorize visual-selection inference either way. Use `TAB_ID` for the tab above and `SPLIT_ID` for the split above rather than whichever panel happens to be focused.
+`panel split --from` only accepts a UUID that `panel create` or `panel split` itself returned — never `$SIRIO_PANE_ID` or any other static pane/tab id, not even the caller's own current pane; passing one fails with `unknown pane`. Use `TAB_ID` for the tab above and `SPLIT_ID` for the split above rather than whichever panel happens to be focused.
 
 ## Drive a known panel
 
@@ -63,18 +63,9 @@ sirioctl panel read --id "$WORKER_ID"
 exit "$status"
 ```
 
-The trap performs cleanup for successful completion, child failure, and an interrupted orchestration path. Do not replace explicit UUID targeting with current-selection assumptions.
+The trap performs cleanup for successful completion, child failure, and an interrupted orchestration path.
 
 ## Browser automation
-
-**Not currently invocable.** `sirioctl` has no `browser` subcommand — every
-verb below only exists as a `browser.*` control-socket request, reachable
-today only by sending that request directly (see
-`sirio_control/examples/browser_probe.rs`), not through this CLI. Attempting
-any `sirioctl browser ...` command below fails with `unknown command
-'browser'`. Tracked in
-[#458](https://github.com/ai-sirio/sirio/issues/458); treat this section as
-the intended contract, not a working recipe, until it lands.
 
 Use the browser surface when an agent needs to inspect or drive a page inside
 Sirio. Browser commands target the caller's worktree by default. Keep the
