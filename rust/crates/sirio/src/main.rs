@@ -7980,6 +7980,24 @@ impl SirioWorkspace {
         }
     }
 
+    fn restore_tab_drag_order(&mut self, snapshot: &TabDragSnapshot) {
+        let mut restored = Vec::with_capacity(self.tabs.len());
+        for id in &snapshot.order {
+            if let Some(position) = self.tabs.iter().position(|tab| tab.id == *id) {
+                restored.push(self.tabs.remove(position));
+            }
+        }
+        // Defensive: any tab not named in the snapshot (none should exist --
+        // no tab opens or closes mid-drag) keeps its relative order, appended
+        // after the restored ones rather than silently dropped.
+        restored.append(&mut self.tabs);
+        self.tabs = restored;
+        self.active_tab = snapshot
+            .active_id
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
+    }
+
     /// F-TAB-24: Escape mid-tab-drag put the tab order back the way it was.
     /// `preview_tab_reorder` above has no separate "commit" step -- it
     /// mutates `self.tabs` on every hover crossing -- so cancelling means
@@ -8000,21 +8018,7 @@ impl SirioWorkspace {
         };
         self.pane_drop_target = None;
         cx.stop_active_drag(window);
-        let mut restored = Vec::with_capacity(self.tabs.len());
-        for id in &snapshot.order {
-            if let Some(position) = self.tabs.iter().position(|tab| tab.id == *id) {
-                restored.push(self.tabs.remove(position));
-            }
-        }
-        // Defensive: any tab not named in the snapshot (none should exist --
-        // no tab opens or closes mid-drag) keeps its relative order, appended
-        // after the restored ones rather than silently dropped.
-        restored.append(&mut self.tabs);
-        self.tabs = restored;
-        self.active_tab = snapshot
-            .active_id
-            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
-            .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
+        self.restore_tab_drag_order(&snapshot);
         self.rebuild_center_split();
         self.schedule_save(cx);
         self.mark_activity_dirty();
@@ -8178,11 +8182,19 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tab_drag_snapshot = None;
+        let snapshot = self.tab_drag_snapshot.take();
         let target = self.pane_drop_target.take();
         if drag.scope == ReorderScope::Tabs
             && let Some(target) = target.filter(|target| target.pane == pane)
         {
+            let crosses_panes = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == drag.id)
+                .is_some_and(|tab| tab.pane != target.pane);
+            if crosses_panes && let Some(snapshot) = snapshot.as_ref() {
+                self.restore_tab_drag_order(snapshot);
+            }
             self.move_tab_to_pane(drag.id, target.pane, target.anchor, Some(window), cx);
         }
         cx.notify();
@@ -28760,6 +28772,113 @@ done
                     .center_split
                     .tabs_for(PaneRole::Secondary, &workspace.tabs),
                 vec![2, 3, 0]
+            );
+        });
+    }
+
+    /// F-TAB-24 + Spec §3: the cross-half drop hands the source half to the
+    /// neighbour from the tab's pre-drag slot, even after a live strip preview.
+    #[gpui::test]
+    async fn cross_half_drop_uses_the_pre_drag_neighbour_for_the_source_half(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[0].title = "A".into();
+            workspace.tabs[1].title = "B".into();
+            workspace.tabs[2].title = "C".into();
+            workspace.select_tab(1, None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let source = cx.debug_bounds("workspace-tab-1").expect("B is drawn");
+        let first = cx.debug_bounds("workspace-tab-0").expect("A is drawn");
+        let before_a = point(first.origin.x + px(4.0), first.center().y);
+        assert!(first.contains(&before_a));
+        begin_tab_drag(&mut cx, source.center(), before_a);
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tab_drag_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.dragged)
+            }),
+            Some(1),
+            "the drag starts on B"
+        );
+        // The same-half drag-move callbacks all receive the move; make the
+        // intended before-A slot the last preview before crossing halves.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.drag_over_tab(
+                RowDrag {
+                    scope: ReorderScope::Tabs,
+                    id: 1,
+                    group: None,
+                },
+                0,
+                true,
+                true,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.title.clone())
+                    .collect::<Vec<_>>()
+            }),
+            vec!["B".to_owned(), "A".to_owned(), "C".to_owned()],
+            "the left-strip hover must live-reorder B before crossing"
+        );
+
+        cx.debug_bounds("secondary-surface")
+            .expect("the right body is drawn");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.pane_drop_target = Some(PaneDropTarget {
+                pane: PaneRole::Secondary,
+                anchor: None,
+            });
+            workspace.drop_on_pane(
+                RowDrag {
+                    scope: ReorderScope::Tabs,
+                    id: 1,
+                    group: None,
+                },
+                PaneRole::Secondary,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let left = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.pane == PaneRole::Primary)
+                .map(|tab| tab.title.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(left, vec!["A".to_owned(), "C".to_owned()]);
+            let shown = workspace.center_split.active(PaneRole::Primary).unwrap();
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == shown)
+                    .unwrap()
+                    .title,
+                "C"
             );
         });
     }

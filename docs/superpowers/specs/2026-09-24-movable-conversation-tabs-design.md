@@ -198,9 +198,9 @@ The strip container's existing `on_drop::<RowDrag>` calls
 target as today. An empty strip accepts the drop as "at the end".
 
 The in-strip live preview only ever moves the dragged tab, so the other
-tabs' relative order is intact when the pointer crosses to the other half;
-`move_tab_to_pane` re-places the dragged tab regardless, and nothing needs
-restoring.
+tabs' relative order stays intact. `move_tab_to_pane` re-places the dragged
+tab regardless, but the source half's hand-off reads its position, so
+`drop_on_pane` first restores the pre-drag order.
 
 ### Drop on the other pane's body
 
