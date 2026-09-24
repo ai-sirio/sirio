@@ -745,7 +745,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             }
                             let question = permission::is_question(&request)
                                 .then(|| crate::parse_permission_question(&request.input))
-                                .flatten();
+                                .flatten()
+                                .map(permission::with_free_text);
                             let options = if permission::is_question(&request) {
                                 permission::question_options(&request)
                             } else {

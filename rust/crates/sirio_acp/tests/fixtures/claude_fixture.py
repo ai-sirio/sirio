@@ -384,7 +384,8 @@ def main():
                 tool_input = {"questions": [{
                     "header": "Pick a branch",
                     "question": "Which branch should this target?",
-                    "options": [{"label": "main"}, {"label": "dev"}],
+                    "options": [{"label": "main", "description": "The default branch"},
+                                {"label": "dev"}],
                 }]}
                 assistant_tool_use("toolu_q_1", "AskUserQuestion", tool_input)
                 ask_permission("cli-q-1", "AskUserQuestion", "toolu_q_1", tool_input)

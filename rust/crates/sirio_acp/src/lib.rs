@@ -452,6 +452,9 @@ pub struct PermissionOption {
     pub name: String,
     /// Protocol-defined permission kind.
     pub kind: String,
+    /// What choosing it means, when the agent says. Only a native
+    /// `AskUserQuestion` option carries one; ACP options have no such field.
+    pub description: Option<String>,
 }
 
 /// A model choice advertised by the agent for this session.
@@ -2212,6 +2215,7 @@ fn permission_option(option: &ProtocolPermissionOption) -> PermissionOption {
         id: option.option_id.to_string(),
         name: option.name.clone(),
         kind: format!("{:?}", option.kind),
+        description: None,
     }
 }
 

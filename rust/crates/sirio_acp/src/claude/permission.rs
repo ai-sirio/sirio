@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 use sirio_claude::{CanUseTool, PermissionResult};
 
-use crate::PermissionOption;
+use crate::{PermissionOption, PermissionQuestion, PermissionTextInput};
 
 /// An answer, plus the mode change that has to follow it.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +43,7 @@ fn option(id: &str, name: &str, kind: &str) -> PermissionOption {
         id: id.to_string(),
         name: name.to_string(),
         kind: kind.to_string(),
+        description: None,
     }
 }
 
@@ -135,11 +136,34 @@ pub(super) fn question_options(request: &CanUseTool) -> Vec<PermissionOption> {
         .map(|options| {
             options
                 .iter()
-                .filter_map(|choice| choice.get("label").and_then(Value::as_str))
-                .map(|label| option(label, label, "AllowOnce"))
+                .filter_map(|choice| {
+                    let label = choice.get("label").and_then(Value::as_str)?;
+                    Some(PermissionOption {
+                        description: choice
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|description| !description.is_empty())
+                            .map(ToOwned::to_owned),
+                        ..option(label, label, "AllowOnce")
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A native question with a free-text field, declared or not. The typed
+/// answer is written into the tool's `answers` as it arrives
+/// (`answer_for_question`), so this transport can always take one; the ACP
+/// transport cannot (typed text would reach the agent as an option id it
+/// never offered), which is why this lives here and not in the surface.
+pub(super) fn with_free_text(mut question: PermissionQuestion) -> PermissionQuestion {
+    question.text_input.get_or_insert(PermissionTextInput {
+        placeholder: None,
+        prefill: None,
+    });
+    question
 }
 
 #[cfg(test)]
@@ -283,5 +307,63 @@ mod tests {
         // The rest of the input survives: the tool reads its own questions
         // back out of it.
         assert!(updated_input["questions"].is_array());
+    }
+
+    #[test]
+    fn a_question_option_carries_its_description() {
+        let question = request(
+            "AskUserQuestion",
+            json!({"questions": [{"header": "Pick", "question": "Which one?",
+                                  "options": [{"label": "A", "description": "The first"},
+                                              {"label": "B"},
+                                              {"label": "C", "description": "  "}]}]}),
+            vec![],
+        );
+        assert_eq!(
+            question_options(&question)
+                .iter()
+                .map(|option| option.description.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("The first"), None, None],
+            "a blank description is no description"
+        );
+    }
+
+    #[test]
+    fn a_permission_option_has_no_description() {
+        let options = options_for(&request("Bash", json!({"command": "ls"}), vec![]));
+        assert!(options.iter().all(|option| option.description.is_none()));
+    }
+
+    #[test]
+    fn a_native_question_always_offers_free_text() {
+        // The native transport writes whatever text arrives into the
+        // tool's `answers` (`answer_for_question`), so the field is safe to
+        // offer even when the tool input declared none.
+        let bare = PermissionQuestion {
+            header: "Pick".into(),
+            prompt: "Which one?".into(),
+            text_input: None,
+        };
+        assert_eq!(
+            with_free_text(bare).text_input,
+            Some(PermissionTextInput {
+                placeholder: None,
+                prefill: None
+            })
+        );
+        // A declared field keeps its own placeholder and prefill.
+        let declared = PermissionQuestion {
+            header: "Pick".into(),
+            prompt: "Which one?".into(),
+            text_input: Some(PermissionTextInput {
+                placeholder: Some("Branch".into()),
+                prefill: Some("main".into()),
+            }),
+        };
+        assert_eq!(
+            with_free_text(declared.clone()).text_input,
+            declared.text_input
+        );
     }
 }
