@@ -8203,9 +8203,11 @@ impl SirioWorkspace {
         if self.pane_drop_overlay_role(cx) != Some(role) {
             return None;
         }
-        let targeted = self
-            .pane_drop_target
-            .is_some_and(|target| target.pane == role);
+        let targeted = self.pane_drop_target
+            == Some(PaneDropTarget {
+                pane: role,
+                anchor: None,
+            });
         let selector = match role {
             PaneRole::Primary => "pane-drop-overlay-primary",
             PaneRole::Secondary => "pane-drop-overlay-secondary",
@@ -8220,9 +8222,21 @@ impl SirioWorkspace {
                 .left_0()
                 .size_full()
                 .when(targeted, |this| {
-                    this.bg(theme.element_active)
+                    let this = this
+                        .bg(theme.element_active)
                         .border_2()
-                        .border_color(theme.border_strong)
+                        .border_color(theme.border_strong);
+                    #[cfg(test)]
+                    let this = this.child(
+                        div()
+                            .id(format!("{selector}-filled"))
+                            .debug_selector(move || format!("{selector}-filled"))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_0(),
+                    );
+                    this
                 })
                 .on_drag_move::<RowDrag>(move |event, _, cx| {
                     let drag = *event.drag(cx);
@@ -28697,6 +28711,57 @@ done
             cx.debug_bounds("tab-drop-indicator-3").is_none(),
             "the bar goes with the drag"
         );
+    }
+
+    /// Spec §5: the body overlay fills only over the body, not while a strip
+    /// slot is targeted; the tab insertion bar remains the only strip cue.
+    #[gpui::test]
+    async fn drawn_strip_drop_shows_only_the_bar_until_the_body_is_hovered(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source tab is drawn")
+            .center();
+        let target = cx
+            .debug_bounds("workspace-tab-3")
+            .expect("target tab is drawn");
+        let before_three = point(target.origin.x + px(4.0), target.center().y);
+        begin_tab_drag(&mut cx, source, before_three);
+
+        assert!(cx.debug_bounds("tab-drop-indicator-3").is_some());
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_some());
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_none(),
+            "the insertion bar targets a strip slot, so the body remains clear"
+        );
+
+        let body = cx
+            .debug_bounds("secondary-surface")
+            .expect("the right body is drawn")
+            .center();
+        cx.simulate_event(MouseMoveEvent {
+            position: body,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_some(),
+            "hovering the body fills the overlay"
+        );
+        release_tab_drag(&mut cx, body);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3, 0]
+            );
+        });
     }
 
     /// Spec §5: released anywhere on the right half's body, a terminal lands
