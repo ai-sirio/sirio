@@ -3,7 +3,7 @@ use sirio_project::PaneRole;
 use crate::OpenTab;
 
 /// What [`CenterSplit`] needs to know about a tab: its identity, and which
-/// half of the split its kind puts it in.
+/// half of the split it is stored in.
 ///
 /// A trait rather than `&[OpenTab]` so the split's own tests can exercise it
 /// without minting a `gpui` entity. `CenterSplit` is pure state — a test that
@@ -22,7 +22,7 @@ impl SplitTab for OpenTab {
     }
 
     fn split_role(&self) -> PaneRole {
-        self.kind.default_pane()
+        self.pane
     }
 }
 
@@ -213,13 +213,13 @@ mod tests {
     use super::{CenterSplit, MoveDirection, SplitTab};
     use sirio_project::{PaneRole, TabKind};
 
-    /// The split reads exactly two things off a tab. Building those two
+    /// The split reads a tab's id and stored half. Building those two
     /// directly keeps these tests on the model: an `OpenTab` would drag in a
     /// live `TerminalView` entity, which cannot be faked without undefined
     /// behaviour and cannot be built without a window.
     struct TestTab {
         id: usize,
-        kind: TabKind,
+        pane: PaneRole,
     }
 
     impl SplitTab for TestTab {
@@ -228,12 +228,18 @@ mod tests {
         }
 
         fn split_role(&self) -> PaneRole {
-            self.kind.default_pane()
+            self.pane
         }
     }
 
+    /// A tab in its kind's home half — every tab, before anything moves.
     fn make_tab(id: usize, kind: TabKind) -> TestTab {
-        TestTab { id, kind }
+        placed(id, kind, kind.default_pane())
+    }
+
+    /// A tab in a chosen half: what a moved terminal or chat looks like.
+    fn placed(id: usize, _kind: TabKind, pane: PaneRole) -> TestTab {
+        TestTab { id, pane }
     }
 
     fn tabs_primary_secondary() -> Vec<TestTab> {
@@ -334,6 +340,31 @@ mod tests {
         split.rebuild(&remaining);
         assert_eq!(split.focused(), PaneRole::Primary);
         assert_eq!(split.active(PaneRole::Secondary), None);
+    }
+
+    /// Spec 2026-09-24 §3: the split reads the half stored on the tab, not
+    /// its kind, so a terminal placed on the right is a right-hand tab.
+    #[test]
+    fn a_terminal_placed_right_belongs_to_the_right_half() {
+        let tabs = vec![
+            make_tab(1, TabKind::Terminal),
+            placed(2, TabKind::Terminal, PaneRole::Secondary),
+            make_tab(3, TabKind::Editor),
+        ];
+        let mut split = CenterSplit::new(&tabs);
+        assert_eq!(split.tabs_for(PaneRole::Primary, &tabs), vec![1]);
+        assert_eq!(split.tabs_for(PaneRole::Secondary, &tabs), vec![2, 3]);
+
+        assert!(split.select_tab(2, &tabs));
+        assert_eq!(split.focused(), PaneRole::Secondary);
+        assert_eq!(split.active(PaneRole::Secondary), Some(2));
+
+        split.rebuild(&tabs);
+        assert_eq!(
+            split.active(PaneRole::Secondary),
+            Some(2),
+            "rebuild keeps it right"
+        );
     }
 
     #[test]

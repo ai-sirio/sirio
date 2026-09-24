@@ -1114,6 +1114,12 @@ struct OpenTab {
     persistence_id: String,
     title: String,
     kind: TabKind,
+    /// The half of the centre split this tab is drawn in. Starts at its
+    /// kind's home half; only `move_tab_to_pane` changes it, and only
+    /// for a kind that `can_move_between_panes` — so a Browser, Editor, Diff
+    /// or Project Settings tab is always in its home half. Restore reads it
+    /// through `session::placement_for`, which keeps the same invariant.
+    pane: PaneRole,
     /// The agent brand shown for an agent-backed terminal tab. `None` means
     /// the surface kind decides the icon (chat, terminal, or file).
     agent_icon: Option<Icon>,
@@ -1126,6 +1132,17 @@ struct OpenTab {
     /// user-driven rename (`commit_tab_rename`) turns it off, which is the
     /// only thing that permanently opts a tab out of automatic renaming.
     title_is_auto_named: bool,
+}
+
+#[cfg(test)]
+impl OpenTab {
+    /// Test fixtures build terminals and then re-kind some of them. The half
+    /// is part of the tab now, so re-kinding re-homes it too — a Browser left
+    /// in the Primary half would break the invariant `pane` carries.
+    fn set_kind(&mut self, kind: TabKind) {
+        self.kind = kind;
+        self.pane = TabKind::default_pane(kind);
+    }
 }
 
 /// Where `SirioWorkspace::sync_sidebar_tabs` takes the parked rows of a
@@ -5222,7 +5239,7 @@ impl SirioWorkspace {
         let persisted_secondary_pane_hidden = session.secondary_pane_hidden_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
-            .is_some_and(|tab| tab.kind.default_pane() == PaneRole::Secondary);
+            .is_some_and(|tab| tab.pane == PaneRole::Secondary);
         if restored_active_secondary && persisted_secondary_pane_hidden {
             // Keep the restored active surface visible and make the repaired
             // state survive the next restart as well.
@@ -5797,8 +5814,7 @@ impl SirioWorkspace {
                 .map(|tab| {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
-                    state.shown_in_pane =
-                        self.center_split.active(tab.kind.default_pane()) == Some(tab.id);
+                    state.shown_in_pane = self.center_split.active(tab.pane) == Some(tab.id);
                     tab.panes.for_each(&mut |pane_id, content| {
                         match content {
                             TabContent::Terminal { view } => {
@@ -7879,7 +7895,7 @@ impl SirioWorkspace {
         if from == target {
             return false;
         }
-        if self.tabs[from].kind.default_pane() != self.tabs[target].kind.default_pane() {
+        if self.tabs[from].pane != self.tabs[target].pane {
             return false;
         }
         let active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -10259,23 +10275,20 @@ impl SirioWorkspace {
     }
 
     /// Rebuilds the per-role active tab after tabs were added, removed or
-    /// reordered. Membership is derived, so the only invariant is that a
-    /// role's remembered active still exists in that role.
+    /// reordered. Membership is each tab's stored `pane`, so the only
+    /// invariant is that a role's remembered active still exists in that role.
     fn rebuild_center_split(&mut self) {
-        let desired = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| (tab.kind.default_pane(), tab.id));
+        let desired = self.tabs.get(self.active_tab).map(|tab| (tab.pane, tab.id));
         let primary_ids: Vec<usize> = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.default_pane() == PaneRole::Primary)
+            .filter(|tab| tab.pane == PaneRole::Primary)
             .map(|tab| tab.id)
             .collect();
         let secondary_ids: Vec<usize> = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.default_pane() == PaneRole::Secondary)
+            .filter(|tab| tab.pane == PaneRole::Secondary)
             .map(|tab| tab.id)
             .collect();
 
@@ -10419,7 +10432,7 @@ impl SirioWorkspace {
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         for (pane_id, view) in panes {
             let content_id = format!("terminal-{pane_id}");
-            let role_str = match tab.kind.default_pane() {
+            let role_str = match tab.pane {
                 PaneRole::Primary => "primary",
                 PaneRole::Secondary => "secondary",
             };
@@ -10615,10 +10628,7 @@ impl SirioWorkspace {
     /// a group that regained a tab has its entry dropped, which also drops
     /// its `TerminalView` entity and the subscription tied to it.
     fn sync_empty_pane_prompts(&mut self, cx: &mut Context<Self>) {
-        let has_primary = self
-            .tabs
-            .iter()
-            .any(|tab| tab.kind.default_pane() == PaneRole::Primary);
+        let has_primary = self.tabs.iter().any(|tab| tab.pane == PaneRole::Primary);
         if has_primary {
             self.empty_pane_prompts.clear();
             return;
@@ -10765,7 +10775,7 @@ impl SirioWorkspace {
         // list that survives, and "nearest" is a fact about the list that did
         // not. So the position is read here, while the closing tab is still
         // in it.
-        let closing_role = self.tabs[index].kind.default_pane();
+        let closing_role = self.tabs[index].pane;
         let closing_position = self
             .center_split
             .tabs_for(closing_role, &self.tabs)
@@ -11088,6 +11098,7 @@ impl SirioWorkspace {
             persistence_id,
             title: title.clone(),
             kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -11205,6 +11216,7 @@ impl SirioWorkspace {
             persistence_id,
             title: title.clone(),
             kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(pane_id),
@@ -11334,6 +11346,7 @@ impl SirioWorkspace {
             persistence_id,
             title: title.clone(),
             kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(pane_id),
@@ -12240,6 +12253,7 @@ impl SirioWorkspace {
             persistence_id,
             title: seed_title,
             kind: TabKind::ProjectSettings,
+            pane: TabKind::ProjectSettings.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12310,6 +12324,7 @@ impl SirioWorkspace {
                     persistence_id: saved.id.clone(),
                     title,
                     kind: TabKind::ProjectSettings,
+                    pane: TabKind::ProjectSettings.default_pane(),
                     agent_icon: None,
                     agent_id: None,
                     session_state: state,
@@ -12473,6 +12488,7 @@ impl SirioWorkspace {
             // identity stays in TabContent; the shell overlay adjusts its
             // glyph and width below without changing the menu component.
             kind: TabKind::Editor,
+            pane: TabKind::Editor.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12543,6 +12559,7 @@ impl SirioWorkspace {
             persistence_id,
             title: "Changes".to_string(),
             kind: TabKind::Diff,
+            pane: TabKind::Diff.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12577,6 +12594,7 @@ impl SirioWorkspace {
             persistence_id,
             title: "Changes".to_string(),
             kind: TabKind::Diff,
+            pane: TabKind::Diff.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12617,6 +12635,7 @@ impl SirioWorkspace {
             persistence_id,
             title: "Browser".to_string(),
             kind: TabKind::Browser,
+            pane: TabKind::Browser.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(pane_id),
@@ -14124,7 +14143,7 @@ impl SirioWorkspace {
                 if let TabContent::Terminal { view } = content {
                     let sole_tab_in_group = self
                         .center_split
-                        .tabs_for(self.tabs[tab_index].kind.default_pane(), &self.tabs)
+                        .tabs_for(self.tabs[tab_index].pane, &self.tabs)
                         .len()
                         == 1;
                     view.update(cx, |terminal, cx| {
@@ -15211,7 +15230,7 @@ impl SirioWorkspace {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return Vec::new();
         };
-        let role = tab.kind.default_pane();
+        let role = tab.pane;
         let ids = machinery.tabs_for(role, &self.tabs);
         let Some(position) = ids.iter().position(|id| *id == tab_id) else {
             return Vec::new();
@@ -15322,11 +15341,7 @@ impl SirioWorkspace {
         };
         let focused = self.center_split.focused();
         let mut left = 5.0;
-        for tab in self
-            .tabs
-            .iter()
-            .filter(|tab| tab.kind.default_pane() == focused)
-        {
+        for tab in self.tabs.iter().filter(|tab| tab.pane == focused) {
             if tab.id == tab_id {
                 break;
             }
@@ -15773,18 +15788,14 @@ impl SirioWorkspace {
     /// chosen for: the Primary strip widens when the Secondary pane closes,
     /// with no seam to keep aligned by hand.
     fn tab_strip_fit(&self, role: PaneRole, window: &Window, theme: Theme) -> (usize, bool, usize) {
-        let group_len = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.kind.default_pane() == role)
-            .count();
+        let group_len = self.tabs.iter().filter(|tab| tab.pane == role).count();
         if group_len == 0 {
             return (0, false, 0);
         }
         let tab_widths = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.default_pane() == role)
+            .filter(|tab| tab.pane == role)
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
@@ -15823,13 +15834,13 @@ impl SirioWorkspace {
         let Some(active_tab) = self.tabs.get(self.active_tab) else {
             return;
         };
-        if active_tab.kind.default_pane() != focused {
+        if active_tab.pane != focused {
             return;
         }
         let active_index = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.default_pane() == focused)
+            .filter(|tab| tab.pane == focused)
             .position(|tab| tab.id == active_tab.id);
         let Some(active_index) = active_index else {
             return;
@@ -15889,7 +15900,7 @@ impl SirioWorkspace {
         if self
             .tabs
             .get(self.active_tab)
-            .is_some_and(|tab| tab.kind.default_pane() == PaneRole::Secondary)
+            .is_some_and(|tab| tab.pane == PaneRole::Secondary)
         {
             self.open_secondary_pane();
         }
@@ -16027,7 +16038,7 @@ impl SirioWorkspace {
         let group_tabs = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.default_pane() == role)
+            .filter(|tab| tab.pane == role)
             .collect::<Vec<_>>();
         let (visible_count, has_overflow, _) = self.tab_strip_fit(role, window, theme);
         let active_tab_id = self.center_split.active(role);
@@ -16270,7 +16281,7 @@ impl SirioWorkspace {
         let menu_role = self
             .tab_menu_tab
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
-            .map(|tab| tab.kind.default_pane());
+            .map(|tab| tab.pane);
 
         // #320: each pane is its own stack — strip on top, surface below —
         // and the two sit side by side. The strip is *inside* the pane, so
@@ -18991,11 +19002,13 @@ fn restore_tabs_with_terminal_cache(
             // worktree is selected again.
             tab_state.scrollback.remove(pane_id);
         }
+        let kind = tab_kind_from_persisted(&tab.kind);
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: tab_kind_from_persisted(&tab.kind),
+            kind,
+            pane: kind.default_pane(),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -19115,7 +19128,7 @@ fn seed_shown_tabs(
                 continue;
             }
             if let Some(tab) = tabs.iter().find(|tab| {
-                tab.persistence_id == saved_tab.id && tab.kind.default_pane() == role
+                tab.persistence_id == saved_tab.id && tab.pane == role
             }) {
                 center_split.set_active(role, Some(tab.id));
                 break;
@@ -19317,12 +19330,14 @@ fn restore_tabs_in_workspace(
                 }),
             }
         });
+        let kind = session::kind_from_persisted(&tab.kind)
+            .expect("settings and unknown kinds continue above");
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: session::kind_from_persisted(&tab.kind)
-                .expect("settings and unknown kinds continue above"),
+            kind,
+            pane: kind.default_pane(),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -22692,7 +22707,7 @@ done
     fn tab_context_menu_never_offers_a_move_between_panes(cx: &mut TestAppContext) {
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.tabs[1].kind = sirio_project::TabKind::Editor;
+            workspace.tabs[1].set_kind(sirio_project::TabKind::Editor);
             workspace.rebuild_center_split();
             workspace.tab_menu_tab = Some(0);
             workspace
@@ -23458,6 +23473,7 @@ done
                     format!("Terminal {id}")
                 },
                 kind: TabKind::Terminal,
+                pane: TabKind::Terminal.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(id),
@@ -23709,6 +23725,7 @@ done
             persistence_id: "activity-terminal".into(),
             title: "Terminal".into(),
             kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(0),
@@ -23866,6 +23883,7 @@ done
             persistence_id: "urgency-terminal".into(),
             title: "Terminal".into(),
             kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(0),
@@ -24982,6 +25000,7 @@ done
                 persistence_id: "live-chat".into(),
                 title: "Live Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(0),
@@ -26625,6 +26644,7 @@ done
                 persistence_id: "hidden-terminal-notification".into(),
                 title: "Hidden".into(),
                 kind: TabKind::Terminal,
+                pane: TabKind::Terminal.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(1),
@@ -28544,6 +28564,32 @@ done
         );
     }
 
+    /// Spec 2026-09-24 §3: the split reads the half stored on the tab, so a
+    /// terminal stored on the right is a right-hand tab and focuses there.
+    #[gpui::test]
+    fn a_terminal_stored_on_the_right_is_a_right_hand_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].pane = PaneRole::Secondary;
+            workspace.rebuild_center_split();
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Primary, &workspace.tabs),
+                vec![0]
+            );
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![1]
+            );
+            workspace.select_tab(1, None, cx);
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            workspace
+        });
+    }
+
     /// #320: both halves always show which of their tabs is current, but
     /// only the focused half's underline is in the full text colour; the
     /// other half's is faint. The selector carries the state so the test
@@ -28571,6 +28617,7 @@ done
                 persistence_id: "underline-doc".into(),
                 title: "note.md".into(),
                 kind: TabKind::Editor,
+                pane: TabKind::Editor.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(1),
@@ -28790,6 +28837,7 @@ done
                 persistence_id: "wsp01-chat".into(),
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: None,
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(2),
@@ -28812,6 +28860,7 @@ done
                 persistence_id: "wsp01-doc".into(),
                 title: "note.md".into(),
                 kind: TabKind::Editor,
+                pane: TabKind::Editor.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(3),
@@ -28892,6 +28941,7 @@ done
                 persistence_id: "test-chat".into(),
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(0),
@@ -29980,6 +30030,7 @@ done
                 persistence_id: "resumed-chat".into(),
                 title: "Resumed chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(1),
@@ -30191,7 +30242,7 @@ done
         let file_view = cx.update(|_, cx| cx.new(|cx| FileView::new(path.clone(), cx)));
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs[0].title = "status".into();
-            workspace.tabs[0].kind = TabKind::Editor;
+            workspace.tabs[0].set_kind(TabKind::Editor);
             workspace.tabs[0].panes = PaneNode::leaf(
                 0,
                 TabContent::File {
@@ -30243,7 +30294,7 @@ done
         let file_view = cx.update(|_, app| app.new(|cx| FileView::new(path.clone(), cx)));
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs[0].title = "Note".into();
-            workspace.tabs[0].kind = TabKind::Editor;
+            workspace.tabs[0].set_kind(TabKind::Editor);
             // #323: see the matching comment in the tab-status test.
             workspace.open_secondary_pane();
             workspace.tabs[0].panes = PaneNode::leaf(
@@ -36717,7 +36768,7 @@ done
                 "the tab names the project like the sheet heading did"
             );
             assert_eq!(
-                workspace.tabs[index].kind.default_pane(),
+                workspace.tabs[index].pane,
                 PaneRole::Secondary,
                 "settings live in the Secondary half"
             );
@@ -37006,7 +37057,7 @@ done
         cx.set_global(Theme::light());
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.tabs[1].set_kind(TabKind::Editor);
             workspace.active_tab = 1;
             workspace.secondary_pane_hidden = true;
             workspace.rebuild_center_split();
@@ -38039,6 +38090,7 @@ done
                 persistence_id: "test-chat".into(),
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(0),
@@ -38306,7 +38358,7 @@ browser  profile  "
         let window = cx.add_window(|_, cx| {
             let mut workspace =
                 palette_test_workspace_with_tab_count_and_translucency(cx, 2, false);
-            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.tabs[1].set_kind(TabKind::Editor);
             workspace.open_secondary_pane();
             // `rebuild_center_split` reads the focused half off `active_tab`.
             workspace.active_tab = 1;
@@ -38353,7 +38405,7 @@ browser  profile  "
     ) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
             workspace.rebuild_center_split();
             let browser_id = workspace.tabs[1].id;
             workspace.select_tab(browser_id, None, cx);
@@ -38426,6 +38478,7 @@ browser  profile  "
                 persistence_id: "test-editor".into(),
                 title: "open.rs".into(),
                 kind: TabKind::Editor,
+                pane: TabKind::Editor.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(0),
@@ -38540,8 +38593,8 @@ browser  profile  "
     fn layout_marks_the_tab_each_pane_shows(cx: &mut TestAppContext) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            workspace.tabs[1].kind = TabKind::Browser;
-            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
+            workspace.tabs[2].set_kind(TabKind::Browser);
             workspace.active_tab = 0;
             workspace.rebuild_center_split();
             workspace
@@ -38569,8 +38622,8 @@ browser  profile  "
     fn the_unfocused_pane_comes_back_on_its_shown_tab(cx: &mut TestAppContext) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            workspace.tabs[1].kind = TabKind::Browser;
-            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
+            workspace.tabs[2].set_kind(TabKind::Browser);
             workspace.active_tab = 0;
             workspace.center_split = CenterSplit::new(&workspace.tabs);
 
@@ -38607,8 +38660,8 @@ browser  profile  "
     fn a_stale_live_shown_flag_does_not_override_the_saved_one(cx: &mut TestAppContext) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            workspace.tabs[1].kind = TabKind::Browser;
-            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
+            workspace.tabs[2].set_kind(TabKind::Browser);
             workspace.tabs[1].session_state.shown_in_pane = true;
             workspace.active_tab = 0;
             workspace.center_split = CenterSplit::new(&workspace.tabs);
@@ -38795,6 +38848,7 @@ browser  profile  "
                 persistence_id: "test-browser".into(),
                 title: "Browser".into(),
                 kind: TabKind::Browser,
+                pane: TabKind::Browser.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(0),
