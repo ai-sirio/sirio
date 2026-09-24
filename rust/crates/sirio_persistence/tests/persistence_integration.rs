@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sirio_persistence::{
-    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CURRENT_SCHEMA_VERSION, ChatEntry,
-    ChatPermissionOption, ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn,
-    MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord,
+    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CLOSED_CHAT_LIMIT,
+    CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChatEntry, ChatPermissionOption,
+    ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
+    MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, SidebarView, TabRecord,
     TabStateRecord, WorktreeRecord, migrate_up_to,
 };
 
@@ -80,6 +81,8 @@ fn sample_tab(id: &str, worktree_id: &str, title: &str, kind: &str) -> TabRecord
         agent_session_id: None,
         order_idx: 0,
         is_active: false,
+        last_event_at: None,
+        closed_at: None,
     }
 }
 
@@ -2171,4 +2174,175 @@ fn markdown_plantuml_server_round_trips_and_defaults_to_empty() {
         db.settings().expect("read back").markdown_plantuml_server,
         "http://localhost:8080"
     );
+}
+
+fn chat_with_turn(db: &AppDatabase, id: &str, title: &str) {
+    db.save_tab(&sample_tab(id, "worktree", title, "chat"))
+        .expect("chat tab");
+    db.save_chat_transcript(&ChatTranscript {
+        tab_id: id.into(),
+        turns: vec![sample_turn("hello")],
+    })
+    .expect("transcript");
+}
+
+fn archive_fixture(name: &str) -> (TempDir, AppDatabase) {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path(name)).expect("open");
+    db.save_project(&sample_project("project", "Project"))
+        .expect("project");
+    db.save_worktree(&sample_worktree("worktree", "project", "main"))
+        .expect("worktree");
+    (dir, db)
+}
+
+#[test]
+fn an_archived_chat_leaves_the_strip_and_survives_a_strip_save() {
+    let (_dir, db) = archive_fixture("archive-strip");
+    chat_with_turn(&db, "chat-1", "First");
+    chat_with_turn(&db, "chat-2", "Second");
+
+    assert!(db.archive_tab("chat-1", 1_000).expect("archive"));
+    // The host saves the strip without the closed chat right after closing it.
+    db.save_tabs(
+        "worktree",
+        &[sample_tab("chat-2", "worktree", "Second", "chat")],
+    )
+    .expect("strip save");
+
+    let strip: Vec<String> = db
+        .tabs_of_worktree("worktree")
+        .expect("strip")
+        .into_iter()
+        .map(|tab| tab.id)
+        .collect();
+    assert_eq!(
+        strip,
+        ["chat-2"],
+        "the archived chat is not part of the strip"
+    );
+    assert!(db.tabs().expect("all").iter().all(|tab| tab.id != "chat-1"));
+    let closed: Vec<ClosedChatSummary> = db.closed_chats(CLOSED_CHAT_LIMIT).expect("closed");
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].tab_id, "chat-1");
+    assert_eq!(closed[0].title, "First");
+    assert_eq!(closed[0].closed_at, 1_000);
+    assert!(
+        db.load_chat_transcript("chat-1").expect("load").is_some(),
+        "archiving keeps the transcript"
+    );
+}
+
+#[test]
+fn only_chats_are_archived_and_a_chat_without_turns_is_not_listed() {
+    let (_dir, db) = archive_fixture("archive-kinds");
+    db.save_tab(&sample_tab("term", "worktree", "Terminal", "terminal"))
+        .expect("terminal");
+    db.save_tab(&sample_tab("empty", "worktree", "Empty chat", "chat"))
+        .expect("chat");
+
+    assert!(!db.archive_tab("term", 1_000).expect("archive terminal"));
+    assert!(db.archive_tab("empty", 1_000).expect("archive empty chat"));
+    assert!(
+        db.closed_chats(CLOSED_CHAT_LIMIT)
+            .expect("closed")
+            .is_empty()
+    );
+}
+
+#[test]
+fn unarchiving_returns_the_chat_to_the_end_of_its_strip_once() {
+    let (_dir, db) = archive_fixture("unarchive");
+    chat_with_turn(&db, "chat-1", "First");
+    chat_with_turn(&db, "chat-2", "Second");
+    db.archive_tab("chat-1", 1_000).expect("archive");
+
+    assert!(db.unarchive_tab("chat-1").expect("unarchive"));
+    assert!(
+        !db.unarchive_tab("chat-1")
+            .expect("second unarchive is a no-op")
+    );
+
+    let strip = db.tabs_of_worktree("worktree").expect("strip");
+    assert_eq!(strip.last().map(|tab| tab.id.as_str()), Some("chat-1"));
+    assert!(
+        db.closed_chats(CLOSED_CHAT_LIMIT)
+            .expect("closed")
+            .is_empty()
+    );
+}
+
+#[test]
+fn pruning_keeps_the_newest_fifty_and_nothing_older_than_thirty_days() {
+    let (_dir, db) = archive_fixture("prune");
+    let now = 100 * CLOSED_CHAT_MAX_AGE_MS;
+    for index in 0..(CLOSED_CHAT_LIMIT + 3) {
+        let id = format!("chat-{index}");
+        chat_with_turn(&db, &id, "Chat");
+        db.archive_tab(&id, now - 1_000 - index as i64)
+            .expect("archive");
+    }
+    chat_with_turn(&db, "ancient", "Ancient");
+    db.archive_tab("ancient", now - CLOSED_CHAT_MAX_AGE_MS - 1)
+        .expect("archive ancient");
+
+    let pruned = db.prune_closed_chats(now).expect("prune");
+
+    assert_eq!(pruned, 4, "three beyond the limit plus the ancient one");
+    let closed = db.closed_chats(CLOSED_CHAT_LIMIT + 10).expect("closed");
+    assert_eq!(closed.len(), CLOSED_CHAT_LIMIT);
+    assert_eq!(closed[0].tab_id, "chat-0", "newest first");
+    assert!(db.load_chat_transcript("ancient").expect("load").is_none());
+}
+
+#[test]
+fn removing_a_worktree_removes_its_archived_chats() {
+    let (_dir, db) = archive_fixture("archive-cascade");
+    chat_with_turn(&db, "chat-1", "First");
+    db.archive_tab("chat-1", 1_000).expect("archive");
+
+    db.remove_worktree("worktree").expect("remove worktree");
+
+    assert!(
+        db.closed_chats(CLOSED_CHAT_LIMIT)
+            .expect("closed")
+            .is_empty()
+    );
+}
+
+#[test]
+fn touching_tabs_reports_unknown_ids_and_never_moves_an_event_back() {
+    let (_dir, db) = archive_fixture("touch");
+    db.save_tab(&sample_tab("tab-1", "worktree", "Chat", "chat"))
+        .expect("tab");
+
+    let unmatched = db
+        .touch_tabs(&[("tab-1".into(), 5_000), ("missing".into(), 5_000)])
+        .expect("touch");
+    assert_eq!(unmatched, ["missing"]);
+    db.touch_tabs(&[("tab-1".into(), 4_000)])
+        .expect("older touch");
+    // A strip save must not reset the column.
+    db.save_tabs(
+        "worktree",
+        &[sample_tab("tab-1", "worktree", "Chat", "chat")],
+    )
+    .expect("strip save");
+
+    assert_eq!(
+        db.tab_event_times().expect("times"),
+        [("tab-1".to_string(), 5_000)]
+    );
+    assert_eq!(
+        db.tabs_of_worktree("worktree").expect("strip")[0].last_event_at,
+        Some(5_000)
+    );
+}
+
+#[test]
+fn the_sidebar_view_round_trips_and_defaults_to_projects() {
+    let (_dir, db) = archive_fixture("sidebar-view");
+    assert_eq!(db.sidebar_view().expect("default"), SidebarView::Projects);
+    db.set_sidebar_view(SidebarView::Sessions).expect("save");
+    assert_eq!(db.sidebar_view().expect("load"), SidebarView::Sessions);
 }

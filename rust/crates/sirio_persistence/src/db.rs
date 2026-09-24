@@ -19,9 +19,9 @@ use crate::agent_ref::AgentRef;
 use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
-    AgentAccountRecord, AppSettings, AppearanceMode, ChatSessionSummary, ChatTranscript, ChatTurn,
-    BaseColor, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord, SidebarState,
-    TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
+    AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChatSessionSummary, ChatTranscript,
+    ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
+    SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
 
 /// Durable storage for what Sirio must remember across launches.
@@ -339,8 +339,9 @@ impl AppDatabase {
         read_tabs(
             &self.conn,
             "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active,
-                    agent_session_id
+                    agent_session_id, last_event_at, closed_at
              FROM tab
+             WHERE closed_at IS NULL
              ORDER BY worktree_id, order_idx, id",
             [],
         )
@@ -351,9 +352,9 @@ impl AppDatabase {
         read_tabs(
             &self.conn,
             "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active,
-                    agent_session_id
+                    agent_session_id, last_event_at, closed_at
              FROM tab
-             WHERE worktree_id = ?1
+             WHERE worktree_id = ?1 AND closed_at IS NULL
              ORDER BY order_idx, id",
             [worktree_id],
         )
@@ -415,13 +416,16 @@ impl AppDatabase {
     /// `ON DELETE CASCADE` to `tab(id)`, so a delete/insert pair — even for
     /// the *same* tab id within the same transaction — wipes any persisted
     /// chat transcript for that tab. Only tabs no longer present in `tabs`
-    /// are deleted, which cascades their transcripts away deliberately.
+    /// Only open tabs no longer present in `tabs` are deleted (cascading
+    /// their transcripts); archived chats (`closed_at IS NOT NULL`) are left
+    /// alone.
     pub fn save_tabs(&self, worktree_id: &str, tabs: &[TabRecord]) -> Result<(), PersistenceError> {
         let transaction = write_transaction(&self.conn)?;
         let keep_ids: std::collections::HashSet<&str> =
             tabs.iter().map(|t| t.id.as_str()).collect();
         let stale_ids: Vec<String> = {
-            let mut statement = transaction.prepare("SELECT id FROM tab WHERE worktree_id = ?1")?;
+            let mut statement = transaction
+                .prepare("SELECT id FROM tab WHERE worktree_id = ?1 AND closed_at IS NULL")?;
             let mut rows = statement.query([worktree_id])?;
             let mut stale = Vec::new();
             while let Some(row) = rows.next()? {
@@ -506,7 +510,7 @@ impl AppDatabase {
             "SELECT tab_state.rowid, tab_state.tab_id, tab_state.state
              FROM tab_state
              JOIN tab ON tab.id = tab_state.tab_id
-             WHERE tab.worktree_id = ?1
+             WHERE tab.worktree_id = ?1 AND tab.closed_at IS NULL
              ORDER BY tab.order_idx, tab.id",
         )?;
         let mut rows = statement.query([worktree_id])?;
@@ -633,6 +637,131 @@ impl AppDatabase {
             .conn
             .execute("DELETE FROM chat_turn WHERE tab_id = ?1", [tab_id])?
             > 0)
+    }
+
+    /// Archives a closed chat instead of deleting it: stamps `closed_at` and
+    /// clears `is_active`, so the strip no longer lists it and the Sessions
+    /// view can. Returns `false` for an unknown id or a tab that is not a chat.
+    pub fn archive_tab(&self, id: &str, closed_at: i64) -> Result<bool, PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        let changed = transaction.execute(
+            "UPDATE tab SET closed_at = ?2, is_active = 0 WHERE id = ?1 AND kind = 'chat'",
+            params![id, closed_at],
+        )?;
+        transaction.commit()?;
+        Ok(changed > 0)
+    }
+
+    /// Returns an archived chat to the end of its worktree's strip. Returns
+    /// `false` when the id is not archived (already reopened, or deleted).
+    pub fn unarchive_tab(&self, id: &str) -> Result<bool, PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        let changed = transaction.execute(
+            "UPDATE tab SET closed_at = NULL, is_active = 0,
+                 order_idx = (SELECT COALESCE(MAX(open.order_idx), -1) + 1
+                              FROM tab AS open
+                              WHERE open.worktree_id = tab.worktree_id
+                                AND open.closed_at IS NULL)
+             WHERE id = ?1 AND closed_at IS NOT NULL",
+            [id],
+        )?;
+        transaction.commit()?;
+        Ok(changed > 0)
+    }
+
+    /// Archived chats that still hold at least one turn, newest first.
+    pub fn closed_chats(&self, limit: usize) -> Result<Vec<ClosedChatSummary>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tab.id, worktree.path, tab.title, tab.agent_id, tab.agent_session_id,
+                    tab.closed_at
+             FROM tab
+             JOIN worktree ON worktree.id = tab.worktree_id
+             WHERE tab.closed_at IS NOT NULL AND tab.kind = 'chat'
+               AND EXISTS (SELECT 1 FROM chat_turn WHERE chat_turn.tab_id = tab.id)
+             ORDER BY tab.closed_at DESC, tab.id
+             LIMIT ?1",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map([limit], |row| {
+            Ok(ClosedChatSummary {
+                tab_id: row.get(0)?,
+                worktree_path: row.get(1)?,
+                title: row.get(2)?,
+                agent_id: row
+                    .get::<_, Option<String>>(3)?
+                    .map(|s| AgentRef::from_db(&s)),
+                agent_session_id: row.get(4)?,
+                closed_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Deletes archived chats beyond `CLOSED_CHAT_LIMIT`, older than
+    /// `CLOSED_CHAT_MAX_AGE_MS`, or holding no turn; the cascade takes their
+    /// transcripts. Returns how many were deleted.
+    pub fn prune_closed_chats(&self, now_ms: i64) -> Result<usize, PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        let expired = transaction.execute(
+            "DELETE FROM tab
+             WHERE closed_at IS NOT NULL
+               AND (closed_at < ?1
+                    OR NOT EXISTS (SELECT 1 FROM chat_turn WHERE chat_turn.tab_id = tab.id))",
+            [now_ms.saturating_sub(crate::CLOSED_CHAT_MAX_AGE_MS)],
+        )?;
+        let overflow = transaction.execute(
+            "DELETE FROM tab WHERE id IN (
+                 SELECT id FROM tab WHERE closed_at IS NOT NULL
+                 ORDER BY closed_at DESC, id
+                 LIMIT -1 OFFSET ?1)",
+            [i64::try_from(crate::CLOSED_CHAT_LIMIT).unwrap_or(i64::MAX)],
+        )?;
+        transaction.commit()?;
+        Ok(expired + overflow)
+    }
+
+    /// Records agent events: each `(id, at)` moves `last_event_at` forward to
+    /// `at`, never back. Returns the ids that matched no row — a tab created
+    /// less than one save-debounce ago — so the caller can retry them.
+    pub fn touch_tabs(&self, touches: &[(String, i64)]) -> Result<Vec<String>, PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        let mut unmatched = Vec::new();
+        for (id, at) in touches {
+            let changed = transaction.execute(
+                "UPDATE tab SET last_event_at = MAX(COALESCE(last_event_at, 0), ?2) WHERE id = ?1",
+                params![id, at],
+            )?;
+            if changed == 0 {
+                unmatched.push(id.clone());
+            }
+        }
+        transaction.commit()?;
+        Ok(unmatched)
+    }
+
+    /// Every tab's last agent event, for seeding the host's in-memory map.
+    pub fn tab_event_times(&self) -> Result<Vec<(String, i64)>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, last_event_at FROM tab WHERE last_event_at IS NOT NULL ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The sidebar's chosen view; `Projects` when unset or unrecognised.
+    pub fn sidebar_view(&self) -> Result<SidebarView, PersistenceError> {
+        Ok(self
+            .setting_value(settings_keys::SIDEBAR_VIEW)?
+            .as_deref()
+            .and_then(SidebarView::parse)
+            .unwrap_or_default())
+    }
+
+    pub fn set_sidebar_view(&self, view: SidebarView) -> Result<(), PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        set_setting(&transaction, settings_keys::SIDEBAR_VIEW, view.raw())?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Loads one chat tab's rendered transcript in display order.
@@ -1516,6 +1645,8 @@ fn map_tab(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<TabRecord> {
         agent_session_id: row.get(offset + 7)?,
         order_idx: row.get(offset + 5)?,
         is_active: row.get(offset + 6)?,
+        last_event_at: row.get(offset + 8)?,
+        closed_at: row.get(offset + 9)?,
     })
 }
 

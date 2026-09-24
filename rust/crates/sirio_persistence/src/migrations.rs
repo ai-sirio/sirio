@@ -480,6 +480,21 @@ fn migrate_v19(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v20 — when a tab's agent last did something, and whether it was closed.
+///
+/// `last_event_at` is the Unix-millisecond time of the tab's last agent event
+/// (a transition into running, needs-input, done or error), written only by
+/// `AppDatabase::touch_tabs`; the Sessions view of the sidebar sorts by it.
+/// `closed_at` marks a chat the user closed: archived instead of deleted so
+/// the Sessions view can list and reopen it. Both are nullable and never
+/// backfilled — an existing tab is open and has no known event.
+fn migrate_v20(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE tab ADD COLUMN last_event_at INTEGER;
+         ALTER TABLE tab ADD COLUMN closed_at INTEGER;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -502,6 +517,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v17,
     migrate_v18,
     migrate_v19,
+    migrate_v20,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -897,6 +913,31 @@ mod tests {
             )
             .expect("read the new column");
         assert_eq!(agent_session_id, None);
+    }
+
+    #[test]
+    fn a_tab_saved_before_v20_is_open_and_has_no_event() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate_up_to(&mut conn, 19).expect("migrate to v19");
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path) VALUES ('proj', 'Proj', '/repo');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx)
+                 VALUES ('wt', 'proj', 'main', '/repo', 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-old', 'wt', 'Chat', 'chat', 0, 1);",
+        )
+        .expect("plant a v19 tab");
+
+        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward");
+
+        let (last_event_at, closed_at): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT last_event_at, closed_at FROM tab WHERE id = 'tab-old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("tab row survives v20");
+        assert_eq!((last_event_at, closed_at), (None, None));
     }
 
     /// v19: the pane flag is inverted. Whatever v16 stored — open or closed —
