@@ -23,6 +23,7 @@ members = [
     "crates/sirio_control",
     "crates/sirio_activity",
     "crates/sirio_markdown",
+    "crates/sirio_diagram",
     "crates/sirio_usage",
     "crates/sirio_registry",
     "crates/sirio_syntax",
@@ -100,6 +101,7 @@ sirio_agents = { path = "crates/sirio_agents" }
 sirio_control = { path = "crates/sirio_control" }
 sirio_activity = { path = "crates/sirio_activity" }
 sirio_markdown = { path = "crates/sirio_markdown" }
+sirio_diagram = { path = "crates/sirio_diagram" }
 sirio_usage = { path = "crates/sirio_usage" }
 sirio_registry = { path = "crates/sirio_registry" }
 sirio_syntax = { path = "crates/sirio_syntax" }

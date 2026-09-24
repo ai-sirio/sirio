@@ -7300,6 +7300,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_diagram"
+version = "0.25.1"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "sirio_git"
 version = "0.1.0"
 dependencies = [
