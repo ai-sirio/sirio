@@ -9698,13 +9698,30 @@ impl SirioWorkspace {
             let mut worktrees = Vec::new();
             for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
                 let row_id = project_index * 1000 + worktree_index + 1;
-                let pane_ids: Vec<String> = self
+                let mut pane_ids: BTreeSet<String> = self
                     .panes
                     .list_for(&worktree.path)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|pane| pane.id)
                     .collect();
+                // Switching worktrees removes this window's old panes from
+                // the control snapshot, while their terminal or chat stays
+                // mounted in the parked strip. Include those pane ids so a
+                // background agent still drives its own worktree indicator.
+                if let Some(parked) = self
+                    .parked_worktree_tabs
+                    .get(worktree.path.to_string_lossy().as_ref())
+                {
+                    for pane_id in parked
+                        .terminal_panes_by_tab
+                        .iter()
+                        .chain(&parked.chat_panes_by_tab)
+                        .flat_map(|panes| panes.iter())
+                    {
+                        pane_ids.insert(format!("pane-{pane_id}"));
+                    }
+                }
                 let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
                 let status = self
                     .activity
@@ -25382,6 +25399,51 @@ done
         workspace.read_with(&cx.cx, |workspace, _| {
             let _ = workspace.panes.close(&errored_pane);
         });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn running_indicator_remains_on_a_parked_worktree(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("parked-running-indicator");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-status-running-1").is_some());
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("select the empty worktree");
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-status-running-1").is_some(),
+            "a mounted agent keeps its worktree's running indicator after selection moves away"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-status-running-2").is_none(),
+            "the empty selected worktree does not inherit the running indicator"
+        );
+
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
     }
