@@ -1377,6 +1377,7 @@ impl FileView {
         let DiagramRequest { key, kind, source } = request;
         let cache_dir = settings.cache_dir.clone();
         let server = settings.plantuml_server.clone();
+        let expected_settings = settings.clone();
         let palette = palette.clone();
         let file = file.to_path_buf();
         let queue = (kind == DiagramKind::PlantUml).then(|| PlantUmlQueue::get(cx));
@@ -1406,6 +1407,21 @@ impl FileView {
             };
             // The view closed while waiting for the turn: abandon the render.
             if this.upgrade().is_none() {
+                return;
+            }
+            if queue.is_some()
+                && this
+                    .update(cx, |_, cx| DiagramSettings::get(cx).cloned())
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    != Some(&expected_settings)
+            {
+                this.update(cx, |view, cx| {
+                    view.diagrams.remove(&key);
+                    cx.notify();
+                })
+                .ok();
                 return;
             }
             let render_key = key.clone();
@@ -5750,7 +5766,7 @@ mod tests {
         );
     }
 
-    use crate::markdown_preview::DiagramSettings;
+    use crate::markdown_preview::{DiagramSettings, PlantUmlQueue};
     use base64::Engine as _;
     use markdown::BlockKind;
 
@@ -5843,6 +5859,59 @@ mod tests {
             .count();
         assert_eq!(files, 1, "rendered once");
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[gpui::test]
+    async fn a_queued_plantuml_render_is_dropped_when_settings_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::ErrorKind;
+        let old_cache = diagram_cache("queued-old");
+        let new_cache = diagram_cache("queued-new");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let server = format!("http://{}", listener.local_addr().expect("addr"));
+        cx.update(|app| {
+            DiagramSettings::set(
+                DiagramSettings {
+                    cache_dir: old_cache.clone(),
+                    plantuml_server: Some(server),
+                },
+                app,
+            );
+        });
+        let queue = cx.update(PlantUmlQueue::get);
+        let turn = queue.turn().await;
+        let file = TempFile::with_extension("md", "```plantuml\nAlice -> Bob: test\n```\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.cx.run_until_parked();
+        let key = cx.update(|_, app| {
+            let palette = markdown_preview::palette(Theme::get(app));
+            sirio_diagram::cache_key(DiagramKind::PlantUml, "Alice -> Bob: test", &palette)
+        });
+        cx.update(|_, app| {
+            DiagramSettings::set(
+                DiagramSettings {
+                    cache_dir: new_cache,
+                    plantuml_server: None,
+                },
+                app,
+            );
+        });
+        drop(turn);
+        for _ in 0..30 {
+            cx.cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            match listener.accept() {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Ok(_) => panic!("the queued render used the withdrawn PlantUML server"),
+                Err(error) => panic!("listener failed: {error}"),
+            }
+        }
+        let state = view.read_with(&cx.cx, |view, _| view.diagrams.get(&key).cloned());
+        assert!(!matches!(state, Some(DiagramState::Pending)), "stale Pending state remains: {state:?}");
+        let _ = std::fs::remove_dir_all(old_cache);
+        let _ = std::fs::remove_dir_all(diagram_cache("queued-new"));
     }
 
     #[gpui::test]
