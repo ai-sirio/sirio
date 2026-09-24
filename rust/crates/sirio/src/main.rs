@@ -15762,9 +15762,22 @@ impl SirioWorkspace {
         let Some(tab_id) = self.tab_menu_tab else {
             return 0.0;
         };
-        let focused = self.center_split.focused();
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return 0.0;
+        };
+        let pane = tab.pane;
+        let first_visible = if self.center_split.focused() == pane {
+            self.tab_strip_first_visible
+        } else {
+            0
+        };
         let mut left = 5.0;
-        for tab in self.tabs.iter().filter(|tab| tab.pane == focused) {
+        for tab in self
+            .tabs
+            .iter()
+            .filter(|tab| tab.pane == pane)
+            .skip(first_visible)
+        {
             if tab.id == tab_id {
                 break;
             }
@@ -28585,6 +28598,37 @@ done
             }),
             vec![1, 2, 0],
             "the drawn tab drag must update the live strip order"
+        );
+    }
+
+    /// M3: a context menu opened on the unfocused half is anchored to that
+    /// tab's drawn x range, not to the focused strip's accumulated width.
+    #[gpui::test]
+    async fn drawn_unfocused_half_tab_menu_opens_under_its_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[0].title = "A primary tab whose width exceeds the right-hand tab".into();
+            workspace.tabs[1].title = "B".into();
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx);
+            workspace.select_tab(0, None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        right_click_tab(&mut cx, 1);
+
+        let tab = cx.debug_bounds("workspace-tab-1").expect("right-hand tab");
+        let menu = cx
+            .debug_bounds("workspace-tab-menu-1")
+            .expect("right-hand tab menu");
+        assert!(
+            menu.left() >= tab.left() && menu.left() <= tab.right(),
+            "menu left edge {} must fall within tab x range {}..{}",
+            menu.left(),
+            tab.left(),
+            tab.right()
         );
     }
 
