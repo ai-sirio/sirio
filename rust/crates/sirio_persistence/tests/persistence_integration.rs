@@ -2155,3 +2155,20 @@ fn a_worktrees_secondary_pane_flag_survives_a_relaunch_and_defaults_visible() {
     assert!(hidden("w1"), "a hidden pane stays hidden across a relaunch");
     assert!(!hidden("w2"), "a worktree that never hid it shows it");
 }
+
+#[test]
+fn markdown_plantuml_server_round_trips_and_defaults_to_empty() {
+    let dir = TempDir::new();
+    let path = dir.db_path("plantuml-server");
+    let db = AppDatabase::open(&path).expect("open fresh database");
+    assert_eq!(db.settings().expect("defaults").markdown_plantuml_server, "");
+    db.save_settings(&AppSettings {
+        markdown_plantuml_server: "http://localhost:8080".into(),
+        ..AppSettings::default()
+    })
+    .expect("save settings");
+    assert_eq!(
+        db.settings().expect("read back").markdown_plantuml_server,
+        "http://localhost:8080"
+    );
+}

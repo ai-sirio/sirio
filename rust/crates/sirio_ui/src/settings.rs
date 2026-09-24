@@ -345,6 +345,9 @@ pub struct SettingsSnapshot {
     /// owns the set. Settings › Language Servers is the one place an entry
     /// comes back out.
     pub lsp_silenced_languages: Vec<String>,
+    /// The Markdown Preview's PlantUML server (design §6). Empty means none;
+    /// the host trims it. Persisted as `markdown.plantumlServer`.
+    pub plantuml_server: String,
 }
 
 impl Default for SettingsSnapshot {
@@ -371,6 +374,7 @@ impl Default for SettingsSnapshot {
             opencode_workspace_id_override: String::new(),
             translucency: false,
             lsp_silenced_languages: Vec::new(),
+            plantuml_server: String::new(),
         }
     }
 }
@@ -919,6 +923,13 @@ pub struct Settings {
     opencode_workspace_id_override: String,
     /// Focus handle for the override field.
     opencode_override_focus: FocusHandle,
+    /// The PlantUML server being edited — the durable value, like the
+    /// workspace-ID override.
+    plantuml_server: String,
+    /// Focus handle for the server field.
+    plantuml_server_focus: FocusHandle,
+    /// The local `plantuml`, looked up once when the surface opens.
+    plantuml_path: Option<std::path::PathBuf>,
     /// Where the cookie is saved: the app's own on-disk store (macOS uses
     /// the Keychain instead). `None` only when no home directory exists to
     /// place the store — Save then reports the failure instead of
@@ -1083,6 +1094,9 @@ impl Settings {
             ollama_cookie_error: None,
             opencode_workspace_id_override: initial.opencode_workspace_id_override,
             opencode_override_focus: cx.focus_handle(),
+            plantuml_server: initial.plantuml_server,
+            plantuml_server_focus: cx.focus_handle(),
+            plantuml_path: sirio_diagram::find_plantuml(),
             credential_store: CredentialStore::from_env().ok(),
             browser_origins: BTreeSet::new(),
             on_revoke_browser_origin: None,
@@ -1577,6 +1591,7 @@ impl Settings {
             opencode_workspace_id_override: self.opencode_workspace_id_override.clone(),
             translucency: self.translucency,
             lsp_silenced_languages: self.lsp_servers.silenced.iter().cloned().collect(),
+            plantuml_server: self.plantuml_server.clone(),
         }
     }
 
@@ -2083,6 +2098,38 @@ impl Settings {
     /// Clears the workspace-ID override back to discovery (F-SET-12).
     fn clear_opencode_override(&mut self, cx: &mut Context<Self>) {
         self.opencode_workspace_id_override.clear();
+        self.changed();
+        cx.notify();
+    }
+
+    /// Raw-keystroke handling for the PlantUML server field — every edit is
+    /// durable, as for the workspace-ID override.
+    fn on_plantuml_server_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.field_blink.wake();
+        let key = event.keystroke.key.as_str();
+        if key == "v" && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control) {
+            if let Some(text) = Self::pasted_field_text(cx) {
+                self.plantuml_server.push_str(&text);
+            }
+        } else if key == "backspace" || key == "delete" {
+            self.plantuml_server.pop();
+        } else if let Some(character) = event.keystroke.key_char.as_deref()
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            self.plantuml_server.push_str(character);
+        }
+        self.changed();
+        cx.notify();
+    }
+
+    fn clear_plantuml_server(&mut self, cx: &mut Context<Self>) {
+        self.plantuml_server.clear();
         self.changed();
         cx.notify();
     }
@@ -3311,7 +3358,7 @@ impl Settings {
         }
     }
 
-    fn render_general(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
+    fn render_general(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> gpui::Div {
         let resume_entity = entity.clone();
         let auto_entity = entity.clone();
         let history_entity = entity.clone();
@@ -3704,6 +3751,67 @@ impl Settings {
             }
         }
 
+        let plantuml_status = match &self.plantuml_path {
+            Some(path) => format!("`plantuml` found at {}", path.display()),
+            None => "`plantuml` is not on PATH".to_string(),
+        };
+        let server_text = self.plantuml_server.clone();
+        let server_is_empty = server_text.is_empty();
+        let server_field = Self::opencode_text_field(
+            "settings-plantuml-server",
+            server_text,
+            "PlantUML server URL",
+            server_is_empty,
+            self.plantuml_server_focus.clone(),
+            self.plantuml_server_focus.is_focused(window),
+            self.field_caret_visible,
+            theme,
+            |this, window, cx| this.plantuml_server_focus.focus(window, cx),
+            |this, event, window, cx| this.on_plantuml_server_key(event, window, cx),
+            entity.clone(),
+        );
+        let clear_server_entity = entity.clone();
+        let clear_server_handler = if server_is_empty {
+            None
+        } else {
+            Some(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                clear_server_entity.update(cx, |this, cx| this.clear_plantuml_server(cx));
+            })
+        };
+        let markdown_preview = controls::card(theme)
+            .child(controls::row(
+                "Local PlantUML",
+                None,
+                div()
+                    .debug_selector(|| "settings-plantuml-status".into())
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(plantuml_status),
+                theme,
+            ))
+            .child(controls::separator(theme))
+            .child(
+                div()
+                    .w_full()
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(server_field)
+                    .child(controls::button_maybe(
+                        "clear-plantuml-server",
+                        "Clear",
+                        theme,
+                        clear_server_handler,
+                    )),
+            )
+            .child(Self::opencode_caption(
+                "settings-plantuml-server-caption",
+                "When `plantuml` is not installed, diagram source is sent to this server.",
+                theme,
+            ));
+
         div()
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
@@ -3714,6 +3822,7 @@ impl Settings {
             .child(settings_section("Automation", automation, theme))
             .child(settings_section("Chat history", history_card, theme))
             .child(settings_section("Performance", performance, theme))
+            .child(settings_section("Markdown preview", markdown_preview, theme))
             .child(settings_section("sirioctl", control, theme))
             .child(settings_section("Agent Skill", skill, theme))
             .child(settings_section("Agent Hooks", hooks, theme))
@@ -4013,6 +4122,7 @@ impl Render for Settings {
             &self.opencode_cookie_focus,
             &self.ollama_cookie_focus,
             &self.opencode_override_focus,
+            &self.plantuml_server_focus,
         ]
         .iter()
         .any(|focus| focus.is_focused(window));
@@ -4032,7 +4142,7 @@ impl Render for Settings {
             SettingsCategory::LanguageServers => {
                 self.render_language_servers(theme, entity.clone())
             }
-            SettingsCategory::General => self.render_general(theme, entity.clone()),
+            SettingsCategory::General => self.render_general(theme, entity.clone(), window),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
             SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
         };
@@ -4873,6 +4983,7 @@ mod tests {
         };
         let window = cx.add_window(|_window, cx| Settings::with_snapshot(cx, snapshot));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
         cx.run_until_parked();
 
         let general = cx
@@ -5231,6 +5342,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    async fn plantuml_server_paste_persists(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window(move |_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("http://localhost:8080".to_string()));
+        });
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("the General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("settings-plantuml-status").is_some(),
+            "the section reports the local plantuml"
+        );
+        let field = cx
+            .debug_bounds("settings-plantuml-server")
+            .expect("the server field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-v");
+        cx.run_until_parked();
+
+        let snapshot = cx.update(|window, cx| {
+            window.root::<Settings>().flatten().expect("settings root").read(cx).snapshot()
+        });
+        assert_eq!(snapshot.plantuml_server, "http://localhost:8080");
+        assert_eq!(
+            saved.borrow().last().map(|s| s.plantuml_server.clone()),
+            Some("http://localhost:8080".to_string()),
+            "the paste routed a snapshot through on_change"
+        );
     }
 
     /// F-SET-12: Clear deletes the stored cookie, signs the provider out

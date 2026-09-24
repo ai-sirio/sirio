@@ -19,6 +19,9 @@ sirio_theme.workspace = true
 sirio_git.workspace = true
 sirio_acp.workspace = true
 sirio_markdown.workspace = true
+# Diagram source to SVG for the Markdown Preview (Mermaid in-process,
+# PlantUML through `plantuml` or a configured server). A leaf with no gpui.
+sirio_diagram.workspace = true
 sirio_project.workspace = true
 sirio_agents.workspace = true
 # The Material icon theme as data: 1112 vendored assets and the tables that
@@ -39,6 +42,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # built here without a second copy of the types.
 image = { version = "0.25.10", default-features = false }
 smallvec.workspace = true
+# An async lock for the app-wide PlantUML turn (markdown_preview.rs). The
+# same 0.3 line gpui already locks, promoted to a direct dependency.
+futures = "0.3"
 # F-PRJ-16: grapheme-cluster-correct single-emoji validation. Already
 # resolved transitively at this version; promoted to a direct dependency.
 unicode-segmentation = "1.13"

@@ -331,7 +331,12 @@ impl<'a> Builder<'a> {
                 for inline in &children {
                     push_plain_text(inline, &mut alt);
                 }
-                pending.push(Inline::Image { target, title, alt });
+                pending.push(Inline::Image {
+                    target,
+                    title,
+                    alt,
+                    width: None,
+                });
             }
             _ => {}
         }
@@ -411,7 +416,12 @@ impl<'a> Builder<'a> {
                     for inline in &children {
                         push_plain_text(inline, &mut alt);
                     }
-                    out.push(Inline::Image { target, title, alt });
+                    out.push(Inline::Image {
+                        target,
+                        title,
+                        alt,
+                        width: None,
+                    });
                 }
                 Event::End(_) => break,
                 _ => {}

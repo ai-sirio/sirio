@@ -25,6 +25,7 @@ mod horizontal_scroll;
 // each having their own copy is the defect it exists to make impossible.
 pub mod git_status_style;
 pub mod loading;
+pub mod markdown_preview;
 pub mod modal;
 pub mod orbit;
 pub mod outline;

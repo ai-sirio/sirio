@@ -541,6 +541,10 @@ pub struct AppSettings {
     /// value that cannot be read at all would poison the whole settings
     /// load.
     pub lsp_silenced_languages: String,
+    /// "markdown.plantumlServer" — default: empty (off). The PlantUML server
+    /// the Markdown Preview sends diagram source to when `plantuml` is not
+    /// installed (design §6). Free text: the host trims it.
+    pub markdown_plantuml_server: String,
 }
 
 impl Default for AppSettings {
@@ -570,6 +574,7 @@ impl Default for AppSettings {
             right_panel_width: 405,
             center_split_ratio: 500,
             lsp_silenced_languages: "[]".to_string(),
+            markdown_plantuml_server: String::new(),
         }
     }
 }
@@ -606,6 +611,8 @@ pub mod settings_keys {
     /// Linux-rewrite-only: no Swift antecedent. Holds a JSON array of
     /// language names, not a scalar — see `AppSettings::lsp_silenced_languages`.
     pub const LSP_SILENCED_LANGUAGES: &str = "lsp.silencedLanguages";
+    /// Linux-rewrite-only: no Swift antecedent.
+    pub const MARKDOWN_PLANTUML_SERVER: &str = "markdown.plantumlServer";
 }
 
 /// The Swift ranges settings values are clamped into.

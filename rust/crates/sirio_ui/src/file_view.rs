@@ -32,6 +32,7 @@ use gpui::{
     StyledText, Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window, anchored,
     canvas, deferred, div, point, prelude::*, px, quad, size, transparent_black, uniform_list,
 };
+use sirio_diagram::{DiagramError, DiagramKind, Palette};
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
@@ -48,6 +49,9 @@ use crate::editor::{
 use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
 use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
+use crate::markdown_preview::{
+    self, DiagramRequest, DiagramSettings, DiagramState, Diagrams, PlantUmlQueue,
+};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// The rendered-markdown column: the frozen 720px content column (waku
@@ -207,6 +211,14 @@ pub struct FileView {
     /// still loading its content: revealing immediately addresses lines
     /// that do not exist yet, and does nothing at all.
     pending_reveal: Option<usize>,
+    /// The Preview's diagrams, by cache key (design §3).
+    diagrams: Diagrams,
+    /// The diagram settings the last frame saw. A change forgets every
+    /// failure, so a newly installed `plantuml` or a new server is tried.
+    diagram_settings: Option<DiagramSettings>,
+    /// Bumped whenever the settings change. A render scheduled under older
+    /// settings lands stale and is discarded, never stored.
+    diagram_generation: u64,
 }
 
 /// The scroll handles of the source list and the Markdown preview, plus the
@@ -232,6 +244,13 @@ impl SurfaceScroll {
             preview_bar: ScrollbarState::new(painter),
         }
     }
+}
+
+/// What the Preview draws this frame: the document, and the directory its
+/// diagrams live in. A click on one of those is not a link.
+struct PreviewFrame {
+    doc: markdown::Doc,
+    diagram_dir: Option<PathBuf>,
 }
 
 /// Emitted so the shell can act on a gesture that started inside this tab
@@ -369,6 +388,9 @@ impl FileView {
             hover_seq: 0,
             hover_card: None,
             pending_reveal: None,
+            diagrams: Diagrams::default(),
+            diagram_settings: None,
+            diagram_generation: 0,
         }
     }
 
@@ -1310,6 +1332,140 @@ impl FileView {
         }
     }
 
+    /// The Preview's document for this frame, scheduling every diagram it
+    /// names that has no state yet. `None` outside Markdown Preview.
+    pub(crate) fn preview_document(&mut self, cx: &mut Context<Self>) -> Option<markdown::Doc> {
+        if self.effective_mode() != MarkdownMode::Preview {
+            return None;
+        }
+        let editor = self.editor()?;
+        let path = editor.path().to_path_buf();
+        let document = markdown_document(&path, editor.buffer())?;
+        let settings = DiagramSettings::get(cx).cloned();
+        if settings != self.diagram_settings {
+            self.diagrams.forget_failures();
+            self.diagram_settings = settings.clone();
+            self.diagram_generation += 1;
+        }
+        let palette = markdown_preview::palette(Theme::get(cx));
+        let base = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let preview = markdown_preview::build(document, &base, &self.diagrams, &palette);
+        if let Some(settings) = settings {
+            for request in preview.missing {
+                self.render_diagram(request, &settings, &palette, &path, cx);
+            }
+        }
+        Some(preview.doc)
+    }
+
+    /// Renders one diagram off the UI thread: the disk cache first, then the
+    /// renderer. PlantUML waits for the app-wide turn; a cache hit never does.
+    fn render_diagram(
+        &mut self,
+        request: DiagramRequest,
+        settings: &DiagramSettings,
+        palette: &Palette,
+        file: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        // The same diagram twice in one frame is scheduled once.
+        if self.diagrams.get(&request.key).is_some() {
+            return;
+        }
+        self.diagrams.insert(request.key.clone(), DiagramState::Pending);
+        let generation = self.diagram_generation;
+        let DiagramRequest { key, kind, source } = request;
+        let cache_dir = settings.cache_dir.clone();
+        let server = settings.plantuml_server.clone();
+        let expected_settings = settings.clone();
+        let palette = palette.clone();
+        let file = file.to_path_buf();
+        let queue = (kind == DiagramKind::PlantUml).then(|| PlantUmlQueue::get(cx));
+        cx.spawn(async move |this, cx| {
+            // The disk cache first: a hit is Ready without rendering (§3) and
+            // never waits for the PlantUML turn.
+            let hit_dir = cache_dir.clone();
+            let hit_key = key.clone();
+            let hit = cx
+                .background_spawn(async move { sirio_diagram::cached(&hit_dir, &hit_key) })
+                .await;
+            if let Some((path, width)) = hit {
+                this.update(cx, |view, cx| {
+                    if view.diagram_generation == generation {
+                        view.diagrams.insert(key.clone(), DiagramState::Ready { path, width });
+                    } else {
+                        view.diagrams.remove(&key);
+                    }
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            let _turn = match &queue {
+                Some(queue) => Some(queue.turn().await),
+                None => None,
+            };
+            // The view closed while waiting for the turn: abandon the render.
+            if this.upgrade().is_none() {
+                return;
+            }
+            if queue.is_some()
+                && this
+                    .update(cx, |_, cx| DiagramSettings::get(cx).cloned())
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    != Some(&expected_settings)
+            {
+                this.update(cx, |view, cx| {
+                    view.diagrams.remove(&key);
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            let render_key = key.clone();
+            let state = cx
+                .background_spawn(async move {
+                    let _perf = sirio_perf::span("Preview.diagram_render", source.len() as u64);
+                    let options = sirio_diagram::Options {
+                        palette,
+                        plantuml_server: server,
+                        working_dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    };
+                    match sirio_diagram::render(kind, &source, &options) {
+                        Ok(svg) => match sirio_diagram::store(&cache_dir, &render_key, &svg) {
+                            Ok(path) => DiagramState::Ready {
+                                path,
+                                width: svg.logical_width,
+                            },
+                            Err(error) => {
+                                DiagramState::Failed(DiagramError::Io(error.to_string()).note(kind))
+                            }
+                        },
+                        Err(error) => DiagramState::Failed(error.note(kind)),
+                    }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                // A result from before a settings change is discarded: the
+                // Pending entry goes away so the next frame requests the
+                // diagram again under the new settings.
+                if view.diagram_generation == generation {
+                    view.diagrams.insert(key.clone(), state);
+                } else {
+                    view.diagrams.remove(&key);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The initial mode once the file is loaded: Preview for an ordinary
     /// Markdown file, Code for everything else (a large Markdown file opens
     /// as source with the manual-preview notice — F-EDIT-03 — and a code
@@ -1328,6 +1484,7 @@ impl FileView {
         entity: gpui::Entity<Self>,
         caret_visible: bool,
         caret_offset: usize,
+        preview: Option<PreviewFrame>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1393,6 +1550,7 @@ impl FileView {
                             caret_offset,
                             theme.syntax_palette(),
                             &self.scroll,
+                            preview,
                         ))
                         .into_any_element()
                 }
@@ -1433,6 +1591,10 @@ impl Render for FileView {
             theme.install_into_bezel(cx);
         }
         let entity = cx.entity();
+        let preview = self.preview_document(cx).map(|doc| PreviewFrame {
+            doc,
+            diagram_dir: DiagramSettings::get(cx).map(|settings| settings.cache_dir.clone()),
+        });
         // The source surface's insertion caret: wake on any caret/selection
         // move since the last frame, then arm the single toggle timer while
         // the editor owns focus.
@@ -1596,6 +1758,7 @@ impl Render for FileView {
                 cx.entity(),
                 caret_visible,
                 caret_offset,
+                preview,
                 window,
                 cx,
             )))
@@ -1849,15 +2012,14 @@ fn render_content(
     caret_offset: usize,
     syntax_palette: bezel::theme::SyntaxPalette,
     scroll: &SurfaceScroll,
+    preview: Option<PreviewFrame>,
 ) -> AnyElement {
     let is_markdown = editor.language() == Language::Markdown;
     // Preview renders the parsed document; a locked preview (large file,
     // F-EDIT-03) or Code mode renders the source. The two modes are
     // behaviour — each shows the *right* content — while the rendering
     // inside them is appearance.
-    if is_markdown && mode == MarkdownMode::Preview && !editor.preview_locked() {
-        let document = markdown_document(editor.path(), editor.buffer())
-            .expect("markdown render path implies a markdown document");
+    if let Some(PreviewFrame { doc, diagram_dir }) = preview {
         // F-CORE-FILE-04: Preview is the file view's *default* mode, so its
         // rendered links must resolve against the open file's directory the
         // same way the Code-mode + platform-click path does — not fall
@@ -1871,13 +2033,18 @@ fn render_content(
         let link_entity = entity.clone();
         let link_click: LinkClickOverride =
             Rc::new(
-                move |target, _window, cx| match resolve_file_link(target, &base) {
-                    Some(resolved) => {
-                        link_entity.update(cx, |_, cx| {
-                            cx.emit(FileViewEvent::OpenFile(resolved.path));
-                        });
+                move |target, _window, cx| {
+                    if markdown_preview::is_diagram_target(target, diagram_dir.as_deref()) {
+                        return;
                     }
-                    None => cx.open_url(target),
+                    match resolve_file_link(target, &base) {
+                        Some(resolved) => {
+                            link_entity.update(cx, |_, cx| {
+                                cx.emit(FileViewEvent::OpenFile(resolved.path));
+                            });
+                        }
+                        None => cx.open_url(target),
+                    }
                 },
             );
         return div()
@@ -1897,7 +2064,7 @@ fn render_content(
                             .mx_auto()
                             .p(px(24.0))
                             .child(Chat::render_markdown_document_with_link_override(
-                                document.clone(),
+                                doc,
                                 &theme,
                                 link_click,
                             )),
@@ -5702,5 +5869,197 @@ mod tests {
             cx.debug_bounds("file-markdown-bar").is_none(),
             "a document that fits its viewport shows no scrollbar"
         );
+    }
+
+    use crate::markdown_preview::{DiagramSettings, PlantUmlQueue};
+    use base64::Engine as _;
+    use markdown::BlockKind;
+
+    fn diagram_cache(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sirio-diagram-cache-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Drives frames and the background executor until no diagram fence is
+    /// left in the Preview, and returns the last document built.
+    fn settle_preview(cx: &mut VisualTestContext, view: &gpui::Entity<FileView>) -> markdown::Doc {
+        let mut last = None;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            let doc = cx
+                .update(|_, cx| view.update(cx, |view, cx| view.preview_document(cx)))
+                .expect("a Markdown file in Preview");
+            let fenced = doc.blocks.iter().any(|block| {
+                matches!(&block.kind, BlockKind::Code { language: Some(language), .. }
+                    if sirio_diagram::DiagramKind::from_fence(language).is_some())
+            });
+            last = Some(doc);
+            if !fenced {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        last.expect("at least one frame")
+    }
+
+    #[gpui::test]
+    async fn a_mermaid_fence_renders_into_the_cache_and_the_preview(cx: &mut gpui::TestAppContext) {
+        let cache = diagram_cache("one");
+        cx.update(|cx| {
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: cache.clone(), plantuml_server: None },
+                cx,
+            )
+        });
+        let file = TempFile::with_extension(
+            "md",
+            "# D\n\n```mermaid\nflowchart TD\n  A --> B\n```\n",
+        );
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let doc = settle_preview(&mut cx, &view);
+        let image = doc
+            .blocks
+            .iter()
+            .find_map(|block| match &block.kind {
+                BlockKind::Image { url, width, .. } => Some((url.clone(), *width)),
+                _ => None,
+            })
+            .expect("the fence became an image");
+        assert!(Path::new(&image.0).starts_with(&cache), "drawn from the diagram cache");
+        assert!(Path::new(&image.0).exists());
+        assert!(image.1.is_some_and(|width| width > 0));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// Both fences render as images; the dedupe itself is guarded by the
+    /// `the_same_diagram_twice_is_requested_once` unit test in markdown_preview.
+    #[gpui::test]
+    async fn the_same_diagram_twice_renders_once_and_shows_twice(cx: &mut gpui::TestAppContext) {
+        let cache = diagram_cache("twice");
+        cx.update(|cx| {
+            DiagramSettings::set(
+                DiagramSettings { cache_dir: cache.clone(), plantuml_server: None },
+                cx,
+            )
+        });
+        let fence = "```mermaid\nflowchart TD\n  A --> B\n```\n";
+        let file = TempFile::with_extension("md", &format!("{fence}\n{fence}"));
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let doc = settle_preview(&mut cx, &view);
+        let images = doc
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.kind, BlockKind::Image { .. }))
+            .count();
+        assert_eq!(images, 2);
+        let files = std::fs::read_dir(&cache)
+            .expect("cache dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "svg"))
+            .count();
+        assert_eq!(files, 1, "rendered once");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[gpui::test]
+    async fn a_queued_plantuml_render_is_dropped_when_settings_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::ErrorKind;
+        let old_cache = diagram_cache("queued-old");
+        let new_cache = diagram_cache("queued-new");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let server = format!("http://{}", listener.local_addr().expect("addr"));
+        cx.update(|app| {
+            DiagramSettings::set(
+                DiagramSettings {
+                    cache_dir: old_cache.clone(),
+                    plantuml_server: Some(server),
+                },
+                app,
+            );
+        });
+        let queue = cx.update(PlantUmlQueue::get);
+        let turn = queue.turn().await;
+        let file = TempFile::with_extension("md", "```plantuml\nAlice -> Bob: test\n```\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.cx.run_until_parked();
+        let key = cx.update(|_, app| {
+            let palette = markdown_preview::palette(Theme::get(app));
+            sirio_diagram::cache_key(DiagramKind::PlantUml, "Alice -> Bob: test", &palette)
+        });
+        cx.update(|_, app| {
+            DiagramSettings::set(
+                DiagramSettings {
+                    cache_dir: new_cache,
+                    plantuml_server: None,
+                },
+                app,
+            );
+        });
+        drop(turn);
+        for _ in 0..30 {
+            cx.cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            match listener.accept() {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Ok(_) => panic!("the queued render used the withdrawn PlantUML server"),
+                Err(error) => panic!("listener failed: {error}"),
+            }
+        }
+        let state = view.read_with(&cx.cx, |view, _| view.diagrams.get(&key).cloned());
+        assert!(!matches!(state, Some(DiagramState::Pending)), "stale Pending state remains: {state:?}");
+        let _ = std::fs::remove_dir_all(old_cache);
+        let _ = std::fs::remove_dir_all(diagram_cache("queued-new"));
+    }
+
+    #[gpui::test]
+    async fn without_diagram_settings_a_fence_stays_code(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("md", "```mermaid\nflowchart TD\n  A --> B\n```\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.run_until_parked();
+        let doc = cx
+            .update(|_, cx| view.update(cx, |view, cx| view.preview_document(cx)))
+            .expect("Preview");
+        assert!(matches!(&doc.blocks[0].kind, BlockKind::Code { .. }));
+    }
+
+    /// Design §8: a drawn frame with a local image.
+    #[gpui::test]
+    async fn a_lone_local_image_is_a_picture_in_the_drawn_preview(cx: &mut gpui::TestAppContext) {
+        let picture = std::env::temp_dir().join(format!(
+            "sirio-preview-logo-{}.png",
+            std::process::id()
+        ));
+        // A 1×1 PNG, split so no line runs past 100 columns.
+        let pixel = concat!(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk",
+            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        );
+        std::fs::write(
+            &picture,
+            base64::engine::general_purpose::STANDARD
+                .decode(pixel)
+                .expect("a 1×1 PNG"),
+        )
+        .expect("write png");
+        let name = picture.file_name().expect("name").to_string_lossy().into_owned();
+        let file = TempFile::with_extension("md", &format!("![Logo]({name})\n"));
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let doc = settle_preview(&mut cx, &view);
+        let is_picture = matches!(
+            &doc.blocks[0].kind,
+            BlockKind::Image { url, .. } if Path::new(url) == picture
+        );
+        let drawn = cx.debug_bounds("file-markdown-scroll").is_some();
+        let _ = std::fs::remove_file(&picture);
+        assert!(is_picture);
+        assert!(drawn, "the Preview was drawn");
     }
 }

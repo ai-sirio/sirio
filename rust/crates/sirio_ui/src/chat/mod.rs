@@ -499,7 +499,7 @@ fn parse_chat_markdown(source: &str) -> markdown::Doc {
     markdown::parse(source)
 }
 
-fn bezel_doc_from_legacy(document: LegacyDocument) -> markdown::Doc {
+pub(crate) fn bezel_doc_from_legacy(document: LegacyDocument) -> markdown::Doc {
     let mut blocks = Vec::new();
     for block in document.blocks {
         push_legacy_block(block, 0, false, &mut blocks);
@@ -518,11 +518,21 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 text: bezel_text(&inline),
             }
         })),
-        LegacyBlock::Paragraph { inline } => out.push(at(if quoted {
-            markdown::BlockKind::Quote(bezel_text(&inline))
-        } else {
-            markdown::BlockKind::Paragraph(bezel_text(&inline))
-        })),
+        LegacyBlock::Paragraph { inline } => out.push(at(
+            if let Some((url, alt, width)) = lone_image(&inline) {
+                // Before the quote check: bezel's quote block holds text
+                // only, and a picture inside a quote is still a picture.
+                markdown::BlockKind::Image {
+                    url: url.to_owned(),
+                    alt: markdown::Text::plain(alt),
+                    width,
+                }
+            } else if quoted {
+                markdown::BlockKind::Quote(bezel_text(&inline))
+            } else {
+                markdown::BlockKind::Paragraph(bezel_text(&inline))
+            },
+        )),
         LegacyBlock::List { kind, items, .. } => {
             for (index, item) in items.into_iter().enumerate() {
                 let mut item_blocks = item.blocks.into_iter();
@@ -601,6 +611,29 @@ fn bezel_text(inlines: &[LegacyInline]) -> markdown::Text {
         push_legacy_inline(inline, &mut text);
     }
     text
+}
+
+/// The one image a paragraph holds, with nothing else but whitespace. It
+/// may stand alone, or be the only content of a link: a linked logo is
+/// drawn and its link dropped, since a block image opens its own URL. A
+/// paragraph of several images (a README's badge row) is not one: bezel
+/// draws one picture per block, so it stays a row of links (design §5).
+fn lone_image(inlines: &[LegacyInline]) -> Option<(&str, &str, Option<u32>)> {
+    let mut found = None;
+    for inline in inlines {
+        match inline {
+            LegacyInline::Text(text) if text.trim().is_empty() => {}
+            LegacyInline::SoftBreak | LegacyInline::HardBreak => {}
+            LegacyInline::Image {
+                target, alt, width, ..
+            } if found.is_none() => found = Some((target.as_str(), alt.as_str(), *width)),
+            LegacyInline::Link { children, .. } if found.is_none() => {
+                found = Some(lone_image(children)?);
+            }
+            _ => return None,
+        }
+    }
+    found
 }
 
 fn push_marked_inlines(mark: markdown::Mark, inlines: &[LegacyInline], text: &mut markdown::Text) {
@@ -5423,17 +5456,16 @@ impl Chat {
         }
     }
 
-    /// Shared bezel-markdown renderer used by file tabs. The legacy parsed
-    /// tree is converted to bezel's flat Doc at the seam; BlockLayouts then
-    /// lets the existing per-render link callback win before bezel's default
-    /// external opener runs.
+    /// Shared bezel-markdown renderer used by file tabs. The caller
+    /// (`markdown_preview::build`) hands it a finished `Doc`; BlockLayouts
+    /// then lets the existing per-render link callback win before bezel's
+    /// default external opener runs.
     pub(crate) fn render_markdown_document_with_link_override(
-        document: LegacyDocument,
+        document: markdown::Doc,
         _theme: &Theme,
         link_click: LinkClickOverride,
     ) -> AnyElement {
-        MarkdownBody::with_link_override(bezel_doc_from_legacy(document), link_click)
-            .into_any_element()
+        MarkdownBody::with_link_override(document, link_click).into_any_element()
     }
     /// F-CHAT-31: a diff preview for a tool call that changed a file —
     /// removed lines then added lines at each point of divergence, capped

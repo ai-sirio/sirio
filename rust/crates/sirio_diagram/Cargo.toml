@@ -1,0 +1,20 @@
+[package]
+name = "sirio_diagram"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Diagram source in, SVG out, for the Markdown Preview (design:
+# docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md).
+# A leaf: no gpui, no bezel, no local crates.
+[dependencies]
+# The PlantUML server protocol: raw DEFLATE + PlantUML's base64 alphabet in
+# the URL, fetched over HTTP. Both are already in the lockfile.
+flate2 = "1"
+ureq = "3.4"
+libc = "0.2"
+sha2 = "0.10"
+# Pinned: the renderer's name and version are part of every Mermaid cache key
+# (`MERMAID_RENDERER` in lib.rs), so a bump is deliberate and moves both.
+# Without default features: no CLI (clap) and no PNG output (resvg).
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }

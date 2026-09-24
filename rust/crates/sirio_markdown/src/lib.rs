@@ -32,6 +32,7 @@
 mod document;
 mod editing;
 mod file_events;
+mod html;
 mod model;
 mod parse;
 mod scan;
@@ -64,6 +65,7 @@ pub(crate) fn scratch_dir(prefix: &str) -> std::path::PathBuf {
 pub use document::{DocumentChange, DocumentError, MarkdownDocument};
 pub use editing::{EditedText, SelectionRange, prefix_selected_lines, wrap_selection};
 pub use file_events::{FileEventKind, FileSystemEvent, FileSystemEventMonitor};
+pub use html::expand_html;
 pub use model::{Alignment, Block, Document, Inline, ListItem, ListKind, TableCell};
 pub use parse::{parse, parse_with_options};
 
