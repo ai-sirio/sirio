@@ -49,8 +49,9 @@ impl Diagrams {
         self.states.remove(key);
     }
 
-    /// Drops every failure, so the next frame tries again: installing
-    /// PlantUML or configuring a server takes effect without reopening.
+    /// Drops every failure, so the next frame tries again when settings
+    /// change. Installing PlantUML takes effect when reopened; configuring a
+    /// server takes effect immediately.
     pub(crate) fn forget_failures(&mut self) {
         self.states
             .retain(|_, state| !matches!(state, DiagramState::Failed(_)));
@@ -79,7 +80,12 @@ pub(crate) fn build(
     diagrams: &Diagrams,
     palette: &Palette,
 ) -> Preview {
-    let converted = bezel_doc_from_legacy(expand_html(document));
+    let source_blocks = document.blocks.len() as u64;
+    let expanded = {
+        let _perf = sirio_perf::span("Preview.expand_html", source_blocks);
+        expand_html(document)
+    };
+    let converted = bezel_doc_from_legacy(expanded);
     let mut blocks = Vec::with_capacity(converted.blocks.len());
     let mut missing = Vec::new();
     for block in converted.blocks {

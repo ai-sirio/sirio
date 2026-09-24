@@ -101,6 +101,9 @@ trimmed text does not begin with `@start` is wrapped in `@startuml` /
 | `Failed` | The code block, then one muted line: *Mermaid diagram is invalid: …*, *PlantUML timed out after 15 s*, *PlantUML server answered 400: …* |
 | `NotAvailable` | The code block, then one muted line: *PlantUML is not available: `plantuml` is not on PATH and no server is configured* |
 
+Installing PlantUML takes effect when the file is reopened; configuring a
+server takes effect immediately.
+
 A `NotAvailable` note is shown, unlike `sirio_lsp`'s silence about a missing
 server. The two cases differ: a missing language server would add a note to
 almost every file nobody asked about, while a ` ```plantuml ` fence is the
@@ -191,8 +194,9 @@ passes `width = logical_width` to `BlockKind::Image`.
   the disk (on the background thread); a hit is `Ready` without rendering.
   A completed render updates the map and calls `cx.notify()` on the view.
   `Failed` and `NotAvailable` exist only in memory, never on disk, and are
-  dropped when `markdown.plantumlServer` changes, so installing PlantUML or
-  configuring a server takes effect without reopening the file.
+  dropped when `markdown.plantumlServer` changes. Installing PlantUML takes
+  effect when the file is reopened; configuring a server takes effect
+  immediately.
 - **No pruning in this version.** The files are a few KiB each; this is a
   deliberate omission.
 

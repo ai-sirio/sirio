@@ -82,11 +82,14 @@ fn expand_cells(cells: Vec<TableCell>) -> Vec<TableCell> {
 /// Folds an inline list's HTML tags into the inlines they stand for,
 /// recursing into the children of Markdown's own spans.
 fn expand_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
+    let has_embed_end = inlines.iter().any(|inline| {
+        matches!(inline, Inline::Html(fragment) if fragment.to_ascii_lowercase().contains("</embed"))
+    });
     let mut fold = InlineFold::default();
     for inline in inlines {
         match inline {
             Inline::Html(fragment) => {
-                for piece in pieces(&fragment) {
+                for piece in pieces(&fragment, has_embed_end) {
                     fold.piece(piece);
                 }
             }
@@ -121,13 +124,14 @@ enum Piece {
 }
 
 /// Tokenises an HTML fragment. Comments, doctypes and parse errors are
-/// dropped; tag names arrive lower-cased and entities decoded. A void
-/// element (`<img>`, `<br>`, …) is followed by its own `Close`, so nothing
-/// downstream waits for an end tag that never comes.
+/// dropped; tag names arrive lower-cased and entities decoded. Any
+/// self-closing tag, as well as a void element (`<img>`, `<br>`, …), is
+/// followed by its own `Close`, so nothing downstream waits for an end tag
+/// that never comes.
 ///
 /// `naively_switch_states` is what makes a `<script>` or `<style>` body raw
 /// text: without it, the `"<b>"` in `var a = "<b>"` is read as a tag.
-fn pieces(fragment: &str) -> Vec<Piece> {
+fn pieces(fragment: &str, has_embed_end: bool) -> Vec<Piece> {
     let mut emitter = DefaultEmitter::default();
     emitter.naively_switch_states(true);
     let mut out = Vec::new();
@@ -141,7 +145,8 @@ fn pieces(fragment: &str) -> Vec<Piece> {
                     .iter()
                     .map(|(key, value)| (lossy(key), lossy(&value.value)))
                     .collect();
-                let void = tag.self_closing || is_void(&name);
+                let void = tag.self_closing
+                    || (is_void(&name) && !(name == "embed" && has_embed_end));
                 out.push(Piece::Open {
                     name: name.clone(),
                     attrs,
@@ -389,7 +394,7 @@ fn pixel_width(value: &str) -> Option<u32> {
 /// Translates one `Block::Html` chunk into blocks.
 fn blocks_from_html(fragment: &str) -> Vec<Block> {
     let mut builder = BlockBuilder::default();
-    for piece in pieces(fragment) {
+    for piece in pieces(fragment, fragment.to_ascii_lowercase().contains("</embed")) {
         builder.piece(piece);
     }
     builder.finish()
@@ -778,6 +783,31 @@ mod tests {
     #[test]
     fn a_script_is_removed_with_its_content() {
         assert_eq!(inlines("a <script>alert(1)</script> b"), vec![text("a  b")]);
+    }
+
+    #[test]
+    fn an_iframe_is_removed_with_its_content() {
+        assert_eq!(inlines("before <iframe>secret</iframe> after"), vec![text("before  after")]);
+    }
+
+    #[test]
+    fn an_object_is_removed_with_its_content() {
+        assert_eq!(inlines("before <object>secret</object> after"), vec![text("before  after")]);
+    }
+
+    #[test]
+    fn an_embed_is_removed_with_its_content() {
+        assert_eq!(inlines("before <embed>secret</embed> after"), vec![text("before  after")]);
+    }
+
+    #[test]
+    fn a_form_is_removed_with_its_content() {
+        assert_eq!(inlines("before <form>secret</form> after"), vec![text("before  after")]);
+    }
+
+    #[test]
+    fn an_svg_is_removed_with_its_content() {
+        assert_eq!(inlines("before <svg>secret</svg> after"), vec![text("before  after")]);
     }
 
     #[test]

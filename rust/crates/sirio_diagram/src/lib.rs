@@ -99,7 +99,7 @@ pub struct Options {
 /// A rendered diagram.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Svg {
-    /// The SVG, its root sized at twice the logical size (design §3).
+    /// The SVG as the renderer wrote it.
     pub markup: String,
     pub logical_width: u32,
     pub logical_height: u32,
