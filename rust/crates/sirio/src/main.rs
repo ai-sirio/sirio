@@ -6105,6 +6105,7 @@ impl SirioWorkspace {
         let changed = self.project_catalog != before;
         if changed {
             self.session.schedule_catalog(&self.project_catalog);
+            self.mark_activity_dirty();
         }
         // The sidebar can have performed a local optimistic mutation before
         // this discovery completes, while control state can also be stale
@@ -22347,8 +22348,15 @@ done
         assert!(!old_changes.read_with(&cx.cx, |changes, _| changes.allows_staging()));
 
         workspace.update(&mut cx, |workspace, cx| {
+            let before = workspace.project_catalog.clone();
             workspace.project_catalog.replace_projects(catalog(true));
-            workspace.mark_activity_dirty();
+            assert!(workspace.apply_catalog_refresh(
+                before,
+                Ok(()),
+                Some(repo.clone()),
+                cx,
+            ));
+            assert!(workspace.activity_dirty);
             workspace.sync_activity(cx);
         });
 
@@ -22357,8 +22365,15 @@ done
         assert!(git_changes.read_with(&cx.cx, |changes, _| changes.allows_staging()));
 
         workspace.update(&mut cx, |workspace, cx| {
+            let before = workspace.project_catalog.clone();
             workspace.project_catalog.replace_projects(catalog(false));
-            workspace.mark_activity_dirty();
+            assert!(workspace.apply_catalog_refresh(
+                before,
+                Ok(()),
+                Some(repo.clone()),
+                cx,
+            ));
+            assert!(workspace.activity_dirty);
             workspace.sync_activity(cx);
         });
 
