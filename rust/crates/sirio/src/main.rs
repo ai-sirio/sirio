@@ -10373,12 +10373,24 @@ impl SirioWorkspace {
             if !needs_rebind {
                 continue;
             }
-            let pane_id = tab.focused_pane;
-            let changes = cx.new(|cx| {
-                ChangesTab::new_with_git_capability(working_directory.clone(), is_git, cx)
+            tab.panes.for_each_mut(&mut |_, content| {
+                let TabContent::Changes(existing) = content else {
+                    return;
+                };
+                let existing = existing.read(cx);
+                let should_rebind = force
+                    || (existing.uses_project_git_capability()
+                        && existing.is_git_capable() != is_git);
+                drop(existing);
+                if !should_rebind {
+                    return;
+                }
+                let changes = cx.new(|cx| {
+                    ChangesTab::new_with_git_capability(working_directory.clone(), is_git, cx)
+                });
+                Self::subscribe_changes_tab(&changes, cx);
+                *content = TabContent::Changes(changes);
             });
-            Self::subscribe_changes_tab(&changes, cx);
-            tab.panes = PaneNode::leaf(pane_id, TabContent::Changes(changes));
         }
     }
 
@@ -22354,6 +22366,122 @@ done
         assert_ne!(git_changes.entity_id(), non_git_changes.entity_id());
         assert!(!non_git_changes.read_with(&cx.cx, |changes, _| changes.allows_staging()));
 
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[gpui::test]
+    fn capability_sync_rebinds_only_the_changes_leaf_in_a_split_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = std::env::temp_dir().join(format!(
+            "sirio-split-changes-capability-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).expect("create non-git project");
+        let catalog = |is_git| {
+            ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "split-capability-project".into(),
+                name: "Split Capability Project".into(),
+                root_path: repo.clone(),
+                is_git,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            }])
+        };
+
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+            workspace.working_directory = repo.clone();
+            workspace.project_catalog = catalog(false);
+            workspace.right_panel = cx.new(|_| RightPanel::new(repo.clone()));
+            let right_panel = workspace.right_panel.clone();
+            SirioWorkspace::subscribe_right_panel(&right_panel, cx);
+            workspace.add_changes_tab(None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let (leaf_ids, focused_pane, pane_events, terminal_id, terminal_is_live) =
+            workspace.update(&mut cx, |workspace, cx| {
+                workspace.split_focused_terminal_with_placement(
+                    SplitDirection::Horizontal,
+                    SplitPlacement::After,
+                    None,
+                    cx,
+                );
+                let tab = &workspace.tabs[0];
+                let mut terminal = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        terminal = Some(view.clone());
+                    }
+                });
+                let terminal = terminal.expect("split terminal sibling");
+                (
+                    tab.panes.leaf_ids(),
+                    tab.focused_pane,
+                    tab.session_state.pane_events.clone(),
+                    terminal.entity_id(),
+                    terminal.read(cx).is_host_mounted(),
+                )
+            });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.project_catalog.replace_projects(catalog(true));
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+
+        let (
+            new_leaf_ids,
+            new_focused_pane,
+            new_pane_events,
+            new_terminal_id,
+            new_terminal_is_live,
+            changes_id,
+            changes_allow_staging,
+        ) = workspace.update(&mut cx, |workspace, cx| {
+                let tab = &workspace.tabs[0];
+                let mut terminal = None;
+                let mut changes = None;
+                tab.panes.for_each(&mut |_, content| match content {
+                    TabContent::Terminal { view } => terminal = Some(view.clone()),
+                    TabContent::Changes(view) => changes = Some(view.clone()),
+                    _ => {}
+                });
+                let terminal = terminal.expect("terminal sibling survives rebind");
+                let changes = changes.expect("rebound Changes leaf");
+                (
+                    tab.panes.leaf_ids(),
+                    tab.focused_pane,
+                    tab.session_state.pane_events.clone(),
+                    terminal.entity_id(),
+                    terminal.read(cx).is_host_mounted(),
+                    changes.entity_id(),
+                    changes.read(cx).allows_staging(),
+                )
+            });
+
+        assert_eq!(new_leaf_ids, leaf_ids);
+        assert_eq!(new_focused_pane, focused_pane);
+        assert_eq!(new_pane_events, pane_events);
+        assert_eq!(new_terminal_id, terminal_id);
+        assert_eq!(new_terminal_is_live, terminal_is_live);
+        assert_ne!(changes_id, terminal_id);
+        assert!(changes_allow_staging);
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&repo);
     }
 
