@@ -952,7 +952,7 @@ mod tests {
             matches!(
                 render(
                     DiagramKind::PlantUml,
-                    "A -> B: hi\\nthis is not plantuml (((",
+                    "A -> B: hi\nthis is not plantuml (((",
                     &test_options(&root),
                 ),
                 Err(DiagramError::Syntax { .. })
