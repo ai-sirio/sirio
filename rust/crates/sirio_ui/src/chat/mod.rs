@@ -46,6 +46,7 @@ mod thought;
 mod tool_calls;
 mod transcript;
 mod turn_rail;
+use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use bezel::ui::widgets::{ButtonStyle, Buttons, Controls, SliderDrag, slider_fraction};
@@ -695,7 +696,7 @@ actions!(
     ]
 );
 
-actions!(chat_question_answer, [SendAnswer, CancelAnswer]);
+actions!(chat_question_answer, [SendAnswer, CancelAnswer, LeaveAnswer]);
 
 /// One option offered by an open question, drawn as a row of the dock.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2602,6 +2603,18 @@ impl Chat {
             KeyBinding::new("enter", SendAnswer, Some("ChatQuestionAnswer")),
             KeyBinding::new("return", SendAnswer, Some("ChatQuestionAnswer")),
             KeyBinding::new("escape", CancelAnswer, Some("ChatQuestionAnswer")),
+            // The question dock: the arrows move between answers, Enter
+            // takes the selected one, Escape withdraws the question. Digits
+            // are read raw by the dock itself (`on_question_dock_key`).
+            KeyBinding::new("up", DockPrevious, Some("ChatQuestionDock")),
+            KeyBinding::new("down", DockNext, Some("ChatQuestionDock")),
+            KeyBinding::new("enter", DockConfirm, Some("ChatQuestionDock")),
+            KeyBinding::new("return", DockConfirm, Some("ChatQuestionDock")),
+            KeyBinding::new("escape", DockCancel, Some("ChatQuestionDock")),
+            // Up from the typed answer goes back to the listed ones. The
+            // field sits inside the dock, so its context is the deeper one
+            // and wins over the dock's own `up`.
+            KeyBinding::new("up", LeaveAnswer, Some("ChatQuestionAnswer")),
         ]);
     }
 
@@ -8797,9 +8810,12 @@ impl Render for Chat {
             cx,
         );
         self.answer_caret_visible = answer_focused && self.answer_blink.visible();
-        // The open question's dock, drawn above the queue and the composer.
-        let dock = question_dock::question_view(&self.entries)
-            .map(|view| self.render_question_dock(view, &theme, &bezel_theme, cx));
+        // The open question's dock, drawn above the queue and the composer;
+        // its selection and focus follow the question first.
+        let question_view = question_dock::question_view(&self.entries);
+        self.sync_question_dock(question_view.as_ref(), window, cx);
+        let dock =
+            question_view.map(|view| self.render_question_dock(view, &theme, &bezel_theme, cx));
         // F-CHAT-13: captured once per render, same as Swift's `canAcceptDrop`
         // — a permission-wait that starts mid-drag simply means the next
         // render (the composer disabling itself already forces one) stops
@@ -8828,6 +8844,7 @@ impl Render for Chat {
             .on_action(cx.listener(Self::popup_accept))
             .on_action(cx.listener(Self::send_answer_action))
             .on_action(cx.listener(Self::cancel_answer_action))
+            .on_action(cx.listener(Self::leave_answer_action))
             .on_key_down(cx.listener(Self::on_composer_key))
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
@@ -10304,6 +10321,46 @@ mod tests {
                 cx,
             )
         })
+    }
+
+    fn focus_composer(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let handle = chat.read(cx).composer_field.read(cx).focus_handle(cx);
+            handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn dock_is_focused(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| chat.read(cx).question_dock.focus.is_focused(window))
+    }
+
+    fn composer_is_focused(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            chat.read(cx)
+                .composer_field
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
+    }
+
+    /// A question with listed answers and a typed one.
+    fn open_question_with_free_text(request_id: u64) -> Entry {
+        Entry::Permission {
+            request_id,
+            title: "Which color?".into(),
+            prompt: "Which color should the button be?".into(),
+            options: question_dock::answer_options(&["Blue", "Green"]),
+            text_input: Some(AnswerTextInput {
+                placeholder: None,
+                prefill: None,
+            }),
+            is_question: true,
+            resolved: None,
+            expired: false,
+            dismissed: false,
+        }
     }
 
     /// A native chat with one sent turn: a user entry whose checkpoint id
@@ -13205,6 +13262,12 @@ let answer = 42;
             "the pending bar is up while the question is open"
         );
 
+        // Escape from the composer cancels the turn; the dock's own Escape
+        // withdraws only the question. Give the keyboard back first.
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+
         // Escape cancels the turn; the protocol answers the pending
         // permission with `cancelled`, and the card must expire instead of
         // leaving the surface waiting on a decision nothing can deliver.
@@ -15940,6 +16003,248 @@ let answer = 42;
         for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
             assert_eq!(question_dock::dock_border(&theme), theme.border);
         }
+    }
+
+    /// A question asked while the user is in this chat takes the keyboard.
+    #[gpui::test]
+    async fn the_dock_takes_the_keyboard_from_the_composer(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx), "the dock holds the keyboard");
+    }
+
+    /// It never takes the keyboard from somewhere else — a terminal in
+    /// another pane the user is typing into.
+    #[gpui::test]
+    async fn the_dock_leaves_the_keyboard_alone_outside_the_chat(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.update(|window, cx| window.blur(cx));
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("question-dock").is_some(),
+            "the dock is drawn all the same"
+        );
+        assert!(!dock_is_focused(&chat, cx), "but it does not take the keyboard");
+    }
+
+    /// Down then Enter answers with the second option, end to end, and the
+    /// keyboard goes back to the composer.
+    #[gpui::test]
+    async fn arrows_and_enter_answer_from_the_dock(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["permission"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "may I?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx), "the question takes the keyboard");
+
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Permission { resolved: Some(choice), .. } if choice == "Deny once")
+            }) && chat.has_completed_turn
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(
+            composer_is_focused(&chat, cx),
+            "with the question answered the keyboard goes back to the composer"
+        );
+    }
+
+    /// A digit answers with its row, end to end.
+    #[gpui::test]
+    async fn a_digit_answers_its_row(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["question-options"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.simulate_keystrokes("2");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Assistant { text, .. } if text.contains("You picked: green"))
+            })
+        });
+    }
+
+    /// Escape in the dock withdraws the question — not the turn.
+    #[gpui::test]
+    async fn escape_in_the_dock_withdraws_the_question(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["question-options"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Permission { resolved: None, expired: true, .. })
+            }) && chat.has_completed_turn
+        });
+    }
+
+    /// Review focus: a digit typed into the free-text answer is text.
+    #[gpui::test]
+    async fn a_digit_typed_in_the_answer_field_is_text_not_a_choice(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("2");
+        cx.run_until_parked();
+        chat.read_with(&*cx, |chat, _| {
+            assert_eq!(chat.question_answer.draft, "2");
+            assert!(matches!(
+                chat.entries.first(),
+                Some(Entry::Permission { resolved: None, .. })
+            ));
+        });
+    }
+
+    /// Up from the typed answer goes back to the last listed answer.
+    #[gpui::test]
+    async fn up_from_the_answer_field_returns_to_the_listed_answers(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.simulate_keystrokes("3");
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| chat.read(cx).question_answer.focus.is_focused(window)),
+            "the third row is the typed answer"
+        );
+
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx));
+        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 1);
+    }
+
+    /// Review focus: two questions open at once — the second follows the
+    /// first in the dock, on its first row, with the keyboard kept.
+    #[gpui::test]
+    async fn a_second_question_follows_the_first_with_the_keyboard(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(2, "/repo/b.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        refresh_frame(cx);
+        chat.read_with(&*cx, |chat, _| {
+            assert_eq!(
+                question_dock::question_view(&chat.entries).map(|view| view.request_id),
+                Some(2)
+            );
+            assert_eq!(chat.question_dock.selected, 0, "a new question starts on row 1");
+        });
+        assert!(dock_is_focused(&chat, cx), "the keyboard stays on the dock");
+    }
+
+    /// Review focus: the pointer moving onto a row selects it, so only one
+    /// row is ever lit.
+    #[gpui::test]
+    async fn moving_the_pointer_onto_a_row_selects_it(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Always", "Reject"],
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let reject = cx
+            .debug_bounds("permission-option-reject")
+            .expect("the third answer is drawn");
+        cx.simulate_mouse_move(reject.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 2);
+    }
+
+    /// Review focus: a question closed from outside the dock (the turn
+    /// ended) hands the keyboard back to the composer.
+    #[gpui::test]
+    async fn a_question_closed_elsewhere_hands_the_keyboard_back(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(dock_is_focused(&chat, cx));
+
+        chat.update(cx, |chat, cx| {
+            chat.expire_unanswered();
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("question-dock").is_none());
+        assert!(composer_is_focused(&chat, cx));
     }
 
     /// A diff header's path is external text of arbitrary length: without

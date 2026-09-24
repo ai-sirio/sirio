@@ -5,8 +5,13 @@
 //! `docs/superpowers/specs/2026-09-24-question-dock-design.md`.
 
 use bezel::ui::popover;
-use gpui::{AnyElement, Context, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Focusable, KeyDownEvent, Window, actions, div, prelude::*, px};
 use sirio_theme::Theme;
+
+actions!(
+    chat_question_dock,
+    [DockPrevious, DockNext, DockConfirm, DockCancel]
+);
 
 use super::{AnswerOption, AnswerTextInput, Chat, Entry, PlanApproval, TRANSCRIPT_WIDTH};
 
@@ -155,6 +160,142 @@ pub(super) fn dock_border(theme: &bezel::theme::Theme) -> gpui::Hsla {
 }
 
 impl Chat {
+    /// Keeps the dock's selection and focus in step with the open question.
+    /// A new question starts on row 1 and takes the keyboard — but only
+    /// from inside this chat, never from another pane. When the last
+    /// question closes while the dock or its field held the keyboard, the
+    /// keyboard goes back to the composer.
+    pub(super) fn sync_question_dock(
+        &mut self,
+        view: Option<&QuestionView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let composer = self.composer_field.read(cx).focus_handle(cx);
+        let dock_or_field_focused = self.question_dock.focus.is_focused(window)
+            || self.question_answer.focus.is_focused(window);
+        match view {
+            Some(view) if self.question_dock.for_request != Some(view.request_id) => {
+                self.question_dock.for_request = Some(view.request_id);
+                self.question_dock.selected = 0;
+                let focus_in_chat = dock_or_field_focused
+                    || composer.contains_focused(window, cx)
+                    || self.transcript_focus.is_focused(window);
+                if focus_in_chat {
+                    let dock = self.question_dock.focus.clone();
+                    cx.defer_in(window, move |_, window, cx| dock.focus(window, cx));
+                }
+            }
+            None if self.question_dock.for_request.is_some() => {
+                self.question_dock.for_request = None;
+                self.question_dock.selected = 0;
+                if dock_or_field_focused {
+                    cx.defer_in(window, move |_, window, cx| composer.focus(window, cx));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Moves the selection to row `index`, redrawing only on a change — a
+    /// pointer resting on a row costs no frames.
+    pub(super) fn select_dock_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.question_dock.selected != index {
+            self.question_dock.selected = index;
+            cx.notify();
+        }
+    }
+
+    fn step_dock(&mut self, down: bool, cx: &mut Context<Self>) {
+        if let Some(view) = question_view(&self.entries) {
+            let next = step_selection(self.question_dock.selected, view.rows.len(), down);
+            self.select_dock_row(next, cx);
+        }
+    }
+
+    pub(super) fn dock_previous(
+        &mut self,
+        _: &DockPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_dock(false, cx);
+    }
+
+    pub(super) fn dock_next(
+        &mut self,
+        _: &DockNext,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_dock(true, cx);
+    }
+
+    pub(super) fn dock_confirm(
+        &mut self,
+        _: &DockConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = question_view(&self.entries) {
+            let index = clamp_selection(self.question_dock.selected, view.rows.len());
+            self.activate_dock_row(index, window, cx);
+        }
+    }
+
+    pub(super) fn dock_cancel(
+        &mut self,
+        _: &DockCancel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = question_view(&self.entries) {
+            self.cancel_question(view.request_id, cx);
+        }
+    }
+
+    /// Digits `1`–`9` pick their row. Keys typed into the free-text field
+    /// bubble through the dock too, and there a digit is text: the field
+    /// owns it.
+    pub(super) fn on_question_dock_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.question_answer.focus.is_focused(window) || event.keystroke.modifiers.modified() {
+            return;
+        }
+        let Some(view) = question_view(&self.entries) else {
+            return;
+        };
+        if let Some(index) = row_for_digit(&event.keystroke.key, view.rows.len()) {
+            cx.stop_propagation();
+            self.activate_dock_row(index, window, cx);
+        }
+    }
+
+    /// Up from the typed answer: back to the dock, on the last listed
+    /// answer.
+    pub(super) fn leave_answer_action(
+        &mut self,
+        _: &super::LeaveAnswer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = question_view(&self.entries) else {
+            return;
+        };
+        self.question_answer.for_request = None;
+        self.question_dock.selected = view
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, DockRow::Option(_)))
+            .unwrap_or(0);
+        self.question_dock.focus.focus(window, cx);
+        cx.notify();
+    }
+
     /// Draws the dock for the open question: its caption, the whole
     /// question, and one numbered row per answer.
     pub(super) fn render_question_dock(
@@ -214,6 +355,12 @@ impl Chat {
                 )
                 .id(("question-dock-row", index))
                 .items_start()
+                .on_mouse_move({
+                    let hover_entity = entity.clone();
+                    move |_, _, cx| {
+                        hover_entity.update(cx, |chat, cx| chat.select_dock_row(index, cx));
+                    }
+                })
                 .on_click(move |_, window, cx| {
                     click_entity.update(cx, |chat, cx| {
                         chat.activate_dock_row(index, window, cx);
@@ -269,6 +416,11 @@ impl Chat {
             .debug_selector(|| "question-dock".into())
             .key_context("ChatQuestionDock")
             .track_focus(&self.question_dock.focus)
+            .on_action(cx.listener(Self::dock_previous))
+            .on_action(cx.listener(Self::dock_next))
+            .on_action(cx.listener(Self::dock_confirm))
+            .on_action(cx.listener(Self::dock_cancel))
+            .on_key_down(cx.listener(Self::on_question_dock_key))
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
             .mb(px(8.0))
@@ -309,6 +461,17 @@ impl Chat {
                     }),
             )
             .child(div().flex().flex_col().gap(px(2.0)).children(rows))
+            .child(
+                div()
+                    .debug_selector(|| "question-dock-hint".into())
+                    .px(px(8.0))
+                    .pb(px(2.0))
+                    .flex()
+                    .justify_end()
+                    .text_size(typography.caption2)
+                    .text_color(theme.text_faint)
+                    .child("↑↓ select · ⏎ confirm · esc cancel"),
+            )
             .into_any_element()
     }
 
