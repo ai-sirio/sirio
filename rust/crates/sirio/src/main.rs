@@ -5222,7 +5222,7 @@ impl SirioWorkspace {
         let persisted_secondary_pane_hidden = session.secondary_pane_hidden_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
-            .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary);
+            .is_some_and(|tab| tab.kind.default_pane() == PaneRole::Secondary);
         if restored_active_secondary && persisted_secondary_pane_hidden {
             // Keep the restored active surface visible and make the repaired
             // state survive the next restart as well.
@@ -5798,7 +5798,7 @@ impl SirioWorkspace {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
                     state.shown_in_pane =
-                        self.center_split.active(tab.kind.pane_role()) == Some(tab.id);
+                        self.center_split.active(tab.kind.default_pane()) == Some(tab.id);
                     tab.panes.for_each(&mut |pane_id, content| {
                         match content {
                             TabContent::Terminal { view } => {
@@ -7879,7 +7879,7 @@ impl SirioWorkspace {
         if from == target {
             return false;
         }
-        if self.tabs[from].kind.pane_role() != self.tabs[target].kind.pane_role() {
+        if self.tabs[from].kind.default_pane() != self.tabs[target].kind.default_pane() {
             return false;
         }
         let active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -10265,17 +10265,17 @@ impl SirioWorkspace {
         let desired = self
             .tabs
             .get(self.active_tab)
-            .map(|tab| (tab.kind.pane_role(), tab.id));
+            .map(|tab| (tab.kind.default_pane(), tab.id));
         let primary_ids: Vec<usize> = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Primary)
+            .filter(|tab| tab.kind.default_pane() == PaneRole::Primary)
             .map(|tab| tab.id)
             .collect();
         let secondary_ids: Vec<usize> = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .filter(|tab| tab.kind.default_pane() == PaneRole::Secondary)
             .map(|tab| tab.id)
             .collect();
 
@@ -10419,7 +10419,7 @@ impl SirioWorkspace {
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         for (pane_id, view) in panes {
             let content_id = format!("terminal-{pane_id}");
-            let role_str = match tab.kind.pane_role() {
+            let role_str = match tab.kind.default_pane() {
                 PaneRole::Primary => "primary",
                 PaneRole::Secondary => "secondary",
             };
@@ -10618,7 +10618,7 @@ impl SirioWorkspace {
         let has_primary = self
             .tabs
             .iter()
-            .any(|tab| tab.kind.pane_role() == PaneRole::Primary);
+            .any(|tab| tab.kind.default_pane() == PaneRole::Primary);
         if has_primary {
             self.empty_pane_prompts.clear();
             return;
@@ -10765,7 +10765,7 @@ impl SirioWorkspace {
         // list that survives, and "nearest" is a fact about the list that did
         // not. So the position is read here, while the closing tab is still
         // in it.
-        let closing_role = self.tabs[index].kind.pane_role();
+        let closing_role = self.tabs[index].kind.default_pane();
         let closing_position = self
             .center_split
             .tabs_for(closing_role, &self.tabs)
@@ -14124,7 +14124,7 @@ impl SirioWorkspace {
                 if let TabContent::Terminal { view } = content {
                     let sole_tab_in_group = self
                         .center_split
-                        .tabs_for(self.tabs[tab_index].kind.pane_role(), &self.tabs)
+                        .tabs_for(self.tabs[tab_index].kind.default_pane(), &self.tabs)
                         .len()
                         == 1;
                     view.update(cx, |terminal, cx| {
@@ -15211,7 +15211,7 @@ impl SirioWorkspace {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return Vec::new();
         };
-        let role = tab.kind.pane_role();
+        let role = tab.kind.default_pane();
         let ids = machinery.tabs_for(role, &self.tabs);
         let Some(position) = ids.iter().position(|id| *id == tab_id) else {
             return Vec::new();
@@ -15325,7 +15325,7 @@ impl SirioWorkspace {
         for tab in self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.kind.default_pane() == focused)
         {
             if tab.id == tab_id {
                 break;
@@ -15776,7 +15776,7 @@ impl SirioWorkspace {
         let group_len = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
+            .filter(|tab| tab.kind.default_pane() == role)
             .count();
         if group_len == 0 {
             return (0, false, 0);
@@ -15784,7 +15784,7 @@ impl SirioWorkspace {
         let tab_widths = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
+            .filter(|tab| tab.kind.default_pane() == role)
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
@@ -15823,13 +15823,13 @@ impl SirioWorkspace {
         let Some(active_tab) = self.tabs.get(self.active_tab) else {
             return;
         };
-        if active_tab.kind.pane_role() != focused {
+        if active_tab.kind.default_pane() != focused {
             return;
         }
         let active_index = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.kind.default_pane() == focused)
             .position(|tab| tab.id == active_tab.id);
         let Some(active_index) = active_index else {
             return;
@@ -15889,7 +15889,7 @@ impl SirioWorkspace {
         if self
             .tabs
             .get(self.active_tab)
-            .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .is_some_and(|tab| tab.kind.default_pane() == PaneRole::Secondary)
         {
             self.open_secondary_pane();
         }
@@ -16027,7 +16027,7 @@ impl SirioWorkspace {
         let group_tabs = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
+            .filter(|tab| tab.kind.default_pane() == role)
             .collect::<Vec<_>>();
         let (visible_count, has_overflow, _) = self.tab_strip_fit(role, window, theme);
         let active_tab_id = self.center_split.active(role);
@@ -16270,7 +16270,7 @@ impl SirioWorkspace {
         let menu_role = self
             .tab_menu_tab
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
-            .map(|tab| tab.kind.pane_role());
+            .map(|tab| tab.kind.default_pane());
 
         // #320: each pane is its own stack — strip on top, surface below —
         // and the two sit side by side. The strip is *inside* the pane, so
@@ -19115,7 +19115,7 @@ fn seed_shown_tabs(
                 continue;
             }
             if let Some(tab) = tabs.iter().find(|tab| {
-                tab.persistence_id == saved_tab.id && tab.kind.pane_role() == role
+                tab.persistence_id == saved_tab.id && tab.kind.default_pane() == role
             }) {
                 center_split.set_active(role, Some(tab.id));
                 break;
@@ -36717,7 +36717,7 @@ done
                 "the tab names the project like the sheet heading did"
             );
             assert_eq!(
-                workspace.tabs[index].kind.pane_role(),
+                workspace.tabs[index].kind.default_pane(),
                 PaneRole::Secondary,
                 "settings live in the Secondary half"
             );

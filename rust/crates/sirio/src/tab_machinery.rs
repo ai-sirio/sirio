@@ -22,7 +22,7 @@ impl SplitTab for OpenTab {
     }
 
     fn split_role(&self) -> PaneRole {
-        self.kind.pane_role()
+        self.kind.default_pane()
     }
 }
 
@@ -228,7 +228,7 @@ mod tests {
         }
 
         fn split_role(&self) -> PaneRole {
-            self.kind.pane_role()
+            self.kind.default_pane()
         }
     }
 
