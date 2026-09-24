@@ -1,7 +1,7 @@
 # The question dock — design
 
 **Date:** 2026-09-24
-**Status:** approved design, not yet implemented
+**Status:** implemented on `worktree/calm-harbor-e5a1`
 **Parent work:** F-CHAT-25 (question cards answered in place), F-CHAT-26 (the
 pending-question bar), F-CHAT-24 (plan approval on the Plan card)
 **Scope of this document:** moving the answer to an agent's question out of
