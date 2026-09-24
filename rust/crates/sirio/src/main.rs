@@ -355,7 +355,8 @@ use session::{
     SessionStore, SessionTab, SessionTabState,
 };
 use tab_machinery::{
-    CenterSplit, MoveDirection, cross_pane_insertion_index, nearest_remaining, visible_tab_count,
+    CenterSplit, MoveDirection, PaneDropTarget, cross_pane_insertion_index, cross_pane_target,
+    nearest_remaining, visible_tab_count,
 };
 
 actions!(
@@ -1226,6 +1227,9 @@ struct PendingTitlePrompt {
 /// and is not meant to be cloned) — a cancel only ever needs to put the same
 /// tabs back in their original order and restore which one was active.
 struct TabDragSnapshot {
+    /// The tab being dragged. The drop overlay across the divider is drawn
+    /// for it, and only while a drag is live (`pane_drop_overlay_role`).
+    dragged: usize,
     order: Vec<usize>,
     active_id: Option<usize>,
 }
@@ -4357,6 +4361,12 @@ struct SirioWorkspace {
     /// dropped. Cleared on a real drop (`render_open_tabs`'s
     /// `on_drop::<RowDrag>`) and on Escape (`cancel_tab_drag`).
     tab_drag_snapshot: Option<TabDragSnapshot>,
+    /// Spec 2026-09-24 §5: where the tab being dragged would land in the
+    /// *other* half if released now. Recomputed on every move of a tab drag
+    /// (reset by `shell-work-area`, set by whichever strip, tab or overlay
+    /// contains the pointer); never mutates `tabs` — a cross-half move commits
+    /// on drop only, so a terminal's PTY is resized once.
+    pane_drop_target: Option<PaneDropTarget>,
     /// The worktree that owns each live tab. `tabs` is intentionally shared
     /// by mounted worktrees while an unsafe switch keeps an agent tab alive;
     /// deriving ownership from `working_directory` would then relabel the
@@ -5310,6 +5320,7 @@ impl SirioWorkspace {
             tabs,
             active_tab,
             tab_drag_snapshot: None,
+            pane_drop_target: None,
             tab_worktree_paths,
             next_tab_id: tabs_len,
             next_retained_chat_id: 0,
@@ -7987,6 +7998,7 @@ impl SirioWorkspace {
         let Some(snapshot) = self.tab_drag_snapshot.take() else {
             return false;
         };
+        self.pane_drop_target = None;
         cx.stop_active_drag(window);
         let mut restored = Vec::with_capacity(self.tabs.len());
         for id in &snapshot.order {
@@ -8067,6 +8079,166 @@ impl SirioWorkspace {
         self.select_tab(tab_id, window, cx);
         cx.notify();
         true
+    }
+
+    /// The half a drop overlay is drawn over right now: the half across the
+    /// divider from a movable tab being dragged, or `None`. A tab drag is
+    /// `tab_drag_snapshot` *and* a live drag (spec §5, "Drag state").
+    fn pane_drop_overlay_role(&self, cx: &App) -> Option<PaneRole> {
+        if !cx.has_active_drag() {
+            return None;
+        }
+        let dragged = self.tab_drag_snapshot.as_ref()?.dragged;
+        let tab = self.tabs.iter().find(|tab| tab.id == dragged)?;
+        tab.kind.can_move_between_panes().then(|| tab.pane.other())
+    }
+
+    /// The first listener of every tab-drag move: forget the last target so
+    /// only what contains the pointer *now* can set one. It runs before the
+    /// strips, tabs and overlays because `shell-work-area` registers its
+    /// listeners before painting its children, and the capture phase walks
+    /// listeners in registration order. Redraws once, after the whole move
+    /// has been dispatched, and only if the target changed.
+    fn begin_pane_drop_move(&mut self, cx: &mut Context<Self>) {
+        let previous = self.pane_drop_target.take();
+        let entity = cx.entity();
+        cx.defer(move |cx| {
+            entity.update(cx, |workspace, cx| {
+                if workspace.pane_drop_target != previous {
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    /// A tab-drag move over a strip or a body of the `over` half (`anchor`
+    /// `None`), or over one of its tabs. Records where the tab would land
+    /// when that is across the divider (`cross_pane_target`).
+    fn drag_over_pane(
+        &mut self,
+        drag: RowDrag,
+        over: PaneRole,
+        anchor: Option<(usize, bool)>,
+        inside: bool,
+    ) {
+        if drag.scope != ReorderScope::Tabs {
+            return;
+        }
+        let Some(dragged) = self.tabs.iter().find(|tab| tab.id == drag.id) else {
+            return;
+        };
+        if let Some(target) = cross_pane_target(
+            dragged.pane,
+            dragged.kind.can_move_between_panes(),
+            over,
+            anchor,
+            inside,
+        ) {
+            self.pane_drop_target = Some(target);
+        }
+    }
+
+    /// A tab-drag move over tab `target_id`: its own half keeps the live
+    /// in-strip reorder (F-TAB-24); the other half records a target.
+    fn drag_over_tab(
+        &mut self,
+        drag: RowDrag,
+        target_id: usize,
+        before: bool,
+        inside: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.scope != ReorderScope::Tabs {
+            return;
+        }
+        let pane_of = |id| {
+            self.tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .map(|tab| tab.pane)
+        };
+        let (Some(dragged), Some(over)) = (pane_of(drag.id), pane_of(target_id)) else {
+            return;
+        };
+        if dragged == over {
+            self.preview_tab_reorder(drag, target_id, before, cx);
+        } else {
+            self.drag_over_pane(drag, over, Some((target_id, before)), inside);
+        }
+    }
+
+    /// A tab drag released over `pane` — its strip or its body overlay. A
+    /// target recorded for that half moves the tab there; otherwise this was
+    /// an in-strip reorder, already applied live, and the drop only commits
+    /// it. Either way the drag's bookkeeping ends here.
+    fn drop_on_pane(
+        &mut self,
+        drag: RowDrag,
+        pane: PaneRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab_drag_snapshot = None;
+        let target = self.pane_drop_target.take();
+        if drag.scope == ReorderScope::Tabs
+            && let Some(target) = target.filter(|target| target.pane == pane)
+        {
+            self.move_tab_to_pane(drag.id, target.pane, target.anchor, Some(window), cx);
+        }
+        cx.notify();
+    }
+
+    /// Spec §5, "Drop on the other pane's body": while a movable tab is
+    /// dragged, the half across the divider is covered by a drop surface —
+    /// clear until the pointer is over it, then filled. Drawn last in its
+    /// surface, so it is the topmost hitbox and the hover-gated `on_drop`
+    /// reaches it rather than a terminal or chat beneath.
+    fn render_pane_drop_overlay(
+        &self,
+        role: PaneRole,
+        theme: Theme,
+        entity: Entity<Self>,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        if self.pane_drop_overlay_role(cx) != Some(role) {
+            return None;
+        }
+        let targeted = self
+            .pane_drop_target
+            .is_some_and(|target| target.pane == role);
+        let selector = match role {
+            PaneRole::Primary => "pane-drop-overlay-primary",
+            PaneRole::Secondary => "pane-drop-overlay-secondary",
+        };
+        let move_entity = entity.clone();
+        Some(
+            div()
+                .id(selector)
+                .debug_selector(move || selector.to_owned())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .when(targeted, |this| {
+                    this.bg(theme.element_active)
+                        .border_2()
+                        .border_color(theme.border_strong)
+                })
+                .on_drag_move::<RowDrag>(move |event, _, cx| {
+                    let drag = *event.drag(cx);
+                    let inside = event.bounds.contains(&event.event.position);
+                    move_entity.update(cx, |workspace, _| {
+                        workspace.drag_over_pane(drag, role, None, inside);
+                    });
+                })
+                .on_drop::<RowDrag>(move |drag, window, cx| {
+                    let drag = *drag;
+                    entity.update(cx, |workspace, cx| {
+                        workspace.drop_on_pane(drag, role, window, cx);
+                    });
+                })
+                .into_any_element(),
+        )
     }
 
     fn control_add_project(
@@ -12811,7 +12983,9 @@ impl SirioWorkspace {
     /// the rule stays testable without a window: every open overlay obscures,
     /// and a quiet frame obscures nothing. Toasts are deliberately not here:
     /// they are small, non-modal root notices, and blanking the page for
-    /// their four seconds would be worse than the overlap.
+    /// their four seconds would be worse than the overlap. A movable tab
+    /// dragged out of the Primary half also covers the Secondary one (spec
+    /// 2026-09-24 §5).
     fn overlay_obscures_browsers(
         overflow_menu_open: bool,
         tab_menu_open: bool,
@@ -12820,6 +12994,7 @@ impl SirioWorkspace {
         pane_close_open: bool,
         tab_rename_open: bool,
         new_tab_menu_open: bool,
+        tab_drag_toward_secondary: bool,
     ) -> bool {
         overflow_menu_open
             || tab_menu_open
@@ -12828,6 +13003,7 @@ impl SirioWorkspace {
             || pane_close_open
             || tab_rename_open
             || new_tab_menu_open
+            || tab_drag_toward_secondary
     }
 
     /// #376: marks every browser surface as covered (or not) by a GPUI
@@ -12848,6 +13024,7 @@ impl SirioWorkspace {
             self.pending_pane_close.is_some(),
             self.tab_rename.is_some(),
             self.tab_bar.read(cx).is_menu_open(),
+            self.pane_drop_overlay_role(cx) == Some(PaneRole::Secondary),
         );
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
@@ -14890,6 +15067,8 @@ impl SirioWorkspace {
         rename_draft: Option<&str>,
         rename_focus: Option<FocusHandle>,
         rename_caret_visible: bool,
+        // Spec 2026-09-24 §5: `Some(before)` draws the cross-half insertion bar on that side.
+        drop_edge: Option<bool>,
         entity: Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -14985,25 +15164,44 @@ impl SirioWorkspace {
             })
             .text_color(if active { theme.text } else { theme.text_muted })
             .hover(|style| style.bg(theme.element_hover))
+            .when_some(drop_edge, |this, before| {
+                this.child(
+                    div()
+                        .id(format!("tab-drop-indicator-{id}"))
+                        .debug_selector(move || format!("tab-drop-indicator-{id}"))
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.0))
+                        .when(before, |bar| bar.left_0())
+                        .when(!before, |bar| bar.right_0())
+                        .bg(theme.text),
+                )
+            })
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
             // the same point sidebar.rs's own drag resets `pending_reorder`
             // at. Snapshot the pre-drag tab order here so Escape has
             // something to put back; `preview_tab_reorder` below mutates
             // `tabs` live on every hover crossing with no other checkpoint.
             .on_drag(tab_drag, move |_, _, _, cx| {
-                drag_start_entity.update(cx, |workspace, _| {
+                drag_start_entity.update(cx, |workspace, cx| {
                     workspace.tab_drag_snapshot = Some(TabDragSnapshot {
+                        dragged: id,
                         order: workspace.tabs.iter().map(|tab| tab.id).collect(),
                         active_id: workspace.tabs.get(workspace.active_tab).map(|tab| tab.id),
                     });
+                    workspace.pane_drop_target = None;
+                    // The drop overlay across the divider appears with the drag.
+                    cx.notify();
                 });
                 cx.new(|_| gpui::Empty)
             })
             .on_drag_move::<RowDrag>(move |event, _, cx| {
                 let drag = *event.drag(cx);
                 let before = event.event.position.x < event.bounds.center().x;
+                let inside = event.bounds.contains(&event.event.position);
                 drag_entity.update(cx, |workspace, cx| {
-                    workspace.preview_tab_reorder(drag, id, before, cx);
+                    workspace.drag_over_tab(drag, id, before, inside, cx);
                 });
             })
             .on_mouse_down(MouseButton::Right, move |_, _, cx| {
@@ -16181,19 +16379,27 @@ impl SirioWorkspace {
             .items_center()
             .gap(px(2.0))
             .bg(theme.surface)
-            // F-TAB-24: a real drop commits the reorder that
-            // `preview_tab_reorder` already applied live during hover --
-            // this just clears the pre-drag snapshot so a later, unrelated
-            // Escape press can no longer revert it. Attached to this stable
-            // strip container, not a per-tab row, for the same reason
-            // sidebar.rs's own `#sidebar-tree` drop is: rows reorder during
-            // the drag, so the row originally under the pointer may not be
-            // the one under it at drop.
+            // F-TAB-24: a drop either commits the live reorder or, with a
+            // cross-half target, moves the tab (`drop_on_pane`). Attached to
+            // this stable strip container, not a per-tab row, because rows
+            // reorder during the drag, so the row originally under the
+            // pointer may not be the one under it at drop.
+            .on_drag_move::<RowDrag>({
+                let strip_entity = entity.clone();
+                move |event, _, cx| {
+                    let drag = *event.drag(cx);
+                    let inside = event.bounds.contains(&event.event.position);
+                    strip_entity.update(cx, |workspace, _| {
+                        workspace.drag_over_pane(drag, role, None, inside);
+                    });
+                }
+            })
             .on_drop::<RowDrag>({
                 let drop_entity = entity.clone();
-                move |_, _, cx| {
-                    drop_entity.update(cx, |workspace, _| {
-                        workspace.tab_drag_snapshot = None;
+                move |drag, window, cx| {
+                    let drag = *drag;
+                    drop_entity.update(cx, |workspace, cx| {
+                        workspace.drop_on_pane(drag, role, window, cx);
                     });
                 }
             });
@@ -16215,6 +16421,14 @@ impl SirioWorkspace {
                 .as_ref()
                 .filter(|rename| rename.tab_id == tab.id)
                 .map(|rename| rename.focus.clone());
+            let drop_edge = self
+                .pane_drop_target
+                .filter(|target| {
+                    target.pane == role && self.pane_drop_overlay_role(cx) == Some(role)
+                })
+                .and_then(|target| target.anchor)
+                .filter(|(anchor, _)| *anchor == tab.id)
+                .map(|(_, before)| before);
             tabs = tabs.child(Self::render_open_tab(
                 tab,
                 self.tab_agent_mark(tab),
@@ -16232,6 +16446,7 @@ impl SirioWorkspace {
                 rename_draft,
                 rename_focus,
                 self.tab_rename_caret_visible,
+                drop_edge,
                 entity.clone(),
                 theme,
                 window,
@@ -16389,7 +16604,8 @@ impl SirioWorkspace {
             .min_h_0()
             .w_full()
             .overflow_hidden()
-            .child(primary_surface);
+            .child(primary_surface)
+            .children(self.render_pane_drop_overlay(PaneRole::Primary, *theme, entity.clone(), cx));
         #[cfg(test)]
         let primary_surface = primary_surface
             .when_some(shell_paint_probe("centre-surface", cx), |this, probe| {
@@ -16570,6 +16786,12 @@ impl SirioWorkspace {
                                     *theme,
                                     entity.clone(),
                                     cx,
+                                ))
+                                .children(self.render_pane_drop_overlay(
+                                    PaneRole::Secondary,
+                                    *theme,
+                                    entity.clone(),
+                                    cx,
                                 )),
                         ),
                 )
@@ -16611,6 +16833,15 @@ impl SirioWorkspace {
             .w_full()
             .p(theme.spacing.shell_outer_inset)
             .gap(theme.spacing.shell_gap)
+            .on_drag_move::<RowDrag>({
+                let entity = entity.clone();
+                move |event, _, cx| {
+                    if event.drag(cx).scope != ReorderScope::Tabs {
+                        return;
+                    }
+                    entity.update(cx, |workspace, cx| workspace.begin_pane_drop_move(cx));
+                }
+            })
             .on_drag_move::<DraggedPanelEdge>({
                 let entity = entity.clone();
                 move |event, _, cx| {
@@ -18078,6 +18309,14 @@ fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Spec 2026-09-24 §5: a tab drag that ended without a drop leaves
+        // its snapshot and target behind, and a later divider drag would
+        // then read as a tab drag (gpui exposes `has_active_drag`, not the
+        // drag's type). Both only mean something mid-drag.
+        if !cx.has_active_drag() {
+            self.tab_drag_snapshot = None;
+            self.pane_drop_target = None;
+        }
         // Layer E chat evidence is polled because streaming state lives in
         // the chat entity. Terminal lifecycle evidence is push-driven and
         // read from `terminal_shell_evidence`, avoiding a render dependency
@@ -22309,50 +22548,56 @@ done
     fn any_open_overlay_obscures_browsers_a_quiet_frame_obscures_nothing() {
         assert!(
             !SirioWorkspace::overlay_obscures_browsers(
-                false, false, false, false, false, false, false
+                false, false, false, false, false, false, false, false
             ),
             "a quiet frame must leave the page mapped"
         );
         for (name, args) in [
             (
                 "overflow menu",
-                (true, false, false, false, false, false, false),
+                (true, false, false, false, false, false, false, false),
             ),
             (
                 "tab context menu",
-                (false, true, false, false, false, false, false),
+                (false, true, false, false, false, false, false, false),
             ),
             (
                 "command palette",
-                (false, false, true, false, false, false, false),
+                (false, false, true, false, false, false, false, false),
             ),
             (
                 "set-title prompt",
-                (false, false, false, true, false, false, false),
+                (false, false, false, true, false, false, false, false),
             ),
             (
                 "pane close confirm",
-                (false, false, false, false, true, false, false),
+                (false, false, false, false, true, false, false, false),
             ),
             (
                 "tab rename",
-                (false, false, false, false, false, true, false),
+                (false, false, false, false, false, true, false, false),
             ),
             (
                 "+ new-tab menu",
-                (false, false, false, false, false, false, true),
+                (false, false, false, false, false, false, true, false),
+            ),
+            (
+                "tab dragged toward the right half",
+                (false, false, false, false, false, false, false, true),
             ),
         ] {
-            let (overflow, tab_menu, palette, title, close, rename, new_tab) = args;
+            let (overflow, tab_menu, palette, title, close, rename, new_tab, tab_drag) = args;
             assert!(
                 SirioWorkspace::overlay_obscures_browsers(
-                    overflow, tab_menu, palette, title, close, rename, new_tab
+                    overflow, tab_menu, palette, title, close, rename, new_tab, tab_drag
                 ),
                 "an open {name} must hide the page so its rows stay clickable"
             );
         }
         assert!(
-            SirioWorkspace::overlay_obscures_browsers(true, true, true, true, true, true, true),
+            SirioWorkspace::overlay_obscures_browsers(
+                true, true, true, true, true, true, true, false
+            ),
             "overlapping overlays still obscure"
         );
     }
@@ -28266,6 +28511,222 @@ done
             .debug_bounds("workspace-tab-1")
             .expect("the moved tab is drawn");
         assert!(pane.contains(&tab.center()));
+    }
+
+    /// Four terminals; 2 and 3 moved to the right half, 0 shown and focused
+    /// on the left. The right strip reads [2, 3].
+    fn drag_test_window(cx: &mut TestAppContext) -> (VisualTestContext, Entity<SirioWorkspace>) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 4);
+            workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx);
+            workspace.move_tab_to_pane(3, PaneRole::Secondary, None, None, cx);
+            workspace.select_tab(0, None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        (cx, workspace)
+    }
+
+    /// Presses on `from`, starts the drag, and hovers `to`, parking after
+    /// each step: the drop overlay only exists in a frame drawn after the
+    /// drag started, and the next move is dispatched against that frame.
+    fn begin_tab_drag(
+        cx: &mut VisualTestContext,
+        from: gpui::Point<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+    ) {
+        cx.simulate_event(MouseDownEvent {
+            position: from,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(from.x + px(30.0), from.y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(MouseMoveEvent {
+            position: to,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+    }
+
+    fn release_tab_drag(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        cx.simulate_event(MouseUpEvent {
+            position: at,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// Spec §5: released on the left edge of a right-hand tab, a terminal
+    /// lands just before it, marked by the insertion bar while hovering.
+    #[gpui::test]
+    async fn drawn_drop_between_two_right_tabs_lands_the_terminal_there(cx: &mut TestAppContext) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("tab 0 is drawn")
+            .center();
+        let target = cx.debug_bounds("workspace-tab-3").expect("tab 3 is drawn");
+        let before_three = point(target.origin.x + px(4.0), target.center().y);
+
+        begin_tab_drag(&mut cx, source, before_three);
+        assert!(
+            cx.debug_bounds("tab-drop-indicator-3").is_some(),
+            "the insertion bar marks the slot"
+        );
+        release_tab_drag(&mut cx, before_three);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 0, 3]
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert!(workspace.pane_drop_target.is_none());
+        });
+        assert!(
+            cx.debug_bounds("tab-drop-indicator-3").is_none(),
+            "the bar goes with the drag"
+        );
+    }
+
+    /// Spec §5: released anywhere on the right half's body, a terminal lands
+    /// last in that strip.
+    #[gpui::test]
+    async fn drawn_drop_on_the_right_body_puts_the_terminal_last(cx: &mut TestAppContext) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("tab 0 is drawn")
+            .center();
+        let body = cx
+            .debug_bounds("secondary-surface")
+            .expect("the right body is drawn")
+            .center();
+
+        begin_tab_drag(&mut cx, source, body);
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary").is_some(),
+            "the right body is a drop target while the terminal is dragged"
+        );
+        release_tab_drag(&mut cx, body);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3, 0]
+            );
+        });
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_none());
+    }
+
+    /// Spec §5, "Refused silently": an editor dragged toward the left half
+    /// gets no drop surface and stays right.
+    #[gpui::test]
+    async fn drawn_editor_dragged_left_stays_right(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].set_kind(TabKind::Editor);
+            workspace.rebuild_center_split();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let source = cx
+            .debug_bounds("workspace-tab-1")
+            .expect("editor tab drawn")
+            .center();
+        let left = cx
+            .debug_bounds("centre-surface")
+            .expect("left body drawn")
+            .center();
+
+        begin_tab_drag(&mut cx, source, left);
+        assert!(cx.debug_bounds("pane-drop-overlay-primary").is_none());
+        release_tab_drag(&mut cx, left);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let editor = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 1)
+                .expect("tab 1");
+            assert_eq!(editor.pane, PaneRole::Secondary);
+        });
+    }
+
+    /// Review Focus 5: leaving every target clears the bar, and a release
+    /// over nothing moves nothing and leaves no snapshot or target behind for
+    /// a later divider drag to trip over.
+    #[gpui::test]
+    async fn drawn_drag_that_leaves_every_target_draws_nothing_and_leaves_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("tab 0 is drawn")
+            .center();
+        let target = cx.debug_bounds("workspace-tab-3").expect("tab 3 is drawn");
+        let over = point(target.origin.x + px(4.0), target.center().y);
+        begin_tab_drag(&mut cx, source, over);
+        assert!(cx.debug_bounds("tab-drop-indicator-3").is_some());
+
+        // The window's top edge: above every strip and body.
+        let left = cx.debug_bounds("pane-primary").expect("left half drawn");
+        let outside = point(left.center().x, px(1.0));
+        cx.simulate_event(MouseMoveEvent {
+            position: outside,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("tab-drop-indicator-3").is_none(),
+            "no target, no bar"
+        );
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.pane_drop_target.is_none()));
+
+        release_tab_drag(&mut cx, outside);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3],
+                "a release over no target moves nothing"
+            );
+            assert!(workspace.tab_drag_snapshot.is_none());
+            assert!(workspace.pane_drop_target.is_none());
+        });
     }
 
     /// F-TAB-24: `preview_tab_reorder` mutates the live tab vector on every

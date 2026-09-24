@@ -98,6 +98,31 @@ pub(crate) fn cross_pane_insertion_index<T: SplitTab>(
         .map_or(tabs.len(), |index| index + 1)
 }
 
+/// Where a tab dragged across the divider would land: which half, and next
+/// to which of its tabs (`(id, before)`), or at the end of its strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneDropTarget {
+    pub(crate) pane: PaneRole,
+    pub(crate) anchor: Option<(usize, bool)>,
+}
+
+/// The drop target a tab-drag move produces over something in the `over`
+/// half — a tab (`anchor` names it), a strip or a body (`anchor` is `None`).
+/// Only a tab that can move, over the half it is *not* in, with the pointer
+/// inside the thing asking, has one. gpui delivers every drag move to every
+/// listener (`on_drag_move` is not hover-gated), so `inside` is what keeps
+/// the strip across the window from claiming the drop.
+pub(crate) fn cross_pane_target(
+    dragged_pane: PaneRole,
+    dragged_movable: bool,
+    over: PaneRole,
+    anchor: Option<(usize, bool)>,
+    inside: bool,
+) -> Option<PaneDropTarget> {
+    (dragged_movable && dragged_pane != over && inside)
+        .then_some(PaneDropTarget { pane: over, anchor })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CenterSplit {
     primary_active: Option<usize>,
@@ -246,7 +271,8 @@ impl CenterSplit {
 #[cfg(test)]
 mod tests {
     use super::{
-        CenterSplit, MoveDirection, SplitTab, cross_pane_insertion_index, nearest_remaining,
+        CenterSplit, MoveDirection, PaneDropTarget, SplitTab, cross_pane_insertion_index,
+        cross_pane_target, nearest_remaining,
     };
     use sirio_project::{PaneRole, TabKind};
 
@@ -439,6 +465,43 @@ mod tests {
             cross_pane_insertion_index(&primary_only, PaneRole::Secondary, None),
             1,
             "an empty target half: the end of the list"
+        );
+    }
+
+    /// Spec §5: gpui hands every drag move to every listener, so only a
+    /// movable tab, over the half it is not in, with the pointer inside the
+    /// thing asking, produces a drop target.
+    #[test]
+    fn only_a_movable_tab_over_the_other_half_with_the_pointer_inside_targets_it() {
+        let anchor = Some((7, true));
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Secondary, anchor, true),
+            Some(PaneDropTarget {
+                pane: PaneRole::Secondary,
+                anchor
+            })
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Secondary, None, true),
+            Some(PaneDropTarget {
+                pane: PaneRole::Secondary,
+                anchor: None
+            })
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, false, PaneRole::Secondary, anchor, true),
+            None,
+            "a kind that cannot move"
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Primary, anchor, true),
+            None,
+            "its own half"
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Secondary, anchor, false),
+            None,
+            "the pointer is elsewhere"
         );
     }
 
