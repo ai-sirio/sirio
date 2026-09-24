@@ -37,41 +37,7 @@ pub(crate) use files::ROW_HEIGHT;
 const HEADER_HEIGHT: f32 = 40.0;
 /// Two-line activity row: 5 + 18 + 2 + 15 + 5, waku's card math.
 const ACTIVITY_ROW_HEIGHT: f32 = 48.0;
-/// Status shown at the trailing edge of an activity row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActivityStatus {
-    /// The surface is waiting for input.
-    Idle,
-    /// The surface is currently running.
-    Running,
-    /// The agent is blocked on a user decision or answer.
-    NeedsInput,
-    /// The surface completed successfully.
-    Done,
-    /// The surface reported an error.
-    Error,
-}
-
-/// The colour an [`ActivityStatus`] is painted in, wherever it is drawn.
-///
-/// The right panel's activity rows and the tab strip's status glyphs show the
-/// same five states, and used to carry two copies of this table — one here and
-/// one in the app crate. Two copies of a colour table is one edit away from two
-/// different colours for the same state, so there is now one.
-///
-/// Only the states that want something from the reader are coloured. Running is
-/// the ordinary case and reads as the bright text neutral; idle is the same
-/// neutral turned down. Amber, green and red are kept for "answer me", "this
-/// finished" and "this broke".
-pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
-    match status {
-        ActivityStatus::Idle => theme.text_faint,
-        ActivityStatus::Running => theme.text,
-        ActivityStatus::NeedsInput => theme.warning,
-        ActivityStatus::Done => theme.success,
-        ActivityStatus::Error => theme.danger,
-    }
-}
+pub use crate::status::{ActivityStatus, status_color};
 
 /// User actions originating from an activity row.
 #[derive(Clone, Debug, PartialEq, Eq)]

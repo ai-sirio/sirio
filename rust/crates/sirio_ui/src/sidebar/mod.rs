@@ -42,7 +42,7 @@ pub mod icons;
 pub mod project_settings;
 
 use self::icons::{Icon, IconElement, IconSize};
-use crate::right_panel::ActivityStatus;
+use crate::status::ActivityStatus;
 
 mod fade;
 mod row;
@@ -160,6 +160,15 @@ pub struct SidebarTab {
     /// is what left every tab row under an identified worktree still drawing
     /// the generic terminal glyph.
     pub agent: Option<AgentMark>,
+    /// The tab's stable database id (`OpenTab::persistence_id`, or the
+    /// persisted strip's `SessionTab::id` for a parked tab). The Sessions
+    /// view keys its rows by it.
+    pub persistence_id: String,
+    /// The tab's own resolved status — host-computed, `None` for a tab of an
+    /// unmounted worktree, whose panes are not running.
+    pub status: Option<ActivityStatus>,
+    /// Unix milliseconds of the tab's last agent event, when known.
+    pub last_event_at: Option<i64>,
 }
 
 /// Width the sidebar draws itself at until the host says otherwise, and the
@@ -720,6 +729,9 @@ impl Sidebar {
             brand: None,
             status: None,
             selected: true,
+            kind: TabKind::AgentChat,
+            persistence_id: "test-tab-1".into(),
+            last_event_at: None,
         }];
         rows[6].pills = vec![SidebarPill {
             tab_id: Some(2),
@@ -729,6 +741,9 @@ impl Sidebar {
             brand: None,
             status: None,
             selected: false,
+            kind: TabKind::Terminal,
+            persistence_id: "test-tab-2".into(),
+            last_event_at: None,
         }];
 
         Self {
@@ -1761,6 +1776,16 @@ impl Sidebar {
         counts
     }
 
+    /// The pills a worktree row currently holds. Test-observable only.
+    #[doc(hidden)]
+    pub fn worktree_pills(&self, worktree_id: usize) -> Vec<SidebarPill> {
+        self.rows
+            .iter()
+            .find(|row| row.id == worktree_id && row.kind == RowKind::Worktree)
+            .map(|row| row.pills.clone())
+            .unwrap_or_default()
+    }
+
     /// One id per pill the worktree carries, in pill order: an open tab by
     /// its [`SidebarTabRef::Open`] id, a parked one by
     /// [`parked_tab_row_id`] — the same identifier its row used before the
@@ -2020,30 +2045,36 @@ impl Sidebar {
         };
         let pills: Vec<SidebarPill> = tabs
             .into_iter()
-            .map(|tab| SidebarPill {
-                tab_id: match tab.tab {
-                    SidebarTabRef::Open(id) => Some(id),
-                    SidebarTabRef::Parked(_) => None,
-                },
-                parked_tab: match tab.tab {
-                    SidebarTabRef::Parked(index) => Some(index),
-                    SidebarTabRef::Open(_) => None,
-                },
-                title: tab.title,
-                icon: tab.agent.map_or_else(
-                    || match tab.kind {
-                        TabKind::Terminal => Icon::SquareTerminal,
-                        TabKind::Editor
-                        | TabKind::Diff
-                        | TabKind::Browser
-                        | TabKind::ProjectSettings => Icon::File,
-                        TabKind::AgentChat => Icon::MessageSquare,
+            .map(|tab| {
+                let kind = tab.kind;
+                SidebarPill {
+                    tab_id: match tab.tab {
+                        SidebarTabRef::Open(id) => Some(id),
+                        SidebarTabRef::Parked(_) => None,
                     },
-                    |agent| agent.icon,
-                ),
-                brand: tab.agent.map(|agent| agent.brand),
-                status: None,
-                selected: tab.selected,
+                    parked_tab: match tab.tab {
+                        SidebarTabRef::Parked(index) => Some(index),
+                        SidebarTabRef::Open(_) => None,
+                    },
+                    title: tab.title,
+                    icon: tab.agent.map_or_else(
+                        || match kind {
+                            TabKind::Terminal => Icon::SquareTerminal,
+                            TabKind::Editor
+                            | TabKind::Diff
+                            | TabKind::Browser
+                            | TabKind::ProjectSettings => Icon::File,
+                            TabKind::AgentChat => Icon::MessageSquare,
+                        },
+                        |agent| agent.icon,
+                    ),
+                    brand: tab.agent.map(|agent| agent.brand),
+                    status: tab.status,
+                    selected: tab.selected,
+                    kind,
+                    persistence_id: tab.persistence_id,
+                    last_event_at: tab.last_event_at,
+                }
             })
             .collect();
         if self.rows[worktree_index].pills == pills {
@@ -3886,6 +3917,9 @@ pub(super) mod tests_support {
                     selected: true,
                     kind: TabKind::AgentChat,
                     agent: AgentMark::for_agent_id("claude").into(),
+                    persistence_id: "test-tab-1".into(),
+                    status: None,
+                    last_event_at: None,
                 },
                 SidebarTab {
                     tab: SidebarTabRef::Open(2),
@@ -3893,6 +3927,9 @@ pub(super) mod tests_support {
                     selected: false,
                     kind: TabKind::Terminal,
                     agent: None,
+                    persistence_id: "test-tab-2".into(),
+                    status: None,
+                    last_event_at: None,
                 },
             ],
             cx,
@@ -3910,6 +3947,9 @@ pub(super) mod tests_support {
                 selected: false,
                 kind: TabKind::Terminal,
                 agent: None,
+                persistence_id: "test-tab-parked-0".into(),
+                status: None,
+                last_event_at: None,
             }],
             cx,
         );
@@ -4770,6 +4810,9 @@ mod tests {
                     selected: false,
                     kind: TabKind::AgentChat,
                     agent: None,
+                    persistence_id: "test-tab-7".into(),
+                    status: None,
+                    last_event_at: None,
                 }],
                 cx,
             );
@@ -4848,6 +4891,9 @@ mod tests {
                         selected: false,
                         kind: TabKind::Terminal,
                         agent: None,
+                        persistence_id: "test-tab-parked-0".into(),
+                        status: None,
+                        last_event_at: None,
                     },
                     SidebarTab {
                         tab: SidebarTabRef::Parked(1),
@@ -4855,6 +4901,9 @@ mod tests {
                         selected: false,
                         kind: TabKind::AgentChat,
                         agent: AgentMark::for_agent_id("claude"),
+                        persistence_id: "test-tab-parked-1".into(),
+                        status: None,
+                        last_event_at: None,
                     },
                 ],
                 cx,
@@ -4921,6 +4970,9 @@ mod tests {
             selected: false,
             kind: TabKind::Terminal,
             agent: None,
+            persistence_id: format!("test-tab-parked-{index}"),
+            status: None,
+            last_event_at: None,
         };
         let live = |id: usize| SidebarTab {
             tab: SidebarTabRef::Open(id),
@@ -4928,6 +4980,9 @@ mod tests {
             selected: false,
             kind: TabKind::Terminal,
             agent: None,
+            persistence_id: format!("test-tab-{id}"),
+            status: None,
+            last_event_at: None,
         };
 
         sidebar.update(cx, |sidebar, cx| {
@@ -5032,6 +5087,9 @@ mod tests {
             brand: None,
             status: None,
             selected: false,
+            kind: TabKind::AgentChat,
+            persistence_id: "test-tab-1".into(),
+            last_event_at: None,
         }];
         assert_eq!(
             Sidebar::row_min_height(&row),
@@ -7060,6 +7118,9 @@ mod tests {
             selected: false,
             kind: TabKind::Terminal,
             agent: None,
+            persistence_id: "test-tab-7".into(),
+            status: None,
+            last_event_at: None,
         };
         entity.update(&mut cx, |sidebar, cx| {
             sidebar.set_worktree_tabs(1, vec![plain_terminal()], cx);
@@ -7258,6 +7319,9 @@ mod tests {
                     selected: true,
                     kind: TabKind::Terminal,
                     agent: AgentMark::for_agent_id("claude"),
+                    persistence_id: "test-tab-7".into(),
+                    status: None,
+                    last_event_at: None,
                 }],
                 cx,
             );
@@ -7502,6 +7566,9 @@ mod tests {
                         selected: true,
                         kind: TabKind::Terminal,
                         agent: None,
+                        persistence_id: "test-tab-42".into(),
+                        status: None,
+                        last_event_at: None,
                     },
                     SidebarTab {
                         tab: SidebarTabRef::Open(43),
@@ -7509,6 +7576,9 @@ mod tests {
                         selected: false,
                         kind: TabKind::Terminal,
                         agent: None,
+                        persistence_id: "test-tab-43".into(),
+                        status: None,
+                        last_event_at: None,
                     },
                 ],
                 cx,
@@ -8028,5 +8098,39 @@ mod tests {
                 .any(|event| matches!(event, SidebarEvent::RemoveProject(id) if id == "proj-1")),
             "accepting the prompt emits RemoveProject with the project's id, got {emitted:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn a_tab_status_and_event_time_reach_its_pill(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut cx, |sidebar, _window, cx| {
+                sidebar.set_worktree_tabs(
+                    1,
+                    vec![SidebarTab {
+                        tab: SidebarTabRef::Open(7),
+                        title: "Chat".into(),
+                        selected: true,
+                        kind: TabKind::AgentChat,
+                        agent: AgentMark::for_agent_id("claude"),
+                        persistence_id: "wt-tab-7".into(),
+                        status: Some(ActivityStatus::Running),
+                        last_event_at: Some(42),
+                    }],
+                    cx,
+                );
+            })
+            .unwrap();
+
+        let pills = window
+            .update(&mut cx, |sidebar, _window, _cx| sidebar.worktree_pills(1))
+            .unwrap();
+        assert_eq!(pills.len(), 1);
+        assert_eq!(pills[0].status, Some(ActivityStatus::Running));
+        assert_eq!(pills[0].kind, TabKind::AgentChat);
+        assert_eq!(pills[0].persistence_id, "wt-tab-7");
+        assert_eq!(pills[0].last_event_at, Some(42));
     }
 }
