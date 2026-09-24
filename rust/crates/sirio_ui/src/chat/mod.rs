@@ -5333,6 +5333,9 @@ impl Chat {
                 self.answer_question_text(request_id, &draft, cx);
             } else if event.keystroke.key == "escape" {
                 self.cancel_question(request_id, cx);
+            } else if event.keystroke.key == "backspace" {
+                self.question_answer.draft.pop();
+                cx.notify();
             } else if let Some(character) = event.keystroke.key_char.as_deref()
                 && !event.keystroke.modifiers.platform
                 && !event.keystroke.modifiers.control
@@ -16209,6 +16212,31 @@ let answer = 42;
             assert!(chat.question_answer.draft.is_empty());
             assert_eq!(chat.question_answer.for_request, None);
         });
+    }
+
+    /// Backspace removes the last character from the typed answer.
+    #[gpui::test]
+    async fn backspace_edits_the_typed_answer(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Blux");
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input("e");
+        cx.run_until_parked();
+
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.question_answer.draft.clone()),
+            "Blue"
+        );
     }
 
     /// Review focus: a digit typed into the free-text answer is text.
