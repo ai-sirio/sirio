@@ -1,7 +1,7 @@
 # Markdown Preview: HTML, Mermaid and PlantUML — design
 
 **Date:** 2026-09-23
-**Status:** approved design, not yet planned
+**Status:** implemented on `worktree/clear-meadow-552a`; the PlantUML sandbox test needs a machine with `plantuml` to run (it SKIPs without one)
 **Parent work:** F-EDIT-01 (the file view's Code/Preview split), F-CORE-FILE-04
 (Preview links resolve against the open file's directory)
 **Scope of this document:** the file view's Markdown **Preview** learns to
@@ -138,6 +138,16 @@ implementation chooses the PlantUML security profile and properties that
 achieve this, and pins it with a test that includes a file outside the root
 and an `!includeurl` to a loopback listener, then asserts that the file is
 refused and the listener sees no connection.
+
+The requirement is enforced by PlantUML's own `ALLOWLIST` profile, so a
+PlantUML older than 1.2020.11 (Debian and Ubuntu ship 1.2020.2) is refused with
+a note rather than run; the child's PATH drops relative entries and its
+environment drops `PLANTUML_INCLUDE_PATH`/`plantuml.include.path`,
+`PLANTUML_ALLOWLIST_URL`/`plantuml.allowlist.url`, `JAVA_TOOL_OPTIONS`,
+`_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`; a timeout kills the whole process tree.
+Known limit, upstream: PlantUML matches the allowlist with a plain string
+prefix, so a sibling directory whose name extends the worktree's
+(`/x/app-secrets` for `/x/app`) also passes.
 
 ### The server
 
