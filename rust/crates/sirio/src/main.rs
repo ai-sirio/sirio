@@ -9807,7 +9807,15 @@ impl SirioWorkspace {
     ) -> Option<ActivityStatus> {
         let parked = self
             .parked_worktree_tabs
-            .get(worktree_path.to_string_lossy().as_ref())?;
+            .get(worktree_path.to_string_lossy().as_ref())
+            .or_else(|| {
+                self.parked_worktree_tabs
+                    .iter()
+                    .find(|(path, _)| {
+                        paths_name_the_same_document(Path::new(path), worktree_path)
+                    })
+                    .map(|(_, parked)| parked)
+            })?;
         let index = parked
             .layout
             .tabs
@@ -25669,6 +25677,11 @@ done
             assert_eq!(pills.len(), 1, "wt-0's strip is listed as parked");
             assert_eq!(pills[0].status, Some(ActivityStatus::Running));
             assert_eq!(pills[0].persistence_id, "urgency-terminal");
+            assert_eq!(
+                workspace.parked_tab_status(&worktrees[0].join("."), "urgency-terminal"),
+                Some(ActivityStatus::Running),
+                "an equivalent but differently spelled worktree path finds parked status"
+            );
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
