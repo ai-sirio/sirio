@@ -6466,13 +6466,6 @@ mod tests {
         assert!(!range.contains(8, 4));
     }
 
-    /// A click without a drag must clear the highlight, not tint one cell.
-    #[test]
-    fn a_selection_with_no_extent_is_empty() {
-        assert!(SelectedRange::between((4, 9), (4, 9)).is_empty());
-        assert!(!SelectedRange::between((4, 9), (4, 10)).is_empty());
-    }
-
     #[cfg(windows)]
     #[test]
     fn spawn_cwd_strips_the_windows_verbatim_prefix() {

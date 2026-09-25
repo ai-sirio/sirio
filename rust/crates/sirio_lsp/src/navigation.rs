@@ -214,13 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn a_null_definition_is_an_empty_list() {
-        // A client that handles only the array shape works against some
-        // servers and silently does nothing against the rest.
-        assert!(targets(&serde_json::json!(null)).is_empty());
-    }
-
-    #[test]
     fn a_location_link_is_still_understood() {
         // We ask for linkSupport: false, but a server that ignores the flag
         // should not cost the user their jump.

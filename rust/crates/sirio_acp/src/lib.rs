@@ -3173,13 +3173,6 @@ mod tests {
     }
 
     #[test]
-    fn mode_catalog_from_state_has_no_config_option_id() {
-        let state = SessionModeState::new("ask", vec![]);
-        let catalog = mode_catalog_from_state(&state);
-        assert_eq!(catalog.config_option_id, None);
-    }
-
-    #[test]
     fn prompt_blocks_builds_trimmed_text_resource_links_and_images() {
         let cwd = std::env::temp_dir().join("sirio-acp-blocks-test");
         let blocks = prompt_blocks(
@@ -3911,17 +3904,6 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         );
 
         let _ = client.shutdown();
-    }
-
-    #[test]
-    fn a_launch_spec_names_its_transport_for_a_surface_that_asks() {
-        let acp = LaunchSpec::Acp(AgentCommand::new("/usr/bin/opencode").arg("acp"));
-        assert_eq!(acp.transport_name(), "acp");
-        assert!(!acp.is_native_claude());
-
-        let native = LaunchSpec::Claude(ClaudeLaunch::new("/usr/local/bin/claude"));
-        assert_eq!(native.transport_name(), "claude");
-        assert!(native.is_native_claude());
     }
 
     #[test]

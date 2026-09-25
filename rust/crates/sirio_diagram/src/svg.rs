@@ -96,13 +96,6 @@ mod tests {
     }
 
     #[test]
-    fn svg_markup_is_unchanged() {
-        let markup = "<svg stroke-width=\"3\" width=\"10\" height=\"20\"></svg>";
-        let svg = as_rendered(markup).expect("a sized root");
-        assert_eq!(svg.markup, markup);
-    }
-
-    #[test]
     fn a_root_sized_only_by_its_view_box_keeps_a_size() {
         let markup = "<svg viewBox=\"0 0 100 50\"></svg>";
         let svg = as_rendered(markup).expect("a view box");

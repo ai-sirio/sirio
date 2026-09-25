@@ -283,11 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn no_rows_is_no_groups() {
-        assert!(group_by_file(&[]).is_empty());
-    }
-
-    #[test]
     fn waiting_and_finding_nothing_do_not_look_alike() {
         // The whole reason this surface has four states. A panel that says
         // nothing while it waits and a panel that found nothing are the

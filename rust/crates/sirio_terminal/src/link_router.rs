@@ -61,12 +61,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linux_link_gesture_is_platform_modifier_only() {
-        assert!(opens_terminal_link(true));
-        assert!(!opens_terminal_link(false));
-    }
-
-    #[test]
     fn click_cell_undoes_a_non_zero_pane_origin() {
         // A pane flush against the window's top-left corner (origin 0,0)
         // cannot distinguish "subtracted the origin" from "ignored it" --

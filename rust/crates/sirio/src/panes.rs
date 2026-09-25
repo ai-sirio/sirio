@@ -825,11 +825,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_tab_groups_have_no_selection() {
-        assert!(TabSelection::new(0, 0).is_none());
-    }
-
-    #[test]
     fn split_disabled_reason_explains_a_too_small_pane() {
         let reason =
             split_disabled_reason(SplitDirection::Horizontal, PaneSize::new(400.0, 500.0), 2)

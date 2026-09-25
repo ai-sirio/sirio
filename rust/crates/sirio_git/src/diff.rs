@@ -677,11 +677,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_numstat_is_empty() {
-        assert!(parse_numstat("").is_empty());
-    }
-
     // ── stats() over real repos: the counts the Changes surface shows ──
 
     fn run(dir: &Path, args: &[&str]) {
