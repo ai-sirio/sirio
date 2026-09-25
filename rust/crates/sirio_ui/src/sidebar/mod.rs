@@ -815,6 +815,9 @@ impl Sidebar {
         let Some(row) = self.session_walk().into_iter().nth(self.session_cursor) else {
             return;
         };
+        if self.armed_delete.take().is_some() {
+            cx.notify();
+        }
         cx.emit(match row.target {
             SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
             SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
@@ -8884,5 +8887,40 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert!(!running(&mut cx), "switching away drops the clock");
+    }
+
+    #[gpui::test]
+    async fn keyboard_activation_disarms_pending_closed_delete(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::tree::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = sessions_fixture(cx);
+            let archived = vec![closed(&sidebar, "old-chat", 10)];
+            sidebar.set_closed_sessions(archived, cx);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+
+        let open_row = cx.debug_bounds("session-0").expect("first session");
+        cx.simulate_click(open_row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let closed_row = cx.debug_bounds("closed-session-0").expect("closed chat");
+        cx.simulate_mouse_move(closed_row.center(), None, Modifiers::none());
+        let delete = cx
+            .debug_bounds("closed-session-delete-0")
+            .expect("hover shows delete");
+        cx.simulate_click(delete.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-confirm-0").is_some(), "delete is armed");
+
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-confirm-0").is_none(), "Enter disarms delete");
+        assert!(matches!(events.borrow().last(), Some(SidebarEvent::SelectTab(1))));
     }
 }
