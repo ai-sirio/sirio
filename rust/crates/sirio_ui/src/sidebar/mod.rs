@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use bezel::motion::{Fade, Painter};
 use bezel::ui::popover::{self, Popup};
 use bezel::ui::tree;
-use bezel::ui::widgets::Controls;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
@@ -181,6 +180,8 @@ pub struct SidebarTab {
 /// pushes a different one, through [`Sidebar::set_panel_width`].
 const DEFAULT_SIDEBAR_WIDTH: f32 = 325.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
+/// Horizontal padding of one Projects/Sessions tab: bezel's `theme.tab()`.
+const VIEW_TAB_PAD_X: f32 = 10.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
@@ -3500,6 +3501,82 @@ impl Focusable for Sidebar {
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
+/// One tab of the header's view switch: bezel's `theme.tab()` recipe,
+/// composed by hand because that widget takes a text label and this one leads
+/// with an icon — the host's tab strip does the same. The current view is
+/// told apart by tone, weight and a 2px underline whose last pixel is the
+/// strip's hairline.
+fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let (id, icon_id, label_id, underline_id, icon, label) = match tab {
+        SidebarView::Projects => (
+            "sidebar-view-projects",
+            "sidebar-view-icon-projects",
+            "sidebar-view-label-projects",
+            "sidebar-view-underline-projects",
+            Icon::FolderFill,
+            "Projects",
+        ),
+        SidebarView::Sessions => (
+            "sidebar-view-sessions",
+            "sidebar-view-icon-sessions",
+            "sidebar-view-label-sessions",
+            "sidebar-view-underline-sessions",
+            Icon::MessageSquare,
+            "Sessions",
+        ),
+    };
+    let active = tab == current;
+    let tone = if active { theme.text } else { theme.text_muted };
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .relative()
+        .h_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(VIEW_TAB_PAD_X))
+        .rounded_t(theme.radii.control)
+        .text_size(theme.typography.scaled(13.0))
+        .font_weight(if active {
+            FontWeight::MEDIUM
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(tone)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.element_hover))
+        .child(
+            div()
+                .debug_selector(move || icon_id.to_owned())
+                .flex()
+                .flex_none()
+                .child(IconElement::new(icon, IconSize::Small).text_color(tone)),
+        )
+        .child(
+            // At the narrowest sidebar the labels give way, never the `+`.
+            div()
+                .debug_selector(move || label_id.to_owned())
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(label),
+        )
+        .when(active, |this| {
+            this.child(
+                div()
+                    .debug_selector(move || underline_id.to_owned())
+                    .absolute()
+                    .bottom(px(-1.0))
+                    .left_0()
+                    .right_0()
+                    .h(px(2.0))
+                    .bg(theme.text),
+            )
+        })
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("Sidebar.render", cx.entity_id().as_u64());
@@ -3830,40 +3907,42 @@ impl Render for Sidebar {
             .pt(px(8.0))
             .child(
                 div()
+                    .debug_selector(|| "sidebar-view-tabs".to_owned())
                     .h(px(28.0))
                     .w_full()
-                    .px(px(FILTER_LEFT_INSET))
+                    // The first tab's icon lands on the 12px content inset
+                    // the rows and the filter field share.
+                    .pl(px(12.0 - VIEW_TAB_PAD_X))
+                    .pr(px(FILTER_LEFT_INSET))
                     .flex()
                     .items_center()
                     .justify_between()
+                    // The hairline the tabs sit on (bezel's `tab_bar()`).
+                    .border_b_1()
+                    .border_color(theme.border)
                     .text_size(theme.typography.scaled(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_faint)
                     .child({
-                        let bezel_theme = theme.to_bezel_theme();
                         let projects_entity = entity.clone();
                         let sessions_entity = entity.clone();
-                        bezel_theme
-                            .toggle_group()
+                        div()
+                            .h_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
                             .child(
-                                bezel_theme
-                                    .toggle_group_item("Projects", view == SidebarView::Projects)
-                                    .id("sidebar-view-projects")
-                                    .debug_selector(|| "sidebar-view-projects".to_owned())
-                                    .on_click(move |_, _, cx| {
+                                view_tab(SidebarView::Projects, view, &theme).on_click(
+                                    move |_, _, cx| {
                                         projects_entity.update(cx, |sidebar, cx| {
                                             sidebar.choose_view(SidebarView::Projects, cx)
                                         });
-                                    }),
+                                    },
+                                ),
                             )
                             .child(
-                                bezel_theme
-                                    .toggle_group_item("Sessions", view == SidebarView::Sessions)
-                                    .id("sidebar-view-sessions")
-                                    .debug_selector(|| "sidebar-view-sessions".to_owned())
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
+                                view_tab(SidebarView::Sessions, view, &theme)
                                     .when_some(badge, |this, status| {
                                         let (color, name) = match status {
                                             ActivityStatus::Error => (theme.danger, "error"),
@@ -3892,6 +3971,7 @@ impl Render for Sidebar {
                             div()
                                 .id("add-project")
                                 .debug_selector(|| "add-project".to_string())
+                                .flex_none()
                                 .w(px(20.0))
                                 .h(px(20.0))
                                 .flex()
@@ -8719,6 +8799,80 @@ mod tests {
             cx.debug_bounds("sidebar-sessions-badge-error").is_none(),
             "no badge while the list itself is shown"
         );
+    }
+
+    /// The view switch is a tab strip, not a segmented control: each tab is
+    /// an icon then its label, the current view wears an underline that
+    /// overlaps the strip's hairline (bezel's `theme.tab()`), and the first
+    /// icon starts at the rows' content inset rather than 22px further in.
+    #[gpui::test]
+    async fn the_view_switch_is_underlined_tabs_with_an_icon_before_each_label(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the tab strip");
+        for (icon, label) in [
+            ("sidebar-view-icon-projects", "sidebar-view-label-projects"),
+            ("sidebar-view-icon-sessions", "sidebar-view-label-sessions"),
+        ] {
+            let icon_bounds = cx.debug_bounds(icon).unwrap_or_else(|| panic!("{icon}"));
+            let label_bounds = cx.debug_bounds(label).unwrap_or_else(|| panic!("{label}"));
+            assert!(
+                icon_bounds.right() <= label_bounds.left(),
+                "{icon} before {label}"
+            );
+        }
+
+        let underline = cx
+            .debug_bounds("sidebar-view-underline-projects")
+            .expect("Projects is current and underlined");
+        assert!(cx.debug_bounds("sidebar-view-underline-sessions").is_none());
+        assert_eq!(underline.bottom(), strip.bottom(), "sits on the hairline");
+
+        let row = cx.debug_bounds("sidebar-row-0").expect("the project row");
+        let icon = cx.debug_bounds("sidebar-view-icon-projects").expect("icon");
+        assert_eq!(icon.left(), row.left() + px(12.0), "the rows' inset");
+
+        // The narrowest sidebar the shell draws (`PanelSide::Left`'s floor)
+        // still fits both tabs and the `+` beside them.
+        window
+            .update(&mut cx, |sidebar, _window, cx| {
+                sidebar.set_panel_width(220.0, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the tab strip");
+        let sessions = cx
+            .debug_bounds("sidebar-view-sessions")
+            .expect("Sessions tab");
+        let add = cx.debug_bounds("add-project").expect("the + button");
+        assert!(
+            sessions.right() <= add.left(),
+            "{sessions:?} runs into {add:?}"
+        );
+        assert!(
+            add.right() <= strip.right(),
+            "{add:?} is clipped by {strip:?}"
+        );
+        assert_eq!(add.size.width, px(20.0), "the + keeps its size");
+        window
+            .update(&mut cx, |sidebar, _window, cx| {
+                sidebar.set_panel_width(DEFAULT_SIDEBAR_WIDTH, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let sessions = cx
+            .debug_bounds("sidebar-view-sessions")
+            .expect("Sessions tab");
+        cx.simulate_click(sessions.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-view-underline-sessions").is_some());
+        assert!(cx.debug_bounds("sidebar-view-underline-projects").is_none());
     }
 
     #[gpui::test]
