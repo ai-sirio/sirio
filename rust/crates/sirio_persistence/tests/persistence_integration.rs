@@ -778,6 +778,23 @@ fn chat_sessions_list_saved_tabs_by_activity_and_delete_only_transcript() {
     );
     assert!(sessions[0].last_activity >= sessions[1].last_activity);
 
+    assert!(db.archive_tab("chat-1", 123).expect("archive"));
+    assert!(
+        db.chat_sessions("worktree")
+            .expect("list open sessions")
+            .iter()
+            .all(|session| session.tab_id != "chat-1"),
+        "history must not offer archived chats to continue"
+    );
+    assert_eq!(
+        db.closed_chats(50)
+            .expect("list archived chats")
+            .iter()
+            .map(|chat| chat.tab_id.as_str())
+            .collect::<Vec<_>>(),
+        ["chat-1"]
+    );
+
     assert!(db.delete_chat_session("chat-2").expect("delete"));
     assert!(
         db.chat_sessions("worktree")

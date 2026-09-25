@@ -145,8 +145,8 @@ with no known event, so they sort after every session that has one.
   end of its strip.
 - Removing a worktree deletes its archived chats through the existing
   `tab.worktree_id` cascade: a chat cannot be reopened without its worktree.
-- `chat_sessions` does not filter `closed_at`, so the chat's History popover
-  now lists closed chats too. Intended.
+- `chat_sessions` excludes archived chats because History would otherwise
+  continue a closed chat behind the host's back.
 
 ### The view setting
 
@@ -297,7 +297,7 @@ Tests first; every suite runs under nextest.
   strip queries exclude it.
 - `prune_closed_chats` keeps the newest 50, drops those older than 30 days and
   those without turns, transcripts included.
-- `closed_chats` order and its turn requirement; `chat_sessions` includes
+- `closed_chats` order and its turn requirement; `chat_sessions` excludes
   archived chats; deleting a worktree cascades to its archived chats.
 - `touch_tabs` writes; `save_tabs` does not overwrite `last_event_at`.
 

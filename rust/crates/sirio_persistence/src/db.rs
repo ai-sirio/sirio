@@ -598,7 +598,7 @@ impl AppDatabase {
         Ok(())
     }
 
-    /// Lists saved chat tabs for one worktree, newest transcript first.
+    /// Lists open saved chat tabs for one worktree, newest transcript first.
     pub fn chat_sessions(
         &self,
         worktree_id: &str,
@@ -609,6 +609,7 @@ impl AppDatabase {
              FROM tab
              JOIN chat_turn ON chat_turn.tab_id = tab.id
              WHERE tab.worktree_id = ?1 AND tab.kind = 'chat'
+               AND tab.closed_at IS NULL
              GROUP BY tab.id, tab.title, tab.agent_id, tab.order_idx
              ORDER BY MAX(chat_turn.updated_at) DESC, tab.order_idx, tab.id",
         )?;
