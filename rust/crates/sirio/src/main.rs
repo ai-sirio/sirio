@@ -38794,28 +38794,6 @@ done
         );
     }
 
-    /// Spec 2026-09-24 §5: Ctrl+T opens on the left, so the right launcher's
-    /// Terminal tile must not claim it; the left one still does.
-    #[gpui::test]
-    fn the_right_terminal_tile_shows_no_shortcut(cx: &mut TestAppContext) {
-        cx.new(|cx| {
-            let workspace = palette_test_workspace(cx);
-            let right = workspace.secondary_launcher_items();
-            let tile = right
-                .iter()
-                .find(|item| item.id == "launcher-terminal")
-                .expect("the right launcher offers a terminal");
-            assert_eq!(
-                tile.action,
-                LauncherAction::NewTerminal(PaneRole::Secondary)
-            );
-            assert!(tile.shortcut.is_none());
-            let left = SirioWorkspace::primary_launcher_items();
-            assert!(left[0].shortcut.is_some(), "the left tile keeps Ctrl+T");
-            workspace
-        });
-    }
-
     /// Spec 2026-09-24 §5: the right launcher's Terminal tile opens a
     /// terminal in the right half, focused there.
     #[gpui::test]

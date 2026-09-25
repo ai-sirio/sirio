@@ -259,8 +259,8 @@ Pane.
 - The new tiles are `launcher-terminal` and `launcher-chat`, following the
   Secondary launcher's own `launcher-` prefix. The Primary tiles keep
   `empty-worktree-new-terminal` / `empty-worktree-new-chat`.
-- The Secondary Terminal tile shows **no** shortcut: Ctrl+T opens on the
-  left, and showing it there would be false.
+- The new tiles show **no** shortcut, like every launcher tile since #564
+  (Ctrl+T opens on the left in any case).
 - The Chat tile opens the same agent picker, anchored under the right-hand
   tile: `empty_chat_picker_open: bool` becomes `Option<PaneRole>`. The right
   picker's selector is `secondary-empty-chat-agent-menu`; the left keeps
