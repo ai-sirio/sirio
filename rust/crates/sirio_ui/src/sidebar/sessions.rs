@@ -523,6 +523,12 @@ pub(super) struct SessionRowInputs {
     pub(super) row: SessionRow,
     pub(super) index: usize,
     pub(super) time: String,
+    /// An archived chat: dimmed title line, no status, delete instead of close.
+    pub(super) closed: bool,
+    /// Its delete control has been clicked once and now reads `Delete`.
+    pub(super) armed: bool,
+    /// The keyboard cursor is on this row.
+    pub(super) cursor: bool,
 }
 
 /// One session card as its own view, like `RowView`: a travelling bloom's
@@ -551,52 +557,66 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<SessionRowView>,
     ) -> impl IntoElement {
-        let SessionRowInputs { row, index, time } = inputs;
-        let group = format!("session-group-{index}");
+        let SessionRowInputs {
+            row,
+            index,
+            time,
+            closed,
+            armed,
+            cursor,
+        } = inputs;
+        let prefix = if closed { "closed-session" } else { "session" };
+        let selector = format!("{prefix}-{index}");
+        let group = format!("{prefix}-group-{index}");
         let select_target = row.target.clone();
+        let select_key = row.key.clone();
         let select_entity = sidebar.clone();
         let close_target = row.target.clone();
-        let status = match RowStatusGlyph::for_status(row.status, theme) {
-            RowStatusGlyph::Running(tint) => Some(
-                div()
-                    .id(("session-status-running", index))
-                    .debug_selector(move || format!("session-status-running-{index}"))
-                    .flex_none()
-                    .child(loading::bloom(
-                        "session-running-bloom",
-                        loading::BLOOM_GLYPH,
-                        tint,
-                        &theme,
-                        window,
-                        cx,
-                    ))
-                    .into_any_element(),
-            ),
-            RowStatusGlyph::Settled(tint) => Some(
-                div()
-                    .id(("session-status-settled", index))
-                    .debug_selector(move || format!("session-status-settled-{index}"))
-                    .flex_none()
-                    .child(loading::settled_bloom(
-                        "session-settled-bloom",
-                        loading::BLOOM_GLYPH,
-                        tint,
-                    ))
-                    .into_any_element(),
-            ),
-            RowStatusGlyph::None => (row.status == Some(ActivityStatus::Idle)).then(|| {
-                div()
-                    .debug_selector(move || format!("session-idle-{index}"))
-                    .flex_none()
-                    .text_size(theme.typography.scaled(11.0))
-                    .text_color(theme.text_faint)
-                    .child("idle")
-                    .into_any_element()
-            }),
+        let status = if closed {
+            None
+        } else {
+            match RowStatusGlyph::for_status(row.status, theme) {
+                RowStatusGlyph::Running(tint) => Some(
+                    div()
+                        .id(("session-status-running", index))
+                        .debug_selector(move || format!("{prefix}-status-running-{index}"))
+                        .flex_none()
+                        .child(loading::bloom(
+                            "session-running-bloom",
+                            loading::BLOOM_GLYPH,
+                            tint,
+                            &theme,
+                            window,
+                            cx,
+                        ))
+                        .into_any_element(),
+                ),
+                RowStatusGlyph::Settled(tint) => Some(
+                    div()
+                        .id(("session-status-settled", index))
+                        .debug_selector(move || format!("{prefix}-status-settled-{index}"))
+                        .flex_none()
+                        .child(loading::settled_bloom(
+                            "session-settled-bloom",
+                            loading::BLOOM_GLYPH,
+                            tint,
+                        ))
+                        .into_any_element(),
+                ),
+                RowStatusGlyph::None => (row.status == Some(ActivityStatus::Idle)).then(|| {
+                    div()
+                        .debug_selector(move || format!("{prefix}-idle-{index}"))
+                        .flex_none()
+                        .text_size(theme.typography.scaled(11.0))
+                        .text_color(theme.text_faint)
+                        .child("idle")
+                        .into_any_element()
+                }),
+            }
         };
         div()
-            .id(("session", index))
-            .debug_selector(move || format!("session-{index}"))
+            .id((prefix, index))
+            .debug_selector(move || selector.clone())
             .group(group.clone())
             .relative()
             .w_full()
@@ -609,7 +629,8 @@ impl Sidebar {
             .gap(px(ROW_GAP))
             .when(row.selected, |this| this.bg(theme.element_active))
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.element_hover)))
-            .on_click(move |_, _, cx| {
+            .when(cursor, |this| this.border_1().border_color(theme.accent))
+            .on_click(move |_, window, cx| {
                 let event = match &select_target {
                     SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
                     SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab {
@@ -618,7 +639,15 @@ impl Sidebar {
                     },
                     SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id.clone()),
                 };
-                select_entity.update(cx, |_, cx| cx.emit(event));
+                select_entity.update(cx, |sidebar, cx| {
+                    let focus_index = sidebar
+                        .session_walk()
+                        .iter()
+                        .position(|row| row.key == select_key)
+                        .unwrap_or(index);
+                    sidebar.focus_session(focus_index, window, cx);
+                    cx.emit(event);
+                });
             })
             .child(
                 div()
@@ -647,7 +676,8 @@ impl Sidebar {
                             .text_color(theme.text)
                             .child(row.title.clone()),
                     )
-                    .when_some(status, |this, status| this.child(status)),
+                    .when_some(status, |this, status| this.child(status))
+                    .when(closed, |this| this.opacity(0.6)),
             )
             .child(
                 div()
@@ -680,7 +710,7 @@ impl Sidebar {
                     )
                     .child(
                         div()
-                            .debug_selector(move || format!("session-time-{index}"))
+                            .debug_selector(move || format!("{prefix}-time-{index}"))
                             .flex_none()
                             .text_size(theme.typography.scaled(11.5))
                             .text_color(theme.text_faint)
@@ -688,12 +718,35 @@ impl Sidebar {
                             .child(time),
                     ),
             )
-            .when(!matches!(close_target, SessionTarget::Closed(_)), |this| {
-                let close_entity = sidebar.clone();
-                this.child(
+            .when(closed, |this| {
+                let delete_entity = sidebar.clone();
+                let tab_id = match &row.target {
+                    SessionTarget::Closed(id) => id.clone(),
+                    _ => String::new(),
+                };
+                this.child(if armed {
                     div()
-                        .id(("session-close", index))
-                        .debug_selector(move || format!("session-close-{index}"))
+                        .id(("closed-session-confirm", index))
+                        .debug_selector(move || format!("{prefix}-confirm-{index}"))
+                        .absolute()
+                        .right(px(10.0))
+                        .bottom(px(4.0))
+                        .px(px(6.0))
+                        .rounded(theme.radii.chip)
+                        .bg(theme.surface_raised)
+                        .text_size(theme.typography.scaled(11.5))
+                        .text_color(theme.danger)
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            let id = tab_id.clone();
+                            delete_entity.update(cx, |sidebar, cx| sidebar.confirm_delete(id, cx));
+                        })
+                        .child("Delete")
+                        .into_any_element()
+                } else {
+                    div()
+                        .id(("closed-session-delete", index))
+                        .debug_selector(move || format!("{prefix}-delete-{index}"))
                         .absolute()
                         .right(px(10.0))
                         .bottom(px(5.0))
@@ -708,24 +761,63 @@ impl Sidebar {
                         .group_hover(group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
-                            let event = match &close_target {
-                                SessionTarget::Open(id) => SidebarEvent::CloseSessionTab(*id),
-                                SessionTarget::Parked { path, index } => {
-                                    SidebarEvent::CloseParkedTab {
-                                        path: path.clone(),
-                                        index: *index,
-                                    }
-                                },
-                                SessionTarget::Closed(_) => return,
-                            };
-                            close_entity.update(cx, |_, cx| cx.emit(event));
+                            let id = tab_id.clone();
+                            delete_entity.update(cx, |sidebar, cx| sidebar.arm_delete(id, cx));
                         })
                         .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.text_muted),
-                        ),
-                )
+                            bezel::ui::icons::icon(bezel::ui::icons::TRASH_BIN_MINIMALISTIC)
+                                .size(px(14.0))
+                                .text_color(theme.danger),
+                        )
+                        .into_any_element()
+                })
             })
+            .when(
+                !closed && !matches!(close_target, SessionTarget::Closed(_)),
+                |this| {
+                    let close_entity = sidebar.clone();
+                    this.child(
+                        div()
+                            .id(("session-close", index))
+                            .debug_selector(move || format!("{prefix}-close-{index}"))
+                            .absolute()
+                            .right(px(10.0))
+                            .bottom(px(5.0))
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radii.chip)
+                            .bg(theme.surface_raised)
+                            .invisible()
+                            .group_hover(group.clone(), |style| style.visible())
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let event = match &close_target {
+                                    SessionTarget::Open(id) => SidebarEvent::CloseSessionTab(*id),
+                                    SessionTarget::Parked { path, index } => {
+                                        SidebarEvent::CloseParkedTab {
+                                            path: path.clone(),
+                                            index: *index,
+                                        }
+                                    }
+                                    SessionTarget::Closed(_) => return,
+                                };
+                                close_entity.update(cx, |sidebar, cx| {
+                                    if sidebar.armed_delete.take().is_some() {
+                                        cx.notify();
+                                    }
+                                    cx.emit(event);
+                                });
+                            })
+                            .child(
+                                IconElement::new(Icon::Close, IconSize::XSmall)
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                },
+            )
     }
 
     /// A session card's height: the worktree card's two-line rhythm at the

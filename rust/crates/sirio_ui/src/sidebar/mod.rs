@@ -646,6 +646,10 @@ pub struct Sidebar {
     session_views: std::collections::HashMap<String, gpui::Entity<sessions::SessionRowView>>,
     now_ms: i64,
     sessions_scroll: ScrollHandle,
+    closed_expanded: bool,
+    armed_delete: Option<String>,
+    session_cursor: usize,
+    clock: Option<gpui::Task<()>>,
 }
 
 impl Sidebar {
@@ -678,8 +682,12 @@ impl Sidebar {
     pub fn set_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.view != view {
             self.view = view;
+            if view == SidebarView::Sessions {
+                self.set_clock(sessions::unix_now_ms(), cx);
+            }
             cx.notify();
         }
+        self.sync_clock(cx);
     }
 
     /// A click on the header switch: switches, clears the filter (a worktree
@@ -690,8 +698,12 @@ impl Sidebar {
         }
         self.view = view;
         self.filter.clear();
+        if view == SidebarView::Sessions {
+            self.set_clock(sessions::unix_now_ms(), cx);
+        }
         cx.emit(SidebarEvent::ViewChanged(view));
         cx.notify();
+        self.sync_clock(cx);
     }
 
     pub fn set_closed_sessions(&mut self, sessions: Vec<ClosedSession>, cx: &mut Context<Self>) {
@@ -706,6 +718,32 @@ impl Sidebar {
         if self.now_ms != now_ms {
             self.now_ms = now_ms;
             cx.notify();
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn clock_running(&self) -> bool {
+        self.clock.is_some()
+    }
+
+    /// Starts or stops the minute clock to match the view.
+    fn sync_clock(&mut self, cx: &mut Context<Self>) {
+        match (self.view, self.clock.is_some()) {
+            (SidebarView::Sessions, false) => {
+                self.clock = Some(cx.spawn(async move |this, cx| loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                    if this
+                        .update(cx, |sidebar, cx| sidebar.set_clock(sessions::unix_now_ms(), cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }));
+            }
+            (SidebarView::Projects, true) => self.clock = None,
+            _ => {}
         }
     }
 
@@ -728,6 +766,60 @@ impl Sidebar {
             .iter()
             .map(|session| session.tab_id.clone())
             .collect()
+    }
+
+    fn arm_delete(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        self.armed_delete = Some(tab_id);
+        cx.notify();
+    }
+
+    fn confirm_delete(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        self.armed_delete = None;
+        cx.emit(SidebarEvent::DeleteClosedChat(tab_id));
+        cx.notify();
+    }
+
+    /// A click on a session row gives the list keyboard focus and drops any
+    /// pending delete confirmation.
+    fn focus_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.session_cursor = index;
+        self.armed_delete = None;
+        self.tree_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The rows the keyboard walks: open sessions, then expanded closed ones.
+    fn session_walk(&self) -> Vec<SessionRow> {
+        let list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
+        let mut rows = list.open;
+        if self.closed_expanded {
+            rows.extend(list.closed);
+        }
+        rows
+    }
+
+    fn session_step(&mut self, down: bool, cx: &mut Context<Self>) {
+        let count = self.session_walk().len();
+        if count == 0 {
+            return;
+        }
+        self.session_cursor = if down {
+            (self.session_cursor + 1).min(count - 1)
+        } else {
+            self.session_cursor.saturating_sub(1)
+        };
+        cx.notify();
+    }
+
+    fn activate_session_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.session_walk().into_iter().nth(self.session_cursor) else {
+            return;
+        };
+        cx.emit(match row.target {
+            SessionTarget::Open(id) => SidebarEvent::SelectTab(id),
+            SessionTarget::Parked { path, index } => SidebarEvent::SelectParkedTab { path, index },
+            SessionTarget::Closed(id) => SidebarEvent::ReopenClosedChat(id),
+        });
     }
 
     /// Creates the expanded fixture shown by the reference sidebar capture.
@@ -856,6 +948,10 @@ impl Sidebar {
             session_views: std::collections::HashMap::new(),
             now_ms: sessions::unix_now_ms(),
             sessions_scroll: ScrollHandle::new(),
+            closed_expanded: true,
+            armed_delete: None,
+            session_cursor: 0,
+            clock: None,
         }
     }
 
@@ -947,6 +1043,10 @@ impl Sidebar {
             session_views: std::collections::HashMap::new(),
             now_ms: sessions::unix_now_ms(),
             sessions_scroll: ScrollHandle::new(),
+            closed_expanded: true,
+            armed_delete: None,
+            session_cursor: 0,
+            clock: None,
         }
     }
 
@@ -3539,17 +3639,108 @@ impl Render for Sidebar {
         }
         let mut session_elements = Vec::new();
         if view == SidebarView::Sessions {
+            let open_count = session_list.open.len();
+            let walk_count = open_count
+                + if self.closed_expanded {
+                    session_list.closed.len()
+                } else {
+                    0
+                };
+            self.session_cursor = self.session_cursor.min(walk_count.saturating_sub(1));
+            let session_cursor = self.session_cursor;
+            let armed_delete = self.armed_delete.clone();
+            let mut rendered_sessions: Vec<_> = session_list
+                .open
+                .iter()
+                .cloned()
+                .map(|row| (row, false, false))
+                .collect();
+            if self.closed_expanded {
+                rendered_sessions.extend(session_list.closed.iter().cloned().map(|row| {
+                    let armed = match &row.target {
+                        SessionTarget::Closed(id) => armed_delete.as_deref() == Some(id),
+                        _ => false,
+                    };
+                    (row, true, armed)
+                }));
+            }
             let card_height = Self::row_drawn_height_for_card(&theme.typography);
             let mut previous = std::mem::take(&mut self.session_views);
-            let mut next = std::collections::HashMap::with_capacity(session_list.open.len());
-            for (index, row) in session_list.open.iter().cloned().enumerate() {
+            let mut next = std::collections::HashMap::with_capacity(rendered_sessions.len());
+            let mut closed_group = (!session_list.closed.is_empty()).then(|| {
+                let group_entity = entity.clone();
+                div()
+                    .id("sidebar-closed-group")
+                    .debug_selector(|| "sidebar-closed-group".to_owned())
+                    .mt(px(6.0))
+                    .h(px(section::SECTION_HEIGHT))
+                    .w_full()
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .bg(theme.surface_raised)
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        group_entity.update(cx, |sidebar, cx| {
+                            sidebar.closed_expanded = !sidebar.closed_expanded;
+                            sidebar.armed_delete = None;
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.typography.scaled(13.5))
+                            .text_color(theme.text_muted)
+                            .child("Closed"),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.typography.scaled(11.0))
+                            .text_color(theme.text_faint)
+                            .child(session_list.closed.len().to_string()),
+                    )
+                    .child(
+                        IconElement::new(
+                            if self.closed_expanded {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            IconSize::XSmall,
+                        )
+                        .text_color(theme.text_faint),
+                    )
+                    .into_any_element()
+            });
+            for walk_index in 0..=rendered_sessions.len() {
+                if walk_index == open_count {
+                    if let Some(group) = closed_group.take() {
+                        session_elements.push(group);
+                    }
+                }
+                let Some((row, closed, armed)) = rendered_sessions.get(walk_index) else {
+                    continue;
+                };
+                let index = if *closed {
+                    walk_index - open_count
+                } else {
+                    walk_index
+                };
                 let inputs = sessions::SessionRowInputs {
                     time: row
                         .at
                         .map(|at| sessions::relative_time(self.now_ms, at))
                         .unwrap_or_default(),
-                    row,
+                    row: row.clone(),
                     index,
+                    closed: *closed,
+                    armed: *armed,
+                    cursor: walk_index == session_cursor,
                 };
                 let key = inputs.row.key.clone();
                 let view = match previous.remove(&key) {
@@ -3589,7 +3780,10 @@ impl Render for Sidebar {
                 }
                 let mut closed = false;
                 project_surface_entity.update(cx, |sidebar, cx| {
-                    if sidebar.has_open_project_surface() {
+                    if sidebar.armed_delete.take().is_some() {
+                        cx.notify();
+                        closed = true;
+                    } else if sidebar.has_open_project_surface() {
                         sidebar.close_project_surface(cx);
                         closed = true;
                     }
@@ -3878,6 +4072,25 @@ impl Render for Sidebar {
                     div()
                         .id("sidebar-sessions")
                         .debug_selector(|| "sidebar-sessions".to_owned())
+                        .key_context(tree::KEY_CONTEXT)
+                        .track_focus(&tree_focus)
+                        .on_action(cx.listener(|this, _: &tree::SelectPrevious, _, cx| {
+                            this.session_step(false, cx);
+                        }))
+                        .on_action(cx.listener(|this, _: &tree::SelectNext, _, cx| {
+                            this.session_step(true, cx);
+                        }))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            if event.keystroke.key == "enter" {
+                                this.activate_session_cursor(cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.armed_delete.take().is_some() {
+                                cx.notify();
+                            }
+                        }))
                         .mt(px(11.0))
                         .flex_1()
                         .min_h(px(0.0))
@@ -8533,5 +8746,143 @@ mod tests {
                 assert_eq!(now, was, "session {key} must be replayed, not re-rendered");
             }
         }
+    }
+
+    /// An archived chat in worktree row 1 of `sidebar_with_one_project` —
+    /// its path read from the fixture, so the projection resolves it.
+    fn closed(sidebar: &Sidebar, tab_id: &str, closed_at: i64) -> ClosedSession {
+        let worktree_path = sidebar
+            .rows
+            .iter()
+            .find(|row| row.id == 1 && row.kind == RowKind::Worktree)
+            .and_then(|row| row.path.clone())
+            .expect("worktree row 1 has a path");
+        ClosedSession {
+            tab_id: tab_id.into(),
+            worktree_path,
+            title: format!("{tab_id} chat"),
+            agent: AgentMark::for_agent_id("claude"),
+            closed_at,
+        }
+    }
+
+    #[gpui::test]
+    async fn a_closed_chat_reopens_on_click_and_deletes_only_after_confirmation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = sessions_fixture(cx);
+            let archived = vec![closed(&sidebar, "old-chat", 10)];
+            sidebar.set_closed_sessions(archived, cx);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        assert!(cx.debug_bounds("sidebar-closed-group").is_some());
+
+        let row = cx.debug_bounds("closed-session-0").expect("the closed chat");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(matches!(
+            events.borrow().last(),
+            Some(SidebarEvent::ReopenClosedChat(id)) if id == "old-chat"
+        ));
+
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        let delete = cx.debug_bounds("closed-session-delete-0").expect("hover shows delete");
+        cx.simulate_click(delete.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !events.borrow().iter().any(|event| matches!(event, SidebarEvent::DeleteClosedChat(_))),
+            "the first click only arms"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-confirm-0").is_none(), "escape disarms");
+
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        let delete = cx.debug_bounds("closed-session-delete-0").expect("delete again");
+        cx.simulate_click(delete.center(), Modifiers::none());
+        cx.run_until_parked();
+        let confirm = cx.debug_bounds("closed-session-confirm-0").expect("armed");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(matches!(
+            events.borrow().last(),
+            Some(SidebarEvent::DeleteClosedChat(id)) if id == "old-chat"
+        ));
+    }
+
+    #[gpui::test]
+    async fn the_closed_group_collapses(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = sessions_fixture(cx);
+            let archived = vec![closed(&sidebar, "a", 2), closed(&sidebar, "b", 1)];
+            sidebar.set_closed_sessions(archived, cx);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-1").is_some());
+        let band = cx.debug_bounds("sidebar-closed-group").expect("band");
+        cx.simulate_click(band.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-0").is_none());
+        assert!(cx.debug_bounds("sidebar-closed-group").is_some(), "the band stays");
+    }
+
+    #[gpui::test]
+    async fn arrows_and_enter_walk_open_then_closed_sessions(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::tree::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = sessions_fixture(cx);
+            let archived = vec![closed(&sidebar, "old-chat", 10)];
+            sidebar.set_closed_sessions(archived, cx);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let row = cx.debug_bounds("session-0").expect("first session");
+        cx.simulate_click(row.center(), Modifiers::none()); // focuses the list, cursor 0
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert!(matches!(
+            events.borrow().last(),
+            Some(SidebarEvent::ReopenClosedChat(id)) if id == "old-chat"
+        ));
+    }
+
+    #[gpui::test]
+    async fn the_minute_clock_runs_only_in_the_sessions_view(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| sessions_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let running = |cx: &mut VisualTestContext| {
+            window.update(cx, |sidebar, _window, _cx| sidebar.clock_running()).unwrap()
+        };
+        assert!(!running(&mut cx), "no clock in the Projects view");
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(running(&mut cx));
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Projects, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!running(&mut cx), "switching away drops the clock");
     }
 }
