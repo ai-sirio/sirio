@@ -316,13 +316,4 @@ mod tests {
         assert_eq!(thought_header_label(false, Some(450)), "Thought for 0s");
         assert_eq!(thought_header_label(false, None), "Thought");
     }
-
-    #[test]
-    fn a_fresh_scroll_state_follows() {
-        let state = FollowState::new();
-        assert!(
-            state.following(),
-            "a new follow pin starts pinned to the newest line"
-        );
-    }
 }

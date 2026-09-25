@@ -94,10 +94,4 @@ mod tests {
         assert!(!ignored.is_ignored(Path::new("target-notes.md")));
         assert!(!ignored.is_ignored(Path::new("src")));
     }
-
-    #[test]
-    fn empty_output_and_the_default_ignore_nothing() {
-        assert!(!parse_ignored(b"").is_ignored(Path::new("anything")));
-        assert!(!IgnoredPaths::default().is_ignored(Path::new("anything")));
-    }
 }

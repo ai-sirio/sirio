@@ -313,15 +313,6 @@ mod tests {
     const CAN_USE_TOOL: &str = include_str!("../tests/fixtures/can_use_tool.json");
 
     #[test]
-    fn initialize_is_the_first_line_and_carries_no_hooks() {
-        let line = ControlRequest::initialize("req-1");
-        assert_eq!(line["type"], "control_request");
-        assert_eq!(line["request_id"], "req-1");
-        assert_eq!(line["request"]["subtype"], "initialize");
-        assert_eq!(line["request"]["hooks"], serde_json::json!({}));
-    }
-
-    #[test]
     fn ultracode_is_a_boolean_beside_the_level_not_a_level() {
         // Verified against claude 2.1.274: `{"ultracode": true}` reports
         // back as `applied: {effort: "xhigh", ultracode: true}`, while

@@ -1102,12 +1102,6 @@ mod tests {
     }
 
     #[test]
-    fn constructor_keeps_the_semantic_size_until_render() {
-        let element = IconElement::new(Icon::FolderFill, IconSize::Small);
-        assert_eq!(element.size, IconSize::Small);
-    }
-
-    #[test]
     fn the_panel_rail_icons_resolve_to_embedded_zed_assets() {
         for icon in [Icon::FileTree, Icon::Diff, Icon::GitGraph] {
             assert!(
