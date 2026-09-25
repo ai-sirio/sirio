@@ -41074,4 +41074,66 @@ browser  profile  "
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[gpui::test]
+    async fn reopening_a_closed_chat_from_another_worktree_restores_it_once(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-reopen-cross-worktree");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "cross-worktree-chat", None, cx);
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            workspace.session.flush_now();
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("switch to worktree B");
+            assert!(paths_name_the_same_document(
+                &workspace.working_directory,
+                &worktrees[1]
+            ));
+
+            workspace.reopen_closed_chat("cross-worktree-chat", cx);
+
+            assert!(paths_name_the_same_document(
+                &workspace.working_directory,
+                &worktrees[0]
+            ));
+            let reopened: Vec<_> = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.persistence_id == "cross-worktree-chat")
+                .collect();
+            assert_eq!(reopened.len(), 1, "the chat reopens exactly once");
+            assert_eq!(
+                workspace
+                    .tabs
+                    .get(workspace.active_tab)
+                    .map(|tab| tab.persistence_id.as_str()),
+                Some("cross-worktree-chat"),
+                "the reopened chat is active"
+            );
+            assert!(
+                !workspace
+                    .sidebar
+                    .read(cx)
+                    .closed_session_ids()
+                    .iter()
+                    .any(|id| id == "cross-worktree-chat"),
+                "the reopened chat is no longer in the closed list"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
