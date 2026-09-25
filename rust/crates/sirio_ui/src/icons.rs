@@ -129,8 +129,6 @@ pub enum Icon {
     Lock,
     /// The Files view in the right panel's rail (`zed/file_tree.svg`).
     FileTree,
-    /// The Activity view in the right panel's rail (`zed/thread.svg`).
-    Thread,
     /// The Diff view in the right panel's rail (`zed/diff.svg`).
     Diff,
     /// The History view in the right panel's rail (`zed/git_graph.svg`).
@@ -225,7 +223,6 @@ impl Icon {
             Icon::Archive => "icons/zed/archive.svg",
             Icon::Lock => "icons/zed/lock.svg",
             Icon::FileTree => "icons/zed/file_tree.svg",
-            Icon::Thread => "icons/zed/thread.svg",
             Icon::Diff => "icons/zed/diff.svg",
             Icon::GitGraph => "icons/zed/git_graph.svg",
             Icon::MagnifyingGlass => "icons/zed/magnifying_glass.svg",
@@ -282,7 +279,6 @@ impl Icon {
             Icon::Archive => include_bytes!("../../../assets/icons/zed/archive.svg"),
             Icon::Lock => include_bytes!("../../../assets/icons/zed/lock.svg"),
             Icon::FileTree => include_bytes!("../../../assets/icons/zed/file_tree.svg"),
-            Icon::Thread => include_bytes!("../../../assets/icons/zed/thread.svg"),
             Icon::Diff => include_bytes!("../../../assets/icons/zed/diff.svg"),
             Icon::GitGraph => include_bytes!("../../../assets/icons/zed/git_graph.svg"),
             Icon::MagnifyingGlass => {
@@ -1113,7 +1109,7 @@ mod tests {
 
     #[test]
     fn the_panel_rail_icons_resolve_to_embedded_zed_assets() {
-        for icon in [Icon::FileTree, Icon::Thread, Icon::Diff, Icon::GitGraph] {
+        for icon in [Icon::FileTree, Icon::Diff, Icon::GitGraph] {
             assert!(
                 icon.path().starts_with("icons/zed/"),
                 "{icon:?} must come from the Zed catalog"

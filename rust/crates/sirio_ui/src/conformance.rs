@@ -55,7 +55,7 @@
 //! - **Tab bar 34px, toolbars 34px** (tab_bar, changes, right panel): waku
 //!   has no tab strip and no toolbars — it is one conversation. Sirio's
 //!   chrome rows are its own; no waku measurement exists for them.
-//! - **Right panel header 40px, activity rows 48px, right panel 220–640px
+//! - **Right panel header 40px, right panel 220–640px
 //!   (default 405)**: Sirio-only surface (waku's right panel is a native
 //!   webview, "not part of Sirio's UI"). No waku measurement exists. The
 //!   width stopped being a frozen constant when the panel became

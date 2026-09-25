@@ -17,6 +17,11 @@ pub struct SidebarPill {
     pub brand: Option<AgentBrandColor>,
     pub status: Option<ActivityStatus>,
     pub selected: bool,
+    /// The tab's kind — the Sessions view keeps agent chats, and terminals
+    /// only once an agent has been identified in them.
+    pub kind: TabKind,
+    pub persistence_id: String,
+    pub last_event_at: Option<i64>,
 }
 
 /// What a worktree (or collapsed project) row draws in place of a status
@@ -287,7 +292,6 @@ impl Sidebar {
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
             Icon::FileTree => "file-tree",
-            Icon::Thread => "thread",
             Icon::Diff => "diff",
             Icon::DiffUnified => "diff-unified",
             Icon::DiffSplit => "diff-split",
@@ -378,7 +382,7 @@ impl Sidebar {
                                     .w(px(6.0))
                                     .h(px(6.0))
                                     .rounded_full()
-                                    .bg(crate::right_panel::status_color(status, theme)),
+                                    .bg(crate::status::status_color(status, theme)),
                             )
                         })
                     })
@@ -856,6 +860,9 @@ mod tests {
             brand: None,
             status: Some(ActivityStatus::Idle),
             selected: false,
+            kind: TabKind::AgentChat,
+            persistence_id: format!("test-tab-{tab_id}"),
+            last_event_at: None,
         }
     }
 
@@ -953,6 +960,9 @@ mod tests {
             brand: None,
             status: None,
             selected: false,
+            kind: TabKind::AgentChat,
+            persistence_id: "test-tab-parked-0".into(),
+            last_event_at: None,
         }];
         assert_eq!(Sidebar::sub_line_text(&row), "review the release notes");
     }

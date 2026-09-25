@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use sirio_activity::{
-    ActivityStatus, ActivityTab, ActivityTabKind, ActivityWorktreeInput, AgentActivityModel,
-    AgentSessionRef, AgentSessionRestorePlan, AgentStatus, AttentionSort, BootstrapRestoreOrder,
-    NotificationPolicy, TerminalContentId, WorktreeMountPolicy, build_activity_rows, strip_ansi,
+    ActivityStatus, AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
+    AttentionSort, BootstrapRestoreOrder, NotificationPolicy, TerminalContentId,
+    WorktreeMountPolicy, strip_ansi,
 };
 
 #[test]
@@ -84,32 +84,6 @@ fn f_core_act_20_notification_policy_suppresses_noise_and_visible_transitions() 
         true,
         false
     ));
-}
-
-#[test]
-fn f_core_act_21_activity_rows_keep_shells_and_chats_but_omit_non_activity_content() {
-    let worktree = ActivityWorktreeInput::new(
-        "worktree-1",
-        "Sirio/main",
-        vec![
-            ActivityTab::terminal("terminal-tab", "zsh", ["pane-1"]),
-            ActivityTab::chat("chat-tab", "Fix login"),
-            ActivityTab::new("document", "README.md", ActivityTabKind::Document),
-            ActivityTab::new("diff", "Changes", ActivityTabKind::Diff),
-            ActivityTab::new("browser", "Browser", ActivityTabKind::Browser),
-            ActivityTab::terminal("unmounted", "not live", Vec::<String>::new()),
-        ],
-    );
-    let statuses = HashMap::from([(String::from("pane-1"), AgentStatus::Running)]);
-    let agents = HashMap::from([(String::from("pane-1"), String::from("codex"))]);
-
-    let rows = build_activity_rows(&[worktree], &statuses, &agents);
-
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].kind, sirio_activity::ActivityRowKind::Terminal);
-    assert_eq!(rows[0].agent_id.as_deref(), Some("codex"));
-    assert_eq!(rows[1].kind, sirio_activity::ActivityRowKind::Chat);
-    assert_eq!(rows[1].status, ActivityStatus::Idle);
 }
 
 #[test]

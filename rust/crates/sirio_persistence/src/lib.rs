@@ -49,6 +49,10 @@ mod model;
 
 /// Maximum logical SQLite database size enforced by the package.
 pub const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
+/// The most archived chats kept; older ones are pruned on every archive.
+pub const CLOSED_CHAT_LIMIT: usize = 50;
+/// Archived chats older than this are pruned (30 days, in milliseconds).
+pub const CLOSED_CHAT_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 pub use agent_ref::AgentRef;
 pub use db::AppDatabase;
@@ -57,7 +61,8 @@ pub use migrations::{CURRENT_SCHEMA_VERSION, migrate_up_to};
 pub use model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChatEntry, ChatPermissionOption,
     ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatToolLocation, ChatTranscript,
-    ChatTurn, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
-    SidebarState, TabRecord, TabStateRecord, WorktreeRecord, settings_keys, settings_ranges,
+    ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
+    SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
+    settings_ranges,
     stable_worktree_id,
 };

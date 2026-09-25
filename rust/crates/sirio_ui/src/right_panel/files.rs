@@ -1533,13 +1533,7 @@ mod tests {
     fn a_root_outside_the_allowlist_stops_the_progress_bar(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let elsewhere = TempDir::new();
-        let panel = cx.new(|_| {
-            RightPanel::with_activity_and_roots(
-                dir.0.clone(),
-                vec![elsewhere.0.clone()],
-                Vec::new(),
-            )
-        });
+        let panel = cx.new(|_| RightPanel::with_roots(dir.0.clone(), vec![elsewhere.0.clone()]));
         panel.update(cx, |panel, cx| {
             // What a snapshot-restored panel looks like before its first
             // refresh: a tree on screen and the bar running.

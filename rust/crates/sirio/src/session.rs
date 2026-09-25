@@ -31,7 +31,7 @@
 //! one transactional write. `flush_now` covers quit: the window-closed hook
 //! calls it so the last action is never lost to the debounce window.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,8 +40,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use sirio_persistence::{
-    AgentRef, AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
-    TabStateRecord, WorktreeRecord, stable_worktree_id,
+    AgentRef, AppDatabase, AppSettings, ClosedChatSummary, PersistenceError, ProjectRecord,
+    SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, stable_worktree_id,
 };
 use sirio_project::{DiscoveredProject, TabKind, discover_project, is_git_repository};
 
@@ -1092,6 +1092,8 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
             agent_session_id: tab.agent_session_id.clone(),
             order_idx: index as i64,
             is_active: tab.active,
+            last_event_at: None,
+            closed_at: None,
         })
         .collect();
     db.save_tabs(&worktree_id, &tabs)?;
@@ -2001,6 +2003,107 @@ impl SessionStore {
             }
             Err(error) => {
                 eprintln!("[session] failed to persist session reference: {error}");
+            }
+        }
+    }
+
+    /// Archives a closed chat (see `AppDatabase::archive_tab`).
+    pub fn archive_tab(&self, id: &str, closed_at: i64) -> bool {
+        self.write_with(false, "archive a closed chat", |db| {
+            db.archive_tab(id, closed_at)
+        })
+    }
+
+    pub fn unarchive_tab(&self, id: &str) -> bool {
+        self.write_with(false, "reopen an archived chat", |db| db.unarchive_tab(id))
+    }
+
+    pub fn closed_chats(&self, limit: usize) -> Vec<ClosedChatSummary> {
+        self.read_with(Vec::new(), "list closed chats", |db| db.closed_chats(limit))
+    }
+
+    pub fn prune_closed_chats(&self, now_ms: i64) -> usize {
+        self.write_with(0, "prune closed chats", |db| db.prune_closed_chats(now_ms))
+    }
+
+    /// Returns the ids that matched no row; an error answers "none", so a
+    /// failing database is not retried on every reconcile.
+    pub fn touch_tabs(&self, touches: &[(String, i64)]) -> Vec<String> {
+        if touches.is_empty() {
+            return Vec::new();
+        }
+        self.write_with(Vec::new(), "record agent events", |db| {
+            db.touch_tabs(touches)
+        })
+    }
+
+    pub fn tab_event_times(&self) -> HashMap<String, i64> {
+        self.read_with(Vec::new(), "read agent event times", |db| {
+            db.tab_event_times()
+        })
+        .into_iter()
+        .collect()
+    }
+
+    /// Deletes a tab row outright (an archived chat's Delete).
+    pub fn delete_tab(&self, id: &str) -> bool {
+        self.write_with(false, "delete a closed chat", |db| {
+            db.remove_tab(id).map(|()| true)
+        })
+    }
+
+    pub fn load_sidebar_view(&self) -> SidebarView {
+        self.read_with(SidebarView::default(), "read the sidebar view", |db| {
+            db.sidebar_view()
+        })
+    }
+
+    pub fn save_sidebar_view(&self, view: SidebarView) {
+        self.write_with((), "save the sidebar view", |db| db.set_sidebar_view(view));
+    }
+
+    fn read_with<T>(
+        &self,
+        fallback: T,
+        what: &str,
+        read: impl FnOnce(&AppDatabase) -> Result<T, PersistenceError>,
+    ) -> T {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return fallback;
+        };
+        read(db).unwrap_or_else(|error| {
+            eprintln!("[session] failed to {what}: {error}");
+            fallback
+        })
+    }
+
+    fn write_with<T>(
+        &self,
+        fallback: T,
+        what: &str,
+        write: impl FnOnce(&AppDatabase) -> Result<T, PersistenceError>,
+    ) -> T {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return fallback;
+        };
+        match write(db) {
+            Ok(value) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+                value
+            }
+            Err(error) => {
+                eprintln!("[session] failed to {what}: {error}");
+                fallback
             }
         }
     }
@@ -4399,5 +4502,23 @@ mod tests {
             app_support_root_for(&fallback),
             PathBuf::from("/home/alice/.local/state/Sirio")
         );
+    }
+
+    #[test]
+    fn the_session_store_round_trips_the_sidebar_view() {
+        let dir = std::env::temp_dir().join(format!(
+            "sirio-sidebar-view-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let store = SessionStore::open(&dir.join("sirio.sqlite"));
+        assert_eq!(store.load_sidebar_view(), SidebarView::Projects);
+        store.save_sidebar_view(SidebarView::Sessions);
+        assert_eq!(store.load_sidebar_view(), SidebarView::Sessions);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

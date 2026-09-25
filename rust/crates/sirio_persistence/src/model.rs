@@ -154,6 +154,13 @@ pub struct TabRecord {
     /// Whether this tab is the active one in its worktree. At most one tab
     /// per worktree is active; saves normalize this invariant.
     pub is_active: bool,
+    /// Unix milliseconds of the tab's last agent event (v20). Written only by
+    /// `AppDatabase::touch_tabs`; `save_tab`/`save_tabs` never write it.
+    pub last_event_at: Option<i64>,
+    /// Unix milliseconds at which a closed chat was archived (v20). `None`
+    /// for every open tab; set and cleared only by `archive_tab` /
+    /// `unarchive_tab`.
+    pub closed_at: Option<i64>,
 }
 
 impl TabRecord {
@@ -172,6 +179,8 @@ impl TabRecord {
             agent_session_id: None,
             order_idx: 0,
             is_active: false,
+            last_event_at: None,
+            closed_at: None,
         }
     }
 
@@ -262,6 +271,23 @@ pub struct ChatSessionSummary {
     pub turn_count: usize,
     /// Last transcript save time in Unix milliseconds.
     pub last_activity: i64,
+}
+
+/// One archived chat, as the Sessions view of the sidebar lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosedChatSummary {
+    /// The archived tab's id — also its transcript's key.
+    pub tab_id: String,
+    /// The checkout path of the worktree the chat belongs to.
+    pub worktree_path: String,
+    /// The tab's title when it was closed.
+    pub title: String,
+    /// The chat's agent, when one was recorded.
+    pub agent_id: Option<AgentRef>,
+    /// The agent-side session the chat was continuing, when known.
+    pub agent_session_id: Option<String>,
+    /// Unix milliseconds at which it was archived.
+    pub closed_at: i64,
 }
 
 /// One completed rendered chat turn.
@@ -414,6 +440,33 @@ impl AppearanceMode {
             "system" => Some(AppearanceMode::System),
             "light" => Some(AppearanceMode::Light),
             "dark" => Some(AppearanceMode::Dark),
+            _ => None,
+        }
+    }
+}
+
+/// Which view the left sidebar shows ("appearance.sidebarView").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarView {
+    /// Projects, their worktrees and the worktrees' tabs.
+    #[default]
+    Projects,
+    /// Every agent session, newest event first.
+    Sessions,
+}
+
+impl SidebarView {
+    pub fn raw(self) -> &'static str {
+        match self {
+            Self::Projects => "projects",
+            Self::Sessions => "sessions",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "projects" => Some(Self::Projects),
+            "sessions" => Some(Self::Sessions),
             _ => None,
         }
     }
@@ -605,6 +658,8 @@ pub mod settings_keys {
     pub const TRANSLUCENCY: &str = "appearance.translucency";
     /// Linux-rewrite-only: no Swift antecedent (the Swift sidebar was fixed).
     pub const SIDEBAR_WIDTH: &str = "appearance.sidebarWidth";
+    /// Linux-rewrite-only: which view the left sidebar shows.
+    pub const SIDEBAR_VIEW: &str = "appearance.sidebarView";
     /// Linux-rewrite-only: no Swift antecedent.
     pub const RIGHT_PANEL_WIDTH: &str = "appearance.rightPanelWidth";
     pub const CENTER_SPLIT_RATIO: &str = "appearance.centerSplitRatio";

@@ -42,7 +42,6 @@ mod notification;
 /// and walk every pane against it, instead of each pane enumerating the
 /// machine's processes for itself.
 pub mod process;
-mod rows;
 mod session;
 mod sort;
 mod status;
@@ -56,10 +55,6 @@ pub use model::{AgentActivityModel, CATALOG_IDS, identify_agent_from_process_nam
 pub use mount::WorktreeMountPolicy;
 pub use notification::{NotificationPayload, NotificationPolicy};
 pub use process::{inspect_foreground_agent, inspect_process_names};
-pub use rows::{
-    ActivityRow, ActivityRowKind, ActivityTab, ActivityTabKind, ActivityWorktreeInput,
-    build_activity_rows,
-};
 pub use session::{
     AgentSessionRef, AgentSessionRestorePlan, AgentSessionRestoreResult, TerminalContentId,
 };

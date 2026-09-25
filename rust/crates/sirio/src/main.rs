@@ -26,7 +26,8 @@ use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
 use sirio_persistence::{
-    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, stable_worktree_id,
+    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, ClosedChatSummary,
+    stable_worktree_id,
 };
 use sirio_project::{
     OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, display_absolute_path, display_path,
@@ -49,16 +50,13 @@ use sirio_ui::{
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
-    right_panel::{
-        self, ActivityRef, ActivityStatus, ActivitySurface, FilesSnapshot, RightPanel,
-        RightPanelActionEvent, RightPanelEvent,
-    },
+    right_panel::{self, FilesSnapshot, RightPanel, RightPanelActionEvent, RightPanelEvent},
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
-        AgentMark, ProjectSettingsUpdate, RowStatusGlyph, Sidebar, SidebarContextAction,
-        SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef,
-        SidebarWorktree, TAB_ROW_ID_OFFSET,
+        AgentMark, ClosedSession, ProjectSettingsUpdate, RowStatusGlyph, Sidebar,
+        SidebarContextAction, SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab,
+        SidebarTabRef, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
         project_settings::{ProjectSettingsEvent, ProjectSettingsSeed, ProjectSettingsView},
     },
@@ -69,6 +67,7 @@ use sirio_ui::{
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
+use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -3906,16 +3905,16 @@ fn activity_rank(status: ActivityStatus) -> u8 {
 /// only crosses the two identically-shaped `ActivityStatus` enums (the
 /// render-facing one in `sirio_ui`, the domain one in `sirio_activity`).
 ///
-/// F-TERM-08: this governs only `request_close_activity` (the right panel's
-/// Activity row). It used to also gate `request_close_terminal_at` (the
-/// terminal context menu's "Close Terminal…"/"Close Tab…"), which made an
-/// ordinary shell's close silent — `ActivityStatus` only recognizes
-/// `AgentCatalog` CLIs, so a plain `sleep 300` (or any non-agent command) is
-/// always `Idle` and could never reach the gate, while the Swift original's
-/// two close paths build their alert with no gate on activity at all
+/// F-TERM-08: session-tab close confirmation uses this status rule. It used
+/// to also gate `request_close_terminal_at` (the terminal context menu's
+/// "Close Terminal…"/"Close Tab…"), which made an ordinary shell's close
+/// silent — `ActivityStatus` only recognizes `AgentCatalog` CLIs, so a plain
+/// `sleep 300` (or any non-agent command) is always `Idle` and could never
+/// reach the gate, while the Swift original's two close paths build their
+/// alert with no gate on activity at all
 /// (`App/TerminalContextMenuProvider.swift:58`, `App/SidebarView.swift:601`/
 /// `:678`). `request_close_terminal_at` now holds every terminal close for
-/// confirmation unconditionally; only the Activity row still asks this.
+/// confirmation unconditionally; session-tab closes use this status rule.
 /// The shell's `TabKind` for a persisted surface kind (`SessionTab::kind`).
 /// One decoder for restore and for the sidebar's parked rows, so the two
 /// can never disagree about what a stored "chat" is. Unknown kinds are
@@ -3967,6 +3966,15 @@ fn tab_status_name(status: ActivityStatus) -> &'static str {
         ActivityStatus::Done => "done",
         ActivityStatus::Error => "error",
     }
+}
+
+/// Wall-clock now in Unix milliseconds — the unit `tab.last_event_at` uses.
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn tab_primary_pane_id(tab: &OpenTab) -> Option<usize> {
@@ -4324,6 +4332,19 @@ struct SirioWorkspace {
     retained_chats: Vec<RetainedChat>,
     next_pane_id: usize,
     working_directory: PathBuf,
+    /// The last resolved status each session tab was seen in, by
+    /// `persistence_id` — the other half of event detection in
+    /// `sync_sidebar_tabs`.
+    session_last_seen: HashMap<String, ActivityStatus>,
+    /// When each session tab last did something (Unix ms), seeded from
+    /// `tab.last_event_at` at startup. The Sessions view sorts by it.
+    session_event_at: HashMap<String, i64>,
+    /// Events not yet written because their tab had no row (a tab younger
+    /// than one save debounce). Retried by `flush_session_event_writes`.
+    pending_event_writes: BTreeMap<String, i64>,
+    /// The archived chats the sidebar lists, as last read; `reopen_closed_chat`
+    /// finds a chat's agent and session here.
+    closed_chats: Vec<ClosedChatSummary>,
     session: SessionStore,
     project_catalog: ProjectCatalog,
     worktree_label: String,
@@ -4375,9 +4396,9 @@ struct SirioWorkspace {
     /// missing, keeping every root-level keybinding reachable regardless of
     /// what surface is showing.
     root_focus: FocusHandle,
-    /// The single source of truth for agent lifecycle status. Every one of
-    /// the sidebar dot, the tab checkmark, and the Activity row reads
-    /// through this (or, for a chat pane, through `Chat`'s own state) —
+    /// The single source of truth for agent lifecycle status. The sidebar
+    /// dot, tab checkmark, and session list read through this (or, for a chat
+    /// pane, through `Chat`'s own state) —
     /// never a second, independently-tracked flag.
     activity: AgentActivityModel,
     /// Shell-only terminal facts, keyed by the terminal entity rather than
@@ -4611,7 +4632,7 @@ struct PendingPaneClose {
     /// Claimed by the first `render` after this opens; see `focus`'s doc
     /// comment and `PendingTitlePrompt::needs_focus`.
     needs_focus: bool,
-    /// Set when the close was asked from an Activity row of *another*
+    /// Set when the close was asked from a session row of *another*
     /// worktree, carrying that worktree's label. The switch has already
     /// happened by the time the dialog is up, so it has to say where the user
     /// just landed. `None` is the ordinary same-worktree close, whose wording
@@ -5260,6 +5281,10 @@ impl SirioWorkspace {
             retained_chats: Vec::new(),
             next_pane_id,
             working_directory,
+            session_last_seen: HashMap::new(),
+            session_event_at: session.tab_event_times(),
+            pending_event_writes: BTreeMap::new(),
+            closed_chats: Vec::new(),
             session,
             project_catalog,
             worktree_label,
@@ -5409,6 +5434,9 @@ impl SirioWorkspace {
             });
         })
         .detach();
+        workspace.apply_saved_sidebar_view(cx);
+        workspace.session.prune_closed_chats(unix_now_ms());
+        workspace.refresh_closed_sessions(cx);
         workspace
     }
 
@@ -6338,12 +6366,6 @@ impl SirioWorkspace {
         cx.subscribe(
             right_panel,
             |workspace, _, event: &RightPanelEvent, cx| match event {
-                RightPanelEvent::SelectActivity(reference) => {
-                    workspace.select_activity(reference, cx)
-                }
-                RightPanelEvent::CloseActivity(reference) => {
-                    workspace.request_close_activity(reference, cx)
-                }
                 RightPanelEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
             },
         )
@@ -7360,10 +7382,253 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// The view the user last chose, restored at startup without reporting.
+    fn apply_saved_sidebar_view(&mut self, cx: &mut Context<Self>) {
+        let view = self.session.load_sidebar_view();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_view(view, cx));
+    }
+
+    /// Reads the archived chats and pushes them to the sidebar, each with
+    /// its worktree path spelled as the catalog (and so the sidebar) spells
+    /// it. A chat whose worktree is not in the catalog is left out of both
+    /// the list and `self.closed_chats`, so it cannot be reopened either.
+    fn refresh_closed_sessions(&mut self, cx: &mut Context<Self>) {
+        let archived = self.session.closed_chats(sirio_persistence::CLOSED_CHAT_LIMIT);
+        let catalog_paths: Vec<PathBuf> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+            .collect();
+        let mut listed = Vec::new();
+        let sessions: Vec<ClosedSession> = archived
+            .into_iter()
+            .filter_map(|chat| {
+                let path = catalog_paths
+                    .iter()
+                    .find(|path| {
+                        paths_name_the_same_document(path, Path::new(&chat.worktree_path))
+                    })?
+                    .clone();
+                Some(ClosedSession {
+                    tab_id: chat.tab_id.clone(),
+                    worktree_path: path,
+                    title: chat.title.clone(),
+                    agent: chat
+                        .agent_id
+                        .as_ref()
+                        .and_then(AgentRef::adapter_id)
+                        .and_then(AgentMark::for_agent_id),
+                    closed_at: chat.closed_at,
+                })
+                .inspect(|_| listed.push(chat.clone()))
+            })
+            .collect();
+        self.closed_chats = listed;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_closed_sessions(sessions, cx));
+    }
+
+    /// Reopens an archived chat in its worktree, restoring its transcript
+    /// and — when resuming is on — the agent's own session. A stale click
+    /// (the chat is no longer archived) does nothing.
+    fn reopen_closed_chat(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self
+            .closed_chats
+            .iter()
+            .find(|chat| chat.tab_id == tab_id)
+            .cloned()
+        else {
+            return;
+        };
+        // 1. Select its worktree first, while the record is still archived,
+        //    so neither the parked layout nor the database restore brings it
+        //    back a second time.
+        let path = PathBuf::from(&chat.worktree_path);
+        if !paths_name_the_same_document(&path, &self.working_directory)
+            && self.select_worktree(path, None, cx).is_err()
+        {
+            self.restore_sidebar_selection(cx);
+            return;
+        }
+        // 2. Unarchive; `false` means someone already did.
+        if !self.session.unarchive_tab(&chat.tab_id) {
+            self.refresh_closed_sessions(cx);
+            return;
+        }
+        // 3. Build that one tab the way session restore builds a chat.
+        // Runtime-created archived chats may not be in the startup-seeded map.
+        if !self.session_event_at.contains_key(&chat.tab_id) {
+            if let Some(last_event_at) = self.session.tab_event_times().get(&chat.tab_id) {
+                self.session_event_at
+                    .insert(chat.tab_id.clone(), *last_event_at);
+            }
+        }
+        let tab_id = self.push_restored_chat_tab(&chat, cx);
+        self.select_tab(tab_id, None, cx);
+        self.schedule_save(cx);
+        self.refresh_closed_sessions(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    /// One chat tab from an archived record, persistence attached (so new
+    /// turns append to the same transcript) and the agent session resumed
+    /// when the setting allows. Mirrors the chat branch of
+    /// `restore_tabs_with_terminal_cache`.
+    fn push_restored_chat_tab(
+        &mut self,
+        chat: &ClosedChatSummary,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
+        let stored_adapter_id = chat.agent_id.as_ref().and_then(AgentRef::adapter_id);
+        let (launch, agent_icon, agent_id, unavailable) = match restored_chat_spec(
+            &self.launch,
+            stored_adapter_id,
+            chat.agent_session_id.as_deref(),
+            resume_agent_sessions,
+        ) {
+            Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
+            None => (
+                None,
+                stored_adapter_id.and_then(Icon::for_agent_id),
+                stored_adapter_id.map(str::to_owned),
+                Some(restored_chat_refusal(&self.launch, stored_adapter_id)),
+            ),
+        };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
+        let is_unavailable = unavailable.is_some();
+        let cwd = self.working_directory.clone();
+        let database_path = self.session.database_path().to_path_buf();
+        let worktree_id = self.session.persisted_worktree_id(&self.working_directory);
+        let persistence_id = chat.tab_id.clone();
+        let chat_entity = cx.new(|cx| match unavailable {
+            Some(reason) => Chat::unavailable(reason, cwd, cx),
+            None => Chat::launch_with_command_and_persistence(
+                launch.expect("a chat with no refusal reason carries its launch"),
+                cwd,
+                database_path,
+                persistence_id.clone(),
+                worktree_id,
+                cx,
+            ),
+        });
+        if let Some(agent_name) = agent_name {
+            chat_entity.update(cx, |chat, cx| {
+                chat.set_agent_name(agent_name);
+                cx.notify();
+            });
+        }
+        Self::bind_chat(&chat_entity, cx);
+        let pane_id = self.next_pane_id;
+        register_restored_agent(
+            &mut self.activity,
+            pane_id,
+            if is_unavailable {
+                None
+            } else {
+                agent_id.as_deref()
+            },
+        );
+        let tab_id = self.next_tab_id;
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            title: chat.title.clone(),
+            kind: TabKind::AgentChat,
+            agent_icon,
+            agent_id,
+            session_state: SessionTabState::with_root(pane_id),
+            panes: PaneNode::leaf(pane_id, TabContent::Chat(chat_entity)),
+            focused_pane: pane_id,
+            title_is_auto_named: false,
+        });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &chat.title) {
+            self.rebuild_center_split();
+        }
+        tab_id
+    }
+
+    /// The close button of a live session: ask when the agent is still
+    /// working or the tab is in another worktree, and close otherwise.
+    fn request_close_session_tab(
+        &mut self,
+        tab_id: usize,
+        from_worktree: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let pane_id = tab.focused_pane;
+        let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
+        if from_worktree.is_some() || pane_close_needs_confirmation(status) {
+            self.pending_pane_close = Some(PendingPaneClose {
+                tab_id,
+                pane_id,
+                whole_tab: true,
+                status,
+                focus: cx.focus_handle().tab_stop(true),
+                needs_focus: true,
+                from_worktree,
+            });
+            cx.notify();
+            return;
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        self.close_tab(index, None, cx);
+    }
+
+    /// The close button of a session in another worktree's strip: bring that
+    /// worktree forward, then ask (the user was not looking at it).
+    fn request_close_parked_tab(&mut self, path: &Path, index: usize, cx: &mut Context<Self>) {
+        let key = path.to_string_lossy().into_owned();
+        let label = self
+            .parked_worktree_tabs
+            .get(&key)
+            .map(|parked| self.parked_worktree_label(&key, parked))
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| key.clone())
+            });
+        if self.select_worktree(path.to_path_buf(), None, cx).is_err() {
+            self.restore_sidebar_selection(cx);
+            return;
+        }
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind.appears_in_sidebar())
+            .nth(index)
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        self.request_close_session_tab(tab_id, Some(label), cx);
+    }
+
     fn handle_sidebar_event(&mut self, event: &SidebarEvent, cx: &mut Context<Self>) {
         match event {
             SidebarEvent::AddProject(path) => self.add_project(path.clone(), cx),
-            SidebarEvent::RemoveProject(id) => self.remove_project(id, cx),
+            SidebarEvent::RemoveProject(id) => {
+                self.remove_project(id, cx);
+                self.refresh_closed_sessions(cx);
+            }
             SidebarEvent::SelectTab(id) => self.activate_tab(*id, None, cx),
             SidebarEvent::SelectParkedTab { path, index } => {
                 // Bring the worktree back first — that restores its strip —
@@ -7416,6 +7681,7 @@ impl SirioWorkspace {
                         self.restore_sidebar_selection(cx);
                     }
                 }
+                self.refresh_closed_sessions(cx);
             }
             SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
             SidebarEvent::OpenProjectSettings(id) => {
@@ -7428,6 +7694,16 @@ impl SirioWorkspace {
             } => self.reorder_sidebar(*drag, *target_id, *before, cx),
             SidebarEvent::ContextAction { target, action } => {
                 self.handle_sidebar_context_action(target, *action, cx)
+            }
+            SidebarEvent::ViewChanged(view) => self.session.save_sidebar_view(*view),
+            SidebarEvent::CloseSessionTab(id) => self.request_close_session_tab(*id, None, cx),
+            SidebarEvent::CloseParkedTab { path, index } => {
+                self.request_close_parked_tab(path, *index, cx)
+            }
+            SidebarEvent::ReopenClosedChat(id) => self.reopen_closed_chat(id, cx),
+            SidebarEvent::DeleteClosedChat(id) => {
+                self.session.delete_tab(id);
+                self.refresh_closed_sessions(cx);
             }
         }
     }
@@ -7883,7 +8159,7 @@ impl SirioWorkspace {
 
     /// Pushes every mounted surface's own evidence into the one
     /// `AgentActivityModel` (Layer E), so that from here on *every* view of
-    /// a pane's status — the worktree dot, the tab check, the Activity row,
+    /// a pane's status — the worktree dot, the tab check, the session list,
     /// the tray roster, the close confirmation — reads the same map.
     ///
     /// This is the repair for the defect that made the feature misleading:
@@ -8102,75 +8378,6 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// F-CORE-ACT-23: the Activity panel's own close button. It used to call
-    /// `close_tab` straight through, so the one list that exists to show a
-    /// running agent was also the one place that could kill it without
-    /// asking. Now it consults the same
-    /// `sirio_activity::ActivityStatus::requires_close_confirmation` the
-    /// pane close does — running, needs-input and error are held for
-    /// confirmation, done and idle close immediately — and reuses the
-    /// existing hold-and-banner rather than raising a second prompt. A row of
-    /// another mounted worktree is brought here first
-    /// ([`Self::select_parked_worktree_tab`]) and its close is then held
-    /// unconditionally: the user was not looking at that surface a moment
-    /// ago, and the switch just happened under their eyes, so the banner is
-    /// the only thing that can still say what "Close Anyway" would close.
-    fn request_close_activity(&mut self, reference: &ActivityRef, cx: &mut Context<Self>) {
-        // A row of another worktree is brought here first: the close then runs
-        // on the live strip, the same path the selected worktree's own rows
-        // take, instead of reaching into a parked layout. The switch is also
-        // why the dialog below is unconditional for these rows -- the user is
-        // closing something they were not looking at a moment ago.
-        let (tab_id, from_worktree) = match reference {
-            ActivityRef::Open(tab_id) => {
-                if !self.tabs.iter().any(|tab| tab.id == *tab_id) {
-                    return;
-                }
-                (*tab_id, None)
-            }
-            ActivityRef::Parked { worktree, index } => {
-                let label = self
-                    .parked_worktree_tabs
-                    .get(worktree)
-                    .map(|parked| self.parked_worktree_label(worktree, parked))
-                    .unwrap_or_else(|| {
-                        Path::new(worktree)
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_else(|| worktree.clone())
-                    });
-                let Some(tab_id) = self.select_parked_worktree_tab(worktree, *index, cx) else {
-                    return;
-                };
-                (tab_id, Some(label))
-            }
-        };
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
-            return;
-        };
-        let pane_id = tab.focused_pane;
-        let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
-        if from_worktree.is_some() || pane_close_needs_confirmation(status) {
-            self.pending_pane_close = Some(PendingPaneClose {
-                tab_id,
-                pane_id,
-                whole_tab: true,
-                status,
-                focus: cx.focus_handle().tab_stop(true),
-                needs_focus: true,
-                from_worktree,
-            });
-            cx.notify();
-            return;
-        }
-        // `close_tab` takes a position in `self.tabs`, not an id.
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return;
-        };
-        self.close_tab(index, None, cx);
-    }
-
     /// F-CORE-WSP-05: `window` (available from the "Close Anyway" banner's
     /// own `on_click`) is threaded through for the same reason
     /// `request_close_focused_pane` threads it -- so real keyboard focus,
@@ -8362,119 +8569,7 @@ impl SirioWorkspace {
         Ok(Some((id, title)))
     }
 
-    /// Every surface the user has open, not just the ones in the worktree
-    /// they happen to be looking at. `self.tabs` is the selected worktree's
-    /// strip and nothing else -- a switch replaces it (see `select_worktree`'s
-    /// CENTER-01 comment) -- so the other mounted worktrees' rows come from
-    /// their parked strips, whose terminals and chats are both still alive.
-    ///
-    /// Rows are named by `ActivityRef`, not by their position: the list now
-    /// crosses worktrees, and the caller that acts on a row
-    /// (`select_activity`, `request_close_activity`) used to index
-    /// `self.tabs` with the row number.
-    fn activity_surfaces(&self, cx: &App) -> Vec<ActivitySurface> {
-        let mut surfaces: Vec<ActivitySurface> = self
-            .tabs
-            .iter()
-            .map(|tab| {
-                let icon = tab_icon(
-                    tab.kind,
-                    tab_file_path(tab, cx).as_deref(),
-                    self.tab_agent_mark(tab).map(|agent| agent.icon),
-                );
-                let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
-                ActivitySurface::new(
-                    ActivityRef::Open(tab.id),
-                    icon,
-                    tab.title.clone(),
-                    self.worktree_label.clone(),
-                    status,
-                )
-            })
-            .collect();
-        surfaces.extend(self.parked_activity_surfaces());
-        surfaces
-    }
-
-    /// The rows of every mounted worktree that is not the selected one, read
-    /// from its parked strip. Each row's status comes from the pane ids
-    /// parked with that tab -- terminal and chat alike -- which is why this
-    /// can show a real status for a worktree the user is not looking at:
-    /// `self.activity` is keyed by pane id, not by worktree.
-    ///
-    /// Membership in `parked_worktree_tabs` is the whole test of whether a
-    /// worktree belongs here: it is written when a worktree is parked and
-    /// dropped, with the terminal cache and the retained chats, when one is
-    /// evicted or closed. This deliberately does *not* additionally ask the
-    /// terminal cache, which knows only about PTYs: a worktree holding
-    /// nothing but a chat has no entry there, and gating on it dropped every
-    /// row that worktree owned.
-    ///
-    /// Worktrees are ordered by urgency (`AttentionSort::sorted`, the tray
-    /// roster's rule) and for the same reason: this list has no manual order
-    /// to respect. Within a worktree the strip keeps its own order.
-    fn parked_activity_surfaces(&self) -> Vec<ActivitySurface> {
-        // One worktree per group -- `(label, worst status, rows)` -- because
-        // `sorted` reorders the worktrees as units: the rows of one strip
-        // have to travel together to keep their own order.
-        let mut groups: Vec<(String, ActivityStatus, Vec<ActivitySurface>)> = Vec::new();
-        for (key, parked) in &self.parked_worktree_tabs {
-            if paths_name_the_same_document(Path::new(key), &self.working_directory) {
-                continue;
-            }
-            let label = self.parked_worktree_label(key, parked);
-            let mut rows = Vec::new();
-            let mut worst = ActivityStatus::Idle;
-            for (index, tab) in parked.layout.tabs.iter().enumerate() {
-                // Same resolution `parked_sidebar_tabs_for` uses for the
-                // sidebar's own parked rows, so the mark a surface wears
-                // does not change with which list is drawing it.
-                let agent_icon = tab
-                    .agent_id
-                    .as_ref()
-                    .and_then(AgentRef::adapter_id)
-                    .and_then(AgentMark::for_agent_id)
-                    .map(|mark| mark.icon);
-                let status = parked
-                    .terminal_panes_by_tab
-                    .get(index)
-                    .into_iter()
-                    .flatten()
-                    .chain(parked.chat_panes_by_tab.get(index).into_iter().flatten())
-                    .filter_map(|pane_id| {
-                        self.activity
-                            .status(&format!("pane-{pane_id}"))
-                            .map(activity_status_for_agent)
-                    })
-                    .min_by_key(|status| activity_rank(*status))
-                    .unwrap_or(ActivityStatus::Idle);
-                if activity_rank(status) < activity_rank(worst) {
-                    worst = status;
-                }
-                rows.push(ActivitySurface::new(
-                    ActivityRef::Parked {
-                        worktree: key.clone(),
-                        index,
-                    },
-                    // A parked strip keeps no file path, so the icon comes
-                    // from the kind and the agent mark alone.
-                    tab_icon(tab_kind_from_persisted(&tab.kind), None, agent_icon),
-                    tab.title.clone(),
-                    label.clone(),
-                    status,
-                ));
-            }
-            groups.push((label, worst, rows));
-        }
-        sirio_activity::AttentionSort::sorted(&groups, |(_, status, _)| {
-            agent_status_for_activity(*status)
-        })
-        .into_iter()
-        .flat_map(|(_, _, rows)| rows)
-        .collect()
-    }
-
-    /// The `project/branch` label a parked worktree's rows carry.
+    /// The `project/branch` label shown when a parked-worktree close is held.
     ///
     /// Built from the catalog and from the branch the strip was parked with,
     /// deliberately *not* from `worktree_context`: that one reads `.git/HEAD`
@@ -8531,10 +8626,13 @@ impl SirioWorkspace {
             })
             .map(|(index, tab)| SidebarTab {
                 tab: SidebarTabRef::Open(tab.id),
+                persistence_id: tab.persistence_id.clone(),
                 title: tab.title.clone(),
                 selected: index == self.active_tab,
                 kind: tab.kind,
                 agent: self.tab_agent_mark(tab),
+                status: None,
+                last_event_at: None,
             })
             .collect()
     }
@@ -8583,6 +8681,7 @@ impl SirioWorkspace {
             .map(|(index, tab)| SidebarTab {
                 tab: SidebarTabRef::Parked(index),
                 kind: tab_kind_from_persisted(&tab.kind),
+                persistence_id: tab.id.clone(),
                 title: tab.title,
                 // Nothing parked is the active tab: the active tab is a live
                 // fact of the selected worktree.
@@ -8592,6 +8691,8 @@ impl SirioWorkspace {
                     .as_ref()
                     .and_then(AgentRef::adapter_id)
                     .and_then(AgentMark::for_agent_id),
+                status: None,
+                last_event_at: None,
             })
             .collect();
         self.parked_sidebar_tabs
@@ -9065,14 +9166,12 @@ impl SirioWorkspace {
             )
         });
 
-        let activity = self.activity_surfaces(cx);
         let selected_path_for_panel = selected_path.clone();
         let files_snapshot = self.files_snapshots.get(&selected_path).cloned();
         self.right_panel = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot_for_project(
+            RightPanel::with_snapshot_for_project(
                 selected_path_for_panel,
                 context.is_git,
-                activity,
                 files_snapshot,
             )
         });
@@ -9556,7 +9655,6 @@ impl SirioWorkspace {
         self.activity_dirty = false;
         self.reconciles = self.reconciles.wrapping_add(1);
         self.sync_control_panes(cx);
-        let activity = self.activity_surfaces(cx);
         // F-CHG-02: keep the Files panel's own selection state honest against
         // `has_current_worktree()` on every reconciliation pass, not only on
         // an explicit `select_worktree`/`close_workspace` transition. A
@@ -9578,7 +9676,6 @@ impl SirioWorkspace {
         let working_directory_is_git =
             worktree_context(&self.project_catalog, &working_directory).is_git;
         self.right_panel.update(cx, |panel, cx| {
-            panel.set_activity(activity, cx);
             if has_worktree {
                 panel.bind_worktree(working_directory, working_directory_is_git, cx);
             } else {
@@ -9647,13 +9744,125 @@ impl SirioWorkspace {
                     }
                 };
             }
+            let now_ms = unix_now_ms();
+            for tab in &mut tabs {
+                if tab.kind == TabKind::Terminal
+                    && tab.agent.is_some()
+                    && !self.session_event_at.contains_key(&tab.persistence_id)
+                {
+                    self.stamp_session_created(&tab.persistence_id);
+                }
+                tab.status = match tab.tab {
+                    SidebarTabRef::Open(id) => self
+                        .tabs
+                        .iter()
+                        .find(|open| open.id == id)
+                        .and_then(|open| self.tab_status(open, cx)),
+                    SidebarTabRef::Parked(_) => {
+                        self.parked_tab_status(&path, &tab.persistence_id)
+                    }
+                };
+                if let Some(status) = tab.status {
+                    self.note_session_status(&tab.persistence_id, status, now_ms);
+                }
+                tab.last_event_at = self.session_event_at.get(&tab.persistence_id).copied();
+            }
             sidebar_updates.push((worktree_id, tabs));
         }
+        self.flush_session_event_writes();
         self.sidebar.update(cx, |sidebar, cx| {
             for (worktree_id, tabs) in sidebar_updates {
                 sidebar.set_worktree_tabs(worktree_id, tabs, cx);
             }
         });
+    }
+
+    /// A session created in this run enters the Sessions view at the top.
+    fn stamp_session_created(&mut self, persistence_id: &str) {
+        let now_ms = unix_now_ms();
+        self.session_event_at
+            .insert(persistence_id.to_owned(), now_ms);
+        self.pending_event_writes
+            .insert(persistence_id.to_owned(), now_ms);
+    }
+
+    /// Event detection: a change **into** running, needs-input, done or error
+    /// is an event; a move to idle is silence; the first status seen for a
+    /// tab (a restored or newly mounted one) is not something that just
+    /// happened.
+    fn note_session_status(&mut self, persistence_id: &str, status: ActivityStatus, now_ms: i64) {
+        let previous = self
+            .session_last_seen
+            .insert(persistence_id.to_owned(), status);
+        if status != ActivityStatus::Idle && previous.is_some_and(|previous| previous != status) {
+            self.session_event_at
+                .insert(persistence_id.to_owned(), now_ms);
+            self.pending_event_writes
+                .insert(persistence_id.to_owned(), now_ms);
+        }
+    }
+
+    /// A tab of a mounted, parked strip: the most urgent status among its
+    /// panes, found by persistence id (the sidebar's parked index counts
+    /// only sidebar tabs, the layout counts all). `None` when the worktree is
+    /// not mounted.
+    fn parked_tab_status(
+        &self,
+        worktree_path: &Path,
+        persistence_id: &str,
+    ) -> Option<ActivityStatus> {
+        let parked = self
+            .parked_worktree_tabs
+            .get(worktree_path.to_string_lossy().as_ref())
+            .or_else(|| {
+                self.parked_worktree_tabs
+                    .iter()
+                    .find(|(path, _)| {
+                        paths_name_the_same_document(Path::new(path), worktree_path)
+                    })
+                    .map(|(_, parked)| parked)
+            })?;
+        let index = parked
+            .layout
+            .tabs
+            .iter()
+            .position(|tab| tab.id == persistence_id)?;
+        Some(
+            parked
+                .terminal_panes_by_tab
+                .get(index)
+                .into_iter()
+                .flatten()
+                .chain(parked.chat_panes_by_tab.get(index).into_iter().flatten())
+                .filter_map(|pane_id| {
+                    self.activity
+                        .status(&format!("pane-{pane_id}"))
+                        .map(activity_status_for_agent)
+                })
+                .min_by_key(|status| activity_rank(*status))
+                .unwrap_or(ActivityStatus::Idle),
+        )
+    }
+
+    /// Writes pending events; keeps those whose tab has no row yet, as long
+    /// as the tab is still open.
+    fn flush_session_event_writes(&mut self) {
+        if self.pending_event_writes.is_empty() {
+            return;
+        }
+        let touches: Vec<(String, i64)> = self
+            .pending_event_writes
+            .iter()
+            .map(|(id, at)| (id.clone(), *at))
+            .collect();
+        let unmatched: HashSet<String> = self.session.touch_tabs(&touches).into_iter().collect();
+        let open: HashSet<&str> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.persistence_id.as_str())
+            .collect();
+        self.pending_event_writes
+            .retain(|id, _| unmatched.contains(id) && open.contains(id.as_str()));
     }
 
     /// F-CORE-ACT-17/18/22: everything a worktree row draws about its live
@@ -10544,46 +10753,6 @@ impl SirioWorkspace {
         }
     }
 
-    fn select_activity(&mut self, reference: &ActivityRef, cx: &mut Context<Self>) {
-        match reference {
-            ActivityRef::Open(tab_id) => {
-                if self.tabs.iter().any(|tab| tab.id == *tab_id) {
-                    self.select_tab(*tab_id, None, cx);
-                }
-            }
-            ActivityRef::Parked { worktree, index } => {
-                if let Some(tab_id) = self.select_parked_worktree_tab(worktree, *index, cx) {
-                    self.select_tab(tab_id, None, cx);
-                }
-            }
-        }
-    }
-
-    /// Brings a parked worktree back and returns the live tab its parked
-    /// position names, or `None` when the switch failed.
-    ///
-    /// The index counts *every* tab of the strip, where `SelectParkedTab`
-    /// counts only the sidebar-visible ones: the sidebar drew that filtered
-    /// list, the Activity panel draws the whole strip, and each side has to
-    /// count what it drew. `restore_tabs_for_mounted_worktree` rebuilds the
-    /// strip from the parked layout, so the position names the same tab on
-    /// both sides of the switch.
-    fn select_parked_worktree_tab(
-        &mut self,
-        worktree: &str,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        if self
-            .select_worktree(PathBuf::from(worktree), None, cx)
-            .is_err()
-        {
-            self.restore_sidebar_selection(cx);
-            return None;
-        }
-        self.tabs.get(index).map(|tab| tab.id)
-    }
-
     fn close_tab(&mut self, index: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
@@ -10617,6 +10786,9 @@ impl SirioWorkspace {
             });
             retained
         };
+        let archived = (self.tabs[index].kind == TabKind::AgentChat)
+            .then(|| self.tabs[index].persistence_id.clone())
+            .filter(|id| self.session.archive_tab(id, unix_now_ms()));
 
         let mut terminals = Vec::new();
         let mut terminal_pane_ids = Vec::new();
@@ -10706,6 +10878,10 @@ impl SirioWorkspace {
             self.focus_active_pane(window, cx);
         }
         self.schedule_save(cx);
+        if archived.is_some() {
+            self.session.prune_closed_chats(unix_now_ms());
+            self.refresh_closed_sessions(cx);
+        }
         self.mark_activity_dirty();
         cx.notify();
     }
@@ -10833,6 +11009,7 @@ impl SirioWorkspace {
         let persistence_id = self
             .session
             .new_tab_id(&self.working_directory, self.next_tab_id);
+        self.stamp_session_created(&persistence_id);
         // F-CHAT-34/F-PER-01: every chat tab is launched with durable
         // transcript persistence (database path + this tab's own id + its
         // worktree id) so completed turns are saved as they settle and the
@@ -10988,6 +11165,7 @@ impl SirioWorkspace {
         let persistence_id = self
             .session
             .new_tab_id(&self.working_directory, self.next_tab_id);
+        self.stamp_session_created(&persistence_id);
         let chat = cx.new(|cx| match unavailable {
             // No transcript: the box is the whole point, and a conversation
             // shown above an explanation of why it cannot continue invites
@@ -11144,6 +11322,9 @@ impl SirioWorkspace {
         let pane_id = self.next_pane_id;
         let title = title.into();
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        if agent_id.is_some() {
+            self.stamp_session_created(&persistence_id);
+        }
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
@@ -14143,8 +14324,8 @@ impl SirioWorkspace {
     /// Swift original is an `.alert` (`App/SidebarView.swift:601`), which is
     /// modal and therefore always on screen; the Rust banner used to render
     /// inside `render_pane_tree`, which only ever runs for each group's
-    /// *active* tab. Closing an Activity row that belongs to a background
-    /// tab therefore armed a prompt on a surface nobody could see: the close
+    /// *active* tab. Closing a background session tab therefore armed a
+    /// prompt on a surface nobody could see: the close
     /// silently did nothing, and there was no drawn control to cancel it
     /// with either.
     ///
@@ -14154,7 +14335,7 @@ impl SirioWorkspace {
     /// unconditional, `status` here can now also be `Idle`/`Done` (an
     /// ordinary shell, or a finished agent) — those get their own wording
     /// rather than falling into a leftover "has running work" catch-all
-    /// that was only ever true back when the Activity row's
+    /// that was only ever true back when the session close's
     /// `requires_close_confirmation` gate was the only way to reach this.
     ///
     /// Built on `sirio_ui::modal::render_modal` — the same modal-sheet
@@ -16275,8 +16456,7 @@ impl SirioWorkspace {
         );
         // The History toolbar shapes itself from the panel's width, and the
         // view cannot measure its own container — push the resolved width
-        // every frame, the same every-render push as `set_activity`. No-op
-        // unless a drag or window resize actually moved it.
+        // every frame. No-op unless a drag or window resize actually moved it.
         self.right_panel.update(cx, |panel, cx| {
             panel.set_panel_width(right_width.unwrap_or(0.0), cx);
         });
@@ -17817,7 +17997,7 @@ impl Render for SirioWorkspace {
         }
         // F-TERM-08 refutation fix (P103): the close-confirm banner claims
         // real focus the same way, on the same "poll once" shape --
-        // `request_close_terminal_at`/`request_close_activity` have no
+        // `request_close_terminal_at`/`request_close_session_tab` have no
         // `Window` either. Before this the banner never took focus at all,
         // so opening it while a terminal held focus (the ordinary case for
         // `ctrl-alt-w`) left the terminal as the actual keyboard-dispatch
@@ -17891,7 +18071,7 @@ impl Render for SirioWorkspace {
 
         // `Chat`'s streaming/completed state changes on its own schedule (an
         // ACP event arriving), not through any of this workspace's own
-        // mutation methods, so the sidebar dot and Activity row would go
+        // mutation methods, so the sidebar dot and session list would go
         // stale after a turn finished unless this re-derives them every
         // render, same as the tab checkmark already does inline in
         // `render_open_tab`. Changed evidence arms `sync_activity`; its gate
@@ -20203,34 +20383,6 @@ fn main() {
                     None,
                     cx,
                 );
-                let activity = tabs
-                    .iter()
-                    .map(|tab| {
-                        // Restored panes get their identity from
-                        // `register_agent_id` inside `restore_tabs`, i.e.
-                        // after the tab exists — the same after-the-fact
-                        // path Layers B and D use — so this first Activity
-                        // list reads the model rather than the tab's field.
-                        let icon = tab_icon(
-                            tab.kind,
-                            tab_file_path(tab, cx).as_deref(),
-                            tab.agent_icon.or_else(|| {
-                                tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
-                                    activity_model
-                                        .agent_id(&format!("pane-{pane_id}"))
-                                        .and_then(Icon::for_agent_id)
-                                })
-                            }),
-                        );
-                        ActivitySurface::new(
-                            ActivityRef::Open(tab.id),
-                            icon,
-                            tab.title.clone(),
-                            activity_label.clone(),
-                            ActivityStatus::Idle,
-                        )
-                    })
-                    .collect();
                 // F-SID-11: at real startup `control_state` was already
                 // seeded from the durable `worktree.comment` column above
                 // (`apply_persisted_comments`), but that seed only reached
@@ -20406,10 +20558,9 @@ fn main() {
                         status_bar,
                         settings,
                         cx.new(|_| {
-                            RightPanel::with_activity_and_roots(
+                            RightPanel::with_roots(
                                 working_directory.to_string_lossy().into_owned(),
                                 allowed_file_roots,
-                                activity,
                             )
                         }),
                         panes_for_window.clone(),
@@ -20630,7 +20781,7 @@ mod tests {
     use super::*;
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
-    use sirio_ui::sidebar::parked_tab_row_id;
+    use sirio_ui::sidebar::{SidebarView, parked_tab_row_id};
 
     #[test]
     fn the_identifier_under_the_caret_names_the_search() {
@@ -25448,6 +25599,190 @@ done
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[gpui::test]
+    async fn a_status_transition_stamps_the_tabs_last_event(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-event-stamp");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        // The first observed non-idle status is a baseline, not an event.
+        // Seed the terminal's existing session time so this isolates status
+        // events from the first time it is identified as a session.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let baseline_event_at = unix_now_ms().saturating_sub(60_000);
+            workspace.session_last_seen.clear();
+            workspace.session_event_at.clear();
+            workspace
+                .session_event_at
+                .insert("urgency-terminal".into(), baseline_event_at);
+            workspace.activity.agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert_eq!(
+                workspace.session_last_seen.get("urgency-terminal"),
+                Some(&ActivityStatus::Running)
+            );
+            assert_eq!(
+                workspace.session_event_at.get("urgency-terminal"),
+                Some(&baseline_event_at),
+                "a first non-idle observation is not an event"
+            );
+            let pills = workspace.sidebar.read(cx).worktree_pills(1);
+            assert_eq!(pills[0].status, Some(ActivityStatus::Running));
+            assert_eq!(pills[0].last_event_at, Some(baseline_event_at));
+        });
+        // Running -> Done is an event; staying Done is not; losing the
+        // status (the pane reads idle) is not.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.activity.notify("pane-0", AgentStatus::Done, Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            let done_event_at = *workspace
+                .session_event_at
+                .get("urgency-terminal")
+                .expect("done is an event");
+            assert!(done_event_at > unix_now_ms().saturating_sub(60_000));
+
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert_eq!(
+                workspace.session_event_at.get("urgency-terminal"),
+                Some(&done_event_at),
+                "no change does not create another event"
+            );
+
+            workspace.activity.pane_closed("pane-0");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            assert_eq!(
+                workspace.session_event_at.get("urgency-terminal"),
+                Some(&done_event_at),
+                "a move to idle is silence"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_plain_terminal_is_stamped_when_first_identified_as_an_agent(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-terminal-agent-stamp");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_terminal_tab("Plain terminal", cx);
+            let tab = workspace.tabs.last().expect("new terminal tab");
+            let persistence_id = tab.persistence_id.clone();
+            let pane_id = tab.focused_pane;
+            assert!(
+                !workspace.session_event_at.contains_key(&persistence_id),
+                "a plain terminal is not a session yet"
+            );
+
+            workspace
+                .activity
+                .register_agent_id(&format!("pane-{pane_id}"), "claude");
+            workspace.sync_sidebar_tabs(ParkedRows::Read, cx);
+            let first_stamp = *workspace
+                .session_event_at
+                .get(&persistence_id)
+                .expect("first session sync stamps an identified terminal");
+            workspace.sync_sidebar_tabs(ParkedRows::Read, cx);
+            assert_eq!(
+                workspace.session_event_at.get(&persistence_id),
+                Some(&first_stamp),
+                "later syncs preserve the initial session time"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_parked_mounted_strip_keeps_reporting_its_tab_status(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-parked-status");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.activity.agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("select the empty worktree");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            let pills = workspace.sidebar.read(cx).worktree_pills(1);
+            assert_eq!(pills.len(), 1, "wt-0's strip is listed as parked");
+            assert_eq!(pills[0].status, Some(ActivityStatus::Running));
+            assert_eq!(pills[0].persistence_id, "urgency-terminal");
+            assert_eq!(
+                workspace.parked_tab_status(&worktrees[0].join("."), "urgency-terminal"),
+                Some(ActivityStatus::Running),
+                "an equivalent but differently spelled worktree path finds parked status"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn agent_events_reach_the_database_once_the_tab_row_exists(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-event-persist");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // A tab with no row that is no longer open is not retried forever.
+            workspace.stamp_session_created("closed-before-its-first-save");
+            workspace.flush_session_event_writes();
+            assert!(workspace.pending_event_writes.is_empty());
+
+            // An open tab's event lands once its row exists. (Whether the
+            // background flusher already wrote the row is timing; saving the
+            // layout now makes it certain.)
+            workspace.session.save_layout_now(&workspace.layout(cx));
+            workspace.stamp_session_created("urgency-terminal");
+            workspace.flush_session_event_writes();
+            assert!(workspace.pending_event_writes.is_empty());
+            assert!(workspace.session.tab_event_times().contains_key("urgency-terminal"));
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// F-USE-05 / F-CORE-ACT-22: the tab a tray-roster jump lands on is the
     /// one `AttentionSort::sorted` puts first, so a tab waiting for an
     /// answer beats one that is merely working.
@@ -25529,9 +25864,9 @@ done
     /// the state it is asking about.
     ///
     /// It used to render inside `render_pane_tree`, which only runs for each
-    /// group's active tab — so an Activity-panel close of a **background**
-    /// tab armed a prompt on a surface nobody could see, and there was no
-    /// drawn control to cancel it with either. And its text was hard-coded
+    /// group's active tab — so closing a **background** session tab armed a
+    /// prompt on a surface nobody could see, and there was no drawn control to
+    /// cancel it with either. And its text was hard-coded
     /// to "has running work" for all three confirming states, so a failed
     /// agent was announced as still working.
     #[gpui::test]
@@ -25582,13 +25917,13 @@ done
                 "tab 0 is the background tab for this test"
             );
             let tab_id = workspace.tabs[0].id;
-            workspace.request_close_activity(&ActivityRef::Open(tab_id), cx);
+            workspace.request_close_session_tab(tab_id, None, cx);
         });
         cx.run_until_parked();
 
         assert!(
             cx.debug_bounds("pane-close-confirm").is_some(),
-            "closing a background tab's Activity row draws a prompt the user can answer"
+            "closing a background session draws a prompt the user can answer"
         );
         assert!(cx.debug_bounds("pane-close-confirm-cancel").is_some());
         assert_eq!(
@@ -25624,7 +25959,7 @@ done
     /// `sirio_activity::ActivityStatus::requires_close_confirmation` names.
     /// This replaces a test of the same name's predecessor that asserted
     /// "a finished pane closes without a prompt" as correct — that was
-    /// `request_close_terminal_at` wrongly reusing the Activity row's own
+    /// `request_close_terminal_at` wrongly reusing the session close's own
     /// gate (F-CORE-ACT-23's `pane_close_needs_confirmation`), which is the
     /// defect P103 documents: `ActivityStatus` only recognizes
     /// `AgentCatalog` CLIs, so a plain `sleep 300` (or any non-agent
@@ -25632,9 +25967,8 @@ done
     /// Reproduced live: right-click "Close Terminal…" on an idle sole
     /// terminal used to close it instantly, no prompt. Every status is
     /// attempted against a real pane, cancel/confirm are real clicks on the
-    /// drawn banner, and the Activity row's own gate
-    /// (`request_close_activity`) is untouched — see
-    /// `drawn_activity_row_close_holds_a_running_tab_and_lets_an_idle_one_go`.
+    /// drawn banner; session-tab close still uses its own status-sensitive
+    /// confirmation rule.
     #[gpui::test]
     async fn drawn_pane_close_prompt_is_held_for_every_status_including_idle_and_done(
         cx: &mut TestAppContext,
@@ -25809,353 +26143,10 @@ done
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// F-CORE-ACT-23, drawn: the Activity panel's own close control used to
-    /// call `close_tab` straight through — the one list that exists to show
-    /// a running agent was also the only place that could kill it silently.
-    /// It now asks the same `requires_close_confirmation` the pane close
-    /// does, and reuses the same banner instead of raising a second prompt.
+    /// A close in the selected worktree stays silent for idle sessions, unlike
+    /// `request_close_parked_tab`, which switches worktrees and asks first.
     #[gpui::test]
-    async fn drawn_activity_row_close_holds_a_running_tab_and_lets_an_idle_one_go(
-        cx: &mut TestAppContext,
-    ) {
-        cx.set_global(Theme::light());
-        let (root, _worktrees) = urgency_test_root("activity-close");
-        let root_for_window = root.clone();
-        let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.simulate_resize(size(px(1400.0), px(700.0)));
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            // Tab 0 runs an agent; tab 1 is a plain idle shell.
-            workspace
-                .activity
-                .agent_spawned("pane-0", "claude", Instant::now());
-            workspace.add_terminal_tab_with_shell(
-                "Terminal 2",
-                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
-                None,
-                cx,
-            );
-            workspace.mark_activity_dirty();
-            workspace.sync_activity(cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
-            2
-        );
-
-        // Activity is one of the right panel's four icon-selected views, not
-        // a collapsible footer under Files: reaching its rows means selecting
-        // it in the rail.
-        let rail_icon = cx
-            .debug_bounds("right-panel-tab-activity")
-            .expect("the Activity rail icon is drawn");
-        cx.simulate_click(rail_icon.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        // The close control is the row's last child, inside its 10px right
-        // padding.
-        let close_point = |row: gpui::Bounds<gpui::Pixels>| {
-            point(row.origin.x + row.size.width - px(16.0), row.center().y)
-        };
-
-        // Idle: closes on the spot, no prompt.
-        let idle_row = cx
-            .debug_bounds("activity-1")
-            .expect("the idle tab has an activity row");
-        cx.simulate_click(close_point(idle_row), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("pane-close-confirm").is_none(),
-            "an idle activity row closes without a prompt"
-        );
-        assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
-            1,
-            "the idle tab actually closed"
-        );
-
-        let row = cx
-            .debug_bounds("activity-0")
-            .expect("the running tab has an activity row");
-        cx.simulate_click(close_point(row), Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
-            1,
-            "closing a running agent from the Activity list must not kill it silently"
-        );
-        assert!(
-            cx.debug_bounds("pane-close-confirm").is_some(),
-            "the Activity close is held behind the same banner the pane close uses"
-        );
-
-        let confirm = cx
-            .debug_bounds("pane-close-confirm-close")
-            .expect("the held close offers Close Anyway");
-        cx.simulate_click(confirm.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
-            0,
-            "confirming an Activity close closes the whole tab, not just one pane"
-        );
-
-        shutdown_workspace_terminals(&workspace, &mut cx);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Every mounted worktree's surfaces stay listed, not only the selected
-    /// one's. `self.tabs` is the selected worktree's strip and nothing else
-    /// (see `select_worktree`'s CENTER-01 comment), so switching to a
-    /// worktree with no layout of its own used to empty the Activity panel
-    /// while the terminal the user had just left was still alive in the pane
-    /// cache with nothing anywhere showing it.
-    #[gpui::test]
-    async fn activity_lists_the_surfaces_of_the_worktrees_left_behind(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let (root, worktrees) = urgency_test_root("activity-parked");
-        let root_for_window = root.clone();
-        let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        let wt0 = worktrees[0].clone();
-        let wt1 = worktrees[1].clone();
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace
-                .select_worktree(wt1.clone(), None, cx)
-                .expect("select wt-1");
-        });
-        cx.run_until_parked();
-
-        let rows = workspace.read_with(&cx.cx, |workspace, cx| workspace.activity_surfaces(cx));
-        assert!(
-            !rows.is_empty(),
-            "wt-1 has no tabs of its own, but wt-0's terminal is still mounted \
-             and its surface must still be listed"
-        );
-        let row = rows
-            .iter()
-            .find(|row| {
-                row.reference
-                    == ActivityRef::Parked {
-                        worktree: wt0.to_string_lossy().into_owned(),
-                        index: 0,
-                    }
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "wt-0's terminal must be listed by its parked position, got {:?}",
-                    rows.iter().map(|row| &row.reference).collect::<Vec<_>>()
-                )
-            });
-        assert_eq!(
-            row.location, "Urgency Project/branch-0",
-            "a row of another worktree names the worktree it comes from, not \
-             the one the user is looking at"
-        );
-
-        shutdown_workspace_terminals(&workspace, &mut cx);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A mounted worktree holding nothing but a chat is still listed, with
-    /// the chat's own live status.
-    ///
-    /// Two separate things used to hide it. The worktree was gated on
-    /// `terminal_pane_cache.has_in_worktree`, which only ever knows about
-    /// terminal PTYs -- a chat-only worktree has no entry there, so every
-    /// row it owned was dropped rather than just its (nonexistent)
-    /// terminals. And the status of what did survive was resolved from
-    /// `terminal_panes_by_tab` alone, so a chat could never report anything
-    /// but `Idle` from here. Both are about the same blind spot: parking
-    /// recorded terminals and forgot that a chat pane carries a status
-    /// under the very same `pane-N` key.
-    #[gpui::test]
-    async fn activity_lists_a_parked_worktree_whose_only_surface_is_a_chat(
-        cx: &mut TestAppContext,
-    ) {
-        cx.set_global(Theme::light());
-        let (root, worktrees) = urgency_test_root("activity-parked-chat");
-        let root_for_window = root.clone();
-        let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        // wt-1 is mounted but not selected, and holds one chat and no
-        // terminal at all -- so nothing of it ever reaches the terminal
-        // pane cache.
-        let wt1 = worktrees[1].clone();
-        let chat_pane = 90usize;
-        workspace.update(&mut cx.cx, |workspace, _| {
-            workspace.parked_worktree_tabs.insert(
-                wt1.to_string_lossy().into_owned(),
-                ParkedWorktreeTabs {
-                    layout: SessionLayout {
-                        working_directory: wt1.clone(),
-                        branch: "branch-1".into(),
-                        tabs: vec![SessionTab {
-                            id: "parked-chat".into(),
-                            title: "Claude".into(),
-                            kind: "chat".into(),
-                            agent_id: None,
-                            agent_session_id: None,
-                            active: true,
-                        }],
-                        tab_states: Vec::new(),
-                    },
-                    terminal_panes_by_tab: vec![HashSet::new()],
-                    chat_panes_by_tab: vec![HashSet::from([chat_pane])],
-                },
-            );
-            let now = Instant::now();
-            let pane_key = format!("pane-{chat_pane}");
-            workspace.activity.agent_spawned(&pane_key, "claude", now);
-            workspace
-                .activity
-                .notify(&pane_key, AgentStatus::NeedsInput, now);
-        });
-
-        let rows = workspace.read_with(&cx.cx, |workspace, cx| workspace.activity_surfaces(cx));
-        let row = rows
-            .iter()
-            .find(|row| {
-                row.reference
-                    == ActivityRef::Parked {
-                        worktree: wt1.to_string_lossy().into_owned(),
-                        index: 0,
-                    }
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "a mounted worktree's chat is listed even with no terminal \
-                     of its own, got {:?}",
-                    rows.iter().map(|row| &row.reference).collect::<Vec<_>>()
-                )
-            });
-        assert_eq!(row.title, "Claude");
-        assert_eq!(
-            row.location, "Urgency Project/branch-1",
-            "the chat row names the worktree it comes from"
-        );
-        assert_eq!(
-            row.status,
-            ActivityStatus::NeedsInput,
-            "a parked chat reports the status pushed under its own pane key, \
-             not a default idle"
-        );
-
-        shutdown_workspace_terminals(&workspace, &mut cx);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Closing a row of *another* worktree brings that worktree back first and
-    /// then always asks. The held status is `Idle` on purpose: the fixture's
-    /// terminal has no agent identity, `pane_close_needs_confirmation(Idle)` is
-    /// false, and the sibling test below proves a row of the selected worktree
-    /// in that state closes with no prompt at all. So the dialog here can only
-    /// come from where the row lives, and tying the confirmation back to the
-    /// status alone turns this red.
-    #[gpui::test]
-    async fn closing_an_activity_row_of_another_worktree_switches_there_and_asks_first(
-        cx: &mut TestAppContext,
-    ) {
-        cx.set_global(Theme::light());
-        let (root, worktrees) = urgency_test_root("activity-close-parked");
-        let root_for_window = root.clone();
-        let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        let wt0 = worktrees[0].clone();
-        let wt1 = worktrees[1].clone();
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace
-                .select_worktree(wt1.clone(), None, cx)
-                .expect("select wt-1");
-        });
-        cx.run_until_parked();
-
-        let parked = ActivityRef::Parked {
-            worktree: wt0.to_string_lossy().into_owned(),
-            index: 0,
-        };
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.request_close_activity(&parked, cx);
-        });
-        cx.run_until_parked();
-
-        workspace.read_with(&cx.cx, |workspace, _| {
-            assert_eq!(
-                workspace.working_directory, wt0,
-                "the close of another worktree's row shows that worktree first"
-            );
-            assert!(
-                !workspace.tabs.is_empty(),
-                "the switch brought wt-0's own strip back, so the close runs on \
-                 a live tab instead of reaching into a parked layout"
-            );
-            let pending = workspace
-                .pending_pane_close
-                .as_ref()
-                .expect("the close of another worktree's row is held for confirmation");
-            assert_eq!(
-                pending.status,
-                ActivityStatus::Idle,
-                "the fixture's terminal has no agent, so it reads Idle -- and \
-                 an Idle close of the selected worktree is not confirmed. The \
-                 prompt is up because the row came from somewhere else, not \
-                 because of this status"
-            );
-            assert_eq!(
-                pending.from_worktree.as_deref(),
-                Some("Urgency Project/branch-0"),
-                "the dialog has to say where the user just landed"
-            );
-        });
-
-        shutdown_workspace_terminals(&workspace, &mut cx);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The other half of that contract: a row of the *selected* worktree keeps
-    /// the behaviour it had before, idle surfaces included. Without this, "the
-    /// dialog is raised whenever a row is closed" would be indistinguishable
-    /// from "the dialog is raised for rows of other worktrees".
-    #[gpui::test]
-    async fn closing_an_activity_row_of_the_selected_worktree_still_closes_without_asking(
+    async fn closing_a_selected_session_tab_still_closes_without_asking(
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
@@ -26172,14 +26163,13 @@ done
                 .expect("workspace root")
         });
 
-        // No switch: wt-0 is both the selected worktree and the one the row
-        // belongs to, which is the ordinary close the Activity panel already
-        // knew before it crossed worktrees.
+        // No switch: wt-0 is both the selected worktree and the one the
+        // session belongs to, so this is the ordinary session close.
         let (tab_id, tabs_before) = workspace.read_with(&cx.cx, |workspace, _| {
             (workspace.tabs[0].id, workspace.tabs.len())
         });
         workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.request_close_activity(&ActivityRef::Open(tab_id), cx);
+            workspace.request_close_session_tab(tab_id, None, cx);
         });
         cx.run_until_parked();
 
@@ -26187,7 +26177,7 @@ done
             assert!(
                 workspace.pending_pane_close.is_none(),
                 "an idle surface of the selected worktree closes on the spot, \
-                 with no prompt -- the behaviour the Activity row always had"
+                 with no prompt -- the behaviour the session close uses"
             );
             assert_eq!(
                 workspace.tabs.len(),
@@ -40333,5 +40323,401 @@ browser  profile  "
              the failure, and auto_naming_throttle never gains an entry \
              for an ACP-hosted chat tab no matter how many turns complete"
         );
+    }
+
+    /// A chat tab on `workspace`'s current worktree whose transcript holds one
+    /// saved turn — what `close_tab` must archive rather than delete.
+    fn push_persisted_chat(
+        workspace: &mut SirioWorkspace,
+        persistence_id: &str,
+        agent_id: Option<&str>,
+        cx: &mut Context<SirioWorkspace>,
+    ) -> usize {
+        let tab_id = workspace.next_tab_id;
+        let pane_id = workspace.next_pane_id;
+        let chat = cx.new(|cx| {
+            Chat::launch_with_command(
+                LaunchSpec::Acp(AgentCommand::new("/bin/false")),
+                workspace.working_directory.clone(),
+                cx,
+            )
+        });
+        workspace.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id: persistence_id.to_owned(),
+            title: "Saved chat".into(),
+            kind: TabKind::AgentChat,
+            agent_icon: agent_id.and_then(Icon::for_agent_id),
+            agent_id: agent_id.map(str::to_owned),
+            session_state: SessionTabState::with_root(pane_id),
+            panes: PaneNode::leaf(pane_id, TabContent::Chat(chat)),
+            focused_pane: pane_id,
+            title_is_auto_named: false,
+        });
+        workspace
+            .tab_worktree_paths
+            .insert(tab_id, workspace.working_directory.clone());
+        workspace.next_tab_id += 1;
+        workspace.next_pane_id += 1;
+        workspace.session.save_layout_now(&workspace.layout(cx));
+        AppDatabase::open(workspace.session.database_path())
+            .expect("open db")
+            .save_chat_transcript(&sirio_persistence::ChatTranscript {
+                tab_id: persistence_id.to_owned(),
+                turns: vec![sirio_persistence::ChatTurn {
+                    entries: vec![sirio_persistence::ChatEntry::UserMessage {
+                        text: "hello".into(),
+                        at: None,
+                    }],
+                }],
+            })
+            .expect("save transcript");
+        tab_id
+    }
+
+    #[gpui::test]
+    async fn startup_prunes_expired_closed_chats_before_listing(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("startup-prune");
+        let database_path = root.join("sirio.sqlite");
+        let db = AppDatabase::open(&database_path).expect("open startup database");
+        db.save_project(&sirio_persistence::ProjectRecord::new(
+            "urgency-project",
+            "Urgency Project",
+            worktrees[0].to_string_lossy().into_owned(),
+        ))
+        .expect("save project");
+        let worktree_id = stable_worktree_id("urgency-project", &worktrees[0]);
+        db.save_worktree(&sirio_persistence::WorktreeRecord::new(
+            &worktree_id,
+            "urgency-project",
+            "branch-0",
+            worktrees[0].to_string_lossy().into_owned(),
+        ))
+        .expect("save worktree");
+        db.save_tab(&sirio_persistence::TabRecord::new(
+            "expired-chat",
+            &worktree_id,
+            "Expired chat",
+            "chat",
+        ))
+        .expect("save chat");
+        db.save_chat_transcript(&sirio_persistence::ChatTranscript {
+            tab_id: "expired-chat".into(),
+            turns: vec![sirio_persistence::ChatTurn {
+                entries: vec![sirio_persistence::ChatEntry::UserMessage {
+                    text: "hello".into(),
+                    at: None,
+                }],
+            }],
+        })
+        .expect("save transcript");
+        db.archive_tab(
+            "expired-chat",
+            unix_now_ms().saturating_sub(sirio_persistence::CLOSED_CHAT_MAX_AGE_MS + 1),
+        )
+        .expect("archive expired chat");
+        assert_eq!(db.closed_chats(50).expect("before startup").len(), 1);
+        drop(db);
+
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        assert!(
+            AppDatabase::open(&database_path)
+                .expect("reopen startup database")
+                .closed_chats(50)
+                .expect("after startup")
+                .is_empty(),
+            "startup should prune expired archived rows"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, cx| workspace
+                .sidebar
+                .read(cx)
+                .closed_session_ids()
+                .is_empty()),
+            "startup should omit expired chats from the sidebar"
+        );
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn closing_a_chat_archives_it_and_reopening_restores_it_once(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-archive");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "saved-chat", None, cx);
+            let last_event_at = unix_now_ms().saturating_sub(60_000);
+            AppDatabase::open(workspace.session.database_path())
+                .expect("open database")
+                .touch_tabs(&[("saved-chat".into(), last_event_at)])
+                .expect("seed last event");
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            // Drain the close's debounced layout before the next synchronous
+            // database write in this test.
+            workspace.session.flush_now();
+            assert_eq!(
+                workspace
+                    .closed_chats
+                    .iter()
+                    .map(|c| c.tab_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["saved-chat"]
+            );
+
+            workspace.reopen_closed_chat("saved-chat", cx);
+            workspace.reopen_closed_chat("saved-chat", cx); // a stale second click
+            let reopened: Vec<_> = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.persistence_id == "saved-chat")
+                .collect();
+            assert_eq!(reopened.len(), 1, "reopened exactly once");
+            assert!(workspace.closed_chats.is_empty());
+            assert_eq!(
+                workspace.session_event_at.get("saved-chat"),
+                Some(&last_event_at),
+                "reopening must preserve the persisted last event, not stamp now"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_reopened_chat_whose_agent_is_gone_still_opens_and_says_why(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-reopen-unavailable");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "orphan-chat", Some("no-such-agent"), cx);
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            workspace.session.flush_now();
+            workspace.reopen_closed_chat("orphan-chat", cx);
+            assert!(
+                workspace.tabs.iter().any(|tab| tab.persistence_id == "orphan-chat"),
+                "the tab opens (disarmed, stating the reason) instead of nothing"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn deleting_a_closed_chat_removes_it_and_one_outside_the_catalog_is_never_listed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-delete");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            for id in ["chat-a", "chat-b"] {
+                let tab_id = push_persisted_chat(workspace, id, None, cx);
+                let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+                workspace.close_tab(index, None, cx);
+                workspace.session.flush_now();
+            }
+            workspace.handle_sidebar_event(&SidebarEvent::DeleteClosedChat("chat-a".into()), cx);
+            assert_eq!(workspace.sidebar.read(cx).closed_session_ids(), ["chat-b"]);
+
+            // An archived chat whose worktree is no longer in the catalog —
+            // what a removed worktree or project leaves behind until the
+            // cascade runs — is neither listed nor reopenable.
+            let db = AppDatabase::open(workspace.session.database_path()).expect("open db");
+            db.save_project(&sirio_persistence::ProjectRecord::new(
+                "ghost-project",
+                "Ghost",
+                "/nowhere",
+            ))
+            .expect("project");
+            db.save_worktree(&sirio_persistence::WorktreeRecord::new(
+                "ghost-worktree",
+                "ghost-project",
+                "main",
+                "/nowhere/main",
+            ))
+            .expect("worktree");
+            db.save_tab(&sirio_persistence::TabRecord::new(
+                "ghost-chat",
+                "ghost-worktree",
+                "Ghost",
+                "chat",
+            ))
+            .expect("tab");
+            db.save_chat_transcript(&sirio_persistence::ChatTranscript {
+                tab_id: "ghost-chat".into(),
+                turns: vec![sirio_persistence::ChatTurn {
+                    entries: vec![sirio_persistence::ChatEntry::UserMessage {
+                        text: "hi".into(),
+                        at: None,
+                    }],
+                }],
+            })
+            .expect("transcript");
+            db.archive_tab("ghost-chat", unix_now_ms()).expect("archive");
+            workspace.refresh_closed_sessions(cx);
+            assert_eq!(workspace.sidebar.read(cx).closed_session_ids(), ["chat-b"]);
+            assert!(
+                workspace
+                    .closed_chats
+                    .iter()
+                    .all(|chat| chat.tab_id != "ghost-chat")
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn the_sidebar_view_is_persisted_and_restored(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-view");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.handle_sidebar_event(&SidebarEvent::ViewChanged(SidebarView::Sessions), cx);
+            assert_eq!(workspace.session.load_sidebar_view(), SidebarView::Sessions);
+
+            // What `new` does at startup: the stored view reaches the sidebar.
+            workspace
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.set_view(SidebarView::Projects, cx));
+            workspace.apply_saved_sidebar_view(cx);
+            assert_eq!(workspace.sidebar.read(cx).view(), SidebarView::Sessions);
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn closing_a_parked_session_switches_there_and_asks_first(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-close-parked");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("move away from wt-0");
+            workspace.handle_sidebar_event(
+                &SidebarEvent::CloseParkedTab {
+                    path: worktrees[0].clone(),
+                    index: 0,
+                },
+                cx,
+            );
+            assert!(paths_name_the_same_document(&workspace.working_directory, &worktrees[0]));
+            let pending = workspace.pending_pane_close.as_ref().expect("asks first");
+            assert!(pending.from_worktree.is_some());
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn reopening_a_closed_chat_from_another_worktree_restores_it_once(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-reopen-cross-worktree");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "cross-worktree-chat", None, cx);
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            workspace.session.flush_now();
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("switch to worktree B");
+            assert!(paths_name_the_same_document(
+                &workspace.working_directory,
+                &worktrees[1]
+            ));
+
+            workspace.reopen_closed_chat("cross-worktree-chat", cx);
+
+            assert!(paths_name_the_same_document(
+                &workspace.working_directory,
+                &worktrees[0]
+            ));
+            let reopened: Vec<_> = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.persistence_id == "cross-worktree-chat")
+                .collect();
+            assert_eq!(reopened.len(), 1, "the chat reopens exactly once");
+            assert_eq!(
+                workspace
+                    .tabs
+                    .get(workspace.active_tab)
+                    .map(|tab| tab.persistence_id.as_str()),
+                Some("cross-worktree-chat"),
+                "the reopened chat is active"
+            );
+            assert!(
+                !workspace
+                    .sidebar
+                    .read(cx)
+                    .closed_session_ids()
+                    .iter()
+                    .any(|id| id == "cross-worktree-chat"),
+                "the reopened chat is no longer in the closed list"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
