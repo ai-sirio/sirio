@@ -9746,6 +9746,12 @@ impl SirioWorkspace {
             }
             let now_ms = unix_now_ms();
             for tab in &mut tabs {
+                if tab.kind == TabKind::Terminal
+                    && tab.agent.is_some()
+                    && !self.session_event_at.contains_key(&tab.persistence_id)
+                {
+                    self.stamp_session_created(&tab.persistence_id);
+                }
                 tab.status = match tab.tab {
                     SidebarTabRef::Open(id) => self
                         .tabs
@@ -11316,7 +11322,9 @@ impl SirioWorkspace {
         let pane_id = self.next_pane_id;
         let title = title.into();
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
-        self.stamp_session_created(&persistence_id);
+        if agent_id.is_some() {
+            self.stamp_session_created(&persistence_id);
+        }
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
@@ -25605,9 +25613,15 @@ done
         });
 
         // The first observed non-idle status is a baseline, not an event.
+        // Seed the terminal's existing session time so this isolates status
+        // events from the first time it is identified as a session.
         workspace.update(&mut cx.cx, |workspace, cx| {
+            let baseline_event_at = unix_now_ms().saturating_sub(60_000);
             workspace.session_last_seen.clear();
             workspace.session_event_at.clear();
+            workspace
+                .session_event_at
+                .insert("urgency-terminal".into(), baseline_event_at);
             workspace.activity.agent_spawned("pane-0", "claude", Instant::now());
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
@@ -25615,36 +25629,87 @@ done
                 workspace.session_last_seen.get("urgency-terminal"),
                 Some(&ActivityStatus::Running)
             );
-            assert!(
-                !workspace.session_event_at.contains_key("urgency-terminal"),
+            assert_eq!(
+                workspace.session_event_at.get("urgency-terminal"),
+                Some(&baseline_event_at),
                 "a first non-idle observation is not an event"
             );
             let pills = workspace.sidebar.read(cx).worktree_pills(1);
             assert_eq!(pills[0].status, Some(ActivityStatus::Running));
-            assert_eq!(pills[0].last_event_at, None);
+            assert_eq!(pills[0].last_event_at, Some(baseline_event_at));
         });
         // Running -> Done is an event; staying Done is not; losing the
-        // status (the pane reads idle) is not. Each step clears the entry
-        // first, so presence afterwards means "stamped by this step" —
-        // two stamps in the same millisecond cannot fool the check.
+        // status (the pane reads idle) is not.
         workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.session_event_at.remove("urgency-terminal");
             workspace.activity.notify("pane-0", AgentStatus::Done, Instant::now());
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
-            assert!(workspace.session_event_at.contains_key("urgency-terminal"), "done is an event");
+            let done_event_at = *workspace
+                .session_event_at
+                .get("urgency-terminal")
+                .expect("done is an event");
+            assert!(done_event_at > unix_now_ms().saturating_sub(60_000));
 
-            workspace.session_event_at.remove("urgency-terminal");
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
-            assert!(!workspace.session_event_at.contains_key("urgency-terminal"), "no change, no event");
+            assert_eq!(
+                workspace.session_event_at.get("urgency-terminal"),
+                Some(&done_event_at),
+                "no change does not create another event"
+            );
 
             workspace.activity.pane_closed("pane-0");
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
-            assert!(
-                !workspace.session_event_at.contains_key("urgency-terminal"),
+            assert_eq!(
+                workspace.session_event_at.get("urgency-terminal"),
+                Some(&done_event_at),
                 "a move to idle is silence"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_plain_terminal_is_stamped_when_first_identified_as_an_agent(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-terminal-agent-stamp");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_terminal_tab("Plain terminal", cx);
+            let tab = workspace.tabs.last().expect("new terminal tab");
+            let persistence_id = tab.persistence_id.clone();
+            let pane_id = tab.focused_pane;
+            assert!(
+                !workspace.session_event_at.contains_key(&persistence_id),
+                "a plain terminal is not a session yet"
+            );
+
+            workspace
+                .activity
+                .register_agent_id(&format!("pane-{pane_id}"), "claude");
+            workspace.sync_sidebar_tabs(ParkedRows::Read, cx);
+            let first_stamp = *workspace
+                .session_event_at
+                .get(&persistence_id)
+                .expect("first session sync stamps an identified terminal");
+            workspace.sync_sidebar_tabs(ParkedRows::Read, cx);
+            assert_eq!(
+                workspace.session_event_at.get(&persistence_id),
+                Some(&first_stamp),
+                "later syncs preserve the initial session time"
             );
         });
 
