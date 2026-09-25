@@ -26,7 +26,8 @@ use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
 use sirio_persistence::{
-    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, stable_worktree_id,
+    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, ClosedChatSummary,
+    stable_worktree_id,
 };
 use sirio_project::{
     OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, display_absolute_path, display_path,
@@ -56,9 +57,9 @@ use sirio_ui::{
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
-        AgentMark, ProjectSettingsUpdate, RowStatusGlyph, Sidebar, SidebarContextAction,
-        SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef,
-        SidebarWorktree, TAB_ROW_ID_OFFSET,
+        AgentMark, ClosedSession, ProjectSettingsUpdate, RowStatusGlyph, Sidebar,
+        SidebarContextAction, SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab,
+        SidebarTabRef, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
         project_settings::{ProjectSettingsEvent, ProjectSettingsSeed, ProjectSettingsView},
     },
@@ -4343,6 +4344,9 @@ struct SirioWorkspace {
     /// Events not yet written because their tab had no row (a tab younger
     /// than one save debounce). Retried by `flush_session_event_writes`.
     pending_event_writes: BTreeMap<String, i64>,
+    /// The archived chats the sidebar lists, as last read; `reopen_closed_chat`
+    /// finds a chat's agent and session here.
+    closed_chats: Vec<ClosedChatSummary>,
     session: SessionStore,
     project_catalog: ProjectCatalog,
     worktree_label: String,
@@ -5282,6 +5286,7 @@ impl SirioWorkspace {
             session_last_seen: HashMap::new(),
             session_event_at: session.tab_event_times(),
             pending_event_writes: BTreeMap::new(),
+            closed_chats: Vec::new(),
             session,
             project_catalog,
             worktree_label,
@@ -5431,6 +5436,8 @@ impl SirioWorkspace {
             });
         })
         .detach();
+        workspace.apply_saved_sidebar_view(cx);
+        workspace.refresh_closed_sessions(cx);
         workspace
     }
 
@@ -7382,10 +7389,248 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// The view the user last chose, restored at startup without reporting.
+    fn apply_saved_sidebar_view(&mut self, cx: &mut Context<Self>) {
+        let view = self.session.load_sidebar_view();
+        self.sidebar.update(cx, |sidebar, cx| sidebar.set_view(view, cx));
+    }
+
+    /// Reads the archived chats and pushes them to the sidebar, each with
+    /// its worktree path spelled as the catalog (and so the sidebar) spells
+    /// it. A chat whose worktree is not in the catalog is left out of both
+    /// the list and `self.closed_chats`, so it cannot be reopened either.
+    fn refresh_closed_sessions(&mut self, cx: &mut Context<Self>) {
+        let archived = self.session.closed_chats(sirio_persistence::CLOSED_CHAT_LIMIT);
+        let catalog_paths: Vec<PathBuf> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+            .collect();
+        let mut listed = Vec::new();
+        let sessions: Vec<ClosedSession> = archived
+            .into_iter()
+            .filter_map(|chat| {
+                let path = catalog_paths
+                    .iter()
+                    .find(|path| {
+                        paths_name_the_same_document(path, Path::new(&chat.worktree_path))
+                    })?
+                    .clone();
+                Some(ClosedSession {
+                    tab_id: chat.tab_id.clone(),
+                    worktree_path: path,
+                    title: chat.title.clone(),
+                    agent: chat
+                        .agent_id
+                        .as_ref()
+                        .and_then(AgentRef::adapter_id)
+                        .and_then(AgentMark::for_agent_id),
+                    closed_at: chat.closed_at,
+                })
+                .inspect(|_| listed.push(chat.clone()))
+            })
+            .collect();
+        self.closed_chats = listed;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_closed_sessions(sessions, cx));
+    }
+
+    /// Reopens an archived chat in its worktree, restoring its transcript
+    /// and — when resuming is on — the agent's own session. A stale click
+    /// (the chat is no longer archived) does nothing.
+    fn reopen_closed_chat(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self
+            .closed_chats
+            .iter()
+            .find(|chat| chat.tab_id == tab_id)
+            .cloned()
+        else {
+            return;
+        };
+        // 1. Select its worktree first, while the record is still archived,
+        //    so neither the parked layout nor the database restore brings it
+        //    back a second time.
+        let path = PathBuf::from(&chat.worktree_path);
+        if !paths_name_the_same_document(&path, &self.working_directory)
+            && self.select_worktree(path, None, cx).is_err()
+        {
+            self.restore_sidebar_selection(cx);
+            return;
+        }
+        // 2. Unarchive; `false` means someone already did.
+        if !self.session.unarchive_tab(&chat.tab_id) {
+            self.refresh_closed_sessions(cx);
+            return;
+        }
+        // 3. Build that one tab the way session restore builds a chat.
+        let tab_id = self.push_restored_chat_tab(&chat, cx);
+        self.stamp_session_created(&chat.tab_id);
+        self.select_tab(tab_id, None, cx);
+        self.schedule_save(cx);
+        self.refresh_closed_sessions(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    /// One chat tab from an archived record, persistence attached (so new
+    /// turns append to the same transcript) and the agent session resumed
+    /// when the setting allows. Mirrors the chat branch of
+    /// `restore_tabs_with_terminal_cache`.
+    fn push_restored_chat_tab(
+        &mut self,
+        chat: &ClosedChatSummary,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
+        let stored_adapter_id = chat.agent_id.as_ref().and_then(AgentRef::adapter_id);
+        let (launch, agent_icon, agent_id, unavailable) = match restored_chat_spec(
+            &self.launch,
+            stored_adapter_id,
+            chat.agent_session_id.as_deref(),
+            resume_agent_sessions,
+        ) {
+            Some((launch, icon, agent_id)) => (Some(launch), icon, agent_id, None),
+            None => (
+                None,
+                stored_adapter_id.and_then(Icon::for_agent_id),
+                stored_adapter_id.map(str::to_owned),
+                Some(restored_chat_refusal(&self.launch, stored_adapter_id)),
+            ),
+        };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
+        let is_unavailable = unavailable.is_some();
+        let cwd = self.working_directory.clone();
+        let database_path = self.session.database_path().to_path_buf();
+        let worktree_id = self.session.persisted_worktree_id(&self.working_directory);
+        let persistence_id = chat.tab_id.clone();
+        let chat_entity = cx.new(|cx| match unavailable {
+            Some(reason) => Chat::unavailable(reason, cwd, cx),
+            None => Chat::launch_with_command_and_persistence(
+                launch.expect("a chat with no refusal reason carries its launch"),
+                cwd,
+                database_path,
+                persistence_id.clone(),
+                worktree_id,
+                cx,
+            ),
+        });
+        if let Some(agent_name) = agent_name {
+            chat_entity.update(cx, |chat, cx| {
+                chat.set_agent_name(agent_name);
+                cx.notify();
+            });
+        }
+        Self::bind_chat(&chat_entity, cx);
+        let pane_id = self.next_pane_id;
+        register_restored_agent(
+            &mut self.activity,
+            pane_id,
+            if is_unavailable {
+                None
+            } else {
+                agent_id.as_deref()
+            },
+        );
+        let tab_id = self.next_tab_id;
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            title: chat.title.clone(),
+            kind: TabKind::AgentChat,
+            agent_icon,
+            agent_id,
+            session_state: SessionTabState::with_root(pane_id),
+            panes: PaneNode::leaf(pane_id, TabContent::Chat(chat_entity)),
+            focused_pane: pane_id,
+            title_is_auto_named: false,
+        });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &chat.title) {
+            self.rebuild_center_split();
+        }
+        tab_id
+    }
+
+    /// The close button of a live session: the same rule the Activity row
+    /// had — ask when the agent is still working or the tab is in another
+    /// worktree, close otherwise.
+    fn request_close_session_tab(
+        &mut self,
+        tab_id: usize,
+        from_worktree: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let pane_id = tab.focused_pane;
+        let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
+        if from_worktree.is_some() || pane_close_needs_confirmation(status) {
+            self.pending_pane_close = Some(PendingPaneClose {
+                tab_id,
+                pane_id,
+                whole_tab: true,
+                status,
+                focus: cx.focus_handle().tab_stop(true),
+                needs_focus: true,
+                from_worktree,
+            });
+            cx.notify();
+            return;
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        self.close_tab(index, None, cx);
+    }
+
+    /// The close button of a session in another worktree's strip: bring that
+    /// worktree forward, then ask (the user was not looking at it).
+    fn request_close_parked_tab(&mut self, path: &Path, index: usize, cx: &mut Context<Self>) {
+        let key = path.to_string_lossy().into_owned();
+        let label = self
+            .parked_worktree_tabs
+            .get(&key)
+            .map(|parked| self.parked_worktree_label(&key, parked))
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| key.clone())
+            });
+        if self.select_worktree(path.to_path_buf(), None, cx).is_err() {
+            self.restore_sidebar_selection(cx);
+            return;
+        }
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind.appears_in_sidebar())
+            .nth(index)
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        self.request_close_session_tab(tab_id, Some(label), cx);
+    }
+
     fn handle_sidebar_event(&mut self, event: &SidebarEvent, cx: &mut Context<Self>) {
         match event {
             SidebarEvent::AddProject(path) => self.add_project(path.clone(), cx),
-            SidebarEvent::RemoveProject(id) => self.remove_project(id, cx),
+            SidebarEvent::RemoveProject(id) => {
+                self.remove_project(id, cx);
+                self.refresh_closed_sessions(cx);
+            }
             SidebarEvent::SelectTab(id) => self.activate_tab(*id, None, cx),
             SidebarEvent::SelectParkedTab { path, index } => {
                 // Bring the worktree back first — that restores its strip —
@@ -7438,6 +7683,7 @@ impl SirioWorkspace {
                         self.restore_sidebar_selection(cx);
                     }
                 }
+                self.refresh_closed_sessions(cx);
             }
             SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
             SidebarEvent::OpenProjectSettings(id) => {
@@ -7451,12 +7697,16 @@ impl SirioWorkspace {
             SidebarEvent::ContextAction { target, action } => {
                 self.handle_sidebar_context_action(target, *action, cx)
             }
-            // Wired by the sessions host task; ignored until then.
-            SidebarEvent::ViewChanged(_)
-            | SidebarEvent::CloseSessionTab(_)
-            | SidebarEvent::CloseParkedTab { .. }
-            | SidebarEvent::ReopenClosedChat(_)
-            | SidebarEvent::DeleteClosedChat(_) => {}
+            SidebarEvent::ViewChanged(view) => self.session.save_sidebar_view(*view),
+            SidebarEvent::CloseSessionTab(id) => self.request_close_session_tab(*id, None, cx),
+            SidebarEvent::CloseParkedTab { path, index } => {
+                self.request_close_parked_tab(path, *index, cx)
+            }
+            SidebarEvent::ReopenClosedChat(id) => self.reopen_closed_chat(id, cx),
+            SidebarEvent::DeleteClosedChat(id) => {
+                self.session.delete_tab(id);
+                self.refresh_closed_sessions(cx);
+            }
         }
     }
 
@@ -10749,6 +10999,9 @@ impl SirioWorkspace {
             });
             retained
         };
+        let archived = (self.tabs[index].kind == TabKind::AgentChat)
+            .then(|| self.tabs[index].persistence_id.clone())
+            .filter(|id| self.session.archive_tab(id, unix_now_ms()));
 
         let mut terminals = Vec::new();
         let mut terminal_pane_ids = Vec::new();
@@ -10838,6 +11091,10 @@ impl SirioWorkspace {
             self.focus_active_pane(window, cx);
         }
         self.schedule_save(cx);
+        if archived.is_some() {
+            self.session.prune_closed_chats(unix_now_ms());
+            self.refresh_closed_sessions(cx);
+        }
         self.mark_activity_dirty();
         cx.notify();
     }
@@ -20765,7 +21022,7 @@ mod tests {
     use super::*;
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
-    use sirio_ui::sidebar::parked_tab_row_id;
+    use sirio_ui::sidebar::{SidebarView, parked_tab_row_id};
 
     #[test]
     fn the_identifier_under_the_caret_names_the_search() {
@@ -40566,5 +40823,317 @@ browser  profile  "
              the failure, and auto_naming_throttle never gains an entry \
              for an ACP-hosted chat tab no matter how many turns complete"
         );
+    }
+
+    /// A chat tab on `workspace`'s current worktree whose transcript holds one
+    /// saved turn — what `close_tab` must archive rather than delete.
+    fn push_persisted_chat(
+        workspace: &mut SirioWorkspace,
+        persistence_id: &str,
+        agent_id: Option<&str>,
+        cx: &mut Context<SirioWorkspace>,
+    ) -> usize {
+        let tab_id = workspace.next_tab_id;
+        let pane_id = workspace.next_pane_id;
+        let chat = cx.new(|cx| {
+            Chat::launch_with_command(
+                LaunchSpec::Acp(AgentCommand::new("/bin/false")),
+                workspace.working_directory.clone(),
+                cx,
+            )
+        });
+        workspace.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id: persistence_id.to_owned(),
+            title: "Saved chat".into(),
+            kind: TabKind::AgentChat,
+            agent_icon: agent_id.and_then(Icon::for_agent_id),
+            agent_id: agent_id.map(str::to_owned),
+            session_state: SessionTabState::with_root(pane_id),
+            panes: PaneNode::leaf(pane_id, TabContent::Chat(chat)),
+            focused_pane: pane_id,
+            title_is_auto_named: false,
+        });
+        workspace
+            .tab_worktree_paths
+            .insert(tab_id, workspace.working_directory.clone());
+        workspace.next_tab_id += 1;
+        workspace.next_pane_id += 1;
+        workspace.session.save_layout_now(&workspace.layout(cx));
+        AppDatabase::open(workspace.session.database_path())
+            .expect("open db")
+            .save_chat_transcript(&sirio_persistence::ChatTranscript {
+                tab_id: persistence_id.to_owned(),
+                turns: vec![sirio_persistence::ChatTurn {
+                    entries: vec![sirio_persistence::ChatEntry::UserMessage {
+                        text: "hello".into(),
+                        at: None,
+                    }],
+                }],
+            })
+            .expect("save transcript");
+        tab_id
+    }
+
+    #[gpui::test]
+    async fn closing_a_chat_archives_it_and_reopening_restores_it_once(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-archive");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "saved-chat", None, cx);
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            // Drain the close's debounced layout before the next synchronous
+            // database write in this test.
+            workspace.session.flush_now();
+            assert_eq!(
+                workspace
+                    .closed_chats
+                    .iter()
+                    .map(|c| c.tab_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["saved-chat"]
+            );
+
+            workspace.reopen_closed_chat("saved-chat", cx);
+            workspace.reopen_closed_chat("saved-chat", cx); // a stale second click
+            let reopened: Vec<_> = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.persistence_id == "saved-chat")
+                .collect();
+            assert_eq!(reopened.len(), 1, "reopened exactly once");
+            assert!(workspace.closed_chats.is_empty());
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn a_reopened_chat_whose_agent_is_gone_still_opens_and_says_why(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-reopen-unavailable");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "orphan-chat", Some("no-such-agent"), cx);
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            workspace.session.flush_now();
+            workspace.reopen_closed_chat("orphan-chat", cx);
+            assert!(
+                workspace.tabs.iter().any(|tab| tab.persistence_id == "orphan-chat"),
+                "the tab opens (disarmed, stating the reason) instead of nothing"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn deleting_a_closed_chat_removes_it_and_one_outside_the_catalog_is_never_listed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-delete");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            for id in ["chat-a", "chat-b"] {
+                let tab_id = push_persisted_chat(workspace, id, None, cx);
+                let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+                workspace.close_tab(index, None, cx);
+                workspace.session.flush_now();
+            }
+            workspace.handle_sidebar_event(&SidebarEvent::DeleteClosedChat("chat-a".into()), cx);
+            assert_eq!(workspace.sidebar.read(cx).closed_session_ids(), ["chat-b"]);
+
+            // An archived chat whose worktree is no longer in the catalog —
+            // what a removed worktree or project leaves behind until the
+            // cascade runs — is neither listed nor reopenable.
+            let db = AppDatabase::open(workspace.session.database_path()).expect("open db");
+            db.save_project(&sirio_persistence::ProjectRecord::new(
+                "ghost-project",
+                "Ghost",
+                "/nowhere",
+            ))
+            .expect("project");
+            db.save_worktree(&sirio_persistence::WorktreeRecord::new(
+                "ghost-worktree",
+                "ghost-project",
+                "main",
+                "/nowhere/main",
+            ))
+            .expect("worktree");
+            db.save_tab(&sirio_persistence::TabRecord::new(
+                "ghost-chat",
+                "ghost-worktree",
+                "Ghost",
+                "chat",
+            ))
+            .expect("tab");
+            db.save_chat_transcript(&sirio_persistence::ChatTranscript {
+                tab_id: "ghost-chat".into(),
+                turns: vec![sirio_persistence::ChatTurn {
+                    entries: vec![sirio_persistence::ChatEntry::UserMessage {
+                        text: "hi".into(),
+                        at: None,
+                    }],
+                }],
+            })
+            .expect("transcript");
+            db.archive_tab("ghost-chat", unix_now_ms()).expect("archive");
+            workspace.refresh_closed_sessions(cx);
+            assert_eq!(workspace.sidebar.read(cx).closed_session_ids(), ["chat-b"]);
+            assert!(
+                workspace
+                    .closed_chats
+                    .iter()
+                    .all(|chat| chat.tab_id != "ghost-chat")
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn the_sidebar_view_is_persisted_and_restored(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("session-view");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.handle_sidebar_event(&SidebarEvent::ViewChanged(SidebarView::Sessions), cx);
+            assert_eq!(workspace.session.load_sidebar_view(), SidebarView::Sessions);
+
+            // What `new` does at startup: the stored view reaches the sidebar.
+            workspace
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.set_view(SidebarView::Projects, cx));
+            workspace.apply_saved_sidebar_view(cx);
+            assert_eq!(workspace.sidebar.read(cx).view(), SidebarView::Sessions);
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn closing_a_parked_session_switches_there_and_asks_first(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-close-parked");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("move away from wt-0");
+            workspace.handle_sidebar_event(
+                &SidebarEvent::CloseParkedTab {
+                    path: worktrees[0].clone(),
+                    index: 0,
+                },
+                cx,
+            );
+            assert!(paths_name_the_same_document(&workspace.working_directory, &worktrees[0]));
+            let pending = workspace.pending_pane_close.as_ref().expect("asks first");
+            assert!(pending.from_worktree.is_some());
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    async fn reopening_a_closed_chat_from_another_worktree_restores_it_once(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-reopen-cross-worktree");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let tab_id = push_persisted_chat(workspace, "cross-worktree-chat", None, cx);
+            let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
+            workspace.close_tab(index, None, cx);
+            workspace.session.flush_now();
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("switch to worktree B");
+            assert!(paths_name_the_same_document(
+                &workspace.working_directory,
+                &worktrees[1]
+            ));
+
+            workspace.reopen_closed_chat("cross-worktree-chat", cx);
+
+            assert!(paths_name_the_same_document(
+                &workspace.working_directory,
+                &worktrees[0]
+            ));
+            let reopened: Vec<_> = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.persistence_id == "cross-worktree-chat")
+                .collect();
+            assert_eq!(reopened.len(), 1, "the chat reopens exactly once");
+            assert_eq!(
+                workspace
+                    .tabs
+                    .get(workspace.active_tab)
+                    .map(|tab| tab.persistence_id.as_str()),
+                Some("cross-worktree-chat"),
+                "the reopened chat is active"
+            );
+            assert!(
+                !workspace
+                    .sidebar
+                    .read(cx)
+                    .closed_session_ids()
+                    .iter()
+                    .any(|id| id == "cross-worktree-chat"),
+                "the reopened chat is no longer in the closed list"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
