@@ -1,7 +1,7 @@
 # The Sessions view in the sidebar — design
 
 **Date:** 2026-09-24
-**Status:** approved design, not yet implemented
+**Status:** implemented
 **Scope of this document:** a second view of the left sidebar that lists every
 agent session — open ones across all projects, and chats the user closed —
 ordered by when each last did something, switched with the existing Projects

@@ -136,9 +136,9 @@ pub enum SidebarTabRef {
 }
 
 /// One tab, as the host (`main.rs`) knows it. For a live tab this is the
-/// same fact the tab bar and the Activity panel already render — the
-/// sidebar's tab rows are a third view of it, not a second copy. For a
-/// parked one it is the persisted strip the host would restore on selection.
+/// same fact the tab bar and Sessions view already render — the sidebar's
+/// tab rows are a third view of it, not a second copy. For a parked one it
+/// is the persisted strip the host would restore on selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarTab {
     /// Which tab this is: live, or parked with its worktree.
@@ -223,9 +223,8 @@ pub struct SidebarRow {
     /// The application-level primary marker for a worktree row.
     pub is_primary: bool,
     /// The worktree's live agent status, driving the small status dot next
-    /// to its glyph. Only meaningful for `RowKind::Worktree`; host-pushed,
-    /// the same way `RightPanel::set_activity` is — this crate never
-    /// resolves status itself.
+    /// to its glyph. Only meaningful for `RowKind::Worktree`; the host
+    /// resolves status and pushes it here, this crate never resolves it itself.
     pub agent_status: Option<ActivityStatus>,
     /// Whether this project row is a git repository. Only meaningful for
     /// `RowKind::Project`; the New Worktree row is offered only for git
@@ -2213,7 +2212,7 @@ impl Sidebar {
     }
 
     /// Replaces the tab rows under a worktree with the host's real, current
-    /// tab list — the same list the tab bar and the Activity panel already
+    /// tab list — the same list the tab bar and Sessions view already
     /// render. Called every render (see `SirioWorkspace::sync_activity`),
     /// so this must diff before touching `self.rows` or it would `notify()`
     /// every frame forever.

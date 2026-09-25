@@ -383,7 +383,7 @@ impl Sidebar {
                                     .w(px(6.0))
                                     .h(px(6.0))
                                     .rounded_full()
-                                    .bg(crate::right_panel::status_color(status, theme)),
+                                    .bg(crate::status::status_color(status, theme)),
                             )
                         })
                     })

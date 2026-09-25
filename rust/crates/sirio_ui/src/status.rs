@@ -4,7 +4,7 @@
 
 use sirio_theme::Theme;
 
-/// Status shown at the trailing edge of an activity row.
+/// Status shown alongside a sidebar session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityStatus {
     /// The surface is waiting for input.
@@ -21,10 +21,10 @@ pub enum ActivityStatus {
 
 /// The colour an [`ActivityStatus`] is painted in, wherever it is drawn.
 ///
-/// The right panel's activity rows and the tab strip's status glyphs show the
-/// same five states, and used to carry two copies of this table — one here and
-/// one in the app crate. Two copies of a colour table is one edit away from two
-/// different colours for the same state, so there is now one.
+/// Sidebar session rows and the tab strip's status glyphs show the same five
+/// states, and used to carry two copies of this table — one here and one in the
+/// app crate. Two copies of a colour table is one edit away from two different
+/// colours for the same state, so there is now one.
 ///
 /// Only the states that want something from the reader are coloured. Running is
 /// the ordinary case and reads as the bright text neutral; idle is the same

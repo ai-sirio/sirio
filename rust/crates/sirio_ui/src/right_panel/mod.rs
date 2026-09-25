@@ -1,14 +1,12 @@
-//! The checkout right panel: filesystem browsing, git changes, and activity.
+//! The checkout right panel: filesystem browsing and git changes.
 //!
 //! `mod.rs` owns the panel's lifecycle, its header, and the choice of
-//! surface below it; the Files and Activity surfaces live in their
-//! sibling modules (`files`, `activity`).
+//! surface below it; the Files surface lives in its sibling module (`files`).
 //!
 //! The data model deliberately stays local to this panel. Git operations are
 //! delegated to `sirio_git`; the host application can later replace the
 //! refresh callbacks with its project store without changing the row layout.
 
-mod activity;
 mod files;
 mod history;
 mod history_toolbar;
@@ -35,17 +33,9 @@ use references::{ReferencesEvent, ReferencesList};
 pub(crate) use files::ROW_HEIGHT;
 
 const HEADER_HEIGHT: f32 = 40.0;
-/// Two-line activity row: 5 + 18 + 2 + 15 + 5, waku's card math.
-const ACTIVITY_ROW_HEIGHT: f32 = 48.0;
-pub use crate::status::{ActivityStatus, status_color};
-
-/// User actions originating from an activity row.
+/// User actions originating from the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPanelEvent {
-    /// Select the surface this row names.
-    SelectActivity(ActivityRef),
-    /// Close the surface this row names.
-    CloseActivity(ActivityRef),
     /// Open a file from the Files tree in the host application's tab strip.
     OpenFile(PathBuf),
 }
@@ -65,66 +55,11 @@ pub enum RightPanelActionEvent {
     OpenAtLine { path: PathBuf, line: usize },
 }
 
-/// Which surface an Activity row names.
-///
-/// Position does not do: the list crosses worktrees, so row `n` is not
-/// `tabs[n]`. `Open` names a live tab of the selected worktree by id;
-/// `Parked` names a tab of another mounted worktree, by worktree and by its
-/// position in *that* worktree's parked strip.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ActivityRef {
-    /// A live tab of the selected worktree, by `OpenTab::id`.
-    Open(usize),
-    /// A tab of another mounted worktree.
-    Parked {
-        /// The worktree, as `path.to_string_lossy()`.
-        worktree: String,
-        /// Position in that worktree's parked strip.
-        index: usize,
-    },
-}
-
-/// A surface shown in the Activity section.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActivitySurface {
-    /// Which surface this row names.
-    pub reference: ActivityRef,
-    /// The typed surface icon from the shared embedded icon set.
-    pub icon: Icon,
-    /// Surface title.
-    pub title: String,
-    /// Project/worktree subtitle.
-    pub location: String,
-    /// Current surface status.
-    pub status: ActivityStatus,
-}
-
-impl ActivitySurface {
-    /// Build one activity row.
-    #[must_use]
-    pub fn new(
-        reference: ActivityRef,
-        icon: Icon,
-        title: impl Into<String>,
-        location: impl Into<String>,
-        status: ActivityStatus,
-    ) -> Self {
-        Self {
-            reference,
-            icon,
-            title: title.into(),
-            location: location.into(),
-            status,
-        }
-    }
-}
-
 /// Which view the right panel is showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PanelView {
     #[default]
     Files,
-    Activity,
     Diff,
     History,
     References,
@@ -221,9 +156,8 @@ impl ShowHiddenFilesSetting {
 
 impl PanelView {
     /// Rail order, left to right.
-    const ORDER: [PanelView; 5] = [
+    const ORDER: [PanelView; 4] = [
         PanelView::Files,
-        PanelView::Activity,
         PanelView::Diff,
         PanelView::History,
         PanelView::References,
@@ -232,7 +166,6 @@ impl PanelView {
     fn icon(self) -> Icon {
         match self {
             PanelView::Files => Icon::FileTree,
-            PanelView::Activity => Icon::Thread,
             PanelView::Diff => Icon::Diff,
             PanelView::History => Icon::GitGraph,
             PanelView::References => Icon::MagnifyingGlass,
@@ -242,7 +175,6 @@ impl PanelView {
     fn element_id(self) -> &'static str {
         match self {
             PanelView::Files => "right-panel-tab-files",
-            PanelView::Activity => "right-panel-tab-activity",
             PanelView::Diff => "right-panel-tab-diff",
             PanelView::History => "right-panel-tab-history",
             PanelView::References => "right-panel-tab-references",
@@ -262,7 +194,7 @@ impl PanelView {
     }
 }
 
-/// The GPUI right panel: the filesystem tree and the activity section.
+/// The GPUI right panel: the filesystem tree, changes, history, and references.
 pub struct RightPanel {
     repo_root: PathBuf,
     project_is_git: bool,
@@ -277,7 +209,6 @@ pub struct RightPanel {
     file_tree: Vec<files::FileNode>,
     flattened_file_rows: Vec<files::FileRow>,
     git_markers: files::GitMarkers,
-    activity: Vec<ActivitySurface>,
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
     walk_task: Option<Task<()>>,
@@ -358,7 +289,6 @@ impl RightPanel {
             file_tree: Vec::new(),
             flattened_file_rows: Vec::new(),
             git_markers: files::GitMarkers::default(),
-            activity: Vec::new(),
             walk_task: None,
             refresh_started: false,
             refresh_task: None,
@@ -388,25 +318,13 @@ impl RightPanel {
         }
     }
 
-    /// Creates the panel with an initial activity section.
-    pub fn with_activity(repo_root: impl Into<PathBuf>, activity: Vec<ActivitySurface>) -> Self {
-        Self {
-            activity,
-            ..Self::new(repo_root)
-        }
-    }
-
     /// Creates the startup panel with the project catalog's filesystem
     /// allowlist. A stale restored directory is left unselected until the
     /// host reconciles it with a current catalog worktree.
-    pub fn with_activity_and_roots(
-        repo_root: impl Into<PathBuf>,
-        allowed_roots: Vec<PathBuf>,
-        activity: Vec<ActivitySurface>,
-    ) -> Self {
+    pub fn with_roots(repo_root: impl Into<PathBuf>, allowed_roots: Vec<PathBuf>) -> Self {
         let repo_root = repo_root.into();
         let worktree_selected = allowed_roots.iter().any(|root| root == &repo_root);
-        let mut panel = Self::with_activity(repo_root, activity);
+        let mut panel = Self::new(repo_root);
         panel.allowed_roots = allowed_roots;
         panel.worktree_selected = worktree_selected;
         panel
@@ -419,12 +337,11 @@ impl RightPanel {
     /// a second ago. The restored tree is marked stale on arrival: it is
     /// drawn immediately, and a silent refresh replaces it with what is on
     /// disk only when the snapshot is dirty or old.
-    pub fn with_activity_and_snapshot(
+    pub fn with_snapshot(
         repo_root: impl Into<PathBuf>,
-        activity: Vec<ActivitySurface>,
         snapshot: Option<FilesSnapshot>,
     ) -> Self {
-        let mut panel = Self::with_activity(repo_root, activity);
+        let mut panel = Self::new(repo_root);
         if let Some(snapshot) = snapshot {
             let snapshot_is_fresh = snapshot.is_fresh(SystemTime::now());
             panel.file_tree = snapshot.file_tree;
@@ -440,13 +357,12 @@ impl RightPanel {
     }
 
     /// Creates the startup panel while carrying the catalog's Git capability.
-    pub fn with_activity_and_snapshot_for_project(
+    pub fn with_snapshot_for_project(
         repo_root: impl Into<PathBuf>,
         project_is_git: bool,
-        activity: Vec<ActivitySurface>,
         snapshot: Option<FilesSnapshot>,
     ) -> Self {
-        let mut panel = Self::with_activity_and_snapshot(repo_root, activity, snapshot);
+        let mut panel = Self::with_snapshot(repo_root, snapshot);
         panel.project_is_git = project_is_git;
         panel
     }
@@ -468,20 +384,8 @@ impl RightPanel {
         })
     }
 
-    /// Replace the host-provided activity rows. The host (`main.rs`) calls
-    /// this every render to stay live with `Chat`'s own state; it no-ops on
-    /// an unchanged value to avoid notifying every render.
-    pub fn set_activity(&mut self, activity: Vec<ActivitySurface>, cx: &mut Context<Self>) {
-        if self.activity == activity {
-            return;
-        }
-        self.activity = activity;
-        cx.notify();
-    }
-
-    /// The host pushes the resolved right-panel width every render; same
-    /// every-render push as [`RightPanel::set_activity`], no-op when
-    /// unchanged so a drag does not notify more than it must.
+    /// The host pushes the resolved right-panel width every render; no-op
+    /// when unchanged so a drag does not notify more than it must.
     pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if self.panel_width == width {
             return;
@@ -538,8 +442,8 @@ impl RightPanel {
     /// The mirror of [`Self::clear_worktree`]: (re-)bind the panel to a
     /// genuinely selected checkout. F-CHG-02: `select_worktree` already
     /// covers a real, explicit worktree switch by throwing this whole entity
-    /// away and building a fresh one via [`Self::with_activity`] -- but a
-    /// worktree can also become the *current* one passively, e.g.
+    /// away and building a fresh one via [`Self::with_snapshot_for_project`]
+    /// -- but a worktree can also become the *current* one passively, e.g.
     /// `sync_control_state` re-matching `working_directory` against a
     /// project the user just added over the control socket, with no dedicated
     /// switch call in between. `SirioWorkspace::sync_activity` -- already
@@ -602,27 +506,6 @@ impl RightPanel {
 }
 
 impl RightPanel {
-    /// The colour of the Activity rail badge, or `None` when nothing wants
-    /// attention. Error outranks NeedsInput: one failed surface is the more
-    /// urgent fact.
-    pub(crate) fn activity_badge(&self) -> Option<ActivityStatus> {
-        if self
-            .activity
-            .iter()
-            .any(|row| row.status == ActivityStatus::Error)
-        {
-            return Some(ActivityStatus::Error);
-        }
-        if self
-            .activity
-            .iter()
-            .any(|row| row.status == ActivityStatus::NeedsInput)
-        {
-            return Some(ActivityStatus::NeedsInput);
-        }
-        None
-    }
-
     fn render_header(
         &self,
         entity: gpui::Entity<Self>,
@@ -630,7 +513,6 @@ impl RightPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = PanelView::get(cx);
-        let badge = self.activity_badge();
         div()
             .h(px(HEADER_HEIGHT))
             .w_full()
@@ -643,17 +525,9 @@ impl RightPanel {
             .border_color(theme.border)
             .children(PanelView::ORDER.map(|view| {
                 let is_active = view == active;
-                let badge_color = (view == PanelView::Activity)
-                    .then_some(badge)
-                    .flatten()
-                    .map(|status| match status {
-                        ActivityStatus::Error => theme.danger,
-                        _ => theme.warning,
-                    });
                 div()
                     .id(view.element_id())
                     .debug_selector(move || view.element_id().to_owned())
-                    .relative()
                     .w(px(28.0))
                     .h(px(28.0))
                     .flex()
@@ -669,25 +543,6 @@ impl RightPanel {
                             theme.text_muted
                         },
                     ))
-                    // The Files icon never carries a spinner. It used to
-                    // overlay `loading::compact` for as long as `walk_task`
-                    // was in flight, and `ensure_tree_refresh` puts a walk
-                    // in flight every second, so the icon blinked once a
-                    // second for the duration of every `git status`. A walk
-                    // over a settled tree is silent — the same rule the
-                    // `settled` field applies to the tree itself.
-                    .when_some(badge_color, |this, color| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top(px(4.0))
-                                .right(px(4.0))
-                                .w(px(6.0))
-                                .h(px(6.0))
-                                .rounded_full()
-                                .bg(color),
-                        )
-                    })
                     .on_mouse_down(MouseButton::Left, {
                         let entity = entity.clone();
                         move |_, _, cx| {
@@ -893,9 +748,6 @@ impl Render for RightPanel {
                     PanelView::Files => self
                         .render_files(entity.clone(), theme, window, cx)
                         .into_any_element(),
-                    PanelView::Activity => self
-                        .render_activity(entity.clone(), theme, window, cx)
-                        .into_any_element(),
                     PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
                     PanelView::History => self.render_history(theme, cx).into_any_element(),
                     PanelView::References => self.render_references(theme, cx).into_any_element(),
@@ -1075,6 +927,16 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn the_rail_offers_four_views_and_no_activity(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(std::env::temp_dir()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert_eq!(PanelView::ORDER.len(), 4);
+        assert!(cx.debug_bounds("right-panel-tab-activity").is_none());
+    }
+
+    #[gpui::test]
     fn the_history_view_renders_commit_rows_in_the_drawn_frame(cx: &mut TestAppContext) {
         cx.update(sirio_theme::Theme::init);
         let dir = TempDir::new();
@@ -1189,38 +1051,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_activity_badge_appears_only_for_attention_states(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-        let dir = TempDir::new();
-        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
-
-        let idle = ActivitySurface::new(
-            ActivityRef::Open(0),
-            Icon::SquareTerminal,
-            "one",
-            "",
-            ActivityStatus::Idle,
-        );
-        let waiting = ActivitySurface::new(
-            ActivityRef::Open(1),
-            Icon::SquareTerminal,
-            "two",
-            "",
-            ActivityStatus::NeedsInput,
-        );
-
-        panel.update(cx, |panel, cx| {
-            panel.set_activity(vec![idle.clone()], cx);
-            assert!(panel.activity_badge().is_none(), "idle rows raise no badge");
-            panel.set_activity(vec![idle, waiting], cx);
-            assert!(
-                panel.activity_badge().is_some(),
-                "a waiting agent raises a badge"
-            );
-        });
-    }
-
-    #[gpui::test]
     fn the_changes_entity_is_built_only_when_the_diff_view_is_selected(cx: &mut TestAppContext) {
         cx.update(sirio_theme::Theme::init);
         let dir = TempDir::new();
@@ -1259,12 +1089,7 @@ mod tests {
         cx.update(sirio_theme::Theme::init);
         let dir = TempDir::new();
         let panel = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot_for_project(
-                dir.0.clone(),
-                false,
-                Vec::new(),
-                None,
-            )
+            RightPanel::with_snapshot_for_project(dir.0.clone(), false, None)
         });
 
         let old_changes = panel.update(cx, |panel, cx| panel.ensure_changes(cx));
@@ -1307,7 +1132,7 @@ mod tests {
         let source = cx.new(|_| RightPanel::new(first.0.clone()));
         let snapshot = settled_snapshot(&source, cx);
         let restored = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot(second.0.clone(), Vec::new(), Some(snapshot))
+            RightPanel::with_snapshot(second.0.clone(), Some(snapshot))
         });
         restored.read_with(cx, |panel, _| {
             assert!(panel.settled);
@@ -1338,11 +1163,7 @@ mod tests {
         );
 
         let window = cx.add_window(|_window, _cx| {
-            let mut panel = RightPanel::with_activity_and_snapshot(
-                incoming.0.clone(),
-                Vec::new(),
-                outgoing_snapshot,
-            );
+            let mut panel = RightPanel::with_snapshot(incoming.0.clone(), outgoing_snapshot);
             panel.refresh_started = true;
             panel
         });
@@ -1374,7 +1195,7 @@ mod tests {
         cx.update(sirio_theme::Theme::init);
         let dir = TempDir::new();
         let panel =
-            cx.new(|_| RightPanel::with_activity_and_snapshot(dir.0.clone(), Vec::new(), None));
+            cx.new(|_| RightPanel::with_snapshot(dir.0.clone(), None));
         panel.read_with(cx, |panel, _| {
             assert!(!panel.settled);
             assert!(!panel.is_stale);
@@ -1389,14 +1210,10 @@ mod tests {
         let panel_a = cx.new(|_| RightPanel::new(worktree_a.0.clone()));
         let snapshot_a = settled_snapshot(&panel_a, cx);
         let panel_b = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot(worktree_b.0.clone(), Vec::new(), None)
+            RightPanel::with_snapshot(worktree_b.0.clone(), None)
         });
         let panel_a_again = cx.new(|_| {
-            RightPanel::with_activity_and_snapshot(
-                worktree_a.0.clone(),
-                Vec::new(),
-                Some(snapshot_a),
-            )
+            RightPanel::with_snapshot(worktree_a.0.clone(), Some(snapshot_a))
         });
         panel_b.read_with(cx, |panel, _| assert!(!panel.settled));
         panel_a_again.read_with(cx, |panel, _| {

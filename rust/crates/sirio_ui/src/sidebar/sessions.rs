@@ -166,8 +166,7 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
     }
 }
 
-/// The badge the Sessions segment wears: error outranks needs-input, the
-/// rule `RightPanel::activity_badge` had.
+/// The badge the Sessions segment wears: error outranks needs-input.
 pub fn attention(open: &[SessionRow]) -> Option<ActivityStatus> {
     [ActivityStatus::Error, ActivityStatus::NeedsInput]
         .into_iter()

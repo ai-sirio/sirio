@@ -8734,7 +8734,7 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
 
 impl Chat {
     // --- Read-only status, for the shell's activity indicators (sidebar
-    // dot / tab checkmark / Activity row) — P28. Added at the end of this
+    // dot / tab checkmark / Sessions view) — P28. Added at the end of this
     // impl block, touching no existing line, so it stays out of the way of
     // whatever else is in flight here. The shell polls these fresh every
     // render, the same as it does `Theme::get(cx)`; nothing is cached.
