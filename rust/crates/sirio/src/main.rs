@@ -7457,8 +7457,14 @@ impl SirioWorkspace {
             return;
         }
         // 3. Build that one tab the way session restore builds a chat.
+        // Runtime-created archived chats may not be in the startup-seeded map.
+        if !self.session_event_at.contains_key(&chat.tab_id) {
+            if let Some(last_event_at) = self.session.tab_event_times().get(&chat.tab_id) {
+                self.session_event_at
+                    .insert(chat.tab_id.clone(), *last_event_at);
+            }
+        }
         let tab_id = self.push_restored_chat_tab(&chat, cx);
-        self.stamp_session_created(&chat.tab_id);
         self.select_tab(tab_id, None, cx);
         self.schedule_save(cx);
         self.refresh_closed_sessions(cx);
@@ -40356,6 +40362,11 @@ browser  profile  "
 
         workspace.update(&mut cx.cx, |workspace, cx| {
             let tab_id = push_persisted_chat(workspace, "saved-chat", None, cx);
+            let last_event_at = unix_now_ms().saturating_sub(60_000);
+            AppDatabase::open(workspace.session.database_path())
+                .expect("open database")
+                .touch_tabs(&[("saved-chat".into(), last_event_at)])
+                .expect("seed last event");
             let index = workspace.tabs.iter().position(|tab| tab.id == tab_id).unwrap();
             workspace.close_tab(index, None, cx);
             // Drain the close's debounced layout before the next synchronous
@@ -40379,6 +40390,11 @@ browser  profile  "
                 .collect();
             assert_eq!(reopened.len(), 1, "reopened exactly once");
             assert!(workspace.closed_chats.is_empty());
+            assert_eq!(
+                workspace.session_event_at.get("saved-chat"),
+                Some(&last_event_at),
+                "reopening must preserve the persisted last event, not stamp now"
+            );
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
