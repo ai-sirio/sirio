@@ -13548,7 +13548,6 @@ impl SirioWorkspace {
                 action: LauncherAction::NewTerminal(PaneRole::Secondary),
                 icon: Icon::SquareTerminal,
                 label: "Terminal".into(),
-                // Ctrl+T opens on the left; naming it here would be false.
                 shortcut: None,
                 disabled: None,
             },
