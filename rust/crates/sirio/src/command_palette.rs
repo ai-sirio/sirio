@@ -239,6 +239,14 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             Some(window_shortcut_hint(WindowCommand::ToggleRightPanel)),
             context,
         ),
+        // The one way back to a Secondary pane hidden by its own `×`, short
+        // of the chord: named after the tab menu's "Move to Right Pane".
+        window_entry(
+            WindowCommand::ToggleSecondaryPane,
+            "Toggle Right Pane",
+            Some(window_shortcut_hint(WindowCommand::ToggleSecondaryPane)),
+            context,
+        ),
         // F-WIN-07: this app draws no in-window menu bar by design, so the
         // command palette is the "History" surface -- the Linux stand-in
         // for the reference app's History > Restore Previous Launch menu
@@ -756,6 +764,22 @@ mod tests {
                 shortcut(WindowCommand::RestoreLaunchSnapshot),
                 Some("Ctrl+Shift+O")
             );
+        }
+    }
+
+    /// A chord is not discoverable on its own. Ctrl+Shift+B was bound but
+    /// never listed, so a Secondary pane hidden by the strip's `×` had no
+    /// visible way back: the `×` and the launcher's Hide Pane go away with
+    /// the pane they hide.
+    #[test]
+    fn every_bound_window_command_is_listed_with_its_chord() {
+        let commands = entries(&context());
+        for (command, _) in crate::linux_window_shortcuts() {
+            let row = commands
+                .iter()
+                .find(|entry| entry.command == PaletteCommand::Window(command))
+                .unwrap_or_else(|| panic!("{command:?} is bound but not in the palette"));
+            assert_eq!(row.shortcut, Some(window_shortcut_hint(command)));
         }
     }
 
