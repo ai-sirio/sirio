@@ -292,7 +292,6 @@ impl Sidebar {
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
             Icon::FileTree => "file-tree",
-            Icon::Thread => "thread",
             Icon::Diff => "diff",
             Icon::DiffUnified => "diff-unified",
             Icon::DiffSplit => "diff-split",
