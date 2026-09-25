@@ -597,6 +597,7 @@ pub struct Sidebar {
     project_worktree_defaults: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     filter: String,
     filter_focus: FocusHandle,
+    filter_focus_subscription: Option<gpui::Subscription>,
     tree_cursor: usize,
     pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
@@ -681,6 +682,7 @@ impl Sidebar {
     pub fn set_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.view != view {
             self.view = view;
+            self.armed_delete = None;
             if view == SidebarView::Sessions {
                 self.set_clock(sessions::unix_now_ms(), cx);
             }
@@ -696,6 +698,7 @@ impl Sidebar {
             return;
         }
         self.view = view;
+        self.armed_delete = None;
         self.filter.clear();
         if view == SidebarView::Sessions {
             self.set_clock(sessions::unix_now_ms(), cx);
@@ -928,6 +931,7 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            filter_focus_subscription: None,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
@@ -1023,6 +1027,7 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            filter_focus_subscription: None,
             tree_cursor: 0,
             pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
@@ -1933,6 +1938,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         self.field_blink.wake();
+        self.armed_delete = None;
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.filter.pop();
@@ -3526,6 +3532,18 @@ impl Render for Sidebar {
             .filter_map(|row| self.row_drag(row).map(|drag| (row.id, drag)))
             .collect::<std::collections::HashMap<_, _>>();
         let filter_focus = self.filter_focus.clone();
+        if self.filter_focus_subscription.is_none() {
+            let focus = filter_focus.clone();
+            self.filter_focus_subscription = Some(cx.on_focus(
+                &focus,
+                window,
+                |sidebar, _window, cx| {
+                    if sidebar.armed_delete.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            ));
+        }
         let tree_focus = self.tree_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
         // Sidebar text fields (filter, worktree prompt) share one blink:
@@ -8817,6 +8835,87 @@ mod tests {
             events.borrow().last(),
             Some(SidebarEvent::DeleteClosedChat(id)) if id == "old-chat"
         ));
+    }
+
+    #[gpui::test]
+    async fn sidebar_view_switches_disarm_pending_closed_delete(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = sessions_fixture(cx);
+            sidebar.set_closed_sessions(vec![closed(&sidebar, "old-chat", 10)], cx);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row = cx.debug_bounds("closed-session-0").expect("closed chat");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        let delete = cx.debug_bounds("closed-session-delete-0").expect("delete");
+        cx.simulate_click(delete.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-confirm-0").is_some(), "delete is armed");
+
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Projects, cx))
+            .unwrap();
+        window
+            .update(&mut cx, |sidebar, _window, cx| sidebar.set_view(SidebarView::Sessions, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("closed-session-confirm-0").is_none(),
+            "set_view disarms"
+        );
+
+        let row = cx.debug_bounds("closed-session-0").expect("closed chat again");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        let delete = cx.debug_bounds("closed-session-delete-0").expect("delete again");
+        cx.simulate_click(delete.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("closed-session-confirm-0").is_some(),
+            "delete is re-armed"
+        );
+
+        let projects = cx.debug_bounds("sidebar-view-projects").expect("Projects tab");
+        cx.simulate_click(projects.center(), Modifiers::none());
+        cx.run_until_parked();
+        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("Sessions tab");
+        cx.simulate_click(sessions.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("closed-session-confirm-0").is_none(),
+            "view switch disarms"
+        );
+    }
+
+    #[gpui::test]
+    async fn focusing_filter_disarms_pending_closed_delete(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = sessions_fixture(cx);
+            sidebar.set_closed_sessions(vec![closed(&sidebar, "old-chat", 10)], cx);
+            sidebar.set_view(SidebarView::Sessions, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row = cx.debug_bounds("closed-session-0").expect("closed chat");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        let delete = cx.debug_bounds("closed-session-delete-0").expect("delete");
+        cx.simulate_click(delete.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("closed-session-confirm-0").is_some(), "delete is armed");
+
+        let filter = cx.debug_bounds("filter-field").expect("filter field");
+        cx.simulate_click(filter.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("closed-session-confirm-0").is_none(),
+            "filter focus disarms"
+        );
     }
 
     #[gpui::test]

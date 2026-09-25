@@ -724,6 +724,7 @@ impl Sidebar {
                     _ => String::new(),
                 };
                 this.child(if armed {
+                    let disarm_entity = sidebar.clone();
                     div()
                         .id(("closed-session-confirm", index))
                         .debug_selector(move || format!("{prefix}-confirm-{index}"))
@@ -735,6 +736,13 @@ impl Sidebar {
                         .bg(theme.surface_raised)
                         .text_size(theme.typography.scaled(11.5))
                         .text_color(theme.danger)
+                        .on_mouse_down_out(move |_, _, cx| {
+                            disarm_entity.update(cx, |sidebar, cx| {
+                                if sidebar.armed_delete.take().is_some() {
+                                    cx.notify();
+                                }
+                            });
+                        })
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             let id = tab_id.clone();
