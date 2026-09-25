@@ -3,7 +3,7 @@ use sirio_project::PaneRole;
 use crate::OpenTab;
 
 /// What [`CenterSplit`] needs to know about a tab: its identity, and which
-/// half of the split its kind puts it in.
+/// half of the split it is stored in.
 ///
 /// A trait rather than `&[OpenTab]` so the split's own tests can exercise it
 /// without minting a `gpui` entity. `CenterSplit` is pure state — a test that
@@ -22,7 +22,7 @@ impl SplitTab for OpenTab {
     }
 
     fn split_role(&self) -> PaneRole {
-        self.kind.pane_role()
+        self.pane
     }
 }
 
@@ -61,6 +61,66 @@ pub(crate) fn visible_tab_count(
             fits
         })
         .count()
+}
+
+/// #319: the tab that takes over a half when the one it showed leaves it —
+/// the tab that slid into its place, or the one before it when it was last.
+/// `remaining` is the half's tab ids after the departure, `position` where
+/// the departed tab stood. `close_tab` and `move_tab_to_pane` both ask this,
+/// so closing a tab and moving it away cannot pick different neighbours.
+pub(crate) fn nearest_remaining(remaining: &[usize], position: usize) -> Option<usize> {
+    remaining
+        .get(position)
+        .or_else(|| remaining.last())
+        .copied()
+}
+
+/// Where a tab moving into `target` is inserted in the shared tab list.
+/// `tabs` is that list *without* the moving tab. With an anchor that is in
+/// `target`, the tab lands just before or after it; otherwise after the last
+/// tab of `target`, or at the end of the list when `target` holds none. Each
+/// strip's order is the relative order of its own tabs in the one list, so
+/// either answer leaves the other strip exactly as it was.
+pub(crate) fn cross_pane_insertion_index<T: SplitTab>(
+    tabs: &[T],
+    target: PaneRole,
+    anchor: Option<(usize, bool)>,
+) -> usize {
+    if let Some((anchor_id, before)) = anchor
+        && let Some(index) = tabs
+            .iter()
+            .position(|tab| tab.split_id() == anchor_id && tab.split_role() == target)
+    {
+        return index + usize::from(!before);
+    }
+    tabs.iter()
+        .rposition(|tab| tab.split_role() == target)
+        .map_or(tabs.len(), |index| index + 1)
+}
+
+/// Where a tab dragged across the divider would land: which half, and next
+/// to which of its tabs (`(id, before)`), or at the end of its strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneDropTarget {
+    pub(crate) pane: PaneRole,
+    pub(crate) anchor: Option<(usize, bool)>,
+}
+
+/// The drop target a tab-drag move produces over something in the `over`
+/// half — a tab (`anchor` names it), a strip or a body (`anchor` is `None`).
+/// Only a tab that can move, over the half it is *not* in, with the pointer
+/// inside the thing asking, has one. gpui delivers every drag move to every
+/// listener (`on_drag_move` is not hover-gated), so `inside` is what keeps
+/// the strip across the window from claiming the drop.
+pub(crate) fn cross_pane_target(
+    dragged_pane: PaneRole,
+    dragged_movable: bool,
+    over: PaneRole,
+    anchor: Option<(usize, bool)>,
+    inside: bool,
+) -> Option<PaneDropTarget> {
+    (dragged_movable && dragged_pane != over && inside)
+        .then_some(PaneDropTarget { pane: over, anchor })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,16 +270,19 @@ impl CenterSplit {
 
 #[cfg(test)]
 mod tests {
-    use super::{CenterSplit, MoveDirection, SplitTab};
+    use super::{
+        CenterSplit, MoveDirection, PaneDropTarget, SplitTab, cross_pane_insertion_index,
+        cross_pane_target, nearest_remaining,
+    };
     use sirio_project::{PaneRole, TabKind};
 
-    /// The split reads exactly two things off a tab. Building those two
+    /// The split reads a tab's id and stored half. Building those two
     /// directly keeps these tests on the model: an `OpenTab` would drag in a
     /// live `TerminalView` entity, which cannot be faked without undefined
     /// behaviour and cannot be built without a window.
     struct TestTab {
         id: usize,
-        kind: TabKind,
+        pane: PaneRole,
     }
 
     impl SplitTab for TestTab {
@@ -228,12 +291,18 @@ mod tests {
         }
 
         fn split_role(&self) -> PaneRole {
-            self.kind.pane_role()
+            self.pane
         }
     }
 
+    /// A tab in its kind's home half — every tab, before anything moves.
     fn make_tab(id: usize, kind: TabKind) -> TestTab {
-        TestTab { id, kind }
+        placed(id, kind, kind.default_pane())
+    }
+
+    /// A tab in a chosen half: what a moved terminal or chat looks like.
+    fn placed(id: usize, _kind: TabKind, pane: PaneRole) -> TestTab {
+        TestTab { id, pane }
     }
 
     fn tabs_primary_secondary() -> Vec<TestTab> {
@@ -334,6 +403,106 @@ mod tests {
         split.rebuild(&remaining);
         assert_eq!(split.focused(), PaneRole::Primary);
         assert_eq!(split.active(PaneRole::Secondary), None);
+    }
+
+    /// Spec 2026-09-24 §3: the split reads the half stored on the tab, not
+    /// its kind, so a terminal placed on the right is a right-hand tab.
+    #[test]
+    fn a_terminal_placed_right_belongs_to_the_right_half() {
+        let tabs = vec![
+            make_tab(1, TabKind::Terminal),
+            placed(2, TabKind::Terminal, PaneRole::Secondary),
+            make_tab(3, TabKind::Editor),
+        ];
+        let mut split = CenterSplit::new(&tabs);
+        assert_eq!(split.tabs_for(PaneRole::Primary, &tabs), vec![1]);
+        assert_eq!(split.tabs_for(PaneRole::Secondary, &tabs), vec![2, 3]);
+
+        assert!(split.select_tab(2, &tabs));
+        assert_eq!(split.focused(), PaneRole::Secondary);
+        assert_eq!(split.active(PaneRole::Secondary), Some(2));
+
+        split.rebuild(&tabs);
+        assert_eq!(
+            split.active(PaneRole::Secondary),
+            Some(2),
+            "rebuild keeps it right"
+        );
+    }
+
+    /// #319: the half a shown tab leaves goes to the tab that slid into its
+    /// place, or the one before it when it was last.
+    #[test]
+    fn nearest_remaining_takes_the_tab_that_slid_in_or_the_one_before() {
+        assert_eq!(nearest_remaining(&[1, 3, 4], 1), Some(3));
+        assert_eq!(nearest_remaining(&[1, 3], 2), Some(3));
+        assert_eq!(nearest_remaining(&[], 0), None);
+    }
+
+    /// Spec §3: a tab crossing the divider lands beside its anchor, or after
+    /// the target half's last tab; the other strip's order never changes.
+    #[test]
+    fn a_tab_crossing_over_lands_by_its_anchor_or_after_the_targets_last_tab() {
+        // The shared list without the moving tab: P1 S3 P2 S4.
+        let tabs = vec![
+            placed(1, TabKind::Terminal, PaneRole::Primary),
+            placed(3, TabKind::Editor, PaneRole::Secondary),
+            placed(2, TabKind::Terminal, PaneRole::Primary),
+            placed(4, TabKind::Diff, PaneRole::Secondary),
+        ];
+        let at = |anchor| cross_pane_insertion_index(&tabs, PaneRole::Secondary, anchor);
+        assert_eq!(at(Some((4, true))), 3, "before 4");
+        assert_eq!(at(Some((3, false))), 2, "after 3");
+        assert_eq!(at(None), 4, "after the right half's last tab");
+        assert_eq!(
+            at(Some((2, true))),
+            4,
+            "an anchor in the wrong half is no anchor"
+        );
+
+        let primary_only = vec![placed(1, TabKind::Terminal, PaneRole::Primary)];
+        assert_eq!(
+            cross_pane_insertion_index(&primary_only, PaneRole::Secondary, None),
+            1,
+            "an empty target half: the end of the list"
+        );
+    }
+
+    /// Spec §5: gpui hands every drag move to every listener, so only a
+    /// movable tab, over the half it is not in, with the pointer inside the
+    /// thing asking, produces a drop target.
+    #[test]
+    fn only_a_movable_tab_over_the_other_half_with_the_pointer_inside_targets_it() {
+        let anchor = Some((7, true));
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Secondary, anchor, true),
+            Some(PaneDropTarget {
+                pane: PaneRole::Secondary,
+                anchor
+            })
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Secondary, None, true),
+            Some(PaneDropTarget {
+                pane: PaneRole::Secondary,
+                anchor: None
+            })
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, false, PaneRole::Secondary, anchor, true),
+            None,
+            "a kind that cannot move"
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Primary, anchor, true),
+            None,
+            "its own half"
+        );
+        assert_eq!(
+            cross_pane_target(PaneRole::Primary, true, PaneRole::Secondary, anchor, false),
+            None,
+            "the pointer is elsewhere"
+        );
     }
 
     #[test]

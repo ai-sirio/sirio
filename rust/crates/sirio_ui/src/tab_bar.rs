@@ -40,11 +40,12 @@ pub enum TabContextAction {
     CloseTabsToRight,
     MoveEarlier,
     MoveLater,
-    // F-TAB-12 removed `MoveToCurrentPane` here, and #319 removed the
-    // `MoveToPane(usize)` that outlived it. Both named a gesture the center
-    // split no longer has: a tab's half is derived from its `TabKind`
-    // (`TabKind::pane_role`), so there is no destination to offer. Moving a
-    // tab between halves would mean changing what the tab *is*.
+    /// Moves a terminal or chat tab to the other half of the centre split.
+    /// F-TAB-12 removed an inert `MoveToCurrentPane` and #319 the N-group
+    /// `MoveToPane(usize)`; this is neither — there are exactly two halves,
+    /// so "the other one" is the whole destination. Offered only for kinds
+    /// that `TabKind::can_move_between_panes`.
+    MoveToOtherPane,
     AttachToCurrentTerminal,
 }
 

@@ -62,7 +62,7 @@ Settled with the user before this document was written:
 
 | Question | Decision |
 |---|---|
-| Can a terminal live in the Secondary pane? | **No.** The rigid `TabKind::pane_role()` routing stays. Each pane's launcher offers only the surfaces that belong to it. |
+| Can a terminal live in the Secondary pane? | **No.** The rigid `TabKind::pane_role()` routing stays. Each pane's launcher offers only the surfaces that belong to it. *Amended 2026-09-24:* terminals and chats may now move to the Secondary pane — see `2026-09-24-movable-conversation-tabs-design.md`. |
 | Where does "Select a worktree" go? | **Left pane**, with both panes drawn; the right one shows a faint placeholder. |
 | Can the Secondary pane still be hidden? | **Yes.** Visible by default, even empty; Ctrl+Shift+B hides it and the choice is persisted per worktree. Existing worktrees reset to visible. |
 | Secondary launcher contents | Browser, Changes, Open File, Project Settings. |
@@ -324,7 +324,9 @@ done. `Scripts/ci.sh` runs only on the user's request.
 
 - **Terminals or chats in the Secondary pane.** The rigid routing stays;
   relaxing it needs a per-tab pane field and a decision about the sidebar,
-  which lists exactly the Primary kinds.
+  which lists exactly the Primary kinds. *Done in
+  2026-09-24-movable-conversation-tabs-design.md* (a per-tab pane field; the
+  sidebar now lists terminals and chats by kind).
 - **A pane entity** (`CenterPane` owning strip, surface and empty state).
   Cleaner, and closer to Zed, but it re-cuts all of #319–#325; its own
   project.

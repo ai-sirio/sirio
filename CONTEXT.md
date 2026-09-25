@@ -22,14 +22,14 @@ be called a pane. Those have their own names below and in `sirio_control`.
 ### Center split
 
 The division of the work area between the sidebars into two halves, each with
-a fixed role and its own tab strip. Not a general N-way split: there are always
-exactly two halves, and which one a tab belongs to is decided by what the tab
-*is*, never chosen or stored.
+its own tab strip. Not a general N-way split: there are always exactly two
+halves. Every tab kind has a home half it opens in; a terminal or a chat can
+be moved to the other half and is stored there, every other kind stays home.
 
 ### Primary pane role
 
-The half of the [center split](#center-split) that holds conversations with
-agents and terminals. It is always shown, and takes the whole work area
+The left half of the [center split](#center-split): home to conversations
+with agents and terminals. It is always shown, and takes the whole work area
 whenever the [secondary](#secondary-pane-role) half is not.
 
 Despite the name it is not a [pane](#pane) — "role" is part of the term, not a
@@ -37,10 +37,10 @@ qualifier that can be dropped.
 
 ### Secondary pane role
 
-The half of the [center split](#center-split) that holds everything the user
-looks at rather than talks to — a browser, a file being edited, a diff. Absent
-by default, present only once something of that kind is open, and gone again
-when the last of them closes.
+The right half of the [center split](#center-split): home to everything the
+user looks at rather than talks to — a browser, a file being edited, a diff,
+a project's settings — and a place a terminal or chat can be moved to. Drawn
+from the first frame, even empty; the keyboard toggle hides it per worktree.
 
 Despite the name it is not a [pane](#pane); see
 [primary pane role](#primary-pane-role).

@@ -354,7 +354,10 @@ use session::{
     CatalogProjectSettings, PaneEvent, ProjectCatalog, RestoredSession, SessionLayout,
     SessionStore, SessionTab, SessionTabState,
 };
-use tab_machinery::{CenterSplit, MoveDirection, visible_tab_count};
+use tab_machinery::{
+    CenterSplit, MoveDirection, PaneDropTarget, cross_pane_insertion_index, cross_pane_target,
+    nearest_remaining, visible_tab_count,
+};
 
 actions!(
     window_commands,
@@ -368,6 +371,7 @@ actions!(
         RestoreLaunchSnapshot,
         NewBrowser,
         FocusAddressBar,
+        MoveTabToOtherPane,
     ]
 );
 
@@ -390,12 +394,14 @@ enum WindowCommand {
     RestoreLaunchSnapshot,
     NewBrowser,
     FocusAddressBar,
+    MoveTabToOtherPane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowCommandDisabledReason {
     NoActiveFile,
     NoActiveBrowser,
+    NoMovableTab,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,7 +410,7 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 10] {
     // #374: `ctrl-shift-s`, `ctrl-shift-i` and `ctrl-shift-o` never reach
     // the app on Windows — they are already taken there as system-wide
     // hotkeys (a `RegisterHotKey` probe for exactly those chords fails
@@ -447,6 +453,10 @@ fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
         // window-level bindings and command-palette rows.
         (WindowCommand::NewBrowser, "ctrl-shift-l"),
         (WindowCommand::FocusAddressBar, "ctrl-l"),
+        // Spec 2026-09-24 §5: the `ctrl-shift-` family survives inside a
+        // terminal. Windows delivery is to be probed the way #374 probed
+        // S/I/O before a release; if it is swallowed there, slide it here.
+        (WindowCommand::MoveTabToOtherPane, "ctrl-shift-m"),
     ]
 }
 
@@ -468,6 +478,7 @@ pub(crate) fn window_shortcut_hint(command: WindowCommand) -> &'static str {
         WindowCommand::RestoreLaunchSnapshot => "Ctrl+Shift+O",
         WindowCommand::NewBrowser => "Ctrl+Shift+L",
         WindowCommand::FocusAddressBar => "Ctrl+L",
+        WindowCommand::MoveTabToOtherPane => "Ctrl+Shift+M",
     }
 }
 
@@ -487,6 +498,11 @@ fn window_command_availability(
         WindowCommand::FocusAddressBar if active_tab_kind != Some(TabKind::Browser) => {
             WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
         }
+        WindowCommand::MoveTabToOtherPane
+            if !active_tab_kind.is_some_and(TabKind::can_move_between_panes) =>
+        {
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoMovableTab)
+        }
         WindowCommand::NewTerminalTab
         | WindowCommand::OpenFile
         | WindowCommand::SaveFile
@@ -495,7 +511,8 @@ fn window_command_availability(
         | WindowCommand::ToggleSecondaryPane
         | WindowCommand::RestoreLaunchSnapshot
         | WindowCommand::NewBrowser
-        | WindowCommand::FocusAddressBar => WindowCommandAvailability::Enabled,
+        | WindowCommand::FocusAddressBar
+        | WindowCommand::MoveTabToOtherPane => WindowCommandAvailability::Enabled,
     }
 }
 
@@ -539,6 +556,9 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::NewBrowser => KeyBinding::new(shortcut, NewBrowser, None),
                 WindowCommand::FocusAddressBar => {
                     KeyBinding::new(shortcut, FocusAddressBar, YIELDS_TO_TERMINAL)
+                }
+                WindowCommand::MoveTabToOtherPane => {
+                    KeyBinding::new(shortcut, MoveTabToOtherPane, None)
                 }
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
@@ -1114,6 +1134,12 @@ struct OpenTab {
     persistence_id: String,
     title: String,
     kind: TabKind,
+    /// The half of the centre split this tab is drawn in. Starts at its
+    /// kind's home half; only `move_tab_to_pane` changes it, and only
+    /// for a kind that `can_move_between_panes` — so a Browser, Editor, Diff
+    /// or Project Settings tab is always in its home half. Restore reads it
+    /// through `session::placement_for`, which keeps the same invariant.
+    pane: PaneRole,
     /// The agent brand shown for an agent-backed terminal tab. `None` means
     /// the surface kind decides the icon (chat, terminal, or file).
     agent_icon: Option<Icon>,
@@ -1126,6 +1152,17 @@ struct OpenTab {
     /// user-driven rename (`commit_tab_rename`) turns it off, which is the
     /// only thing that permanently opts a tab out of automatic renaming.
     title_is_auto_named: bool,
+}
+
+#[cfg(test)]
+impl OpenTab {
+    /// Test fixtures build terminals and then re-kind some of them. The half
+    /// is part of the tab now, so re-kinding re-homes it too — a Browser left
+    /// in the Primary half would break the invariant `pane` carries.
+    fn set_kind(&mut self, kind: TabKind) {
+        self.kind = kind;
+        self.pane = kind.default_pane();
+    }
 }
 
 /// Where `SirioWorkspace::sync_sidebar_tabs` takes the parked rows of a
@@ -1191,6 +1228,9 @@ struct PendingTitlePrompt {
 /// and is not meant to be cloned) — a cancel only ever needs to put the same
 /// tabs back in their original order and restore which one was active.
 struct TabDragSnapshot {
+    /// The tab being dragged. The drop overlay across the divider is drawn
+    /// for it, and only while a drag is live (`pane_drop_overlay_role`).
+    dragged: usize,
     order: Vec<usize>,
     active_id: Option<usize>,
 }
@@ -4009,8 +4049,10 @@ struct WorktreeContext {
 /// string, so `handle_launcher_action` matches exhaustively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LauncherAction {
-    NewTerminal,
-    NewChat,
+    /// Opens in the named half (spec 2026-09-24 §5).
+    NewTerminal(PaneRole),
+    /// Opens in the named half (spec 2026-09-24 §5).
+    NewChat(PaneRole),
     NewBrowser,
     Changes,
     OpenFile,
@@ -4314,14 +4356,17 @@ struct SirioWorkspace {
     restore_focus_pending: bool,
     tabs: Vec<OpenTab>,
     active_tab: usize,
-    /// F-TAB-24: the tab order (by id) and active tab id at the moment a
-    /// tab drag started, captured in `render_open_tab`'s `on_drag`.
-    /// `preview_tab_reorder` mutates `tabs` live on every hover crossing
-    /// (there is no separate "commit on drop" step), so this is the only
-    /// record of what to put back if the drag is cancelled instead of
-    /// dropped. Cleared on a real drop (`render_open_tabs`'s
-    /// `on_drop::<RowDrag>`) and on Escape (`cancel_tab_drag`).
+    /// The pre-drag tab order and active tab id: the Escape-cancel snapshot,
+    /// and also the "a tab drag is live" marker used by `pane_drop_overlay_role`
+    /// and browser obscuring. Cleared by `drop_on_pane` (strip or overlay),
+    /// `cancel_tab_drag`, and `render` when no drag is active.
     tab_drag_snapshot: Option<TabDragSnapshot>,
+    /// Spec 2026-09-24 §5: where the tab being dragged would land in the
+    /// *other* half if released now. Recomputed on every move of a tab drag
+    /// (reset by `shell-work-area`, set by whichever strip, tab or overlay
+    /// contains the pointer); never mutates `tabs` — a cross-half move commits
+    /// on drop only, so a terminal's PTY is resized once.
+    pane_drop_target: Option<PaneDropTarget>,
     /// The worktree that owns each live tab. `tabs` is intentionally shared
     /// by mounted worktrees while an unsafe switch keeps an agent tab alive;
     /// deriving ownership from `working_directory` would then relabel the
@@ -4359,10 +4404,8 @@ struct SirioWorkspace {
     overflow_menu_open: bool,
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
-    /// Whether the empty-worktree state's New Chat picker (the agent list)
-    /// is expanded. Mirrors `TabBar::chat_picker_open`, owned here because
-    /// the empty state renders in this crate, not in `sirio_ui`.
-    empty_chat_picker_open: bool,
+    /// Which half's empty-state agent picker is expanded, if any.
+    empty_chat_picker_open: Option<PaneRole>,
     tab_rename: Option<TabRename>,
     pending_title_prompt: Option<PendingTitlePrompt>,
     /// Blink state of the "Set Title" modal field's insertion caret, and
@@ -5222,7 +5265,7 @@ impl SirioWorkspace {
         let persisted_secondary_pane_hidden = session.secondary_pane_hidden_for(&working_directory);
         let restored_active_secondary = tabs
             .get(active_tab)
-            .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary);
+            .is_some_and(|tab| tab.pane == PaneRole::Secondary);
         if restored_active_secondary && persisted_secondary_pane_hidden {
             // Keep the restored active surface visible and make the repaired
             // state survive the next restart as well.
@@ -5275,6 +5318,7 @@ impl SirioWorkspace {
             tabs,
             active_tab,
             tab_drag_snapshot: None,
+            pane_drop_target: None,
             tab_worktree_paths,
             next_tab_id: tabs_len,
             next_retained_chat_id: 0,
@@ -5296,7 +5340,7 @@ impl SirioWorkspace {
             overflow_menu_open: false,
             tab_menu_open: false,
             tab_menu_tab: None,
-            empty_chat_picker_open: false,
+            empty_chat_picker_open: None,
             tab_rename: None,
             pending_title_prompt: None,
             modal_field_blink: sirio_ui::caret::Blink::new(),
@@ -5797,8 +5841,8 @@ impl SirioWorkspace {
                 .map(|tab| {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
-                    state.shown_in_pane =
-                        self.center_split.active(tab.kind.pane_role()) == Some(tab.id);
+                    state.shown_in_pane = self.center_split.active(tab.pane) == Some(tab.id);
+                    state.pane = session::persisted_pane(tab.pane).to_owned();
                     tab.panes.for_each(&mut |pane_id, content| {
                         match content {
                             TabContent::Terminal { view } => {
@@ -6334,6 +6378,33 @@ impl SirioWorkspace {
     /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane.
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
         self.set_secondary_pane_hidden(!self.secondary_pane_hidden, cx);
+    }
+
+    /// Spec 2026-09-24 §5: Ctrl+Shift+M moves the focused half's shown tab
+    /// to the other half, and focus goes with it — so the chord pressed
+    /// twice brings the tab back. With nothing movable focused it lets the
+    /// key through (#227: a matched binding otherwise eats it).
+    fn handle_move_tab_to_other_pane(
+        &mut self,
+        _: &MoveTabToOtherPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_current_worktree() {
+            cx.propagate();
+            return;
+        }
+        let movable = self
+            .center_split
+            .active_for_focused()
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .filter(|tab| tab.kind.can_move_between_panes())
+            .map(|tab| (tab.id, tab.pane.other()));
+        let Some((tab_id, target)) = movable else {
+            cx.propagate();
+            return;
+        };
+        self.move_tab_to_pane(tab_id, target, None, Some(window), cx);
     }
 
     /// Hides or shows the Secondary pane, *keeping* its tabs, and persists
@@ -7542,6 +7613,7 @@ impl SirioWorkspace {
             persistence_id,
             title: chat.title.clone(),
             kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(pane_id),
@@ -7879,7 +7951,7 @@ impl SirioWorkspace {
         if from == target {
             return false;
         }
-        if self.tabs[from].kind.pane_role() != self.tabs[target].kind.pane_role() {
+        if self.tabs[from].pane != self.tabs[target].pane {
             return false;
         }
         let active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -7911,6 +7983,24 @@ impl SirioWorkspace {
         }
     }
 
+    fn restore_tab_drag_order(&mut self, snapshot: &TabDragSnapshot) {
+        let mut restored = Vec::with_capacity(self.tabs.len());
+        for id in &snapshot.order {
+            if let Some(position) = self.tabs.iter().position(|tab| tab.id == *id) {
+                restored.push(self.tabs.remove(position));
+            }
+        }
+        // Defensive: any tab not named in the snapshot (none should exist --
+        // no tab opens or closes mid-drag) keeps its relative order, appended
+        // after the restored ones rather than silently dropped.
+        restored.append(&mut self.tabs);
+        self.tabs = restored;
+        self.active_tab = snapshot
+            .active_id
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
+    }
+
     /// F-TAB-24: Escape mid-tab-drag put the tab order back the way it was.
     /// `preview_tab_reorder` above has no separate "commit" step -- it
     /// mutates `self.tabs` on every hover crossing -- so cancelling means
@@ -7929,27 +8019,255 @@ impl SirioWorkspace {
         let Some(snapshot) = self.tab_drag_snapshot.take() else {
             return false;
         };
+        self.pane_drop_target = None;
         cx.stop_active_drag(window);
-        let mut restored = Vec::with_capacity(self.tabs.len());
-        for id in &snapshot.order {
-            if let Some(position) = self.tabs.iter().position(|tab| tab.id == *id) {
-                restored.push(self.tabs.remove(position));
-            }
-        }
-        // Defensive: any tab not named in the snapshot (none should exist --
-        // no tab opens or closes mid-drag) keeps its relative order, appended
-        // after the restored ones rather than silently dropped.
-        restored.append(&mut self.tabs);
-        self.tabs = restored;
-        self.active_tab = snapshot
-            .active_id
-            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
-            .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
+        self.restore_tab_drag_order(&snapshot);
         self.rebuild_center_split();
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
         true
+    }
+
+    /// Spec 2026-09-24 §3: the only way a tab changes half after it is
+    /// built. Refuses a kind that cannot move and a tab already in `target`;
+    /// otherwise re-places the tab in the shared list (beside `anchor`, or at
+    /// the end of the target strip), hands the half it left to its nearest
+    /// remaining tab — the rule `close_tab` applies — and gives the target
+    /// half focus on the moved tab. A hidden Secondary half is revealed by
+    /// `rebuild_center_split`, because the active tab is now in it. The
+    /// surface's entity moves as it is: nothing is restarted, a terminal is
+    /// only resized to its new half. Returns whether anything moved.
+    fn move_tab_to_pane(
+        &mut self,
+        tab_id: usize,
+        target: PaneRole,
+        anchor: Option<(usize, bool)>,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        let source = self.tabs[from].pane;
+        if source == target || !self.tabs[from].kind.can_move_between_panes() {
+            return false;
+        }
+        if self
+            .tab_rename
+            .as_ref()
+            .is_some_and(|rename| rename.tab_id == tab_id)
+        {
+            match window.as_deref_mut() {
+                Some(window) => self.commit_tab_rename(window, cx),
+                None => self.tab_rename = None,
+            }
+        }
+        let was_shown = self.center_split.active(source) == Some(tab_id);
+        let position = self
+            .center_split
+            .tabs_for(source, &self.tabs)
+            .iter()
+            .position(|id| *id == tab_id);
+
+        let mut tab = self.tabs.remove(from);
+        tab.pane = target;
+        let insert_at = cross_pane_insertion_index(&self.tabs, target, anchor);
+        self.tabs.insert(insert_at, tab);
+
+        if was_shown && let Some(position) = position {
+            let remaining = self.center_split.tabs_for(source, &self.tabs);
+            self.center_split
+                .set_active(source, nearest_remaining(&remaining, position));
+        }
+        self.active_tab = insert_at;
+        self.rebuild_center_split();
+        self.track_terminal_panes_in_cache(tab_id);
+        self.select_tab(tab_id, window, cx);
+        cx.notify();
+        true
+    }
+
+    /// The half a drop overlay is drawn over right now: the half across the
+    /// divider from a movable tab being dragged, or `None`. A tab drag is
+    /// `tab_drag_snapshot` *and* a live drag (spec §5, "Drag state").
+    fn pane_drop_overlay_role(&self, cx: &App) -> Option<PaneRole> {
+        if !cx.has_active_drag() {
+            return None;
+        }
+        let dragged = self.tab_drag_snapshot.as_ref()?.dragged;
+        let tab = self.tabs.iter().find(|tab| tab.id == dragged)?;
+        tab.kind.can_move_between_panes().then(|| tab.pane.other())
+    }
+
+    /// The first listener of every tab-drag move: forget the last target so
+    /// only what contains the pointer *now* can set one. It runs before the
+    /// strips, tabs and overlays because `shell-work-area` registers its
+    /// listeners before painting its children, and the capture phase walks
+    /// listeners in registration order. Redraws once, after the whole move
+    /// has been dispatched, and only if the target changed.
+    fn begin_pane_drop_move(&mut self, cx: &mut Context<Self>) {
+        let previous = self.pane_drop_target.take();
+        let entity = cx.entity();
+        cx.defer(move |cx| {
+            entity.update(cx, |workspace, cx| {
+                if workspace.pane_drop_target != previous {
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    /// A tab-drag move over a strip or a body of the `over` half (`anchor`
+    /// `None`), or over one of its tabs. Records where the tab would land
+    /// when that is across the divider (`cross_pane_target`).
+    fn drag_over_pane(
+        &mut self,
+        drag: RowDrag,
+        over: PaneRole,
+        anchor: Option<(usize, bool)>,
+        inside: bool,
+    ) {
+        if drag.scope != ReorderScope::Tabs {
+            return;
+        }
+        let Some(dragged) = self.tabs.iter().find(|tab| tab.id == drag.id) else {
+            return;
+        };
+        if let Some(target) = cross_pane_target(
+            dragged.pane,
+            dragged.kind.can_move_between_panes(),
+            over,
+            anchor,
+            inside,
+        ) {
+            self.pane_drop_target = Some(target);
+        }
+    }
+
+    /// A tab-drag move over tab `target_id`: its own half keeps the live
+    /// in-strip reorder (F-TAB-24); the other half records a target.
+    fn drag_over_tab(
+        &mut self,
+        drag: RowDrag,
+        target_id: usize,
+        before: bool,
+        inside: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.scope != ReorderScope::Tabs {
+            return;
+        }
+        let pane_of = |id| {
+            self.tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .map(|tab| tab.pane)
+        };
+        let (Some(dragged), Some(over)) = (pane_of(drag.id), pane_of(target_id)) else {
+            return;
+        };
+        if dragged == over {
+            self.preview_tab_reorder(drag, target_id, before, cx);
+        } else {
+            self.drag_over_pane(drag, over, Some((target_id, before)), inside);
+        }
+    }
+
+    /// A tab drag released over `pane` — its strip or its body overlay. A
+    /// target recorded for that half moves the tab there; otherwise this was
+    /// an in-strip reorder, already applied live, and the drop only commits
+    /// it. Either way the drag's bookkeeping ends here.
+    fn drop_on_pane(
+        &mut self,
+        drag: RowDrag,
+        pane: PaneRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self.tab_drag_snapshot.take();
+        let target = self.pane_drop_target.take();
+        if drag.scope == ReorderScope::Tabs
+            && let Some(target) = target.filter(|target| target.pane == pane)
+        {
+            let crosses_panes = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == drag.id)
+                .is_some_and(|tab| tab.pane != target.pane);
+            if crosses_panes && let Some(snapshot) = snapshot.as_ref() {
+                self.restore_tab_drag_order(snapshot);
+            }
+            self.move_tab_to_pane(drag.id, target.pane, target.anchor, Some(window), cx);
+        }
+        cx.notify();
+    }
+
+    /// Spec §5, "Drop on the other pane's body": while a movable tab is
+    /// dragged, the half across the divider is covered by a drop surface —
+    /// clear until the pointer is over it, then filled. Drawn last in its
+    /// surface, so it is the topmost hitbox and the hover-gated `on_drop`
+    /// reaches it rather than a terminal or chat beneath.
+    fn render_pane_drop_overlay(
+        &self,
+        role: PaneRole,
+        theme: Theme,
+        entity: Entity<Self>,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        if self.pane_drop_overlay_role(cx) != Some(role) {
+            return None;
+        }
+        let targeted = self.pane_drop_target
+            == Some(PaneDropTarget {
+                pane: role,
+                anchor: None,
+            });
+        let selector = match role {
+            PaneRole::Primary => "pane-drop-overlay-primary",
+            PaneRole::Secondary => "pane-drop-overlay-secondary",
+        };
+        let move_entity = entity.clone();
+        Some(
+            div()
+                .id(selector)
+                .debug_selector(move || selector.to_owned())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .when(targeted, |this| {
+                    let this = this
+                        .bg(theme.element_active)
+                        .border_2()
+                        .border_color(theme.border_strong);
+                    #[cfg(test)]
+                    let this = this.child(
+                        div()
+                            .id(format!("{selector}-filled"))
+                            .debug_selector(move || format!("{selector}-filled"))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_0(),
+                    );
+                    this
+                })
+                .on_drag_move::<RowDrag>(move |event, _, cx| {
+                    let drag = *event.drag(cx);
+                    let inside = event.bounds.contains(&event.event.position);
+                    move_entity.update(cx, |workspace, _| {
+                        workspace.drag_over_pane(drag, role, None, inside);
+                    });
+                })
+                .on_drop::<RowDrag>(move |drag, window, cx| {
+                    let drag = *drag;
+                    entity.update(cx, |workspace, cx| {
+                        workspace.drop_on_pane(drag, role, window, cx);
+                    });
+                })
+                .into_any_element(),
+        )
     }
 
     fn control_add_project(
@@ -10259,23 +10577,20 @@ impl SirioWorkspace {
     }
 
     /// Rebuilds the per-role active tab after tabs were added, removed or
-    /// reordered. Membership is derived, so the only invariant is that a
-    /// role's remembered active still exists in that role.
+    /// reordered. Membership is each tab's stored `pane`, so the only
+    /// invariant is that a role's remembered active still exists in that role.
     fn rebuild_center_split(&mut self) {
-        let desired = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| (tab.kind.pane_role(), tab.id));
+        let desired = self.tabs.get(self.active_tab).map(|tab| (tab.pane, tab.id));
         let primary_ids: Vec<usize> = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Primary)
+            .filter(|tab| tab.pane == PaneRole::Primary)
             .map(|tab| tab.id)
             .collect();
         let secondary_ids: Vec<usize> = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .filter(|tab| tab.pane == PaneRole::Secondary)
             .map(|tab| tab.id)
             .collect();
 
@@ -10381,10 +10696,10 @@ impl SirioWorkspace {
         if !rebuild_pane_cache {
             return;
         }
-        // F-TERM-PTY-08: every tab placement transition (MoveTabToOtherPane,
-        // "Move to New Pane", and tab reordering all funnel through here) is a real seam moment -- record each terminal
-        // pane's current placement so the cache stays a true mirror of the
-        // pane tree, not just of the specific moves the row names.
+        // F-TERM-PTY-08: callers that request a pane-cache rebuild come
+        // through this seam, so it re-records every terminal leaf.
+        // `MoveTabToOtherPane` instead calls `move_tab_to_pane`, which tracks
+        // the moved tab directly.
         let tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
         for tab_id in tab_ids {
             self.track_terminal_panes_in_cache(tab_id);
@@ -10419,7 +10734,7 @@ impl SirioWorkspace {
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         for (pane_id, view) in panes {
             let content_id = format!("terminal-{pane_id}");
-            let role_str = match tab.kind.pane_role() {
+            let role_str = match tab.pane {
                 PaneRole::Primary => "primary",
                 PaneRole::Secondary => "secondary",
             };
@@ -10615,10 +10930,7 @@ impl SirioWorkspace {
     /// a group that regained a tab has its entry dropped, which also drops
     /// its `TerminalView` entity and the subscription tied to it.
     fn sync_empty_pane_prompts(&mut self, cx: &mut Context<Self>) {
-        let has_primary = self
-            .tabs
-            .iter()
-            .any(|tab| tab.kind.pane_role() == PaneRole::Primary);
+        let has_primary = self.tabs.iter().any(|tab| tab.pane == PaneRole::Primary);
         if has_primary {
             self.empty_pane_prompts.clear();
             return;
@@ -10765,7 +11077,7 @@ impl SirioWorkspace {
         // list that survives, and "nearest" is a fact about the list that did
         // not. So the position is read here, while the closing tab is still
         // in it.
-        let closing_role = self.tabs[index].kind.pane_role();
+        let closing_role = self.tabs[index].pane;
         let closing_position = self
             .center_split
             .tabs_for(closing_role, &self.tabs)
@@ -10860,11 +11172,8 @@ impl SirioWorkspace {
             // The tab that slid into the closed one's place, or the one
             // before it when the closed tab was last.
             let remaining = self.center_split.tabs_for(closing_role, &self.tabs);
-            let nearest = remaining
-                .get(position)
-                .or_else(|| remaining.last())
-                .copied();
-            self.center_split.set_active(closing_role, nearest);
+            self.center_split
+                .set_active(closing_role, nearest_remaining(&remaining, position));
         }
         self.rebuild_center_split();
         if let Some(active_id) = self.center_split.active_for_focused()
@@ -11088,6 +11397,7 @@ impl SirioWorkspace {
             persistence_id,
             title: title.clone(),
             kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -11205,6 +11515,7 @@ impl SirioWorkspace {
             persistence_id,
             title: title.clone(),
             kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(pane_id),
@@ -11334,6 +11645,7 @@ impl SirioWorkspace {
             persistence_id,
             title: title.clone(),
             kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
             agent_icon,
             agent_id,
             session_state: SessionTabState::with_root(pane_id),
@@ -12240,6 +12552,7 @@ impl SirioWorkspace {
             persistence_id,
             title: seed_title,
             kind: TabKind::ProjectSettings,
+            pane: TabKind::ProjectSettings.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12310,6 +12623,7 @@ impl SirioWorkspace {
                     persistence_id: saved.id.clone(),
                     title,
                     kind: TabKind::ProjectSettings,
+                    pane: TabKind::ProjectSettings.default_pane(),
                     agent_icon: None,
                     agent_id: None,
                     session_state: state,
@@ -12473,6 +12787,7 @@ impl SirioWorkspace {
             // identity stays in TabContent; the shell overlay adjusts its
             // glyph and width below without changing the menu component.
             kind: TabKind::Editor,
+            pane: TabKind::Editor.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12543,6 +12858,7 @@ impl SirioWorkspace {
             persistence_id,
             title: "Changes".to_string(),
             kind: TabKind::Diff,
+            pane: TabKind::Diff.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12577,6 +12893,7 @@ impl SirioWorkspace {
             persistence_id,
             title: "Changes".to_string(),
             kind: TabKind::Diff,
+            pane: TabKind::Diff.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(self.next_pane_id),
@@ -12617,6 +12934,7 @@ impl SirioWorkspace {
             persistence_id,
             title: "Browser".to_string(),
             kind: TabKind::Browser,
+            pane: TabKind::Browser.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(pane_id),
@@ -12694,7 +13012,9 @@ impl SirioWorkspace {
     /// the rule stays testable without a window: every open overlay obscures,
     /// and a quiet frame obscures nothing. Toasts are deliberately not here:
     /// they are small, non-modal root notices, and blanking the page for
-    /// their four seconds would be worse than the overlap.
+    /// their four seconds would be worse than the overlap. A movable tab
+    /// dragged out of the Primary half also covers the Secondary one (spec
+    /// 2026-09-24 §5).
     fn overlay_obscures_browsers(
         overflow_menu_open: bool,
         tab_menu_open: bool,
@@ -12703,6 +13023,7 @@ impl SirioWorkspace {
         pane_close_open: bool,
         tab_rename_open: bool,
         new_tab_menu_open: bool,
+        tab_drag_toward_secondary: bool,
     ) -> bool {
         overflow_menu_open
             || tab_menu_open
@@ -12711,6 +13032,7 @@ impl SirioWorkspace {
             || pane_close_open
             || tab_rename_open
             || new_tab_menu_open
+            || tab_drag_toward_secondary
     }
 
     /// #376: marks every browser surface as covered (or not) by a GPUI
@@ -12731,6 +13053,7 @@ impl SirioWorkspace {
             self.pending_pane_close.is_some(),
             self.tab_rename.is_some(),
             self.tab_bar.read(cx).is_menu_open(),
+            self.pane_drop_overlay_role(cx) == Some(PaneRole::Secondary),
         );
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
@@ -13214,12 +13537,29 @@ impl SirioWorkspace {
         }
     }
 
-    /// The Secondary pane's launcher: every surface that lives in that half,
-    /// then the pane's own close. Changes needs git and Project Settings a
-    /// project; each says why when it cannot be used.
+    /// The Secondary pane's launcher: every surface that lives in that half —
+    /// plus a terminal and a chat, which may — then the pane's own close.
+    /// Changes needs git and Project Settings a project; each says why when it
+    /// cannot be used.
     fn secondary_launcher_items(&self) -> Vec<LauncherItem<LauncherAction>> {
         let project = self.current_catalog_project();
         vec![
+            LauncherItem {
+                id: "launcher-terminal",
+                action: LauncherAction::NewTerminal(PaneRole::Secondary),
+                icon: Icon::SquareTerminal,
+                label: "Terminal".into(),
+                shortcut: None,
+                disabled: None,
+            },
+            LauncherItem {
+                id: "launcher-chat",
+                action: LauncherAction::NewChat(PaneRole::Secondary),
+                icon: Icon::MessageSquare,
+                label: "Chat".into(),
+                shortcut: None,
+                disabled: None,
+            },
             LauncherItem {
                 id: "launcher-browser",
                 action: LauncherAction::NewBrowser,
@@ -13272,7 +13612,7 @@ impl SirioWorkspace {
         vec![
             LauncherItem {
                 id: "empty-worktree-new-terminal",
-                action: LauncherAction::NewTerminal,
+                action: LauncherAction::NewTerminal(PaneRole::Primary),
                 icon: Icon::SquareTerminal,
                 label: "Terminal".into(),
                 shortcut: None,
@@ -13280,7 +13620,7 @@ impl SirioWorkspace {
             },
             LauncherItem {
                 id: "empty-worktree-new-chat",
-                action: LauncherAction::NewChat,
+                action: LauncherAction::NewChat(PaneRole::Primary),
                 icon: Icon::MessageSquare,
                 label: "Chat".into(),
                 shortcut: None,
@@ -13299,9 +13639,19 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         match action {
-            LauncherAction::NewTerminal => self.open_action(NewTabAction::NewTerminal, window, cx),
-            LauncherAction::NewChat => {
-                self.empty_chat_picker_open = !self.empty_chat_picker_open;
+            LauncherAction::NewTerminal(pane) => self.open_in_pane(
+                pane,
+                |workspace, window, cx| {
+                    workspace.open_action(NewTabAction::NewTerminal, window, cx)
+                },
+                window,
+                cx,
+            ),
+            LauncherAction::NewChat(pane) => {
+                self.empty_chat_picker_open = match self.empty_chat_picker_open {
+                    Some(open) if open == pane => None,
+                    _ => Some(pane),
+                };
                 cx.notify();
             }
             LauncherAction::NewBrowser => self.open_action(NewTabAction::NewBrowser, window, cx),
@@ -13317,6 +13667,173 @@ impl SirioWorkspace {
             }
             LauncherAction::HidePane => self.set_secondary_pane_hidden(true, cx),
         }
+    }
+
+    /// Spec 2026-09-24 §5, "Secondary launcher": opens a tab through its
+    /// ordinary creation path — which puts it in its home half — then moves
+    /// it to `pane` in the same update, before any frame is drawn, so a
+    /// terminal's PTY is sized once, where it will stay. `move_tab_to_pane`
+    /// stays the only writer of a tab's half. A creation that opened nothing
+    /// (a chat refused with a toast) moves nothing; `pane` being the home
+    /// half moves nothing either.
+    fn open_in_pane(
+        &mut self,
+        pane: PaneRole,
+        open: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let other_pane = pane.other();
+        let other_active = self.center_split.active(other_pane);
+        let first_new_id = self.next_tab_id;
+        open(self, window, cx);
+        let opened = self
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .filter(|id| *id >= first_new_id)
+            .max();
+        if let Some(tab_id) = opened
+            && self.move_tab_to_pane(tab_id, pane, None, Some(window), cx)
+            && let Some(previous_id) = other_active
+            && self
+                .tabs
+                .iter()
+                .any(|tab| tab.id == previous_id && tab.pane == other_pane)
+        {
+            self.center_split.set_active(other_pane, Some(previous_id));
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// The empty-state agent picker, drawn under the Chat tile of `target`'s
+    /// launcher while that half's picker is open. Both halves share it; the
+    /// right one's selectors carry a `secondary-` prefix so the two can
+    /// never be confused. Picking an agent opens its chat in `target`.
+    fn render_empty_chat_picker(
+        &self,
+        target: PaneRole,
+        theme: Theme,
+        entity: Entity<Self>,
+    ) -> Option<AnyElement> {
+        if self.empty_chat_picker_open != Some(target) {
+            return None;
+        }
+        let prefix: &'static str = match target {
+            PaneRole::Primary => "empty-chat-",
+            PaneRole::Secondary => "secondary-empty-chat-",
+        };
+        // The same resolved-source gate the tab bar's New Chat picker
+        // applies: only adapters with a concrete command today (Builtin or
+        // Installed) are offered as chats.
+        let available: Vec<(&'static str, &'static str)> = AGENT_CATALOG
+            .iter()
+            .filter(|adapter| agent_command_for(&self.launch_source_for(adapter.id())).is_some())
+            .map(|adapter| (adapter.id(), adapter.display_name()))
+            .collect();
+        let dismiss_entity = entity.clone();
+        let mut menu = div()
+            .id(format!("{prefix}agent-menu"))
+            .debug_selector(move || format!("{prefix}agent-menu"))
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.titlebar_control_spacing)
+            .mt(theme.spacing.titlebar_control_spacing)
+            .p(theme.spacing.titlebar_control_spacing)
+            .w(theme.spacing.menu_width)
+            .rounded(theme.radii.control)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.floating_surface)
+            .shadow_lg()
+            .text_size(theme.typography.footnote)
+            .on_mouse_down_out(move |_, _, cx| {
+                dismiss_entity.update(cx, |workspace, cx| {
+                    workspace.empty_chat_picker_open = None;
+                    cx.notify();
+                });
+            });
+        if available.is_empty() {
+            let settings_entity = entity.clone();
+            menu = menu.child(
+                div()
+                    .id(format!("{prefix}empty"))
+                    .debug_selector(move || format!("{prefix}empty"))
+                    .flex()
+                    .flex_col()
+                    .gap(theme.spacing.titlebar_control_spacing)
+                    .px(theme.spacing.card_gap)
+                    .py(theme.spacing.titlebar_control_spacing)
+                    .rounded(theme.radii.control)
+                    .text_color(theme.text_faint)
+                    .hover(|style| style.bg(theme.element_hover))
+                    .on_click(move |_, _, cx| {
+                        settings_entity.update(cx, |workspace, cx| {
+                            workspace.empty_chat_picker_open = None;
+                            workspace.open_settings(Some(SettingsCategory::Agents), cx);
+                        });
+                    })
+                    .child("Other agents…")
+                    .child(
+                        div()
+                            .text_size(theme.typography.caption2)
+                            .child("No supported agent found on PATH"),
+                    ),
+            );
+        } else {
+            for (id, display_name) in available {
+                let row_entity = entity.clone();
+                let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
+                menu = menu.child(
+                    div()
+                        .id(format!("{prefix}agent-{id}"))
+                        .debug_selector(move || format!("{prefix}agent-{id}"))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .px(theme.spacing.card_gap)
+                        .py(theme.spacing.titlebar_control_spacing)
+                        .rounded(theme.radii.control)
+                        .text_color(theme.text)
+                        .hover(|style| style.bg(theme.element_hover))
+                        .on_click(move |_, window, cx| {
+                            row_entity.update(cx, |workspace, cx| {
+                                workspace.empty_chat_picker_open = None;
+                                workspace.open_in_pane(
+                                    target,
+                                    |workspace, window, cx| {
+                                        workspace.open_chat_agent(id, window, cx)
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            });
+                        })
+                        .child(IconElement::new(icon, IconSize::Small).text_color(theme.text))
+                        .child(div().id(format!("{prefix}label-{id}")).child(display_name)),
+                );
+            }
+            let other_entity = entity;
+            menu = menu.child(
+                div()
+                    .id(format!("{prefix}other-agents"))
+                    .debug_selector(move || format!("{prefix}other-agents"))
+                    .px(theme.spacing.card_gap)
+                    .py(theme.spacing.titlebar_control_spacing)
+                    .rounded(theme.radii.control)
+                    .text_color(theme.text_faint)
+                    .hover(|style| style.bg(theme.element_hover))
+                    .on_click(move |_, _, cx| {
+                        other_entity.update(cx, |workspace, cx| {
+                            workspace.empty_chat_picker_open = None;
+                            workspace.open_settings(Some(SettingsCategory::Agents), cx);
+                        });
+                    })
+                    .child("Other agents…"),
+            );
+        }
+        Some(menu.into_any_element())
     }
 
     /// The full-window Settings route used by the status-bar affordance and
@@ -14124,7 +14641,7 @@ impl SirioWorkspace {
                 if let TabContent::Terminal { view } = content {
                     let sole_tab_in_group = self
                         .center_split
-                        .tabs_for(self.tabs[tab_index].kind.pane_role(), &self.tabs)
+                        .tabs_for(self.tabs[tab_index].pane, &self.tabs)
                         .len()
                         == 1;
                     view.update(cx, |terminal, cx| {
@@ -14541,6 +15058,7 @@ impl SirioWorkspace {
                         .flex_1()
                         .size_full()
                         .flex()
+                        .flex_col()
                         .items_center()
                         .justify_center()
                         .p(theme.spacing.card_gap)
@@ -14554,22 +15072,15 @@ impl SirioWorkspace {
                                 });
                             },
                         ))
+                        .children(self.render_empty_chat_picker(
+                            PaneRole::Secondary,
+                            theme,
+                            entity.clone(),
+                        ))
                         .into_any_element()
                 } else if role == PaneRole::Primary && self.has_current_worktree() {
-                    let dismiss_chat_picker_entity = entity.clone();
-                    let picker_open = self.empty_chat_picker_open;
-                    // The same resolved-source gate the tab bar's New Chat
-                    // picker applies: only adapters with a concrete command
-                    // today (Builtin or Installed) are offered as chats.
-                    let available: Vec<(&'static str, &'static str)> = AGENT_CATALOG
-                        .iter()
-                        .filter(|adapter| {
-                            agent_command_for(&self.launch_source_for(adapter.id())).is_some()
-                        })
-                        .map(|adapter| (adapter.id(), adapter.display_name()))
-                        .collect();
                     let launcher_entity = entity.clone();
-                    let mut empty = div()
+                    let empty = div()
                         .id("empty-worktree")
                         .debug_selector(|| "empty-worktree".to_owned())
                         .flex_1()
@@ -14589,111 +15100,12 @@ impl SirioWorkspace {
                                     workspace.handle_launcher_action(action, window, cx)
                                 });
                             },
+                        ))
+                        .children(self.render_empty_chat_picker(
+                            PaneRole::Primary,
+                            theme,
+                            entity.clone(),
                         ));
-                    if picker_open {
-                        let mut menu = div()
-                            .id("empty-chat-agent-menu")
-                            .debug_selector(|| "empty-chat-agent-menu".to_owned())
-                            .flex()
-                            .flex_col()
-                            .gap(theme.spacing.titlebar_control_spacing)
-                            .mt(theme.spacing.titlebar_control_spacing)
-                            .p(theme.spacing.titlebar_control_spacing)
-                            .w(theme.spacing.menu_width)
-                            .rounded(theme.radii.control)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.floating_surface)
-                            .shadow_lg()
-                            .text_size(theme.typography.footnote)
-                            .on_mouse_down_out(move |_, _, cx| {
-                                dismiss_chat_picker_entity.update(cx, |workspace, cx| {
-                                    workspace.empty_chat_picker_open = false;
-                                    cx.notify();
-                                });
-                            });
-                        if available.is_empty() {
-                            let empty_settings_entity = entity.clone();
-                            menu = menu.child(
-                                div()
-                                    .id("empty-chat-empty")
-                                    .debug_selector(|| "empty-chat-empty".to_owned())
-                                    .flex()
-                                    .flex_col()
-                                    .gap(theme.spacing.titlebar_control_spacing)
-                                    .px(theme.spacing.card_gap)
-                                    .py(theme.spacing.titlebar_control_spacing)
-                                    .rounded(theme.radii.control)
-                                    .text_color(theme.text_faint)
-                                    .hover(|style| style.bg(theme.element_hover))
-                                    .on_click(move |_, _, cx| {
-                                        empty_settings_entity.update(cx, |workspace, cx| {
-                                            workspace.empty_chat_picker_open = false;
-                                            workspace
-                                                .open_settings(Some(SettingsCategory::Agents), cx);
-                                        });
-                                    })
-                                    .child("Other agents…")
-                                    .child(
-                                        div()
-                                            .text_size(theme.typography.caption2)
-                                            .child("No supported agent found on PATH"),
-                                    ),
-                            );
-                        } else {
-                            for (id, display_name) in available {
-                                let row_entity = entity.clone();
-                                let selector = format!("empty-chat-agent-{id}");
-                                let selector_for_debug = selector.clone();
-                                let label_selector = format!("empty-chat-label-{id}");
-                                let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
-                                menu = menu.child(
-                                    div()
-                                        .id(selector)
-                                        .debug_selector(move || selector_for_debug.clone())
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(7.0))
-                                        .px(theme.spacing.card_gap)
-                                        .py(theme.spacing.titlebar_control_spacing)
-                                        .rounded(theme.radii.control)
-                                        .text_color(theme.text)
-                                        .hover(|style| style.bg(theme.element_hover))
-                                        .on_click(move |_, window, cx| {
-                                            row_entity.update(cx, |workspace, cx| {
-                                                workspace.empty_chat_picker_open = false;
-                                                workspace.open_chat_agent(id, window, cx);
-                                            });
-                                        })
-                                        .child(
-                                            IconElement::new(icon, IconSize::Small)
-                                                .text_color(theme.text),
-                                        )
-                                        .child(div().id(label_selector).child(display_name)),
-                                );
-                            }
-                            let other_entity = entity.clone();
-                            menu = menu.child(
-                                div()
-                                    .id("empty-chat-other-agents")
-                                    .debug_selector(|| "empty-chat-other-agents".to_owned())
-                                    .px(theme.spacing.card_gap)
-                                    .py(theme.spacing.titlebar_control_spacing)
-                                    .rounded(theme.radii.control)
-                                    .text_color(theme.text_faint)
-                                    .hover(|style| style.bg(theme.element_hover))
-                                    .on_click(move |_, _, cx| {
-                                        other_entity.update(cx, |workspace, cx| {
-                                            workspace.empty_chat_picker_open = false;
-                                            workspace
-                                                .open_settings(Some(SettingsCategory::Agents), cx);
-                                        });
-                                    })
-                                    .child("Other agents…"),
-                            );
-                        }
-                        empty = empty.child(menu);
-                    }
                     empty.into_any_element()
                 } else if role == PaneRole::Primary
                     && let Some(prompt) = self.empty_pane_prompts.get(&0)
@@ -14773,6 +15185,8 @@ impl SirioWorkspace {
         rename_draft: Option<&str>,
         rename_focus: Option<FocusHandle>,
         rename_caret_visible: bool,
+        // Spec 2026-09-24 §5: `Some(before)` draws the cross-half insertion bar on that side.
+        drop_edge: Option<bool>,
         entity: Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -14868,25 +15282,44 @@ impl SirioWorkspace {
             })
             .text_color(if active { theme.text } else { theme.text_muted })
             .hover(|style| style.bg(theme.element_hover))
+            .when_some(drop_edge, |this, before| {
+                this.child(
+                    div()
+                        .id(format!("tab-drop-indicator-{id}"))
+                        .debug_selector(move || format!("tab-drop-indicator-{id}"))
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.0))
+                        .when(before, |bar| bar.left_0())
+                        .when(!before, |bar| bar.right_0())
+                        .bg(theme.text),
+                )
+            })
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
             // the same point sidebar.rs's own drag resets `pending_reorder`
             // at. Snapshot the pre-drag tab order here so Escape has
             // something to put back; `preview_tab_reorder` below mutates
             // `tabs` live on every hover crossing with no other checkpoint.
             .on_drag(tab_drag, move |_, _, _, cx| {
-                drag_start_entity.update(cx, |workspace, _| {
+                drag_start_entity.update(cx, |workspace, cx| {
                     workspace.tab_drag_snapshot = Some(TabDragSnapshot {
+                        dragged: id,
                         order: workspace.tabs.iter().map(|tab| tab.id).collect(),
                         active_id: workspace.tabs.get(workspace.active_tab).map(|tab| tab.id),
                     });
+                    workspace.pane_drop_target = None;
+                    // The drop overlay across the divider appears with the drag.
+                    cx.notify();
                 });
                 cx.new(|_| gpui::Empty)
             })
             .on_drag_move::<RowDrag>(move |event, _, cx| {
                 let drag = *event.drag(cx);
                 let before = event.event.position.x < event.bounds.center().x;
+                let inside = event.bounds.contains(&event.event.position);
                 drag_entity.update(cx, |workspace, cx| {
-                    workspace.preview_tab_reorder(drag, id, before, cx);
+                    workspace.drag_over_tab(drag, id, before, inside, cx);
                 });
             })
             .on_mouse_down(MouseButton::Right, move |_, _, cx| {
@@ -15211,7 +15644,7 @@ impl SirioWorkspace {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return Vec::new();
         };
-        let role = tab.kind.pane_role();
+        let role = tab.pane;
         let ids = machinery.tabs_for(role, &self.tabs);
         let Some(position) = ids.iter().position(|id| *id == tab_id) else {
             return Vec::new();
@@ -15279,6 +15712,20 @@ impl SirioWorkspace {
             },
         ];
 
+        // Spec 2026-09-24 §5: absent, not disabled, for a kind that can
+        // never move — disabled means "not now".
+        if tab.kind.can_move_between_panes() {
+            let label = match tab.pane {
+                PaneRole::Primary => "Move to Right Pane",
+                PaneRole::Secondary => "Move to Left Pane",
+            };
+            items.push(TabContextItem::enabled(
+                label,
+                "move-to-other-pane",
+                TabContextAction::MoveToOtherPane,
+            ));
+        }
+
         items.push(TabContextItem::separator());
         if self.can_attach_tab_to_current_terminal(tab_id) {
             items.push(TabContextItem::enabled(
@@ -15294,9 +15741,6 @@ impl SirioWorkspace {
                 "select another terminal tab",
             ));
         }
-
-        // Center split: no pane-move; routing is derived from TabKind, there is no
-        // "other pane" to move to. The Move-to-Pane family is removed per #325.
 
         items.push(TabContextItem::separator());
         if self.retained_chats.is_empty() {
@@ -15320,12 +15764,21 @@ impl SirioWorkspace {
         let Some(tab_id) = self.tab_menu_tab else {
             return 0.0;
         };
-        let focused = self.center_split.focused();
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return 0.0;
+        };
+        let pane = tab.pane;
+        let first_visible = if self.center_split.focused() == pane {
+            self.tab_strip_first_visible
+        } else {
+            0
+        };
         let mut left = 5.0;
         for tab in self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.pane == pane)
+            .skip(first_visible)
         {
             if tab.id == tab_id {
                 break;
@@ -15431,6 +15884,18 @@ impl SirioWorkspace {
             }
             TabContextAction::MoveLater => {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
+            }
+            TabContextAction::MoveToOtherPane => {
+                if let Some(tab_id) = self.tab_menu_tab
+                    && let Some(target) = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .map(|tab| tab.pane.other())
+                {
+                    self.move_tab_to_pane(tab_id, target, None, Some(window), cx);
+                }
+                self.dismiss_tab_menu(cx);
             }
             TabContextAction::AttachToCurrentTerminal => {
                 if let Some(tab_id) = self.tab_menu_tab {
@@ -15773,18 +16238,14 @@ impl SirioWorkspace {
     /// chosen for: the Primary strip widens when the Secondary pane closes,
     /// with no seam to keep aligned by hand.
     fn tab_strip_fit(&self, role: PaneRole, window: &Window, theme: Theme) -> (usize, bool, usize) {
-        let group_len = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
-            .count();
+        let group_len = self.tabs.iter().filter(|tab| tab.pane == role).count();
         if group_len == 0 {
             return (0, false, 0);
         }
         let tab_widths = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
+            .filter(|tab| tab.pane == role)
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
@@ -15823,13 +16284,13 @@ impl SirioWorkspace {
         let Some(active_tab) = self.tabs.get(self.active_tab) else {
             return;
         };
-        if active_tab.kind.pane_role() != focused {
+        if active_tab.pane != focused {
             return;
         }
         let active_index = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.pane == focused)
             .position(|tab| tab.id == active_tab.id);
         let Some(active_index) = active_index else {
             return;
@@ -15889,7 +16350,7 @@ impl SirioWorkspace {
         if self
             .tabs
             .get(self.active_tab)
-            .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .is_some_and(|tab| tab.pane == PaneRole::Secondary)
         {
             self.open_secondary_pane();
         }
@@ -16027,7 +16488,7 @@ impl SirioWorkspace {
         let group_tabs = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
+            .filter(|tab| tab.pane == role)
             .collect::<Vec<_>>();
         let (visible_count, has_overflow, _) = self.tab_strip_fit(role, window, theme);
         let active_tab_id = self.center_split.active(role);
@@ -16049,19 +16510,27 @@ impl SirioWorkspace {
             .items_center()
             .gap(px(2.0))
             .bg(theme.surface)
-            // F-TAB-24: a real drop commits the reorder that
-            // `preview_tab_reorder` already applied live during hover --
-            // this just clears the pre-drag snapshot so a later, unrelated
-            // Escape press can no longer revert it. Attached to this stable
-            // strip container, not a per-tab row, for the same reason
-            // sidebar.rs's own `#sidebar-tree` drop is: rows reorder during
-            // the drag, so the row originally under the pointer may not be
-            // the one under it at drop.
+            // F-TAB-24: a drop either commits the live reorder or, with a
+            // cross-half target, moves the tab (`drop_on_pane`). Attached to
+            // this stable strip container, not a per-tab row, because rows
+            // reorder during the drag, so the row originally under the
+            // pointer may not be the one under it at drop.
+            .on_drag_move::<RowDrag>({
+                let strip_entity = entity.clone();
+                move |event, _, cx| {
+                    let drag = *event.drag(cx);
+                    let inside = event.bounds.contains(&event.event.position);
+                    strip_entity.update(cx, |workspace, _| {
+                        workspace.drag_over_pane(drag, role, None, inside);
+                    });
+                }
+            })
             .on_drop::<RowDrag>({
                 let drop_entity = entity.clone();
-                move |_, _, cx| {
-                    drop_entity.update(cx, |workspace, _| {
-                        workspace.tab_drag_snapshot = None;
+                move |drag, window, cx| {
+                    let drag = *drag;
+                    drop_entity.update(cx, |workspace, cx| {
+                        workspace.drop_on_pane(drag, role, window, cx);
                     });
                 }
             });
@@ -16083,6 +16552,14 @@ impl SirioWorkspace {
                 .as_ref()
                 .filter(|rename| rename.tab_id == tab.id)
                 .map(|rename| rename.focus.clone());
+            let drop_edge = self
+                .pane_drop_target
+                .filter(|target| {
+                    target.pane == role && self.pane_drop_overlay_role(cx) == Some(role)
+                })
+                .and_then(|target| target.anchor)
+                .filter(|(anchor, _)| *anchor == tab.id)
+                .map(|(_, before)| before);
             tabs = tabs.child(Self::render_open_tab(
                 tab,
                 self.tab_agent_mark(tab),
@@ -16100,6 +16577,7 @@ impl SirioWorkspace {
                 rename_draft,
                 rename_focus,
                 self.tab_rename_caret_visible,
+                drop_edge,
                 entity.clone(),
                 theme,
                 window,
@@ -16257,7 +16735,8 @@ impl SirioWorkspace {
             .min_h_0()
             .w_full()
             .overflow_hidden()
-            .child(primary_surface);
+            .child(primary_surface)
+            .children(self.render_pane_drop_overlay(PaneRole::Primary, *theme, entity.clone(), cx));
         #[cfg(test)]
         let primary_surface = primary_surface
             .when_some(shell_paint_probe("centre-surface", cx), |this, probe| {
@@ -16270,7 +16749,7 @@ impl SirioWorkspace {
         let menu_role = self
             .tab_menu_tab
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
-            .map(|tab| tab.kind.pane_role());
+            .map(|tab| tab.pane);
 
         // #320: each pane is its own stack — strip on top, surface below —
         // and the two sit side by side. The strip is *inside* the pane, so
@@ -16438,6 +16917,12 @@ impl SirioWorkspace {
                                     *theme,
                                     entity.clone(),
                                     cx,
+                                ))
+                                .children(self.render_pane_drop_overlay(
+                                    PaneRole::Secondary,
+                                    *theme,
+                                    entity.clone(),
+                                    cx,
                                 )),
                         ),
                 )
@@ -16479,6 +16964,15 @@ impl SirioWorkspace {
             .w_full()
             .p(theme.spacing.shell_outer_inset)
             .gap(theme.spacing.shell_gap)
+            .on_drag_move::<RowDrag>({
+                let entity = entity.clone();
+                move |event, _, cx| {
+                    if event.drag(cx).scope != ReorderScope::Tabs {
+                        return;
+                    }
+                    entity.update(cx, |workspace, cx| workspace.begin_pane_drop_move(cx));
+                }
+            })
             .on_drag_move::<DraggedPanelEdge>({
                 let entity = entity.clone();
                 move |event, _, cx| {
@@ -17410,6 +17904,9 @@ impl SirioWorkspace {
                 WindowCommand::FocusAddressBar => {
                     window.dispatch_action(Box::new(FocusAddressBar), cx)
                 }
+                WindowCommand::MoveTabToOtherPane => {
+                    window.dispatch_action(Box::new(MoveTabToOtherPane), cx)
+                }
             },
             PaletteCommand::Tab(command) => match command {
                 TabCommand::FocusPane(direction, forward) => match (direction, forward) {
@@ -17943,6 +18440,14 @@ fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Spec 2026-09-24 §5: a tab drag that ended without a drop leaves
+        // its snapshot and target behind, and a later divider drag would
+        // then read as a tab drag (gpui exposes `has_active_drag`, not the
+        // drag's type). Both only mean something mid-drag.
+        if !cx.has_active_drag() {
+            self.tab_drag_snapshot = None;
+            self.pane_drop_target = None;
+        }
         // Layer E chat evidence is polled because streaming state lives in
         // the chat entity. Terminal lifecycle evidence is push-driven and
         // read from `terminal_shell_evidence`, avoiding a render dependency
@@ -18217,6 +18722,7 @@ impl Render for SirioWorkspace {
             .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
                 workspace.toggle_secondary_pane(cx);
             }))
+            .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .on_action(cx.listener(Self::handle_focus_pane_above))
@@ -18991,11 +19497,13 @@ fn restore_tabs_with_terminal_cache(
             // worktree is selected again.
             tab_state.scrollback.remove(pane_id);
         }
+        let kind = tab_kind_from_persisted(&tab.kind);
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: tab_kind_from_persisted(&tab.kind),
+            kind,
+            pane: session::placement_for(kind, &tab_state.pane),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -19115,7 +19623,7 @@ fn seed_shown_tabs(
                 continue;
             }
             if let Some(tab) = tabs.iter().find(|tab| {
-                tab.persistence_id == saved_tab.id && tab.kind.pane_role() == role
+                tab.persistence_id == saved_tab.id && tab.pane == role
             }) {
                 center_split.set_active(role, Some(tab.id));
                 break;
@@ -19317,12 +19825,14 @@ fn restore_tabs_in_workspace(
                 }),
             }
         });
+        let kind = session::kind_from_persisted(&tab.kind)
+            .expect("settings and unknown kinds continue above");
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: session::kind_from_persisted(&tab.kind)
-                .expect("settings and unknown kinds continue above"),
+            kind,
+            pane: session::placement_for(kind, &tab_state.pane),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -22169,50 +22679,56 @@ done
     fn any_open_overlay_obscures_browsers_a_quiet_frame_obscures_nothing() {
         assert!(
             !SirioWorkspace::overlay_obscures_browsers(
-                false, false, false, false, false, false, false
+                false, false, false, false, false, false, false, false
             ),
             "a quiet frame must leave the page mapped"
         );
         for (name, args) in [
             (
                 "overflow menu",
-                (true, false, false, false, false, false, false),
+                (true, false, false, false, false, false, false, false),
             ),
             (
                 "tab context menu",
-                (false, true, false, false, false, false, false),
+                (false, true, false, false, false, false, false, false),
             ),
             (
                 "command palette",
-                (false, false, true, false, false, false, false),
+                (false, false, true, false, false, false, false, false),
             ),
             (
                 "set-title prompt",
-                (false, false, false, true, false, false, false),
+                (false, false, false, true, false, false, false, false),
             ),
             (
                 "pane close confirm",
-                (false, false, false, false, true, false, false),
+                (false, false, false, false, true, false, false, false),
             ),
             (
                 "tab rename",
-                (false, false, false, false, false, true, false),
+                (false, false, false, false, false, true, false, false),
             ),
             (
                 "+ new-tab menu",
-                (false, false, false, false, false, false, true),
+                (false, false, false, false, false, false, true, false),
+            ),
+            (
+                "tab dragged toward the right half",
+                (false, false, false, false, false, false, false, true),
             ),
         ] {
-            let (overflow, tab_menu, palette, title, close, rename, new_tab) = args;
+            let (overflow, tab_menu, palette, title, close, rename, new_tab, tab_drag) = args;
             assert!(
                 SirioWorkspace::overlay_obscures_browsers(
-                    overflow, tab_menu, palette, title, close, rename, new_tab
+                    overflow, tab_menu, palette, title, close, rename, new_tab, tab_drag
                 ),
                 "an open {name} must hide the page so its rows stay clickable"
             );
         }
         assert!(
-            SirioWorkspace::overlay_obscures_browsers(true, true, true, true, true, true, true),
+            SirioWorkspace::overlay_obscures_browsers(
+                true, true, true, true, true, true, true, false
+            ),
             "overlapping overlays still obscure"
         );
     }
@@ -22479,6 +22995,7 @@ done
             let restore_launch_snapshot = self.fired.clone();
             let new_browser = self.fired.clone();
             let focus_address_bar = self.fired.clone();
+            let move_tab_to_other_pane = self.fired.clone();
             div()
                 .key_context(self.key_context)
                 .track_focus(&self.focus_handle)
@@ -22520,6 +23037,11 @@ done
                     focus_address_bar
                         .borrow_mut()
                         .push(WindowCommand::FocusAddressBar);
+                }))
+                .on_action(cx.listener(move |_, _: &MoveTabToOtherPane, _, _| {
+                    move_tab_to_other_pane
+                        .borrow_mut()
+                        .push(WindowCommand::MoveTabToOtherPane);
                 }))
                 .child("window command fixture")
         }
@@ -22676,44 +23198,47 @@ done
         );
     }
 
-    /// #319: the tab context menu offers no move-between-panes entry at all,
-    /// under any label. Two of them died here for different reasons —
-    /// F-TAB-12 removed a permanently-disabled "Move to This Pane", and the
-    /// center split removes the live "Move to Pane {id}" that replaced it —
-    /// so the assertion is on the *absence of the whole family*, not on one
-    /// spelling. A tab's half is derived from its `TabKind`, and no menu item
-    /// can change what a tab is.
-    ///
-    /// The fixture puts a Secondary tab beside a Primary one, which is the
-    /// state the deleted entries needed to be live in: with only one pane
-    /// populated they would have been absent anyway and this would assert
-    /// nothing.
+    /// Spec 2026-09-24 §5: a terminal or chat offers the move to the half it
+    /// is not in, named by direction; a kind that can never move does not
+    /// list it at all — absent means "never, for this kind", disabled would
+    /// mean "not now".
     #[gpui::test]
-    fn tab_context_menu_never_offers_a_move_between_panes(cx: &mut TestAppContext) {
+    fn tab_context_menu_offers_the_other_pane_only_to_terminals_and_chats(cx: &mut TestAppContext) {
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.tabs[1].kind = sirio_project::TabKind::Editor;
+            workspace.tabs[1].set_kind(sirio_project::TabKind::Editor);
             workspace.rebuild_center_split();
-            workspace.tab_menu_tab = Some(0);
             workspace
         });
+        let labels = |tab: usize, cx: &mut TestAppContext| {
+            workspace.update(cx, |workspace, _| {
+                workspace.tab_menu_tab = Some(tab);
+                workspace
+                    .tab_context_items()
+                    .iter()
+                    .map(|item| item.label().to_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
 
-        let items = workspace.read_with(cx, |workspace, _| workspace.tab_context_items());
+        let terminal = labels(0, cx);
+        assert!(terminal.iter().any(|label| label == "Move to Right Pane"));
+        assert!(!terminal.iter().any(|label| label == "Move to Left Pane"));
 
-        let offender = items
-            .iter()
-            .find(|item| item.label().contains("Pane") || item.label().contains("pane"));
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_tab_to_pane(0, PaneRole::Secondary, None, None, cx);
+        });
+        let moved = labels(0, cx);
+        assert!(moved.iter().any(|label| label == "Move to Left Pane"));
+
+        let editor = labels(1, cx);
         assert!(
-            offender.is_none(),
-            "no context item may name a pane destination, found {:?}",
-            offender.map(|item| item.label())
+            !editor.iter().any(|label| label.contains("Pane")),
+            "an editor never moves, so the move is not listed: {editor:?}"
         );
-
-        // The reordering entries that sat beside it must survive, so this
-        // fails on a re-addition rather than on the menu going empty.
         assert!(
-            items.iter().any(|item| item.label() == "Move Earlier"),
-            "reordering within a pane is still offered"
+            editor.iter().any(|label| label == "Move Earlier"),
+            "reordering within a half is still offered"
         );
     }
 
@@ -23458,6 +23983,7 @@ done
                     format!("Terminal {id}")
                 },
                 kind: TabKind::Terminal,
+                pane: TabKind::Terminal.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(id),
@@ -23709,6 +24235,7 @@ done
             persistence_id: "activity-terminal".into(),
             title: "Terminal".into(),
             kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(0),
@@ -23866,6 +24393,7 @@ done
             persistence_id: "urgency-terminal".into(),
             title: "Terminal".into(),
             kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
             agent_icon: None,
             agent_id: None,
             session_state: SessionTabState::with_root(0),
@@ -24982,6 +25510,7 @@ done
                 persistence_id: "live-chat".into(),
                 title: "Live Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(0),
@@ -26625,6 +27154,7 @@ done
                 persistence_id: "hidden-terminal-notification".into(),
                 title: "Hidden".into(),
                 kind: TabKind::Terminal,
+                pane: TabKind::Terminal.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(1),
@@ -28073,6 +28603,523 @@ done
         );
     }
 
+    /// M3: a context menu opened on the unfocused half is anchored to that
+    /// tab's drawn x range, not to the focused strip's accumulated width.
+    #[gpui::test]
+    async fn drawn_unfocused_half_tab_menu_opens_under_its_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[0].title = "A primary tab whose width exceeds the right-hand tab".into();
+            workspace.tabs[1].title = "B".into();
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx);
+            workspace.select_tab(0, None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        right_click_tab(&mut cx, 1);
+
+        let tab = cx.debug_bounds("workspace-tab-1").expect("right-hand tab");
+        let menu = cx
+            .debug_bounds("workspace-tab-menu-1")
+            .expect("right-hand tab menu");
+        assert!(
+            menu.left() >= tab.left() && menu.left() <= tab.right(),
+            "menu left edge {} must fall within tab x range {}..{}",
+            menu.left(),
+            tab.left(),
+            tab.right()
+        );
+    }
+
+    /// Spec 2026-09-24 §5: the drawn menu item moves the tab, focus follows
+    /// it to the right half, and the menu closes.
+    #[gpui::test]
+    async fn drawn_tab_context_menu_moves_a_terminal_to_the_right_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        right_click_tab(&mut cx, 1);
+        let item = cx
+            .debug_bounds("tab-command-move-to-other-pane")
+            .expect("the move is offered on a terminal");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![1]
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert!(!workspace.tab_menu_open, "the menu closes after the move");
+        });
+        let pane = cx
+            .debug_bounds("pane-secondary")
+            .expect("the right half is drawn");
+        let tab = cx
+            .debug_bounds("workspace-tab-1")
+            .expect("the moved tab is drawn");
+        assert!(pane.contains(&tab.center()));
+    }
+
+    /// Four terminals; 2 and 3 moved to the right half, 0 shown and focused
+    /// on the left. The right strip reads [2, 3].
+    fn drag_test_window(cx: &mut TestAppContext) -> (VisualTestContext, Entity<SirioWorkspace>) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 4);
+            workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx);
+            workspace.move_tab_to_pane(3, PaneRole::Secondary, None, None, cx);
+            workspace.select_tab(0, None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        (cx, workspace)
+    }
+
+    /// Presses on `from`, starts the drag, and hovers `to`, parking after
+    /// each step: the drop overlay only exists in a frame drawn after the
+    /// drag started, and the next move is dispatched against that frame.
+    fn begin_tab_drag(
+        cx: &mut VisualTestContext,
+        from: gpui::Point<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+    ) {
+        cx.simulate_event(MouseDownEvent {
+            position: from,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(from.x + px(30.0), from.y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(MouseMoveEvent {
+            position: to,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+    }
+
+    fn release_tab_drag(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        cx.simulate_event(MouseUpEvent {
+            position: at,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// Spec §5: released on the left edge of a right-hand tab, a terminal
+    /// lands just before it, marked by the insertion bar while hovering.
+    #[gpui::test]
+    async fn drawn_drop_between_two_right_tabs_lands_the_terminal_there(cx: &mut TestAppContext) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("tab 0 is drawn")
+            .center();
+        let target = cx.debug_bounds("workspace-tab-3").expect("tab 3 is drawn");
+        let before_three = point(target.origin.x + px(4.0), target.center().y);
+
+        begin_tab_drag(&mut cx, source, before_three);
+        assert!(
+            cx.debug_bounds("tab-drop-indicator-3").is_some(),
+            "the insertion bar marks the slot"
+        );
+        release_tab_drag(&mut cx, before_three);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 0, 3]
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert!(workspace.pane_drop_target.is_none());
+        });
+        assert!(
+            cx.debug_bounds("tab-drop-indicator-3").is_none(),
+            "the bar goes with the drag"
+        );
+    }
+
+    /// Spec §5: the body overlay fills only over the body, not while a strip
+    /// slot is targeted; the tab insertion bar remains the only strip cue.
+    #[gpui::test]
+    async fn drawn_strip_drop_shows_only_the_bar_until_the_body_is_hovered(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source tab is drawn")
+            .center();
+        let target = cx
+            .debug_bounds("workspace-tab-3")
+            .expect("target tab is drawn");
+        let before_three = point(target.origin.x + px(4.0), target.center().y);
+        begin_tab_drag(&mut cx, source, before_three);
+
+        assert!(cx.debug_bounds("tab-drop-indicator-3").is_some());
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_some());
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_none(),
+            "the insertion bar targets a strip slot, so the body remains clear"
+        );
+
+        let body = cx
+            .debug_bounds("secondary-surface")
+            .expect("the right body is drawn")
+            .center();
+        cx.simulate_event(MouseMoveEvent {
+            position: body,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_some(),
+            "hovering the body fills the overlay"
+        );
+        release_tab_drag(&mut cx, body);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3, 0]
+            );
+        });
+    }
+
+    /// F-TAB-24 + Spec §3: the cross-half drop hands the source half to the
+    /// neighbour from the tab's pre-drag slot, even after a live strip preview.
+    #[gpui::test]
+    async fn cross_half_drop_uses_the_pre_drag_neighbour_for_the_source_half(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.tabs[0].title = "A".into();
+            workspace.tabs[1].title = "B".into();
+            workspace.tabs[2].title = "C".into();
+            workspace.select_tab(1, None, cx);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let source = cx.debug_bounds("workspace-tab-1").expect("B is drawn");
+        let first = cx.debug_bounds("workspace-tab-0").expect("A is drawn");
+        let before_a = point(first.origin.x + px(4.0), first.center().y);
+        assert!(first.contains(&before_a));
+        begin_tab_drag(&mut cx, source.center(), before_a);
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tab_drag_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.dragged)
+            }),
+            Some(1),
+            "the drag starts on B"
+        );
+        // The same-half drag-move callbacks all receive the move; make the
+        // intended before-A slot the last preview before crossing halves.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.drag_over_tab(
+                RowDrag {
+                    scope: ReorderScope::Tabs,
+                    id: 1,
+                    group: None,
+                },
+                0,
+                true,
+                true,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.title.clone())
+                    .collect::<Vec<_>>()
+            }),
+            vec!["B".to_owned(), "A".to_owned(), "C".to_owned()],
+            "the left-strip hover must live-reorder B before crossing"
+        );
+
+        cx.debug_bounds("secondary-surface")
+            .expect("the right body is drawn");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.pane_drop_target = Some(PaneDropTarget {
+                pane: PaneRole::Secondary,
+                anchor: None,
+            });
+            workspace.drop_on_pane(
+                RowDrag {
+                    scope: ReorderScope::Tabs,
+                    id: 1,
+                    group: None,
+                },
+                PaneRole::Secondary,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let left = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.pane == PaneRole::Primary)
+                .map(|tab| tab.title.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(left, vec!["A".to_owned(), "C".to_owned()]);
+            let shown = workspace.center_split.active(PaneRole::Primary).unwrap();
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == shown)
+                    .unwrap()
+                    .title,
+                "C"
+            );
+        });
+    }
+
+    /// Spec §5: released anywhere on the right half's body, a terminal lands
+    /// last in that strip.
+    #[gpui::test]
+    async fn drawn_drop_on_the_right_body_puts_the_terminal_last(cx: &mut TestAppContext) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("tab 0 is drawn")
+            .center();
+        let body = cx
+            .debug_bounds("secondary-surface")
+            .expect("the right body is drawn")
+            .center();
+
+        begin_tab_drag(&mut cx, source, body);
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary").is_some(),
+            "the right body is a drop target while the terminal is dragged"
+        );
+        release_tab_drag(&mut cx, body);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3, 0]
+            );
+        });
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_none());
+    }
+
+    /// Spec §5, "Refused silently": an editor dragged toward the left half
+    /// gets no drop surface and stays right.
+    #[gpui::test]
+    async fn drawn_editor_dragged_left_stays_right(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].set_kind(TabKind::Editor);
+            workspace.rebuild_center_split();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let source = cx
+            .debug_bounds("workspace-tab-1")
+            .expect("editor tab drawn")
+            .center();
+        let left = cx
+            .debug_bounds("centre-surface")
+            .expect("left body drawn")
+            .center();
+
+        begin_tab_drag(&mut cx, source, left);
+        assert!(cx.debug_bounds("pane-drop-overlay-primary").is_none());
+        release_tab_drag(&mut cx, left);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let editor = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 1)
+                .expect("tab 1");
+            assert_eq!(editor.pane, PaneRole::Secondary);
+        });
+    }
+
+    /// Review Focus 5: leaving every target clears the bar, and a release
+    /// over nothing moves nothing and leaves no snapshot or target behind for
+    /// a later divider drag to trip over.
+    #[gpui::test]
+    async fn drawn_drag_that_leaves_every_target_draws_nothing_and_leaves_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("tab 0 is drawn")
+            .center();
+        let target = cx.debug_bounds("workspace-tab-3").expect("tab 3 is drawn");
+        let over = point(target.origin.x + px(4.0), target.center().y);
+        begin_tab_drag(&mut cx, source, over);
+        assert!(cx.debug_bounds("tab-drop-indicator-3").is_some());
+
+        // The window's top edge: above every strip and body.
+        let left = cx.debug_bounds("pane-primary").expect("left half drawn");
+        let outside = point(left.center().x, px(1.0));
+        cx.simulate_event(MouseMoveEvent {
+            position: outside,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("tab-drop-indicator-3").is_none(),
+            "no target, no bar"
+        );
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.pane_drop_target.is_none()));
+
+        release_tab_drag(&mut cx, outside);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3],
+                "a release over no target moves nothing"
+            );
+            assert!(workspace.tab_drag_snapshot.is_none());
+            assert!(workspace.pane_drop_target.is_none());
+        });
+    }
+
+    /// M6: a tab drag released on a sidebar row has no pane target, and the
+    /// render-time cleanup leaves neither drag marker nor target behind.
+    #[gpui::test]
+    async fn drawn_tab_drop_on_sidebar_clears_its_drag_state(cx: &mut TestAppContext) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source tab is drawn")
+            .center();
+        let sidebar = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the selected worktree row is drawn");
+        let target = sidebar.center();
+        let before = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut placements = workspace
+                .tabs
+                .iter()
+                .map(|tab| (tab.id, tab.pane))
+                .collect::<Vec<_>>();
+            placements.sort_by_key(|(id, _)| *id);
+            (
+                workspace.center_split.active(PaneRole::Primary),
+                workspace.center_split.active(PaneRole::Secondary),
+                placements,
+            )
+        });
+
+        begin_tab_drag(&mut cx, source, target);
+        for selector in [
+            "tab-drop-indicator-0",
+            "tab-drop-indicator-1",
+            "tab-drop-indicator-2",
+            "tab-drop-indicator-3",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "{selector} is not drawn"
+            );
+        }
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_some());
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_none(),
+            "the sidebar is not a pane-body target"
+        );
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.pane_drop_target.is_none()));
+
+        release_tab_drag(&mut cx, target);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(workspace.tab_drag_snapshot.is_none());
+            assert!(workspace.pane_drop_target.is_none());
+            assert_eq!(
+                (
+                    workspace.center_split.active(PaneRole::Primary),
+                    workspace.center_split.active(PaneRole::Secondary),
+                    {
+                        let mut placements = workspace
+                            .tabs
+                            .iter()
+                            .map(|tab| (tab.id, tab.pane))
+                            .collect::<Vec<_>>();
+                        placements.sort_by_key(|(id, _)| *id);
+                        placements
+                    },
+                ),
+                before,
+                "the sidebar drop does not change either pane's tabs or shown tab"
+            );
+        });
+    }
+
     /// F-TAB-24: `preview_tab_reorder` mutates the live tab vector on every
     /// hover crossing, with no on-drop commit step and (until this fix) no
     /// Escape handling and no pre-drag snapshot anywhere in the drag path --
@@ -28544,6 +29591,272 @@ done
         );
     }
 
+    /// Spec 2026-09-24 §3: the split reads the half stored on the tab, so a
+    /// terminal stored on the right is a right-hand tab and focuses there.
+    #[gpui::test]
+    fn a_terminal_stored_on_the_right_is_a_right_hand_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].pane = PaneRole::Secondary;
+            workspace.rebuild_center_split();
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Primary, &workspace.tabs),
+                vec![0]
+            );
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![1]
+            );
+            workspace.select_tab(1, None, cx);
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            workspace
+        });
+    }
+
+    /// The `TerminalView` entity a tab holds. The same id before and after a
+    /// move is the proof the PTY was not restarted.
+    fn terminal_entity_id(workspace: &SirioWorkspace, tab_id: usize) -> gpui::EntityId {
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .expect("the tab exists");
+        let mut id = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Terminal { view } = content {
+                id = Some(view.entity_id());
+            }
+        });
+        id.expect("the tab holds a terminal")
+    }
+
+    /// Spec §3: moving a terminal re-homes it on the right, hands the left
+    /// half to the tab that slid into its place, and focuses the moved tab.
+    #[gpui::test]
+    fn moving_a_terminal_right_hands_the_left_half_to_its_nearest_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            workspace.select_tab(1, None, cx);
+
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx));
+
+            let moved = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 1)
+                .expect("tab 1");
+            assert_eq!(moved.pane, PaneRole::Secondary);
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Primary, &workspace.tabs),
+                vec![0, 2]
+            );
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![1]
+            );
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Primary),
+                Some(2),
+                "the tab that slid into its place"
+            );
+            assert_eq!(workspace.center_split.active(PaneRole::Secondary), Some(1));
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert_eq!(workspace.tabs[workspace.active_tab].id, 1);
+            workspace
+        });
+    }
+
+    /// Spec §3: the one writer refuses a kind that cannot move and a move
+    /// into the half the tab is already in.
+    #[gpui::test]
+    fn only_a_terminal_or_chat_moves_and_never_into_its_own_half(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].set_kind(TabKind::Editor);
+            workspace.rebuild_center_split();
+            let before = workspace
+                .tabs
+                .iter()
+                .map(|tab| (tab.id, tab.pane))
+                .collect::<Vec<_>>();
+
+            assert!(
+                !workspace.move_tab_to_pane(1, PaneRole::Primary, None, None, cx),
+                "an editor stays in the right half"
+            );
+            assert!(
+                !workspace.move_tab_to_pane(0, PaneRole::Primary, None, None, cx),
+                "a terminal already on the left goes nowhere"
+            );
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.id, tab.pane))
+                    .collect::<Vec<_>>(),
+                before
+            );
+            workspace
+        });
+    }
+
+    /// Spec §3 step 4: a tab cannot move into a half that is not drawn.
+    #[gpui::test]
+    fn moving_into_a_hidden_right_half_reveals_it(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.set_secondary_pane_hidden(true, cx);
+            assert!(!workspace.secondary_pane_visible());
+
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx));
+
+            assert!(workspace.secondary_pane_visible());
+            workspace
+        });
+    }
+
+    /// Review Focus 1: a move is not a worktree change, and a moved tab
+    /// closes like any right-hand tab — the right half falls to its nearest
+    /// remaining tab and the left half does not change.
+    #[gpui::test]
+    fn a_moved_tab_keeps_its_worktree_and_closes_like_any_right_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            let owner = workspace.tab_worktree_path(1);
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx);
+            assert_eq!(workspace.tab_worktree_path(1), owner);
+
+            workspace.select_tab(1, None, cx);
+            let index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.id == 1)
+                .expect("tab 1");
+            workspace.close_tab(index, None, cx);
+
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2]
+            );
+            assert_eq!(workspace.center_split.active(PaneRole::Secondary), Some(2));
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Primary, &workspace.tabs),
+                vec![0]
+            );
+            workspace
+        });
+    }
+
+    /// Review Focus 2: hiding the right half while a moved terminal holds
+    /// focus keeps the tab, returns focus left, and selecting the tab — what
+    /// a sidebar row click reaches — reveals the half again.
+    #[gpui::test]
+    fn hiding_the_right_half_keeps_a_moved_terminal_and_selecting_it_reveals_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+
+            workspace.toggle_secondary_pane(cx);
+            assert!(!workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+            assert!(
+                workspace.tabs.iter().any(|tab| tab.id == 1),
+                "hiding never closes"
+            );
+
+            workspace.select_tab(1, None, cx);
+            assert!(workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            workspace
+        });
+    }
+
+    /// Spec §7: moving the last left-hand tab out leaves the left half on
+    /// its launcher, not on an empty surface.
+    #[gpui::test]
+    async fn drawn_left_half_falls_back_to_its_launcher_when_its_last_tab_moves_out(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.move_tab_to_pane(0, PaneRole::Secondary, None, Some(window), cx));
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("empty-worktree-new-terminal").is_some(),
+            "the left half shows its launcher"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-0").is_some(),
+            "the tab is drawn on the right"
+        );
+    }
+
+    /// Spec §0/§8: the moved tab holds the very same `TerminalView` — the
+    /// PTY was not restarted — and is drawn in the right half's strip.
+    #[gpui::test]
+    async fn drawn_moved_terminal_is_the_same_view_inside_the_right_half(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let before = workspace.read_with(&cx.cx, |workspace, _| terminal_entity_id(workspace, 1));
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, Some(window), cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| terminal_entity_id(workspace, 1)),
+            before,
+            "the same entity, so the same PTY"
+        );
+        let pane = cx
+            .debug_bounds("pane-secondary")
+            .expect("the right half is drawn");
+        let tab = cx
+            .debug_bounds("workspace-tab-1")
+            .expect("the moved tab is drawn");
+        assert!(
+            pane.contains(&tab.center()),
+            "the moved tab sits in the right strip"
+        );
+    }
+
     /// #320: both halves always show which of their tabs is current, but
     /// only the focused half's underline is in the full text colour; the
     /// other half's is faint. The selector carries the state so the test
@@ -28571,6 +29884,7 @@ done
                 persistence_id: "underline-doc".into(),
                 title: "note.md".into(),
                 kind: TabKind::Editor,
+                pane: TabKind::Editor.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(1),
@@ -28790,6 +30104,7 @@ done
                 persistence_id: "wsp01-chat".into(),
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: None,
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(2),
@@ -28812,6 +30127,7 @@ done
                 persistence_id: "wsp01-doc".into(),
                 title: "note.md".into(),
                 kind: TabKind::Editor,
+                pane: TabKind::Editor.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(3),
@@ -28892,6 +30208,7 @@ done
                 persistence_id: "test-chat".into(),
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(0),
@@ -29980,6 +31297,7 @@ done
                 persistence_id: "resumed-chat".into(),
                 title: "Resumed chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(1),
@@ -30191,7 +31509,7 @@ done
         let file_view = cx.update(|_, cx| cx.new(|cx| FileView::new(path.clone(), cx)));
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs[0].title = "status".into();
-            workspace.tabs[0].kind = TabKind::Editor;
+            workspace.tabs[0].set_kind(TabKind::Editor);
             workspace.tabs[0].panes = PaneNode::leaf(
                 0,
                 TabContent::File {
@@ -30243,7 +31561,7 @@ done
         let file_view = cx.update(|_, app| app.new(|cx| FileView::new(path.clone(), cx)));
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs[0].title = "Note".into();
-            workspace.tabs[0].kind = TabKind::Editor;
+            workspace.tabs[0].set_kind(TabKind::Editor);
             // #323: see the matching comment in the tab-status test.
             workspace.open_secondary_pane();
             workspace.tabs[0].panes = PaneNode::leaf(
@@ -30753,12 +32071,12 @@ done
 
         // #374: on Windows the s/i/o chords are bound as d/r/h instead
         // (system-wide hotkeys swallow the former before they ever reach
-        // the window), so the same nine actions are driven through the
+        // the window), so the same ten actions are driven through the
         // platform chords there, in the same order.
         let chords = if cfg!(target_os = "windows") {
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-d ctrl-shift-r ctrl-shift-b ctrl-shift-h ctrl-shift-l ctrl-l"
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-d ctrl-shift-r ctrl-shift-b ctrl-shift-h ctrl-shift-l ctrl-l ctrl-shift-m"
         } else {
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l"
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l ctrl-shift-m"
         };
         cx.simulate_keystrokes(chords);
         cx.run_until_parked();
@@ -30775,6 +32093,7 @@ done
                 WindowCommand::RestoreLaunchSnapshot,
                 WindowCommand::NewBrowser,
                 WindowCommand::FocusAddressBar,
+                WindowCommand::MoveTabToOtherPane,
             ],
             "Linux primary and secondary chords must reach typed shell actions"
         );
@@ -30841,7 +32160,7 @@ done
         } else {
             "ctrl-shift-s"
         };
-        cx.simulate_keystrokes(&format!("{sidebar} ctrl-shift-b"));
+        cx.simulate_keystrokes(&format!("{sidebar} ctrl-shift-b ctrl-shift-m"));
         cx.run_until_parked();
 
         assert_eq!(
@@ -30849,6 +32168,7 @@ done
             &[
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleSecondaryPane,
+                WindowCommand::MoveTabToOtherPane,
             ],
             "the ctrl-shift family must keep reaching the shell from inside a terminal"
         );
@@ -30884,6 +32204,7 @@ done
                 (WindowCommand::RestoreLaunchSnapshot, restore),
                 (WindowCommand::NewBrowser, "ctrl-shift-l"),
                 (WindowCommand::FocusAddressBar, "ctrl-l"),
+                (WindowCommand::MoveTabToOtherPane, "ctrl-shift-m"),
             ]
         );
     }
@@ -30923,6 +32244,141 @@ done
         // The untouched family members keep their chords on every platform.
         assert_eq!(hint(WindowCommand::ToggleSecondaryPane), "Ctrl+Shift+B");
         assert_eq!(hint(WindowCommand::NewBrowser), "Ctrl+Shift+L");
+        assert_eq!(hint(WindowCommand::MoveTabToOtherPane), "Ctrl+Shift+M");
+    }
+
+    #[test]
+    fn moving_to_the_other_pane_needs_a_terminal_or_chat() {
+        for kind in [TabKind::Terminal, TabKind::AgentChat] {
+            assert_eq!(
+                window_command_availability(WindowCommand::MoveTabToOtherPane, Some(kind)),
+                WindowCommandAvailability::Enabled
+            );
+        }
+        for kind in [
+            None,
+            Some(TabKind::Browser),
+            Some(TabKind::Editor),
+            Some(TabKind::Diff),
+            Some(TabKind::ProjectSettings),
+        ] {
+            assert_eq!(
+                window_command_availability(WindowCommand::MoveTabToOtherPane, kind),
+                WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoMovableTab)
+            );
+        }
+    }
+
+    /// Spec §5 + Review Focus 4: the chord moves the focused half's shown tab
+    /// and focus follows, so twice is a round trip; with nothing movable
+    /// focused it changes nothing.
+    #[gpui::test]
+    async fn ctrl_shift_m_moves_the_focused_tab_across_and_back(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let press = |cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.handle_move_tab_to_other_pane(&MoveTabToOtherPane, window, cx);
+            });
+            cx.run_until_parked();
+        };
+        workspace.update(&mut cx, |workspace, cx| workspace.select_tab(1, None, cx));
+
+        press(&mut cx);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().find(|t| t.id == 1).unwrap().pane,
+                PaneRole::Secondary
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+
+        press(&mut cx);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().find(|t| t.id == 1).unwrap().pane,
+                PaneRole::Primary
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[1].set_kind(TabKind::Editor);
+            workspace.rebuild_center_split();
+            workspace.select_tab(1, None, cx);
+        });
+        press(&mut cx);
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().find(|t| t.id == 1).unwrap().pane,
+                PaneRole::Secondary,
+                "an editor focused on the right stays there"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_center_split();
+            cx.notify();
+        });
+        press(&mut cx);
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.is_empty()),
+            "nothing to move: nothing happens, and nothing panics"
+        );
+    }
+
+    /// F-TERM-11: a stale tab retained under a deselected worktree must not
+    /// move or reveal the Secondary pane when Ctrl+Shift+M is dispatched.
+    #[gpui::test]
+    async fn ctrl_shift_m_does_nothing_without_a_current_worktree(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.secondary_pane_hidden = true;
+            workspace.select_tab(1, None, cx);
+            let path = workspace.working_directory.clone();
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!workspace.read_with(&cx.cx, |workspace, _| workspace.has_current_worktree()));
+        let before = workspace.read_with(&cx.cx, |workspace, _| {
+            (workspace.tabs[1].pane, workspace.secondary_pane_hidden)
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_move_tab_to_other_pane(&MoveTabToOtherPane, window, cx);
+        });
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                (workspace.tabs[1].pane, workspace.secondary_pane_hidden),
+                before,
+                "the stale movable tab and hidden-pane choice stay unchanged"
+            );
+        });
     }
 
     #[test]
@@ -36717,7 +38173,7 @@ done
                 "the tab names the project like the sheet heading did"
             );
             assert_eq!(
-                workspace.tabs[index].kind.pane_role(),
+                workspace.tabs[index].pane,
                 PaneRole::Secondary,
                 "settings live in the Secondary half"
             );
@@ -37006,7 +38462,7 @@ done
         cx.set_global(Theme::light());
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.tabs[1].set_kind(TabKind::Editor);
             workspace.active_tab = 1;
             workspace.secondary_pane_hidden = true;
             workspace.rebuild_center_split();
@@ -37322,6 +38778,8 @@ done
         );
         for selector in [
             "secondary-launcher",
+            "launcher-terminal",
+            "launcher-chat",
             "launcher-browser",
             "launcher-changes",
             "launcher-open-file",
@@ -37334,6 +38792,121 @@ done
             cx.debug_bounds("secondary-pane-close").is_some(),
             "the `×` closes the pane itself, so an empty strip draws it too"
         );
+    }
+
+    /// Spec 2026-09-24 §5: the right launcher's Terminal tile opens a
+    /// terminal in the right half, focused there.
+    #[gpui::test]
+    async fn drawn_right_terminal_tile_opens_a_terminal_on_the_right(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
+
+        let tile = cx
+            .debug_bounds("launcher-terminal")
+            .expect("the tile is drawn");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(workspace.tabs.len(), before + 1);
+            let opened = workspace
+                .tabs
+                .iter()
+                .max_by_key(|tab| tab.id)
+                .expect("a tab");
+            assert_eq!(opened.kind, TabKind::Terminal);
+            assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Primary),
+                Some(0),
+                "opening on the right must leave the left half showing A"
+            );
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(opened.id),
+                "the new terminal is shown on the right"
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+    }
+
+    /// Spec 2026-09-24 §5: the right launcher's Chat tile opens the agent
+    /// picker under itself — not the left one's — and the picked chat opens
+    /// on the right.
+    #[gpui::test]
+    async fn drawn_right_chat_tile_opens_its_own_picker_and_a_chat_on_the_right(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        // Drain the construction-time launch-source refresh before the
+        // override, as `drawn_selected_worktree_without_tabs_offers_new_chat_picker` does.
+        cx.run_until_parked();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_tab(0, None, cx);
+            workspace.launch.sources.insert(
+                "codex".into(),
+                sirio_registry::LaunchSource::Builtin {
+                    program: "codex-acp".into(),
+                    args: Vec::new(),
+                },
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let tile = cx.debug_bounds("launcher-chat").expect("the tile is drawn");
+        cx.simulate_click(tile.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("secondary-empty-chat-agent-menu").is_some());
+        assert!(
+            cx.debug_bounds("empty-chat-agent-menu").is_none(),
+            "not the left picker"
+        );
+
+        let agent = cx
+            .debug_bounds("secondary-empty-chat-agent-codex")
+            .expect("the right picker lists Codex");
+        cx.simulate_click(agent.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let opened = workspace
+                .tabs
+                .iter()
+                .max_by_key(|tab| tab.id)
+                .expect("a tab");
+            assert_eq!(opened.kind, TabKind::AgentChat);
+            assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Primary),
+                Some(0),
+                "opening on the right must leave the left half showing A"
+            );
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(opened.id),
+                "the new chat is shown on the right"
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert_eq!(workspace.empty_chat_picker_open, None, "the picker closes");
+        });
     }
 
     /// The strip's `×` closes the Secondary pane the way Ctrl+Shift+B does:
@@ -37455,18 +39028,21 @@ done
             cx.debug_bounds("command-palette-empty").is_some(),
             "the palette shows no row to click"
         );
-        let launcher_center = cx
+        let launcher = cx
             .debug_bounds("launcher-browser")
-            .expect("the launcher is still drawn under the palette")
-            .center();
+            .expect("the launcher is still drawn under the palette");
         let palette = cx
             .debug_bounds("command-palette")
             .expect("the palette is open");
-        assert!(
-            palette.contains(&launcher_center),
-            "the palette must cover the launcher tile in the test window"
+        let overlap_point = point(
+            launcher.left().max(palette.left()) + px(1.0),
+            launcher.top().max(palette.top()) + px(1.0),
         );
-        cx.simulate_click(launcher_center, Modifiers::none());
+        assert!(
+            launcher.contains(&overlap_point) && palette.contains(&overlap_point),
+            "the palette must overlap the launcher tile in the test window"
+        );
+        cx.simulate_click(overlap_point, Modifiers::none());
         cx.run_until_parked();
 
         workspace.read_with(&cx.cx, |workspace, _| {
@@ -38039,6 +39615,7 @@ done
                 persistence_id: "test-chat".into(),
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
+                pane: TabKind::AgentChat.default_pane(),
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(0),
@@ -38306,7 +39883,7 @@ browser  profile  "
         let window = cx.add_window(|_, cx| {
             let mut workspace =
                 palette_test_workspace_with_tab_count_and_translucency(cx, 2, false);
-            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.tabs[1].set_kind(TabKind::Editor);
             workspace.open_secondary_pane();
             // `rebuild_center_split` reads the focused half off `active_tab`.
             workspace.active_tab = 1;
@@ -38353,7 +39930,7 @@ browser  profile  "
     ) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.tabs[1].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
             workspace.rebuild_center_split();
             let browser_id = workspace.tabs[1].id;
             workspace.select_tab(browser_id, None, cx);
@@ -38426,6 +40003,7 @@ browser  profile  "
                 persistence_id: "test-editor".into(),
                 title: "open.rs".into(),
                 kind: TabKind::Editor,
+                pane: TabKind::Editor.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(0),
@@ -38540,8 +40118,8 @@ browser  profile  "
     fn layout_marks_the_tab_each_pane_shows(cx: &mut TestAppContext) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            workspace.tabs[1].kind = TabKind::Browser;
-            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
+            workspace.tabs[2].set_kind(TabKind::Browser);
             workspace.active_tab = 0;
             workspace.rebuild_center_split();
             workspace
@@ -38569,8 +40147,8 @@ browser  profile  "
     fn the_unfocused_pane_comes_back_on_its_shown_tab(cx: &mut TestAppContext) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            workspace.tabs[1].kind = TabKind::Browser;
-            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
+            workspace.tabs[2].set_kind(TabKind::Browser);
             workspace.active_tab = 0;
             workspace.center_split = CenterSplit::new(&workspace.tabs);
 
@@ -38607,8 +40185,8 @@ browser  profile  "
     fn a_stale_live_shown_flag_does_not_override_the_saved_one(cx: &mut TestAppContext) {
         cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            workspace.tabs[1].kind = TabKind::Browser;
-            workspace.tabs[2].kind = TabKind::Browser;
+            workspace.tabs[1].set_kind(TabKind::Browser);
+            workspace.tabs[2].set_kind(TabKind::Browser);
             workspace.tabs[1].session_state.shown_in_pane = true;
             workspace.active_tab = 0;
             workspace.center_split = CenterSplit::new(&workspace.tabs);
@@ -38638,6 +40216,115 @@ browser  profile  "
                 "the saved flag wins over a stale live one"
             );
             workspace
+        });
+    }
+
+    /// Spec 2026-09-24 §6: a terminal left in the right half is saved there
+    /// and comes back there — as the tab that half shows — through the same
+    /// restore function launch uses.
+    #[gpui::test]
+    async fn a_terminal_moved_right_comes_back_right_after_a_restart(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let restored = workspace.update(&mut cx, |workspace, cx| {
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            let layout = workspace.layout(cx);
+            assert_eq!(layout.tab_states[1].pane, "secondary");
+            assert_eq!(layout.tab_states[0].pane, "primary");
+            assert!(layout.tab_states[1].shown_in_pane);
+            RestoredSession {
+                working_directory: layout.working_directory.clone(),
+                tabs: layout.tabs.clone(),
+                tab_states: layout.tab_states.clone(),
+                diagnostics: Vec::new(),
+            }
+        });
+        let working_directory =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        let tabs = cx.update(|window, cx| {
+            let mut activity = AgentActivityModel::new();
+            let (tabs, _) = restore_tabs(
+                &restored,
+                &working_directory,
+                Some(window),
+                &mut activity,
+                &BTreeMap::new(),
+                false,
+                cx,
+            );
+            tabs
+        });
+
+        let back = tabs
+            .iter()
+            .find(|tab| tab.persistence_id == restored.tabs[1].id)
+            .expect("the terminal is restored");
+        let restored_tab_id = back.id;
+        assert_eq!(back.kind, TabKind::Terminal);
+        assert_eq!(
+            back.pane,
+            PaneRole::Secondary,
+            "back in the half it was left in"
+        );
+        let mut split = CenterSplit::new(&tabs);
+        seed_shown_tabs(&mut split, &tabs, &restored);
+        assert_eq!(
+            split.active(PaneRole::Secondary),
+            Some(back.id),
+            "and it is what that half shows"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs = tabs;
+            workspace.active_tab = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.id == restored_tab_id)
+                .expect("the restored terminal is in the strip");
+            workspace.rebuild_center_split();
+            workspace.sync_sidebar_tabs(ParkedRows::Read, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-pill-1-1").is_some(),
+            "the moved terminal is listed under its worktree after restore"
+        );
+    }
+
+    /// Review Focus 3: a restore-time rebuild (`rebuild_center_split` on a
+    /// live workspace) with an active moved terminal in the hidden right half
+    /// must reveal it — the same repair
+    /// `restoring_an_active_secondary_tab_reopens_the_secondary_pane` pins
+    /// for an editor, now reading the stored half.
+    #[gpui::test]
+    async fn a_hidden_right_half_holding_the_active_moved_terminal_is_revealed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].pane = PaneRole::Secondary;
+            workspace.active_tab = 1;
+            workspace.secondary_pane_hidden = true;
+            workspace.rebuild_center_split();
+            workspace
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert_eq!(workspace.center_split.active(PaneRole::Secondary), Some(1));
         });
     }
 
@@ -38795,6 +40482,7 @@ browser  profile  "
                 persistence_id: "test-browser".into(),
                 title: "Browser".into(),
                 kind: TabKind::Browser,
+                pane: TabKind::Browser.default_pane(),
                 agent_icon: None,
                 agent_id: None,
                 session_state: SessionTabState::with_root(0),
@@ -40347,6 +42035,7 @@ browser  profile  "
             persistence_id: persistence_id.to_owned(),
             title: "Saved chat".into(),
             kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
             agent_icon: agent_id.and_then(Icon::for_agent_id),
             agent_id: agent_id.map(str::to_owned),
             session_state: SessionTabState::with_root(pane_id),
