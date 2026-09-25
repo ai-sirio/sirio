@@ -144,7 +144,7 @@ pub struct LauncherItem<A> {
     pub action: A,
     pub icon: Icon,
     pub label: SharedString,
-    pub shortcut: Option<SharedString>, // from `window_shortcut_hint`
+    pub shortcut: Option<SharedString>, // optional; None omits the row
     pub disabled: Option<SharedString>, // the reason, shown as a tooltip
 }
 
@@ -165,18 +165,19 @@ narrow. bezel has no launcher tile: `option_card` is a fixed 148 px preview fram
 `row_tile` a 36 px identity mark. The tile is therefore drawn from bezel's
 tokens — `panel_radius`, `border`, `ink(0.03)` — the way
 `settings::agents_page` draws its identity tile: a 64 px square with the icon,
-the label under it, the shortcut under that in faint text. A disabled tile is dimmed, never calls `on_click`, and
+the label under it, and an optional shortcut under that in faint text. A disabled tile is dimmed, never calls `on_click`, and
 explains itself through a bezel tooltip. There is no headline and no orbit
 mark — the tiles are the whole state, as in Zed.
 
-`shortcut` is read from `window_shortcut_hint`, never written out again, so
-the #374 Windows chords stay right automatically.
+The centre-pane launchers leave `shortcut` as `None`, so they draw no shortcut
+row. This changes only the empty-pane presentation; the corresponding
+`WindowCommand` bindings remain unchanged.
 
 ### Primary, worktree selected, no tabs
 
 | Tile | Action |
 |---|---|
-| Terminal (`Icon::SquareTerminal`, Ctrl+T) | `add_terminal_tab` |
+| Terminal (`Icon::SquareTerminal`) | `add_terminal_tab` |
 | Chat (`Icon::MessageSquare`) | opens the existing agent picker (`empty-chat-agent-menu`), anchored under the tile |
 
 The debug selectors current tests use (`empty-worktree`,
@@ -188,11 +189,11 @@ are kept wherever the element survives, so no test changes without a reason.
 
 | Tile | Action |
 |---|---|
-| Browser (`Icon::Globe`, Ctrl+Shift+L) | `open_action(NewTabAction::NewBrowser, …)` — exactly what `handle_new_browser` calls |
+| Browser (`Icon::Globe`) | `open_action(NewTabAction::NewBrowser, …)` — exactly what `handle_new_browser` calls |
 | Changes (`Icon::Diff`) | `add_changes_tab(None)`; **disabled** when the worktree is not a git repository |
-| Open File (`Icon::File`, Ctrl+O) | dispatches `OpenFile` — the existing native dialog in `handle_open_file`; a cancelled dialog does nothing |
+| Open File (`Icon::File`) | dispatches `OpenFile` — the existing native dialog in `handle_open_file`; a cancelled dialog does nothing |
 | Project Settings (`Icon::Settings`) | `add_project_settings_tab` for the project the current worktree belongs to |
-| Hide Pane (`Icon::Close`, Ctrl+Shift+B) | `set_secondary_pane_hidden(true)`, the strip's `×` as a tile (added in 0.25) |
+| Hide Pane (`Icon::Close`) | `set_secondary_pane_hidden(true)`, the strip's `×` as a tile (added in 0.25) |
 
 ### No worktree selected
 

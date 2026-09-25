@@ -1,5 +1,5 @@
 //! The launcher an empty centre pane shows: one tile per surface that pane
-//! can open, each with its keyboard chord under it.
+//! can open, with an optional keyboard chord under it.
 //!
 //! A render function, not an entity — it holds no state. What a tile *does*
 //! stays with the host (`sirio`'s `main.rs`), the only place that can create
