@@ -5435,6 +5435,7 @@ impl SirioWorkspace {
         })
         .detach();
         workspace.apply_saved_sidebar_view(cx);
+        workspace.session.prune_closed_chats(unix_now_ms());
         workspace.refresh_closed_sessions(cx);
         workspace
     }
@@ -40264,6 +40265,80 @@ browser  profile  "
             })
             .expect("save transcript");
         tab_id
+    }
+
+    #[gpui::test]
+    async fn startup_prunes_expired_closed_chats_before_listing(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("startup-prune");
+        let database_path = root.join("sirio.sqlite");
+        let db = AppDatabase::open(&database_path).expect("open startup database");
+        db.save_project(&sirio_persistence::ProjectRecord::new(
+            "urgency-project",
+            "Urgency Project",
+            worktrees[0].to_string_lossy().into_owned(),
+        ))
+        .expect("save project");
+        let worktree_id = stable_worktree_id("urgency-project", &worktrees[0]);
+        db.save_worktree(&sirio_persistence::WorktreeRecord::new(
+            &worktree_id,
+            "urgency-project",
+            "branch-0",
+            worktrees[0].to_string_lossy().into_owned(),
+        ))
+        .expect("save worktree");
+        db.save_tab(&sirio_persistence::TabRecord::new(
+            "expired-chat",
+            &worktree_id,
+            "Expired chat",
+            "chat",
+        ))
+        .expect("save chat");
+        db.save_chat_transcript(&sirio_persistence::ChatTranscript {
+            tab_id: "expired-chat".into(),
+            turns: vec![sirio_persistence::ChatTurn {
+                entries: vec![sirio_persistence::ChatEntry::UserMessage {
+                    text: "hello".into(),
+                    at: None,
+                }],
+            }],
+        })
+        .expect("save transcript");
+        db.archive_tab(
+            "expired-chat",
+            unix_now_ms().saturating_sub(sirio_persistence::CLOSED_CHAT_MAX_AGE_MS + 1),
+        )
+        .expect("archive expired chat");
+        assert_eq!(db.closed_chats(50).expect("before startup").len(), 1);
+        drop(db);
+
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+
+        assert!(
+            AppDatabase::open(&database_path)
+                .expect("reopen startup database")
+                .closed_chats(50)
+                .expect("after startup")
+                .is_empty(),
+            "startup should prune expired archived rows"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, cx| workspace
+                .sidebar
+                .read(cx)
+                .closed_session_ids()
+                .is_empty()),
+            "startup should omit expired chats from the sidebar"
+        );
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]
