@@ -82,19 +82,20 @@
 //! that type's docs explain why a theme `danger` cannot stand in for it.
 //!
 //! Row layout, left to right: traffic lights (Linux CSD only) → cluster
-//! (sidebar toggle, back, forward, `+`) → accent dot + title → muted
+//! (sidebar toggle, back, forward) → accent dot + title → muted
 //! subtitle → (spacer) → history, right-panel toggle → the Windows caption
 //! buttons (Windows only), flush to the trailing edge. The far-right
 //! scope/branch pills and collapse/expand controls from the screenshot are
-//! **not built** — see the P76 report for why.
+//! **not built** — see the P76 report for why. Neither is the screenshot's
+//! trailing `+`: the tab bar already owns new-tab, and a second one here
+//! was never wired to anything.
 //!
-//! Back/forward/`+` have no data to act on from inside this crate (no
-//! navigation history, no new-tab concept lives here) — rather than ship
-//! live-looking dead buttons, they render muted and inert until a host
-//! injects a handler via [`Titlebar::on_back`] / [`Titlebar::on_forward`] /
-//! [`Titlebar::on_new_tab`]. That is the seam left for `codex12`; wiring it
-//! needs no change to this file or to `main.rs`'s `TitlebarEvent` match —
-//! these are plain closures, not a widened enum.
+//! Back/forward have no data to act on from inside this crate (no
+//! navigation history lives here) — rather than ship live-looking dead
+//! buttons, they render muted and inert until a host injects a handler via
+//! [`Titlebar::on_back`] / [`Titlebar::on_forward`]. That is the seam left
+//! for `codex12`; wiring it needs no change to this file or to `main.rs`'s
+//! `TitlebarEvent` match — these are plain closures, not a widened enum.
 
 use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
@@ -190,13 +191,11 @@ pub struct Titlebar {
     on_maximize: Rc<dyn Fn(&mut Window)>,
     on_back: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     on_forward: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
-    on_new_tab: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     /// F-WIN-07: this app draws no in-window menu bar by design (see the
     /// module docs), so this cluster button is the surface's stand-in for
     /// the reference app's "History > Restore Previous Launch" menu entry.
-    /// Unwired (the default), it renders muted like `on_back`/`on_forward`/
-    /// `on_new_tab` above, for the same "no live-looking dead control"
-    /// reason.
+    /// Unwired (the default), it renders muted like `on_back`/`on_forward`
+    /// above, for the same "no live-looking dead control" reason.
     on_history: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     title: Option<SharedString>,
     subtitle: Option<SharedString>,
@@ -246,7 +245,6 @@ impl Titlebar {
             on_maximize: Rc::new(|window| window.zoom_window()),
             on_back: None,
             on_forward: None,
-            on_new_tab: None,
             on_history: None,
             title: None,
             subtitle: None,
@@ -317,13 +315,6 @@ impl Titlebar {
     /// The forward counterpart to [`Self::on_back`].
     pub fn on_forward(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_forward = Some(Rc::new(handler));
-        self
-    }
-
-    /// Wires the cluster's trailing `+`. Unset, it renders muted for the
-    /// same reason as [`Self::on_back`].
-    pub fn on_new_tab(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        self.on_new_tab = Some(Rc::new(handler));
         self
     }
 
@@ -727,7 +718,6 @@ impl Render for Titlebar {
         let double_click_menu = self.on_show_menu.clone();
         let on_back = self.on_back.clone();
         let on_forward = self.on_forward.clone();
-        let on_new_tab = self.on_new_tab.clone();
         let on_history = self.on_history.clone();
         let title = self.title.clone();
         let subtitle = self.subtitle.clone();
@@ -858,15 +848,6 @@ impl Render for Titlebar {
                 control_radius,
                 icon_button,
                 on_forward,
-            ))
-            .child(cluster_button(
-                "titlebar-new-tab",
-                Icon::Plus,
-                button_size,
-                icon_size,
-                control_radius,
-                icon_button,
-                on_new_tab,
             ));
 
         let title_row = title.map(|title| {
@@ -1426,7 +1407,7 @@ mod tests {
         assert!(*called.borrow(), "clicking maximize invoked the handler");
     }
 
-    /// Back/forward/`+` must not be dead-looking controls: unwired (the
+    /// Back/forward must not be dead-looking controls: unwired (the
     /// default), a click must not silently succeed at nothing observable —
     /// there is nothing to observe because no `on_click` is attached at
     /// all when no handler is set. This test drives the *wired* case
@@ -1437,17 +1418,11 @@ mod tests {
     async fn the_cluster_seams_invoke_their_wired_handlers(cx: &mut TestAppContext) {
         let back_called = Rc::new(RefCell::new(false));
         let forward_called = Rc::new(RefCell::new(false));
-        let new_tab_called = Rc::new(RefCell::new(false));
-        let (back_spy, forward_spy, new_tab_spy) = (
-            back_called.clone(),
-            forward_called.clone(),
-            new_tab_called.clone(),
-        );
+        let (back_spy, forward_spy) = (back_called.clone(), forward_called.clone());
         let window = cx.add_window(|_window, cx| {
             Titlebar::new(cx)
                 .on_back(move |_, _| *back_spy.borrow_mut() = true)
                 .on_forward(move |_, _| *forward_spy.borrow_mut() = true)
-                .on_new_tab(move |_, _| *new_tab_spy.borrow_mut() = true)
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -1455,7 +1430,6 @@ mod tests {
         for (selector, flag) in [
             ("titlebar-back", &back_called),
             ("titlebar-forward", &forward_called),
-            ("titlebar-new-tab", &new_tab_called),
         ] {
             let bounds = cx.debug_bounds(selector).expect("cluster seam is drawn");
             cx.simulate_click(bounds.center(), Modifiers::none());
@@ -1464,7 +1438,7 @@ mod tests {
         }
     }
 
-    /// Unwired back/forward/`+` (the default state) must render — the
+    /// Unwired back/forward (the default state) must render — the
     /// screenshot's row shape stays intact — but a click must not panic or
     /// emit anything: no handler is attached to click at all.
     #[gpui::test]
@@ -1473,7 +1447,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        for selector in ["titlebar-back", "titlebar-forward", "titlebar-new-tab"] {
+        for selector in ["titlebar-back", "titlebar-forward"] {
             let bounds = cx
                 .debug_bounds(selector)
                 .unwrap_or_else(|| panic!("{selector} is drawn even unwired"));
@@ -1483,7 +1457,7 @@ mod tests {
     }
 
     /// F-WIN-07: the History seam is the same "unwired renders muted, wired
-    /// invokes the handler" contract as back/forward/`+` above — see
+    /// invokes the handler" contract as back/forward above — see
     /// [`the_cluster_seams_invoke_their_wired_handlers`] and
     /// [`unwired_cluster_seams_render_but_do_not_panic_on_click`].
     #[gpui::test]
