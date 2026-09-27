@@ -1,0 +1,31 @@
+fragment ChangeSummary on PullRequest {
+  number
+  title
+  url
+  isDraft
+  state
+  updatedAt
+  author { login }
+  headRefName
+  baseRefName
+  headRepositoryOwner { login }
+  comments { totalCount }
+  reviewDecision
+  approvals: reviews(states: APPROVED) { totalCount }
+  reviewRequests(first: 20) {
+    nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } }
+  }
+  commits(last: 1) {
+    nodes {
+      commit {
+        statusCheckRollup {
+          state
+          contexts(first: 1) {
+            checkRunCountsByState { state count }
+            statusContextCountsByState { state count }
+          }
+        }
+      }
+    }
+  }
+}

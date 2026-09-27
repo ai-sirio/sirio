@@ -225,6 +225,82 @@ expect_line "RESOLVE ready gitlab token"
 probe "$PROBE" resolve --host nowhere.test --setting gitlab:token
 expect_line "RESOLVE not-connected gitlab"
 
+echo "case 5: GitHub reads -- every filter, a second page, the worktree's PR, and every detail tab"
+GH=("$PROBE" "${GH_TOKEN_ARGS[@]}" --token good)
+probe "${GH[@]}" list all-open --more
+expect_code 0 "github all open"
+expect_line "PAGE 1 rows=2 next=yes"
+expect_line "ROW #101 state=open ci=failed review=changes me=yes comments=12 source=feat/login owner=acme author=alice title=Fix the login redirect"
+expect_line "ROW #102 state=draft ci=none review=none me=no comments=0 source=docs/readme owner=acme author=bob title=Draft the README"
+expect_line "PAGE 2 rows=1 next=no"
+expect_line "ROW #103 state=open ci=running:4/7 review=approved:2 me=no comments=3 source=feat/export owner=- author=fake-user title=Export orders as CSV"
+expect_rows "#101,#102,#103"
+expect_log github '"states": ["OPEN"]'
+expect_log github '"after": "c1"'
+probe "${GH[@]}" list closed
+expect_code 0 "github closed"
+expect_log github '"states": ["MERGED", "CLOSED"]'
+probe "${GH[@]}" list to-review
+expect_code 0 "github to review"
+expect_line "ROW #104 state=open ci=passed review=required me=yes comments=1 source=chore/deps owner=acme author=carol title=Bump the parser"
+expect_rows "#104"
+expect_log github '"q": "repo:acme/widgets is:pr is:open review-requested:@me sort:updated-desc"'
+probe "${GH[@]}" list all-open --search login
+expect_code 0 "github search"
+expect_log github '"q": "repo:acme/widgets is:pr is:open login sort:updated-desc"'
+probe "${GH[@]}" list closed --search login
+expect_log github '"q": "repo:acme/widgets is:pr is:closed login sort:updated-desc"'
+probe "${GH[@]}" list mine
+expect_code 0 "github mine"
+expect_line "PAGE 1 rows=3 next=no"
+expect_rows "#105,#103,#106"
+expect_log github '"authored": "repo:acme/widgets is:pr is:open author:@me sort:updated-desc"'
+expect_log github '"assigned": "repo:acme/widgets is:pr is:open assignee:@me sort:updated-desc"'
+probe "${GH[@]}" count
+expect_line "COUNT 2"
+expect_log github 'ChangeRequestCount interaction=no vars={"q": "repo:acme/widgets is:pr is:open review-requested:@me"}'
+probe "${GH[@]}" branch feat/login
+expect_line "BRANCH #112 open"
+expect_log github '"branch": "feat/login"'
+probe "${GH[@]}" branch feat/login --owner acme
+expect_line "BRANCH #111 open"
+probe "${GH[@]}" branch feat/login --owner nobody
+expect_line "BRANCH none"
+probe "${GH[@]}" header 101
+expect_code 0 "github header"
+expect_line "HEADER #101 state=open additions=120 deletions=8 files=3 commits=2 truncated=yes"
+expect_line "BODY ## What"
+expect_line "REVIEWER bob changes"
+expect_line "REVIEWER fake-user requested"
+timeline=$(echo "$PROBE_OUT" | grep -E '^(COMMENT|REVIEW|LINE|EVENT) ' | paste -sd'|' -)
+[ "$timeline" = "EVENT commits:2|COMMENT alice|EVENT review-requested:fake-user|REVIEW bob changes lines=1|EVENT other:SomethingNew" ] ||
+  { dump; fail "github timeline was '$timeline'"; }
+probe "${GH[@]}" commits 101
+expect_line "COMMIT 1111111 alice Fix the redirect"
+expect_line "COMMIT 2222222 Bob Roe Test the redirect"
+expect_line "TRUNCATED no"
+probe "${GH[@]}" checks 101
+expect_line "CHECK passed CI build 240"
+expect_line "CHECK failed CI test 600"
+expect_line "CHECK running CI lint -"
+expect_line "CHECK running - deploy/preview -"
+probe "${GH[@]}" files 101
+expect_line "FILE modified +100 -6 src/login.rs"
+expect_line "FILE added +20 -0 src/redirect.rs"
+expect_line "FILE renamed +0 -2 docs/new.md"
+expect_line "FILE deleted +0 -12 docs/removed.md"
+expect_line "TRUNCATED no"
+probe "${GH[@]}" header 404
+expect_code 20 "a pull request that does not exist"
+expect_line "ERR NotFound"
+probe "${GH[@]}" create-url feat/login
+expect_line "CREATE https://ghe.test/acme/widgets/compare/feat/login?expand=1"
+if command -v gh >/dev/null; then
+  probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" list all-open
+  expect_code 0 "github reads through gh"
+  expect_rows "#101,#102"
+fi
+
 # Later cases are added above this line.
 
 echo "artifact: $OUT_DIR"

@@ -1,0 +1,7 @@
+query ChangeRequestForBranch($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $branch, first: 10, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { ...ChangeSummary }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{"data": {
+  "authored": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [
+    {"number": 105, "title": "Theme the settings page", "url": "https://ghe.test/acme/widgets/pull/105", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-27T11:00:00Z", "author": {"login": "fake-user"}, "headRefName": "feat/theme", "baseRefName": "main", "headRepositoryOwner": {"login": "acme"}, "comments": {"totalCount": 0}, "reviewDecision": null, "approvals": {"totalCount": 0}, "reviewRequests": {"nodes": []}, "commits": {"nodes": []}},
+    {"number": 103, "title": "Export orders as CSV", "url": "https://ghe.test/acme/widgets/pull/103", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-27T09:00:00Z", "author": {"login": "fake-user"}, "headRefName": "feat/export", "baseRefName": "main", "headRepositoryOwner": null, "comments": {"totalCount": 3}, "reviewDecision": "APPROVED", "approvals": {"totalCount": 2}, "reviewRequests": {"nodes": []}, "commits": {"nodes": []}}
+  ]},
+  "assigned": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [
+    {"number": 103, "title": "Export orders as CSV", "url": "https://ghe.test/acme/widgets/pull/103", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-27T09:00:00Z", "author": {"login": "fake-user"}, "headRefName": "feat/export", "baseRefName": "main", "headRepositoryOwner": null, "comments": {"totalCount": 3}, "reviewDecision": "APPROVED", "approvals": {"totalCount": 2}, "reviewRequests": {"nodes": []}, "commits": {"nodes": []}},
+    {"number": 106, "title": "Retry flaky uploads", "url": "https://ghe.test/acme/widgets/pull/106", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-26T08:00:00Z", "author": {"login": "dave"}, "headRefName": "fix/uploads", "baseRefName": "main", "headRepositoryOwner": {"login": "acme"}, "comments": {"totalCount": 4}, "reviewDecision": null, "approvals": {"totalCount": 1}, "reviewRequests": {"nodes": []}, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS", "contexts": {"checkRunCountsByState": [{"state": "SUCCESS", "count": 3}], "statusContextCountsByState": [{"state": "SUCCESS", "count": 1}]}}}}]}}
+  ]}
+}}

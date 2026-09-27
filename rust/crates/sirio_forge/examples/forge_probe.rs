@@ -17,8 +17,10 @@
 use std::process::ExitCode;
 
 use sirio_forge::{
-    CliProgram, CliTransport, Forge, ForgeClient, ForgeError, ForgeTarget, HostSetting, Means,
-    Resolution, SystemProbes, TokenTransport, Transport, resolve,
+    ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport, EventKind,
+    FileChangeKind, Filter, Forge, ForgeClient, ForgeError, ForgeTarget, HostSetting, ListQuery,
+    Means, Resolution, ReviewOutcome, ReviewState, SystemProbes, TimelineItem, TokenTransport,
+    Transport, resolve,
 };
 
 enum Failure {
@@ -151,6 +153,112 @@ fn run(args: &Args) -> Result<(), Failure> {
     let client = client(args)?;
     match command.as_str() {
         "viewer" => println!("VIEWER {}", client.viewer()?),
+        "list" => {
+            let filter = match args.words.get(1).map(String::as_str) {
+                Some("mine") => Filter::Mine,
+                Some("to-review") => Filter::ToReview,
+                Some("all-open") => Filter::AllOpen,
+                Some("closed") => Filter::ClosedAndMerged,
+                _ => {
+                    return Err(usage(
+                        "list mine|to-review|all-open|closed [--search S] [--more]",
+                    ));
+                }
+            };
+            let query = ListQuery {
+                filter,
+                search: args.flag("search").map(str::to_string),
+            };
+            let first = client.list(&query, None)?;
+            print_page(1, &first);
+            if args.switch("more")
+                && let Some(next) = &first.next
+            {
+                print_page(2, &client.list(&query, Some(next))?);
+            }
+        }
+        "count" => println!("COUNT {}", client.to_review_count()?),
+        "branch" => {
+            let name = args
+                .words
+                .get(1)
+                .ok_or_else(|| usage("branch NAME [--owner O]"))?;
+            match client.for_branch(name, args.flag("owner"))? {
+                Some(found) => println!(
+                    "BRANCH {} {}",
+                    found.reference.label(),
+                    state_word(found.state)
+                ),
+                None => println!("BRANCH none"),
+            }
+        }
+        "header" => {
+            let header = client.header(number(args)?)?;
+            println!(
+                "HEADER {} state={} additions={} deletions={} files={} commits={} truncated={}",
+                header.summary.reference.label(),
+                state_word(header.summary.state),
+                count_word(header.additions),
+                count_word(header.deletions),
+                count_word(header.changed_files),
+                count_word(header.commit_count),
+                yes_no(header.timeline_truncated),
+            );
+            println!("BODY {}", header.body.lines().next().unwrap_or(""));
+            for reviewer in &header.reviewers {
+                println!(
+                    "REVIEWER {} {}",
+                    reviewer.login,
+                    outcome_word(reviewer.outcome)
+                );
+            }
+            for item in &header.timeline {
+                println!("{}", timeline_line(item));
+            }
+        }
+        "commits" => {
+            let listing = client.commits(number(args)?)?;
+            for commit in &listing.items {
+                println!(
+                    "COMMIT {} {} {}",
+                    commit.short_sha, commit.author, commit.title
+                );
+            }
+            println!("TRUNCATED {}", yes_no(listing.truncated));
+        }
+        "checks" => {
+            let listing = client.checks(number(args)?)?;
+            for check in &listing.items {
+                println!(
+                    "CHECK {} {} {} {}",
+                    check_word(check.status),
+                    check.group.as_deref().unwrap_or("-"),
+                    check.name,
+                    count_word(check.duration_secs.map(|secs| secs as u32)),
+                );
+            }
+            println!("TRUNCATED {}", yes_no(listing.truncated));
+        }
+        "files" => {
+            let listing = client.files(number(args)?)?;
+            for file in &listing.items {
+                println!(
+                    "FILE {} +{} -{} {}",
+                    kind_word(file.kind),
+                    file.additions,
+                    file.deletions,
+                    file.path
+                );
+            }
+            println!("TRUNCATED {}", yes_no(listing.truncated));
+        }
+        "create-url" => {
+            let branch = args
+                .words
+                .get(1)
+                .ok_or_else(|| usage("create-url BRANCH"))?;
+            println!("CREATE {}", client.creation_url(branch));
+        }
         other => return Err(usage(&format!("unknown command {other}"))),
     }
     Ok(())
@@ -209,4 +317,142 @@ fn resolve_command(args: &Args) -> Result<(), Failure> {
         Resolution::UnknownForge => println!("RESOLVE unknown"),
     }
     Ok(())
+}
+
+fn number(args: &Args) -> Result<u64, Failure> {
+    args.words
+        .get(1)
+        .and_then(|word| word.parse().ok())
+        .ok_or_else(|| usage("a change request number"))
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn count_word(value: Option<u32>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+fn state_word(state: ChangeState) -> &'static str {
+    match state {
+        ChangeState::Draft => "draft",
+        ChangeState::Open => "open",
+        ChangeState::Merged => "merged",
+        ChangeState::Closed => "closed",
+    }
+}
+
+fn ci_word(ci: CiState) -> String {
+    match ci {
+        CiState::NoChecks => "none".to_string(),
+        CiState::Running(Some(progress)) => format!("running:{}/{}", progress.done, progress.total),
+        CiState::Running(None) => "running".to_string(),
+        CiState::Passed => "passed".to_string(),
+        CiState::Failed => "failed".to_string(),
+        CiState::Canceled => "canceled".to_string(),
+    }
+}
+
+fn review_word(review: ReviewState) -> String {
+    match review {
+        ReviewState::Approved { count } => format!("approved:{count}"),
+        ReviewState::ChangesRequested => "changes".to_string(),
+        ReviewState::ReviewRequired => "required".to_string(),
+        ReviewState::None => "none".to_string(),
+    }
+}
+
+fn outcome_word(outcome: ReviewOutcome) -> &'static str {
+    match outcome {
+        ReviewOutcome::Approved => "approved",
+        ReviewOutcome::ChangesRequested => "changes",
+        ReviewOutcome::Commented => "commented",
+        ReviewOutcome::Dismissed => "dismissed",
+        ReviewOutcome::Requested => "requested",
+        ReviewOutcome::Other => "other",
+    }
+}
+
+fn check_word(status: CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Queued => "queued",
+        CheckStatus::Running => "running",
+        CheckStatus::Passed => "passed",
+        CheckStatus::Failed => "failed",
+        CheckStatus::Canceled => "canceled",
+        CheckStatus::Skipped => "skipped",
+        CheckStatus::Neutral => "neutral",
+    }
+}
+
+fn kind_word(kind: Option<FileChangeKind>) -> &'static str {
+    match kind {
+        Some(FileChangeKind::Added) => "added",
+        Some(FileChangeKind::Modified) => "modified",
+        Some(FileChangeKind::Deleted) => "deleted",
+        Some(FileChangeKind::Renamed) => "renamed",
+        Some(FileChangeKind::Copied) => "copied",
+        None => "-",
+    }
+}
+
+fn print_page(index: u32, page: &ChangePage) {
+    println!(
+        "PAGE {index} rows={} next={}",
+        page.items.len(),
+        yes_no(page.next.is_some())
+    );
+    for item in &page.items {
+        println!(
+            "ROW {} state={} ci={} review={} me={} comments={} source={} owner={} author={} title={}",
+            item.reference.label(),
+            state_word(item.state),
+            ci_word(item.ci),
+            review_word(item.review),
+            yes_no(item.review_requested_from_me),
+            item.comments,
+            item.source_branch,
+            item.source_owner.as_deref().unwrap_or("-"),
+            item.author,
+            item.title,
+        );
+    }
+}
+
+fn timeline_line(item: &TimelineItem) -> String {
+    match item {
+        TimelineItem::Comment { author, .. } => format!("COMMENT {author}"),
+        TimelineItem::Review {
+            author,
+            outcome,
+            line_comments,
+            ..
+        } => {
+            format!(
+                "REVIEW {author} {} lines={}",
+                outcome_word(*outcome),
+                line_comments.len()
+            )
+        }
+        TimelineItem::LineComment(comment) => format!(
+            "LINE {} {}:{}",
+            comment.author,
+            comment.path,
+            count_word(comment.line)
+        ),
+        TimelineItem::Event { kind, .. } => format!(
+            "EVENT {}",
+            match kind {
+                EventKind::CommitsPushed { count } => format!("commits:{count}"),
+                EventKind::ReviewRequested { reviewer } => format!("review-requested:{reviewer}"),
+                EventKind::Merged => "merged".to_string(),
+                EventKind::Closed => "closed".to_string(),
+                EventKind::Reopened => "reopened".to_string(),
+                EventKind::ReadyForReview => "ready".to_string(),
+                EventKind::ConvertedToDraft => "draft".to_string(),
+                EventKind::Other(text) => format!("other:{text}"),
+            }
+        ),
+    }
 }

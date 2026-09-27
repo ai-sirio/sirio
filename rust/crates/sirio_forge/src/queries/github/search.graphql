@@ -1,0 +1,6 @@
+query ChangeRequestSearch($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 50, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { ...ChangeSummary } }
+  }
+}
