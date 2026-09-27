@@ -6,9 +6,18 @@
 //! blocks; the app runs them on GPUI's background executor. A token, when
 //! there is one, is handed in by the caller and never stored or logged here.
 
+mod client;
+mod error;
+mod github;
+mod gitlab;
+mod graphql;
 mod mapping;
 mod model;
 mod target;
+mod transport;
+
+pub use client::ForgeClient;
+pub use error::ForgeError;
 
 pub use model::{
     ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckStatus, CiState,
@@ -16,3 +25,4 @@ pub use model::{
     Listing, PageCursor, Progress, ReviewOutcome, ReviewState, Reviewer, TimelineItem,
 };
 pub use target::{ForgeTarget, parse_remote_url};
+pub use transport::{ApiResponse, TokenTransport, Transport};
