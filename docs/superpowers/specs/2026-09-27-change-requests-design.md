@@ -153,8 +153,10 @@ host in Settings or presses *Retry* after an authentication error.
 
 For a host `H`, the first step that answers wins:
 
-1. **Settings override** — `{host, forge, means}` rows in `AppSettings`
-   (`sirio_persistence`), written by the *Git hosting* page.
+1. **Settings override** — `{host, forge, means}` entries in `AppSettings`
+   (`sirio_persistence`), stored as a JSON array under the settings key
+   `forge.hosts` (the shape `lsp.silencedLanguages` already uses), written by
+   the *Git hosting* page.
 2. **Known name** — `github.com` is GitHub, `gitlab.com` is GitLab. Only the
    means is still open; the chain continues for it.
 3. **CLI** — `gh auth status --hostname H` exiting 0 means GitHub, CLI means;
@@ -181,7 +183,7 @@ One row per host seen this session or configured: forge mark, host, forge,
 means in use and the account it authenticates as. Actions: *Use CLI*, *Use
 token* (paste field), *Forget token*, and for a non-public host the forge
 selector. Saving a token verifies it at once — `viewer { login }` on GitHub,
-`GET /user` on GitLab — and shows the account. The page and the *not
+`currentUser { username }` on GitLab — and shows the account. The page and the *not
 connected* card both name the minimum scopes: `read_api` on GitLab; read
 access to pull requests, checks and metadata on GitHub.
 
@@ -214,42 +216,59 @@ Enterprise Server. Queries live in `.graphql` files compiled in with
 header + conversation (with the check rollup), and one per remaining inner tab
 issued **the first time that tab is shown**.
 
-### §6.3 GitLab — REST v4
+### §6.3 GitLab — GraphQL
 
-REST rather than GraphQL because it is the more stable surface across the old
-self-managed versions enterprise installations run. Endpoints:
-`projects/:id/merge_requests` (list, and one MR with `head_pipeline`),
-`…/discussions`, `…/approvals`, `pipelines/:id/jobs`, `…/commits`, `…/diffs`,
-and `GET /user`. `:id` is the URL-encoded project path. Pagination and totals
-come from the `x-next-page` / `x-total` headers — the reason the `Transport`
-contract returns headers. The lowest supported GitLab version is fixed in the
-plan by checking each endpoint's introduction; below it, the affected section
-degrades as in §10.
+Endpoint `https://H/api/graphql`; queries compiled in the same way.
+
+*Revised during planning (2026-09-27), replacing REST v4.* The REST list
+endpoint (`projects/:id/merge_requests`) carries neither the pipeline status
+nor the approvals — checked against gitlab.com — so drawing a list row's CI
+and review icons would cost one more call per row, fifty `glab` processes a
+refresh in CLI mode. GraphQL answers a whole list page, and each detail tab,
+in one request: `headPipeline { status, jobs { count }, finished: jobs(statuses:
+…) { count } }`, `approved`, `approvedBy`, `reviewers { mergeRequestInteraction
+{ reviewState } }`, `userNotesCount`, `notes` (with `position` for line
+comments), `commits`, `diffStats`, and `headPipeline.jobs` with their `stage`.
+
+REST was first chosen as the more stable surface across old self-managed
+versions; the risk it answered is real — GraphQL rejects a whole query that
+names a field an older server lacks. The answer is **a baseline variant of
+every GitLab query**, without the fields added most recently
+(`mergeRequestInteraction`, the finished-jobs count). When a server answers
+with a `Field '…' doesn't exist` error, Sirio re-issues the baseline for that
+host and keeps using it for the session; the affected facts degrade as in §10
+(review shows *approved / not approved* without *changes requested*; CI shows
+its status without `done/total`).
+
+Pagination on both forges is by cursor (`pageInfo.endCursor`). The
+`Transport` still returns headers, now for the rate-limit headers (§9).
 
 ### §6.4 Filters
 
 | Filter (icon) | GitHub | GitLab |
 |---|---|---|
-| Mine (`person`) | open, `author:@me` ∪ `assignee:@me` | `opened`, `author_username` ∪ `assignee_username` |
-| To review (`eye`, with count) | open, `review-requested:@me` | `opened`, `reviewer_username=<me>` |
-| All open (`pull_request`) | `states: OPEN`, by update | `state=opened`, by update |
-| Closed & merged (`archive`) | `MERGED, CLOSED`, most recent | `merged` + `closed`, most recent |
+| Mine (`person`) | open, `author:@me` ∪ `assignee:@me` | `opened`, `authorUsername` ∪ `assigneeUsername` |
+| To review (`eye`, with count) | open, `review-requested:@me` | `opened`, `reviewerUsername: <me>` |
+| All open (`pull_request`) | `states: OPEN`, by update | `state: opened`, `UPDATED_DESC` |
+| Closed & merged (`archive`) | `MERGED, CLOSED`, most recent | `merged` ∪ `closed`, most recent |
 
-Pages of 50, with *Load more* at the end. *Mine* is two queries (author,
-assignee) merged, deduplicated by number and sorted by update; *Load more*
-advances both cursors. The *To review* count is its own cheap query (GitHub
-`issueCount`, GitLab `x-total` at `per_page=1`), refreshed with whichever
-filter is active, so the count is right while another filter is shown. The
-search field queries the server, debounced 300 ms (`search` with `repo:` on
-GitHub, `search=` on GitLab). The current user (`viewer` / `GET /user`) is
-read once per host.
+Pages of 50, with *Load more* at the end. A union (*Mine*, and *Closed &
+merged* on GitLab) is two aliased connections in **one** request, merged,
+deduplicated by number and sorted by update; *Load more* advances both
+cursors. The *To review* count is its own cheap request (GitHub `search …
+issueCount` at `first: 0`, GitLab `mergeRequests(…) { count }` at `first: 1`),
+refreshed with whichever filter is active, so the count is right while another
+filter is shown. The search field queries the server, debounced 300 ms
+(`search` with `repo:` on GitHub, the `search:` argument on GitLab). The
+current user (`viewer { login }` / `currentUser { username }`) is read once per
+host.
 
 ### §6.5 The worktree's own change request
 
 The most recent change request whose source branch is the worktree's branch,
 preferring an open one. When `origin` and `upstream` differ, the source is
 also constrained to `origin`'s project (GitHub `headRepositoryOwner`, GitLab
-`source_project_id`), so a same-named branch in someone else's fork does not
+`sourceProject.fullPath`), so a same-named branch in someone else's fork does not
 match. A detached HEAD has no card. With no match, the card reads "No PR for
 `feat/x`" and offers **Create on the forge**, which opens the forge's
 pre-filled creation page in the browser — a URL, not an API write.
@@ -307,15 +326,22 @@ pre-filled creation page in the browser — a URL, not an API write.
 +----------------------------------------------------------------------+
 ```
 
-- Tab strip title `#578 title`, with the state icon coloured (open green,
-  draft grey, merged purple, closed red); it follows every refresh.
+- Tab strip title `#578 title`, with the state icon coloured (open
+  `theme.success`, draft `theme.text_faint`, merged purple, closed
+  `theme.danger`); it follows every refresh. Neither Sirio's theme nor
+  bezel's has a purple token, so *merged* takes the syntax palette's keyword
+  colour (`theme.syntax_palette().keyword`, purple in both appearances) rather
+  than adding a Sirio-owned token (`docs/THEME-PROVENANCE.md` keeps that list
+  at three).
 - **Conversation** — the description through the Preview's Markdown path,
   `expand_html` subset included, then comments, reviews with their outcome,
   and events, oldest first. A line comment shows as "on `path:line`" with its
-  text and no surrounding diff (that is B). An image that does not load — a
-  private repository's attachment — must not break the description; the plan
-  checks what the Preview does today and settles on showing its alt text as a
-  link to the forge where it does not.
+  text and no surrounding diff (that is B). *Checked during planning:* a remote
+  image never loads in Sirio today — the app installs no GPUI HTTP client, and
+  bezel's image block has no fallback, so it draws an empty bordered box. The
+  description therefore rewrites every remote image into a link whose text is
+  its alt text (or "image") and whose target is the image URL, before
+  rendering; local paths cannot occur in a forge description.
 - **Commits** — short sha, title, author, age. Click: if the object exists
   locally (`git cat-file -e`), the existing Changes tab through
   `add_commit_tab`; otherwise the commit on the forge. Nothing is fetched.
@@ -382,15 +408,19 @@ End to end, per the project convention; every run ends in an artifact.
 
 1. **`Scripts/Tests/test-forge-e2e.sh`** → `FORGE E2E OK`, on the shape of
    `test-update-e2e.sh`. A fake forge on loopback serves fixtures of the real
-   GitHub GraphQL and GitLab REST shapes (captured from the live APIs, with
+   GitHub and GitLab GraphQL shapes (captured from the live APIs, with
    their provenance recorded next to them). A probe,
    `rust/crates/sirio_forge/examples/forge_probe.rs`, compiled the way the app
    is, drives resolution → list → detail → pagination → 401/403/404/429.
    - Token transport: real.
-   - CLI transport: the real `glab`, pointed at the fake forge through a
-     per-host `api_protocol: http` in an isolated config directory. The real
-     `gh` if it can be pointed at loopback; if the plan finds it cannot, a shim
-     that records the invocations stands in, and the artifact says so.
+   - CLI transport: both real CLIs, verified during planning. `gh` with
+     `--hostname github.localhost` (which it serves over plain HTTP at
+     `api.github.localhost`) and `HTTP_PROXY` pointing at the fake forge, logged
+     in through a `hosts.yml` in an isolated `GH_CONFIG_DIR`. `glab` with a
+     host key `gitlab.localhost` whose `api_host` is the fake forge's
+     `127.0.0.1:PORT` and `api_protocol: http`, in an isolated
+     `GLAB_CONFIG_DIR` (`--hostname` refuses a port). A CLI that is not
+     installed makes its stage print `SKIP:` rather than pass silently.
    - The fake base URL comes from an override **honoured only in debug
      builds**, as `SIRIO_UPDATE_MANIFEST_URL` is, so a release binary cannot be
      pointed at another forge by an environment variable.
@@ -425,7 +455,8 @@ End to end, per the project convention; every run ends in an artifact.
 
 | Point | Fallback if the check fails |
 |---|---|
-| `gh` can be pointed at a loopback forge | recording shim, declared in the artifact (§11.1) |
-| Lowest GitLab version for each endpoint | the section degrades on older versions (§10) |
-| What the Preview does with an image that fails to load | alt text as a link to the forge (§7.2) |
-| Control-socket verbs available for the UI run | add them (§11.3) |
+| `gh` can be pointed at a loopback forge | **verified**: `github.localhost` + `HTTP_PROXY` (§11.1) |
+| `glab` can be pointed at a loopback forge | **verified**: `api_host` + `api_protocol: http` (§11.1) |
+| Which GitLab fields go in the baseline variants | the baseline omits every field the plan cannot date to GitLab 15.0 or earlier (§6.3) |
+| What the Preview does with an image that fails to load | **checked**: nothing loads; remote images become links (§7.2) |
+| Control-socket verbs available for the UI run | **checked**: none selects a right-panel view or opens a PR; they are added (§11.3) |
