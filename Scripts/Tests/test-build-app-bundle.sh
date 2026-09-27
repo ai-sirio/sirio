@@ -100,6 +100,35 @@ if ! grep -q -- "--options runtime" "$FIXTURE/codesign.args"; then
   exit 1
 fi
 
+# A pane's tools run inside Sirio's TCC envelope, and macOS asks on Sirio's
+# behalf only if Sirio says why. Without a usage string an Apple Event, or a
+# first touch of the local network, is refused with no prompt at all — which
+# is what the Permissions page's Trigger Prompt would then quietly do.
+for key in NSAppleEventsUsageDescription NSLocalNetworkUsageDescription; do
+  if ! grep -q "<key>$key</key>" "$PLIST"; then
+    echo "FAIL: Info.plist is missing $key" >&2
+    cat "$PLIST" >&2
+    exit 1
+  fi
+done
+
+# The hardened runtime refuses Apple Events outright unless the signature
+# carries this entitlement: no prompt, errAEEventNotPermitted. The Automation
+# row, and every agent script that drives another app, would be dead in the
+# signed build and alive in the ad-hoc dev build — a difference nothing on a
+# developer's machine shows.
+ENTITLEMENTS=$(sed -n 's/.*--entitlements \([^ ]*\).*/\1/p' "$FIXTURE/codesign.args")
+if [ -z "$ENTITLEMENTS" ] || [ ! -f "$ENTITLEMENTS" ]; then
+  echo "FAIL: codesign must be given an entitlements file" >&2
+  cat "$FIXTURE/codesign.args" >&2
+  exit 1
+fi
+if ! grep -A1 '<key>com.apple.security.automation.apple-events</key>' "$ENTITLEMENTS" | grep -q '<true/>'; then
+  echo "FAIL: the entitlements must grant com.apple.security.automation.apple-events" >&2
+  cat "$ENTITLEMENTS" >&2
+  exit 1
+fi
+
 if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" >/dev/null 2>&1; then
   echo "FAIL: a missing binary must exit non-zero" >&2
   exit 1

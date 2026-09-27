@@ -7233,6 +7233,7 @@ dependencies = [
  "bezel-zed-scheduler",
  "chrono",
  "embed-resource",
+ "futures",
  "gtk",
  "image",
  "ksni",
@@ -7253,6 +7254,7 @@ dependencies = [
  "sirio_lsp",
  "sirio_perf",
  "sirio_persistence",
+ "sirio_privacy",
  "sirio_project",
  "sirio_registry",
  "sirio_release",
@@ -7389,6 +7391,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_privacy"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+]
+
+[[package]]
 name = "sirio_project"
 version = "0.26.2"
 dependencies = [
@@ -7509,6 +7521,7 @@ dependencies = [
  "sirio_markdown",
  "sirio_perf",
  "sirio_persistence",
+ "sirio_privacy",
  "sirio_project",
  "sirio_registry",
  "sirio_syntax",

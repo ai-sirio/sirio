@@ -7,12 +7,14 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
 use bezel::theme::Theme as BezelTheme;
 use bezel::ui::input::TextField;
+use bezel::ui::widgets::status_dot;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
     KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, Window, actions, div, point, prelude::*,
     px, text,
 };
 use sirio_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
+use sirio_privacy::{PermissionAction, PermissionKind, PermissionStatus};
 use sirio_project::SkillInstallCommand;
 use sirio_theme::{Theme, ThemeMode};
 use sirio_usage::{
@@ -678,37 +680,6 @@ impl ProviderKind {
     }
 }
 
-/// The foreground for text painted on one of the saturated status fills
-/// (`tab_error`, `tab_needs_input`).
-///
-/// `title` is tuned for the *page*, so on a saturated chip it lands at the
-/// chip's own lightness and vanishes. The page ground is the neutral that
-/// actually contrasts with both fills, and it is already what the granted
-/// permission badge uses two screens over.
-///
-/// That ground is `bg`, not `surface`. The two were near enough to stand in
-/// for each other until Neutral got its own ladder and the light pane
-/// settled on `#E8E8E8` — a rung darker than the page, which dropped the
-/// danger chip to 3.89:1 and put the text back out of reach. `bg` is the
-/// plane this was always describing, so it is now the one it reads.
-///
-/// macOS-only in production (the permission rows it serves are macOS
-/// gates); the contrast test below uses it on every platform.
-#[cfg(any(test, target_os = "macos"))]
-fn on_status_fill(theme: &Theme) -> Rgba {
-    theme.bg
-}
-
-/// Small settings view model. The real application can replace these values
-/// with its persistence layer without changing the reusable settings UI.
-/// The badge shown at the trailing edge of a permission row.
-#[cfg(target_os = "macos")]
-struct PermissionBadge {
-    label: &'static str,
-    background: Rgba,
-    foreground: Rgba,
-}
-
 /// A login command selected from the fixed provider catalog, never user input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountLoginRequest {
@@ -737,6 +708,15 @@ pub enum SettingsEvent {
     /// owns the installer and the store, and returns its result through
     /// [`Settings::set_install_state`].
     InstallLanguageServer(String),
+    /// The Permissions screen opened, its Refresh was pressed, or the window
+    /// came back to the front: the host re-reads every macOS permission off
+    /// the UI thread and returns each through
+    /// [`Settings::set_permission_status`].
+    RefreshPermissions,
+    /// A permission row's Request or Trigger Prompt. The host shows the
+    /// prompt — it can wait on the user, so never on the UI thread — then
+    /// re-reads that one permission. Open Settings never reaches the host.
+    RequestPermission(PermissionKind),
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -880,6 +860,12 @@ pub struct Settings {
     /// hides the row's action; `Failed` shows the installer's own message
     /// and offers the action again; success removes the entry.
     install_states: BTreeMap<String, InstallState>,
+    /// What macOS last said about each permission, as the host read it. A
+    /// kind with no entry has not been read yet and shows as being checked.
+    permission_statuses: BTreeMap<PermissionKind, PermissionStatus>,
+    /// Permissions whose prompt is up. The row hides its action meanwhile:
+    /// a second click would stack a second prompt behind the first.
+    permission_requests: BTreeSet<PermissionKind>,
     /// Settings › Language Servers: the shipped table, what this machine has
     /// for each entry, and the declined offers. Plain data, so the page's row
     /// model can be built from it in a pure function.
@@ -1076,6 +1062,8 @@ impl Settings {
             registry_versions: BTreeMap::new(),
             transport_notes: BTreeMap::new(),
             install_states: BTreeMap::new(),
+            permission_statuses: BTreeMap::new(),
+            permission_requests: BTreeSet::new(),
             lsp_servers: ServerStates {
                 silenced: initial.lsp_silenced_languages.iter().cloned().collect(),
                 ..ServerStates::default()
@@ -1464,6 +1452,20 @@ impl Settings {
         }
     }
 
+    /// Records what macOS says about one permission, and ends that row's
+    /// wait on its prompt if one was up. Callers notify afterwards.
+    pub fn set_permission_status(&mut self, kind: PermissionKind, status: PermissionStatus) {
+        self.permission_statuses.insert(kind, status);
+        self.permission_requests.remove(&kind);
+    }
+
+    fn request_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
+        if self.permission_requests.insert(kind) {
+            cx.emit(SettingsEvent::RequestPermission(kind));
+            cx.notify();
+        }
+    }
+
     /// Tells the page where Sirio installs language servers and probes the
     /// machine against it. The host owns the path — it resolves the
     /// environment once at startup — and this is the crate's only read of it.
@@ -1623,6 +1625,11 @@ impl Settings {
 
     /// Selects the category shown in the detail column. Both the sidebar
     /// click and the control socket call this function.
+    /// The screen on show.
+    pub fn category(&self) -> SettingsCategory {
+        self.category
+    }
+
     pub fn select_category(&mut self, category: SettingsCategory, cx: &mut Context<Self>) {
         if self.category != category {
             self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
@@ -1636,9 +1643,16 @@ impl Settings {
         // up without a restart.
         let entering_language_servers = category == SettingsCategory::LanguageServers
             && self.category != SettingsCategory::LanguageServers;
+        // Entering the Permissions screen re-reads macOS: a switch flipped
+        // in System Settings has to show up here without a restart.
+        let entering_permissions = category == SettingsCategory::Permissions
+            && self.category != SettingsCategory::Permissions;
         self.category = category;
         if entering_agents {
             cx.emit(SettingsEvent::RefreshAgentSources);
+        }
+        if entering_permissions {
+            cx.emit(SettingsEvent::RefreshPermissions);
         }
         if entering_language_servers {
             self.refresh_language_servers();
@@ -3828,71 +3842,99 @@ impl Settings {
             .child(settings_section("Agent Hooks", hooks, theme))
     }
 
-    #[cfg(target_os = "macos")]
+    /// One permission: what it is, what macOS says, and the one thing to do
+    /// about it. Built on every platform so every platform compiles it; only
+    /// macOS puts it on screen.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn render_permission_row(
         &self,
-        glyph: &'static str,
-        title: &'static str,
-        description: &'static str,
-        badge: PermissionBadge,
-        action: &'static str,
+        kind: PermissionKind,
         theme: Theme,
+        entity: Entity<Self>,
     ) -> impl IntoElement {
+        let slug = kind.slug();
+        let status = self.permission_statuses.get(&kind).copied();
+        let asking = self.permission_requests.contains(&kind);
         let label = div()
             .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(div().w(px(20.0)).text_color(theme.text_faint).child(text!(
-                id = format!("settings-permission-glyph-{title}"),
-                glyph
-            )))
+            .flex_col()
+            .gap(px(2.0))
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(text!(
-                        id = format!("settings-permission-title-{title}"),
-                        title
+                        id = format!("settings-permission-title-{slug}"),
+                        kind.title()
                     )),
             )
-            .child(controls::badge(
-                theme,
-                badge.label,
-                badge.background,
-                badge.foreground,
-            ));
-        let description = div()
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text_muted)
-            .child(text!(
-                id = format!("settings-permission-description-{title}"),
-                description
-            ));
-        let label = div()
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(text!(
+                        id = format!("settings-permission-description-{slug}"),
+                        kind.detail()
+                    )),
+            );
+
+        // The bead and the quiet word the Language Servers rows carry for
+        // theirs, rather than a filled capital-letter pill no other screen
+        // uses. Colour is kept for the two answers macOS gave; everything
+        // short of an answer stays neutral.
+        let (tone, word) = match (asking, status) {
+            (true, _) => (theme.text_faint, "asking…"),
+            (false, Some(PermissionStatus::Granted)) => {
+                (theme.success, PermissionStatus::Granted.label())
+            }
+            (false, Some(PermissionStatus::Denied)) => {
+                (theme.danger, PermissionStatus::Denied.label())
+            }
+            (false, Some(other)) => (theme.text_faint, other.label()),
+            (false, None) => (theme.text_faint, "checking…"),
+        };
+        let status_view = div()
+            .id(format!("settings-permission-status-{slug}"))
+            .debug_selector(move || format!("settings-permission-status-{slug}"))
             .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(label)
-            .child(description);
-        controls::row_view(
-            label,
-            controls::button(
-                match title {
-                    "Notifications" => "permission-notifications",
-                    "Screen Recording" => "permission-screen-recording",
-                    "Accessibility" => "permission-accessibility",
-                    "Full Disk Access" => "permission-full-disk",
-                    "Automation" => "permission-automation",
-                    _ => "permission-local-network",
-                },
-                action,
+            .items_center()
+            .gap(px(6.0))
+            .child(status_dot(tone.into()))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(text!(
+                        id = format!("settings-permission-state-{slug}"),
+                        word
+                    )),
+            );
+
+        let mut tail = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(status_view);
+        if !asking {
+            let action = sirio_privacy::action_for(
+                kind,
+                status.unwrap_or(PermissionStatus::CheckManually),
+            );
+            tail = tail.child(controls::button(
+                permission_button_id(kind),
+                action.label(),
                 theme,
-                |_, _, _| {},
-            ),
-            theme,
-        )
-        .id(format!("settings-permission-row-{title}"))
+                move |_, _, cx| match action {
+                    PermissionAction::OpenSettings => cx.open_url(kind.settings_url()),
+                    PermissionAction::Request | PermissionAction::TriggerPrompt => {
+                        entity.update(cx, |settings, cx| settings.request_permission(kind, cx));
+                    }
+                },
+            ));
+        }
+        controls::row_view(label, tail, theme).id(format!("settings-permission-row-{slug}"))
     }
 
     fn render_browser_grants(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
@@ -3993,92 +4035,6 @@ impl Settings {
     }
 
     fn render_permissions(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
-        #[cfg(target_os = "macos")]
-        let granted = theme.success;
-        #[cfg(target_os = "macos")]
-        let denied = theme.danger;
-        #[cfg(target_os = "macos")]
-        let neutral = theme.surface_raised;
-        #[cfg(target_os = "macos")]
-        let rows = controls::card(theme)
-            .child(self.render_permission_row(
-                "♧",
-                "Notifications",
-                "Alerts when agents finish or need input.",
-                PermissionBadge {
-                    label: "GRANTED",
-                    background: granted,
-                    foreground: theme.surface,
-                },
-                "Open Settings",
-                theme,
-            ))
-            .child(controls::separator(theme))
-            .child(self.render_permission_row(
-                "◉",
-                "Screen Recording",
-                "Screenshot, visual automation, and UI inspection tools.",
-                PermissionBadge {
-                    label: "GRANTED",
-                    background: granted,
-                    foreground: theme.surface,
-                },
-                "Open Settings",
-                theme,
-            ))
-            .child(controls::separator(theme))
-            .child(self.render_permission_row(
-                "♙",
-                "Accessibility",
-                "Keystroke injection, window control, and UI automation tools.",
-                PermissionBadge {
-                    label: "DENIED",
-                    background: denied,
-                    foreground: on_status_fill(&theme),
-                },
-                "Open Settings",
-                theme,
-            ))
-            .child(controls::separator(theme))
-            .child(self.render_permission_row(
-                "▱",
-                "Full Disk Access",
-                "Recommended when projects or worktrees touch macOS-protected folders.",
-                PermissionBadge {
-                    label: "CHECK MANUALLY",
-                    background: neutral,
-                    foreground: theme.text_muted,
-                },
-                "Open Settings",
-                theme,
-            ))
-            .child(controls::separator(theme))
-            .child(self.render_permission_row(
-                "⚙",
-                "Automation",
-                "Apple Events for scripts that control other local apps.",
-                PermissionBadge {
-                    label: "GRANTED",
-                    background: granted,
-                    foreground: theme.surface,
-                },
-                "Open Settings",
-                theme,
-            ))
-            .child(controls::separator(theme))
-            .child(self.render_permission_row(
-                "◎",
-                "Local Network",
-                "Discovery and access for development servers on your network.",
-                PermissionBadge {
-                    label: "CHECK MANUALLY",
-                    background: neutral,
-                    foreground: theme.text_muted,
-                },
-                "Trigger Prompt",
-                theme,
-            ));
-
         #[allow(unused_mut)]
         let mut surface = div()
             .w(px(CONTENT_WIDTH))
@@ -4086,27 +4042,51 @@ impl Settings {
             .pb(px(DETAIL_BOTTOM_PADDING));
         #[cfg(target_os = "macos")]
         {
-            surface = surface
-                .child(
-                controls::card(theme)
-                    .child(controls::row(
-                        "Terminal tools inherit Sirio's macOS privacy envelope.",
-                        Some("Use these controls when a CLI or agent in a pane needs macOS privacy access. Sirio does not ask at startup.".into()),
-                        controls::button("refresh-permissions", "Refresh", theme, |_, _, _| {}),
-                        theme,
-                    )),
-                )
-                .child(
-                div()
-                    .mt(px(8.0))
-                    .child(settings_section("macOS Permissions", rows, theme)),
-                );
+            surface = surface.child(self.render_macos_permissions(theme, entity.clone()));
         }
         surface.child(settings_section(
             "Browser origin grants",
             self.render_browser_grants(theme, entity),
             theme,
         ))
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn render_macos_permissions(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
+        let mut rows = controls::card(theme);
+        for (index, kind) in PermissionKind::ALL.into_iter().enumerate() {
+            if index > 0 {
+                rows = rows.child(controls::separator(theme));
+            }
+            rows = rows.child(self.render_permission_row(kind, theme, entity.clone()));
+        }
+        div()
+            .child(controls::card(theme).child(controls::row(
+                "Terminal tools inherit Sirio's macOS privacy envelope.",
+                Some("Use these controls when a CLI or agent in a pane needs macOS privacy access. Sirio does not ask at startup.".into()),
+                controls::button("refresh-permissions", "Refresh", theme, move |_, _, cx| {
+                    entity.update(cx, |_, cx| cx.emit(SettingsEvent::RefreshPermissions));
+                }),
+                theme,
+            )))
+            .child(
+                div()
+                    .mt(px(8.0))
+                    .child(settings_section("macOS Permissions", rows, theme)),
+            )
+    }
+}
+
+/// `controls::button` takes a `&'static` id, so each row's is spelled out.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn permission_button_id(kind: PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Notifications => "permission-notifications",
+        PermissionKind::ScreenRecording => "permission-screen-recording",
+        PermissionKind::Accessibility => "permission-accessibility",
+        PermissionKind::FullDiskAccess => "permission-full-disk",
+        PermissionKind::Automation => "permission-automation",
+        PermissionKind::LocalNetwork => "permission-local-network",
     }
 }
 
@@ -6787,23 +6767,6 @@ mod tests {
         );
     }
 
-    /// WCAG 2.1 contrast between two opaque colours, the same ratio
-    /// `sirio_theme`'s own palette tests use.
-    fn contrast_ratio(one: Rgba, other: Rgba) -> f32 {
-        let luminance = |color: Rgba| {
-            let channel = |c: f32| {
-                if c <= 0.03928 {
-                    c / 12.92
-                } else {
-                    ((c + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-        };
-        let (a, b) = (luminance(one), luminance(other));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
-
     /// The detail column must scroll under the wheel.
     ///
     /// It did not. The column was a flex *row*, so the page it holds was
@@ -6928,34 +6891,5 @@ mod tests {
             viewport.origin.y,
             first_provider.origin.y
         );
-    }
-
-    /// Text on a saturated status fill has to be readable in both
-    /// appearances.
-    ///
-    /// The "not installed" pill and the terminal-only ACP badge painted
-    /// `title_selected` — which *is* `title`, the page's body colour — on
-    /// `tab_error` and `tab_needs_input`. Measured, that lands at 1.13:1
-    /// (warning, dark) and 1.66:1 (danger, light): the text is the same
-    /// lightness as the chip under it and simply disappears.
-    #[test]
-    fn status_pill_text_stays_readable_on_its_fill() {
-        for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            let theme = match mode {
-                ThemeMode::Dark => Theme::dark(),
-                _ => Theme::light(),
-            };
-            for (name, fill) in [
-                ("tab_error", theme.danger),
-                ("tab_needs_input", theme.warning),
-            ] {
-                let ratio = contrast_ratio(on_status_fill(&theme), fill);
-                assert!(
-                    ratio >= 4.0,
-                    "{mode:?}: status text on {name} is {ratio:.2}:1, which no \
-                     reader can use"
-                );
-            }
-        }
     }
 }

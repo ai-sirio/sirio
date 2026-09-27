@@ -38,9 +38,14 @@ sirio_control.workspace = true
 sirio_release.workspace = true
 sirio_update.workspace = true
 sirio_apply.workspace = true
+sirio_privacy.workspace = true
 sirio_git.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The channel that carries a notification from whichever thread posts it to
+# the main thread, where gpui's notification center lives. Already in the
+# graph through gpui, sirio_ui and sirio_acp.
+futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The window icon (`WindowOptions.icon`): decoded once at startup from the
 # embedded PNG. Same crate and version family gpui itself uses, so the

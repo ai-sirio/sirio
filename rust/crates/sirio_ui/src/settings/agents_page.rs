@@ -950,7 +950,9 @@ mod tests {
                     | SettingsEvent::InstallLanguageServer(_)
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
-                    | SettingsEvent::RefreshUsage => {}
+                    | SettingsEvent::RefreshUsage
+                    | SettingsEvent::RefreshPermissions
+                    | SettingsEvent::RequestPermission(_) => {}
                 },
             );
             std::mem::forget(subscription);
@@ -1002,7 +1004,9 @@ mod tests {
                     | SettingsEvent::InstallLanguageServer(_)
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
-                    | SettingsEvent::RefreshUsage => {}
+                    | SettingsEvent::RefreshUsage
+                    | SettingsEvent::RefreshPermissions
+                    | SettingsEvent::RequestPermission(_) => {}
                 },
             );
             std::mem::forget(subscription);
@@ -1161,7 +1165,9 @@ mod tests {
                     | SettingsEvent::InstallLanguageServer(_)
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
-                    | SettingsEvent::RefreshUsage => {}
+                    | SettingsEvent::RefreshUsage
+                    | SettingsEvent::RefreshPermissions
+                    | SettingsEvent::RequestPermission(_) => {}
                 },
             );
             // The subscription must outlive this update scope for the whole
