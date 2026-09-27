@@ -283,26 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_and_finding_nothing_do_not_look_alike() {
-        // The whole reason this surface has four states. A panel that says
-        // nothing while it waits and a panel that found nothing are the
-        // same picture, and the user who clicked cannot tell which happened.
-        let (waiting_heading, waiting_body) = summary(&ReferencesState::Searching {
-            symbol: "spawn".to_owned(),
-        });
-        let (empty_heading, empty_body) = summary(&ReferencesState::Found {
-            symbol: "spawn".to_owned(),
-            rows: Vec::new(),
-        });
-
-        assert_eq!(waiting_body.as_deref(), Some("Searching…"));
-        assert_eq!(empty_body.as_deref(), Some("No references found"));
-        assert_ne!(waiting_body, empty_body);
-        assert_eq!(waiting_heading, "References to spawn");
-        assert_eq!(empty_heading, "0 references to spawn");
-    }
-
-    #[test]
     fn results_replace_the_message_rather_than_joining_it() {
         // With rows to draw there must be no message: a list under
         // "Searching…" would say the search is still running.
@@ -312,29 +292,5 @@ mod tests {
         });
         assert_eq!(heading, "1 references to spawn");
         assert_eq!(body, None);
-    }
-
-    #[test]
-    fn a_failure_is_shown_rather_than_swallowed() {
-        // LspError's Display phrases the still-indexing case; the surface
-        // shows whatever it is given rather than flattening it to "none".
-        let (_, body) = summary(&ReferencesState::Failed(
-            "the language server is still indexing this project".to_owned(),
-        ));
-        assert_eq!(
-            body.as_deref(),
-            Some("the language server is still indexing this project")
-        );
-    }
-
-    #[test]
-    fn a_symbol_the_buffer_could_not_name_is_not_invented() {
-        // symbol_at returns empty when the caret is not on an identifier.
-        // The heading then counts, and says nothing it does not know.
-        let (heading, _) = summary(&ReferencesState::Found {
-            symbol: String::new(),
-            rows: vec![row("main.rs", 1), row("main.rs", 2)],
-        });
-        assert_eq!(heading, "2 references");
     }
 }

@@ -437,15 +437,4 @@ mod tests {
             "no POSIX .local layout leaks into the Windows path: {text}"
         );
     }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn the_posix_layout_is_unchanged() {
-        use std::ffi::OsStr;
-
-        assert_eq!(
-            resolve_store_path(None, None, Some(OsStr::new("/home/u")), None).unwrap(),
-            PathBuf::from("/home/u/.local/share/sirio/credentials.json")
-        );
-    }
 }

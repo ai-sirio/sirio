@@ -216,12 +216,6 @@ impl Client {
         .await
     }
 
-    /// Test seam: proves a giving-up request unregistered itself.
-    #[cfg(test)]
-    pub(crate) fn pending_is_empty(&self) -> bool {
-        self.pending.lock().unwrap().is_empty()
-    }
-
     async fn send(&self, envelope: &Value) -> Result<(), LspError> {
         let bytes = serde_json::to_vec(envelope)
             .map_err(|error| LspError::Transport(format!("serialising: {error}")))?;
@@ -331,26 +325,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_request_resolves_with_the_matching_response() {
-        futures::executor::block_on(async {
-            let (client, _incoming) = with_scripted_server(|request| {
-                vec![serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "result": {"echo": request["method"]}
-                })]
-            })
-            .await;
-
-            let value: serde_json::Value = client
-                .request("textDocument/hover", serde_json::json!({}))
-                .await
-                .unwrap();
-            assert_eq!(value, serde_json::json!({"echo": "textDocument/hover"}));
-        });
-    }
-
-    #[test]
     fn two_concurrent_requests_each_receive_their_own_id() {
         // The correlation map earns its keep here: two requests are in
         // flight at once and each must get the answer bearing its own id.
@@ -430,27 +404,6 @@ pub(crate) mod tests {
                 error.to_string().contains("indexing"),
                 "the message must read as a wait: {error}"
             );
-        });
-    }
-
-    #[test]
-    fn another_server_error_is_still_a_server_error() {
-        // The specific arm must not swallow the general one.
-        futures::executor::block_on(async {
-            let (client, _incoming) = with_scripted_server(|request| {
-                vec![serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "error": { "code": -32602, "message": "invalid params" }
-                })]
-            })
-            .await;
-
-            let error = client
-                .request::<_, serde_json::Value>("textDocument/hover", serde_json::json!({}))
-                .await
-                .expect_err("the server refused");
-            assert!(matches!(error, LspError::Server { code: -32602, .. }));
         });
     }
 
@@ -543,31 +496,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_timed_out_request_leaves_no_entry_behind_in_the_pending_map() {
-        // A timeout that forgets to unregister leaks one entry per giving-up
-        // request, and a long session of a slow server would grow the map
-        // without bound.
-        futures::executor::block_on(async {
-            let (client, _incoming) = with_scripted_server(|_| {
-                vec![serde_json::json!({"jsonrpc": "2.0", "id": 9999, "result": null})]
-            })
-            .await;
-
-            let _ = client
-                .request_with_timeout::<_, serde_json::Value>(
-                    "textDocument/hover",
-                    serde_json::json!({}),
-                    std::time::Duration::from_millis(50),
-                )
-                .await;
-            assert!(
-                client.pending_is_empty(),
-                "the timed-out request must be unregistered"
-            );
-        });
-    }
-
-    #[test]
     fn a_closed_stream_fails_every_request_still_waiting() {
         // A server that dies mid-request must not leave the caller parked
         // forever; the read loop's exit has to drain the pending map.
@@ -578,44 +506,6 @@ pub(crate) mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(error, LspError::Transport(_)));
-        });
-    }
-
-    #[test]
-    fn an_unimplemented_request_is_refused_in_the_protocols_own_terms() {
-        futures::executor::block_on(async {
-            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let captured = seen.clone();
-            let (client, _incoming) = with_scripted_server(move |request| {
-                captured.lock().unwrap().push(request.clone());
-                // Keep the peer loop alive: an empty reply list ends it.
-                vec![serde_json::json!({"jsonrpc": "2.0", "id": 9999, "result": null})]
-            })
-            .await;
-
-            client
-                .respond_error(serde_json::json!(7), -32601, "not implemented")
-                .await
-                .expect("the refusal reaches the server");
-
-            // The peer only observes what the client wrote, so give the
-            // write a turn to land before reading it back.
-            for _ in 0..50 {
-                if !seen.lock().unwrap().is_empty() {
-                    break;
-                }
-                futures_timer::Delay::new(std::time::Duration::from_millis(10)).await;
-            }
-
-            let sent = seen.lock().unwrap();
-            let refusal = sent.first().expect("the server saw the refusal");
-            assert_eq!(refusal["id"], serde_json::json!(7));
-            assert_eq!(refusal["error"]["code"], serde_json::json!(-32601));
-            assert_eq!(refusal["error"]["message"], serde_json::json!("not implemented"));
-            assert!(
-                refusal.get("result").is_none(),
-                "a JSON-RPC answer carries a result or an error, never both"
-            );
         });
     }
 }

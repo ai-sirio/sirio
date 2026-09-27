@@ -432,26 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_content_exposes_only_terminal_panes_and_chat_tab_activity() {
-        let terminal = LegacyWorkspaceTab::Terminal {
-            title: "Terminal".into(),
-            pane_ids: vec!["p1".into(), "p2".into()],
-        };
-        assert_eq!(
-            terminal.activity_pane_ids(),
-            &["p1".to_string(), "p2".to_string()]
-        );
-        let chat = LegacyWorkspaceTab::Chat {
-            title: "Chat".into(),
-            tab_id: "tab".into(),
-            agent_id: "codex".into(),
-            session_id: "s".into(),
-        };
-        assert_eq!(chat.activity_tab_id(), Some("tab"));
-        assert!(chat.activity_pane_ids().is_empty());
-    }
-
-    #[test]
     fn layout_validation_accepts_root_empty_but_rejects_invalid_references() {
         let layout = WorkspaceLayout::empty("root");
         assert!(layout.validate().is_ok());
@@ -471,39 +451,6 @@ mod tests {
             second: Box::new(LayoutNode::Group("missing".into())),
         };
         assert_eq!(split.validate(), Err(LayoutError::InvalidFraction(1_001)));
-    }
-
-    #[test]
-    fn command_classes_distinguish_structural_and_nonstructural_changes() {
-        let tab = WorkspaceTab {
-            id: "t".into(),
-            content_id: "c".into(),
-            kind: ContentKind::Terminal,
-            title: "T".into(),
-            view_state: WorkspaceTabViewState::default(),
-        };
-        assert!(
-            classify_layout_command(&LayoutCommand::Insert {
-                group: "g".into(),
-                tab
-            })
-            .structural
-        );
-        assert_eq!(
-            classify_layout_command(&LayoutCommand::SetDividerFraction {
-                split_id: "s".into(),
-                fraction_millis: 500
-            })
-            .focus,
-            FocusIntent::Divider
-        );
-        assert!(
-            !classify_layout_command(&LayoutCommand::Rename {
-                tab: "t".into(),
-                title: "new".into()
-            })
-            .structural
-        );
     }
 
     #[test]

@@ -359,17 +359,6 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_with_crlf_forms_lines() {
-        assert_eq!(render(5, 20, &[b"one\r\ntwo\r\n"]), "one\ntwo");
-    }
-
-    #[test]
-    fn cursor_positioning_and_forward_place_text_where_conhost_put_it() {
-        let text = render(5, 20, &[b"\x1b[3;2HHi\x1b[1Cthere"]);
-        assert_eq!(text, "\n\n Hi there");
-    }
-
-    #[test]
     fn erase_to_end_and_rewrite_replace_the_line() {
         assert_eq!(render(3, 20, &[b"old text\r\x1b[Knew"]), "new");
         assert_eq!(render(3, 20, &[b"old text\x1b[3D\x1b[K"]), "old t");

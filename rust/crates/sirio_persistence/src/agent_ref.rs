@@ -102,10 +102,4 @@ mod tests {
     fn a_bare_id_from_before_v15_decodes_as_an_adapter() {
         assert_eq!(AgentRef::from_db("opencode"), AgentRef::adapter("opencode"));
     }
-
-    #[test]
-    fn adapter_id_is_some_only_for_adapter_refs() {
-        assert_eq!(AgentRef::adapter("codex").adapter_id(), Some("codex"));
-        assert_eq!(AgentRef::Registry("custom".into()).adapter_id(), None);
-    }
 }

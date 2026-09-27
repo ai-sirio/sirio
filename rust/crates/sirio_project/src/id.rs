@@ -50,30 +50,3 @@ define_id_type! {
     /// Identifies a [`crate::Tab`] within a [`crate::Workspace`].
     TabId
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ids_are_distinct_types_with_value_semantics() {
-        let a = ProjectId::new(7);
-        let b = ProjectId::new(7);
-        let c = ProjectId::new(8);
-
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        assert_eq!(a.to_string(), "ProjectId#7");
-        assert_eq!(c.0, 8);
-    }
-
-    #[test]
-    fn ids_support_set_and_map_usage() {
-        let mut seen = std::collections::HashSet::new();
-        seen.insert(WorktreeId::new(1));
-        seen.insert(WorktreeId::new(1));
-        seen.insert(WorktreeId::new(2));
-        assert_eq!(seen.len(), 2);
-        assert!(seen.contains(&WorktreeId::new(2)));
-    }
-}

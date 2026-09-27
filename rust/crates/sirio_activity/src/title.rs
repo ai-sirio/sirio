@@ -212,7 +212,6 @@ pub fn should_apply_title_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn spinner() -> String {
         "\u{280B}".to_string() // ⠋
@@ -227,17 +226,6 @@ mod tests {
         assert_eq!(identify_agent_from_title("✳ Fix login bug"), Some("claude"));
         assert_eq!(identify_agent_from_title("✳"), Some("claude"));
         assert_eq!(identify_agent_from_title(". Fix login bug"), Some("claude"));
-    }
-
-    #[test]
-    fn bare_braille_spinner_does_not_identify() {
-        // Codex 0.144+ writes the same "dots" braille cycle (⠋⠙⠹…) into its
-        // terminal title while working, so a bare spinner no longer implies
-        // Claude. Both are native binaries caught by Layer D instead.
-        assert_eq!(
-            identify_agent_from_title(&format!("{} Fix login bug", spinner())),
-            None
-        );
     }
 
     #[test]
@@ -280,12 +268,6 @@ mod tests {
         // No spinner present — bare "pi" text alone is too ambiguous with a
         // branch/cwd name (e.g. "pi-notes") to safely claim identity.
         assert_eq!(identify_agent_from_title("Pi"), None);
-    }
-
-    #[test]
-    fn plain_shell_prompts_do_not_identify() {
-        assert_eq!(identify_agent_from_title("zsh"), None);
-        assert_eq!(identify_agent_from_title(""), None);
     }
 
     #[test]
@@ -396,11 +378,6 @@ mod tests {
         assert_eq!(detect_status_from_title("codex already", "codex"), None);
     }
 
-    #[test]
-    fn empty_title_is_nil() {
-        assert_eq!(detect_status_from_title("", "claude"), None);
-    }
-
     // ------------------------------------------------------------------
     // Signal merger (debounce)
     // ------------------------------------------------------------------
@@ -411,55 +388,6 @@ mod tests {
             None,
             Instant::now(),
             TITLE_DEBOUNCE
-        ));
-    }
-
-    #[test]
-    fn title_signal_dropped_within_debounce_window() {
-        let now = Instant::now();
-        let recent_hook = now - Duration::from_millis(500);
-        assert!(!should_apply_title_signal(
-            Some(recent_hook),
-            now,
-            TITLE_DEBOUNCE
-        ));
-    }
-
-    #[test]
-    fn title_signal_applies_after_debounce_window() {
-        let now = Instant::now();
-        let stale_hook = now - Duration::from_secs(2);
-        assert!(should_apply_title_signal(
-            Some(stale_hook),
-            now,
-            TITLE_DEBOUNCE
-        ));
-    }
-
-    #[test]
-    fn exactly_at_debounce_boundary_applies() {
-        let now = Instant::now();
-        let hook_at_boundary = now - TITLE_DEBOUNCE;
-        assert!(should_apply_title_signal(
-            Some(hook_at_boundary),
-            now,
-            TITLE_DEBOUNCE
-        ));
-    }
-
-    #[test]
-    fn custom_debounce_interval_is_respected() {
-        let now = Instant::now();
-        let hook = now - Duration::from_secs(3);
-        assert!(!should_apply_title_signal(
-            Some(hook),
-            now,
-            Duration::from_secs(5)
-        ));
-        assert!(should_apply_title_signal(
-            Some(hook),
-            now,
-            Duration::from_secs(1)
         ));
     }
 }

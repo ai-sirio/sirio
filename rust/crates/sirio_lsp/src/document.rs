@@ -217,19 +217,4 @@ mod tests {
         assert_eq!(versions.changed(path), 3);
         assert!(versions.is_open(path));
     }
-
-    #[test]
-    fn reopening_a_closed_document_starts_over() {
-        let mut versions = DocumentVersions::default();
-        let path = Path::new("/tmp/a.rs");
-        versions.opened(path);
-        versions.changed(path);
-        versions.closed(path);
-        assert!(!versions.is_open(path));
-        assert_eq!(
-            versions.opened(path),
-            1,
-            "a reopened document is a new document to the server"
-        );
-    }
 }

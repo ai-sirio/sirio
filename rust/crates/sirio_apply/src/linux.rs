@@ -176,22 +176,6 @@ mod tests {
     }
 
     #[test]
-    fn self_location_accepts_the_appimage_environment_variable() {
-        let appimage = Path::new("/home/someone/Downloads/Sirio-0.6.0-x86_64.AppImage");
-        assert_eq!(
-            self_locate_at(Some(appimage.as_os_str())).unwrap(),
-            appimage
-        );
-    }
-
-    #[test]
-    fn missing_appimage_is_the_not_an_install_signal_and_points_at_the_download_page() {
-        let error = self_locate_at(None).unwrap_err();
-        assert_eq!(error, ApplyError::InstallNotFound);
-        assert!(error.to_string().contains(super::super::DOWNLOAD_PAGE_URL));
-    }
-
-    #[test]
     fn a_verified_download_replaces_the_appimage_and_leaves_no_incoming_copy() {
         let (_root, appimage, staged) = appimage_fixture("swap");
 

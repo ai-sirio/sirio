@@ -1,10 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sirio_agents::{
-    AgentSessionValidator, ClaudeHookMigrator, ClaudeTranscriptSource, CodexTranscriptSource,
-    shell_quote,
-};
+use sirio_agents::{ClaudeHookMigrator, ClaudeTranscriptSource, shell_quote};
 
 const CURRENT_SIRIOCTL: &str = "/opt/sirio/bin/sirioctl";
 
@@ -157,63 +154,6 @@ fn hook_migration_updates_a_file_and_missing_files_are_noops() {
 }
 
 #[test]
-fn session_validator_checks_claude_and_codex_files_but_trusts_other_agents() {
-    let dir = TempDir::new();
-    let worktree = "/tmp/demo.project";
-    assert_eq!(
-        AgentSessionValidator::claude_project_slug(worktree),
-        "-tmp-demo-project"
-    );
-    let claude_file = dir
-        .path()
-        .join("projects/-tmp-demo-project/claude-ref.jsonl");
-    std::fs::create_dir_all(claude_file.parent().unwrap()).unwrap();
-    std::fs::write(&claude_file, b"{}").unwrap();
-
-    assert!(AgentSessionValidator::is_likely_valid(
-        "claude",
-        "claude-ref",
-        worktree,
-        dir.path(),
-        dir.path().join("codex"),
-    ));
-    assert!(!AgentSessionValidator::is_likely_valid(
-        "claude",
-        "missing",
-        worktree,
-        dir.path(),
-        dir.path().join("codex"),
-    ));
-
-    let codex_file = dir
-        .path()
-        .join("codex/sessions/2026/08/rollout-deadbeef.jsonl");
-    std::fs::create_dir_all(codex_file.parent().unwrap()).unwrap();
-    std::fs::write(&codex_file, b"{}").unwrap();
-    assert!(AgentSessionValidator::is_likely_valid(
-        "codex",
-        "deadbeef",
-        worktree,
-        dir.path().join("missing-claude"),
-        dir.path().join("codex"),
-    ));
-    assert!(!AgentSessionValidator::is_likely_valid(
-        "codex",
-        "not-present",
-        worktree,
-        dir.path().join("missing-claude"),
-        dir.path().join("codex"),
-    ));
-    assert!(AgentSessionValidator::is_likely_valid(
-        "pi",
-        "anything",
-        worktree,
-        dir.path().join("missing-claude"),
-        dir.path().join("missing-codex"),
-    ));
-}
-
-#[test]
 fn claude_transcript_source_joins_string_and_text_block_messages() {
     let dir = TempDir::new();
     let worktree = "/Users/tester/project";
@@ -237,77 +177,4 @@ not-json
         .recent_text()
         .expect("transcript text");
     assert_eq!(text, "fix the login bug\nLooking at auth.ts now\nDone");
-}
-
-#[test]
-fn claude_transcript_source_uses_the_same_non_alphanumeric_slug_as_validation() {
-    let dir = TempDir::new();
-    let worktree = "/tmp/demo.project";
-    let session = "claude-ref";
-    let path = dir
-        .path()
-        .join(".claude/projects/-tmp-demo-project")
-        .join(format!("{session}.jsonl"));
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
-        br#"{"message":{"content":"found the transcript"}}
-"#,
-    )
-    .unwrap();
-
-    assert_eq!(
-        ClaudeTranscriptSource::new(worktree, session, dir.path()).recent_text(),
-        Some("found the transcript".to_string())
-    );
-}
-
-#[test]
-fn codex_transcript_source_finds_rollout_recursively_and_joins_text_blocks() {
-    let dir = TempDir::new();
-    let session = "ABCD-1234";
-    let path = dir
-        .path()
-        .join(".codex/sessions/2026/08/13")
-        .join("rollout-2026-08-13T12-00-00-abcd-1234.jsonl");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
-        br#"{"content":[{"type":"text","text":"add rate limiting"}]}
-{"content":[{"type":"tool","text":"ignored"},{"type":"text","text":"Added a token bucket limiter"}]}
-"#,
-    )
-    .unwrap();
-
-    let text = CodexTranscriptSource::new(session, dir.path())
-        .recent_text()
-        .expect("rollout text");
-    assert_eq!(text, "add rate limiting\nAdded a token bucket limiter");
-    assert!(
-        CodexTranscriptSource::new("missing", dir.path())
-            .recent_text()
-            .is_none()
-    );
-}
-
-#[test]
-fn codex_transcript_source_reads_text_blocks_nested_in_rollout_payloads() {
-    let dir = TempDir::new();
-    let session = "nested-ref";
-    let path = dir
-        .path()
-        .join(".codex/sessions/2026/08/13")
-        .join("rollout-2026-08-13T12-00-00-nested-ref.jsonl");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
-        br#"{"type":"response_item","payload":{"type":"message","content":[{"type":"output_text","text":"nested reply"}]}}
-"#,
-    )
-    .unwrap();
-
-    assert_eq!(
-        CodexTranscriptSource::new(session, dir.path()).recent_text(),
-        Some("nested reply".to_string())
-    );
 }

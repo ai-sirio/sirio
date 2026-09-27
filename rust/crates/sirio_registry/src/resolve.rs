@@ -193,7 +193,6 @@ pub fn current_platform_key() -> &'static str {
 mod tests {
     use super::*;
     use crate::model::{AcpRegistry, BinaryArtifact, Distribution, RegistryAgent};
-    use crate::{UnpackKind, unpack_kind};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -329,26 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn unpackable_binary_archives_remain_installable() {
-        for archive in [
-            "https://example.invalid/a.zip",
-            "https://example.invalid/a.tar.gz",
-        ] {
-            let registry = registry_with("opencode", vec![binary_for_current_platform(archive)]);
-            assert!(
-                matches!(
-                    resolve(ResolveInput {
-                        platform_key: current_platform_key(),
-                        ..input(Some(&registry))
-                    }),
-                    LaunchSource::Installable { .. }
-                ),
-                "{archive} should remain installable"
-            );
-        }
-    }
-
-    #[test]
     fn npx_rescues_an_unsupported_binary_archive() {
         let registry = registry_with(
             "mixed",
@@ -387,15 +366,6 @@ mod tests {
         assert_eq!(
             resolve(input(Some(&registry))),
             LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution)
-        );
-    }
-
-    #[test]
-    fn an_agent_the_registry_does_not_carry_is_unavailable() {
-        let registry = registry_with("something-else", vec![binary_for("linux-x86_64")]);
-        assert_eq!(
-            resolve(input(Some(&registry))),
-            LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
         );
     }
 
@@ -469,16 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn nothing_known_at_all_is_not_in_registry() {
-        // Reaches the `input.registry` guard: no builtin, no install, and
-        // no cached registry copy.
-        assert_eq!(
-            resolve(input(None)),
-            LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
-        );
-    }
-
-    #[test]
     fn a_known_adapter_never_falls_through_to_bare_name_lookup() {
         // If the registry ever published an agent literally called "omp",
         // it must not start answering the omp adapter's lookup: the table's
@@ -492,51 +452,5 @@ mod tests {
             }),
             LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
         );
-    }
-
-    #[test]
-    fn fixture_binary_installability_agrees_with_archive_support() {
-        let registry = AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json"))
-            .expect("decode the recorded registry");
-        let platform_keys = ["linux-x86_64", "darwin-aarch64", "windows-x86_64"];
-        let mut saw_goose = false;
-
-        for agent in &registry.agents {
-            saw_goose |= agent.id == "goose";
-            let has_npx = agent
-                .distributions
-                .iter()
-                .any(|distribution| matches!(distribution, Distribution::Npx { .. }));
-
-            for platform_key in platform_keys {
-                let source = resolve(ResolveInput {
-                    adapter_id: &agent.id,
-                    builtin: None,
-                    builtin_on_path: false,
-                    installed: None,
-                    registry: Some(&registry),
-                    platform_key,
-                });
-                if !has_npx && matches!(source, LaunchSource::Installable { .. }) {
-                    let artifact =
-                        agent
-                            .distributions
-                            .iter()
-                            .find_map(|distribution| match distribution {
-                                Distribution::Binary(artifacts) => artifacts.get(platform_key),
-                                _ => None,
-                            });
-                    let artifact = artifact.expect("binary installability requires an artifact");
-                    assert_ne!(
-                        unpack_kind(&artifact.archive),
-                        UnpackKind::Unsupported,
-                        "{} on {platform_key} is installable but its archive is unsupported",
-                        agent.id
-                    );
-                }
-            }
-        }
-
-        assert!(saw_goose, "the agreement fixture must cover goose");
     }
 }

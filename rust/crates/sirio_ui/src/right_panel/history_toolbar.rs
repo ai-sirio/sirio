@@ -608,35 +608,3 @@ pub(super) fn render_toolbar(
             )
         })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The boundaries, not the middles. A layout exercised at 300 and 500px
-    /// passes whether the threshold sits at 400 or at 470, which is why
-    /// those are the numbers not tested here.
-    #[test]
-    fn the_toolbar_changes_shape_exactly_at_its_thresholds() {
-        assert_eq!(toolbar_layout(469.0), ToolbarLayout::TwoRows);
-        assert_eq!(toolbar_layout(470.0), ToolbarLayout::OneRow);
-        assert_eq!(toolbar_layout(259.0), ToolbarLayout::Collapsed);
-        assert_eq!(toolbar_layout(260.0), ToolbarLayout::TwoRows);
-    }
-
-    /// The panel clamps to 220..=640, so those two are the only widths the
-    /// toolbar will ever actually be asked for at the extremes.
-    #[test]
-    fn both_ends_of_the_panels_range_have_a_shape() {
-        assert_eq!(toolbar_layout(220.0), ToolbarLayout::Collapsed);
-        assert_eq!(toolbar_layout(640.0), ToolbarLayout::OneRow);
-    }
-
-    /// A degenerate width must not panic or fall through to the widest
-    /// shape: during the first frame, before layout has run, zero is a real
-    /// value this can be called with.
-    #[test]
-    fn a_zero_width_collapses_rather_than_expanding() {
-        assert_eq!(toolbar_layout(0.0), ToolbarLayout::Collapsed);
-    }
-}

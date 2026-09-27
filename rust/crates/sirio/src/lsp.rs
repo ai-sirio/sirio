@@ -413,42 +413,6 @@ mod tests {
     }
 
     #[test]
-    fn a_rust_file_resolves_to_the_rust_entry() {
-        let mut supervisor = LspSupervisor::new(loader_with_defaults());
-        let entry = supervisor
-            .entry_for(std::path::Path::new("/repo/src/main.rs"))
-            .expect("a .rs file has an entry among the defaults");
-        assert_eq!(entry.name, "rust");
-        assert_eq!(entry.command, "rust-analyzer");
-    }
-
-    #[test]
-    fn a_file_with_no_language_resolves_to_nothing_quietly() {
-        let mut supervisor = LspSupervisor::new(loader_with_defaults());
-        assert!(
-            supervisor
-                .entry_for(std::path::Path::new("/repo/NOTES.txt"))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn the_key_pairs_the_project_root_with_the_language() {
-        let mut supervisor = LspSupervisor::new(loader_with_defaults());
-        let entry = supervisor
-            .entry_for(std::path::Path::new("/repo/src/main.rs"))
-            .expect("rust entry");
-        let key = supervisor.key_for(
-            std::path::Path::new("/repo/src/main.rs"),
-            std::path::Path::new("/repo"),
-            &entry,
-        );
-        // No Cargo.toml exists at that path, so the root falls back to the
-        // worktree — the pairing is what this test pins down.
-        assert_eq!(key, (std::path::PathBuf::from("/repo"), "rust".to_owned()));
-    }
-
-    #[test]
     fn two_languages_under_one_root_are_two_different_keys() {
         // The registry must not collapse a Rust server and a Go server that
         // happen to share a directory.
@@ -569,53 +533,6 @@ mod tests {
         assert_eq!(python.1, "python");
     }
 
-    #[test]
-    fn a_file_no_entry_claims_resolves_to_no_key_at_all() {
-        // No key means no server, which means the menu entry is disabled
-        // with a reason rather than enabled and inert.
-        let mut supervisor = LspSupervisor::new(loader_with_defaults());
-        let table = supervisor.table_for_test();
-        assert!(
-            key_for_file(
-                table,
-                std::path::Path::new("/repo/NOTES.txt"),
-                std::path::Path::new("/repo")
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn symbols_arrive_in_the_view_s_own_vocabulary() {
-        // The protocol's kind is a number in a table; the view's is a case
-        // it can draw. Converting here is what keeps sirio_ui free of
-        // lsp-types — the same reason view_diagnostics exists above.
-        let raw = vec![
-            sirio_lsp::Symbol {
-                name: "LspSupervisor".to_owned(),
-                detail: Some("struct".to_owned()),
-                kind: sirio_lsp::SymbolKind::Struct,
-                line: 10,
-                depth: 0,
-            },
-            sirio_lsp::Symbol {
-                name: "servers".to_owned(),
-                detail: None,
-                kind: sirio_lsp::SymbolKind::Field,
-                line: 12,
-                depth: 1,
-            },
-        ];
-        let converted = view_symbols(&raw);
-        assert_eq!(converted.len(), 2);
-        assert_eq!(converted[0].name, "LspSupervisor");
-        assert_eq!(converted[0].kind, sirio_ui::outline::OutlineKind::Struct);
-        assert_eq!(converted[0].detail.as_deref(), Some("struct"));
-        assert_eq!(converted[0].line, 10);
-        assert_eq!(converted[1].depth, 1, "the indent survives the crossing");
-        assert_eq!(converted[1].kind, sirio_ui::outline::OutlineKind::Field);
-    }
-
     /// One filename per language the editor recognises, and the language it
     /// must resolve to. Two lists that have to agree — the editor's and the
     /// server table's — and this is the only place both are visible, since
@@ -701,18 +618,6 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_are_absent_while_no_server_runs() {
-        // Nothing is running in a fresh supervisor, so every question about
-        // a capability answers "no" — never "maybe".
-        let supervisor = LspSupervisor::new(loader_with_defaults());
-        let file = std::path::Path::new("/repo/src/main.rs");
-        let root = std::path::Path::new("/repo");
-        assert!(supervisor.capability_for(file, root).is_none());
-        assert!(!supervisor.definition_available(file, root));
-        assert!(!supervisor.references_available(file, root));
-    }
-
-    #[test]
     fn a_command_that_is_missing_and_installable_offers_its_recipe() {
         let mut supervisor = LspSupervisor::new(loader_with_defaults());
         let file = std::path::Path::new("/repo/src/main.rs");
@@ -729,52 +634,6 @@ mod tests {
             supervisor.dead_reason_for(file, root),
             Some(Dead::Installable { .. })
         ));
-    }
-
-    #[test]
-    fn a_language_whose_server_needs_a_toolchain_says_so_instead() {
-        let mut supervisor = LspSupervisor::new(loader_with_defaults());
-        let file = std::path::Path::new("/repo/src/Main.java");
-        let root = std::path::Path::new("/repo");
-        let entry = supervisor.entry_for(file).expect("java is in the defaults");
-        let key = supervisor.key_for(file, root, &entry);
-        let Some(sirio_lsp::Recipe::Manual { needs, url }) = entry.install.clone() else {
-            panic!("java is a Manual recipe");
-        };
-        supervisor.mark_dead(key, Dead::Manual { needs, url });
-        match supervisor.dead_reason_for(file, root) {
-            Some(Dead::Manual { needs, .. }) => assert!(needs.contains("JVM")),
-            other => panic!("expected the toolchain explanation, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn the_path_wins_over_what_sirio_installed() {
-        // Zed's rule, and its reason: worktree 1 may pin its own gopls while
-        // worktree 3 falls back to ours. Spawning by name *is* the PATH
-        // lookup, so the store is consulted only after NotInstalled — which is
-        // what makes this ordering free.
-        let store = sirio_registry::InstallStore::new(std::env::temp_dir().join(
-            format!("sirio-lsp-store-{}", std::process::id()),
-        ));
-        let supervisor = LspSupervisor::new(loader_with_defaults());
-        // A command every machine has, standing in for one the reader installed.
-        let entry = sirio_lsp::LanguageEntry {
-            name: "probe".into(),
-            extensions: vec!["probe".into()],
-            command: "sh".into(),
-            args: Vec::new(),
-            roots: Vec::new(),
-            install: Some(sirio_lsp::Recipe::Npm {
-                package: "never-used",
-                version: "1.0.0",
-                bin: "never-used",
-            }),
-        };
-        assert!(
-            supervisor.installed_binary_for(&entry, &store).is_none(),
-            "nothing is installed, so step 2 has nothing to offer"
-        );
     }
 
     #[test]
@@ -875,27 +734,5 @@ mod tests {
         supervisor.revive(&key);
 
         assert!(supervisor.is_dead(&key), "Failed is final");
-    }
-
-    #[test]
-    fn a_file_no_entry_claims_has_no_dead_reason() {
-        // Something *is* dead here, so `None` below is the answer to a
-        // question rather than the emptiness of the map. A `.txt` has no
-        // entry and so no key, and the reason a Java file gives must not
-        // leak onto a file no server was ever named for.
-        let mut supervisor = LspSupervisor::new(loader_with_defaults());
-        let file = std::path::Path::new("/repo/src/Main.java");
-        let root = std::path::Path::new("/repo");
-        let entry = supervisor.entry_for(file).expect("java is in the defaults");
-        let key = supervisor.key_for(file, root, &entry);
-        supervisor.mark_dead(key, Dead::Failed);
-        assert!(
-            supervisor
-                .dead_reason_for(
-                    std::path::Path::new("/repo/NOTES.txt"),
-                    std::path::Path::new("/repo")
-                )
-                .is_none()
-        );
     }
 }

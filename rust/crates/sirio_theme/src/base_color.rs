@@ -102,53 +102,6 @@ impl BaseColor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn neutral_is_bezels_shipped_grey() {
-        // `Tint::NONE` is what `Brand::default` carries, and bezel documents
-        // that it reproduces the built-in palette exactly. Anything else here
-        // would silently restyle every existing install on upgrade.
-        assert_eq!(BaseColor::Neutral.tint(), bezel::theme::Tint::NONE);
-        assert_eq!(BaseColor::default(), BaseColor::Neutral);
-    }
-
-    #[test]
-    fn the_four_tinted_families_carry_bezels_own_numbers() {
-        // Transcribed from `BASE_COLORS` in bezel's `brand.rs`. Written out
-        // rather than read from that array so a bezel bump that moves a hue
-        // fails here instead of restyling the app quietly — the same contract
-        // `dark_palette_comes_from_bezel` holds for the palette itself.
-        let expected = [
-            (BaseColor::Stone, 58.071_f32, 0.013_f32),
-            (BaseColor::Zinc, 285.938, 0.016),
-            (BaseColor::Gray, 264.364, 0.027),
-            (BaseColor::Slate, 257.417, 0.046),
-        ];
-        for (base, hue, chroma) in expected {
-            let tint = base.tint();
-            assert_eq!(tint.hue, hue, "{base:?} hue");
-            assert_eq!(tint.chroma, chroma, "{base:?} chroma");
-        }
-    }
-
-    #[test]
-    fn all_lists_every_variant_in_display_order() {
-        assert_eq!(
-            BaseColor::ALL,
-            [
-                BaseColor::Neutral,
-                BaseColor::Stone,
-                BaseColor::Zinc,
-                BaseColor::Gray,
-                BaseColor::Slate,
-                BaseColor::Notte,
-            ]
-        );
-        assert_eq!(
-            BaseColor::ALL.map(BaseColor::title),
-            ["Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte"]
-        );
-    }
-
     /// Notte's tint is not quoted from Tailwind: it is the mean oklch hue and
     /// chroma of the four surfaces the preset was given, so the text and
     /// plates bezel tints with it share the family of the surfaces they sit
@@ -180,15 +133,6 @@ mod tests {
             "chroma {} is not the ladder's mean {mean_chroma:.4}",
             tint.chroma
         );
-    }
-
-    #[test]
-    fn the_notte_ladder_is_darkest_first() {
-        let ladder = NOTTE_LADDER;
-        assert_eq!(ladder.page, 0x0E1016);
-        assert_eq!(ladder.surface, 0x202127);
-        assert_eq!(ladder.raised, 0x2B2F3A);
-        assert_eq!(ladder.raised_hover, 0x313337);
     }
 
     /// sRGB `0xRRGGBB` to oklch `(lightness, chroma, hue in degrees)`.

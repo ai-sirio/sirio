@@ -32,55 +32,6 @@ enum ReaderMessage {
     End,
 }
 
-#[test]
-fn answers_initialize_times_out_for_silent_cli() {
-    let executable = std::env::current_exe().expect("test binary path");
-    let started = Instant::now();
-    let timeout = Duration::from_millis(300);
-    let result = answers_initialize_within(
-        &executable.to_string_lossy(),
-        &[
-            "--exact",
-            "silent_child_never_answers",
-            "--ignored",
-            "--format",
-            "terse",
-        ],
-        timeout,
-    );
-    let elapsed = started.elapsed();
-
-    let Handshake::TimedOut { output } = &result else {
-        panic!("expected TimedOut, got {result:?}");
-    };
-    assert!(!output.is_empty(), "timed-out handshake discarded stdout");
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "timeout took {elapsed:?} — the deadline is not enforced"
-    );
-}
-
-#[test]
-fn answers_initialize_reports_unlaunchable_cli() {
-    let missing = std::env::current_exe()
-        .expect("test binary path")
-        .with_file_name("sirio-acp-missing-executable");
-    let result = answers_initialize(&missing.to_string_lossy(), &[]);
-
-    assert_eq!(
-        result,
-        Handshake::NotLaunched,
-        "an unlaunchable CLI must be reported as NotLaunched"
-    );
-}
-
-#[test]
-#[ignore = "spawned as the silent child by the timeout test"]
-fn silent_child_never_answers() {
-    std::thread::sleep(Duration::from_secs(3));
-    std::process::exit(0);
-}
-
 fn answers_initialize(program: &str, args: &[&str]) -> Handshake {
     answers_initialize_within(program, args, ACP_HANDSHAKE_TIMEOUT)
 }

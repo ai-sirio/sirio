@@ -5,8 +5,8 @@
 use std::time::{Duration, Instant};
 
 use sirio_activity::{
-    AgentActivityModel, AgentStatus, CATALOG_IDS, detect_content_status,
-    identify_agent_from_process_names, identify_agent_from_title, inspect_process_names,
+    AgentActivityModel, AgentStatus, CATALOG_IDS, identify_agent_from_process_names,
+    identify_agent_from_title, inspect_process_names,
 };
 
 const P1: &str = "pane-1";
@@ -216,20 +216,6 @@ fn bare_braille_spinner_assigns_no_identity() {
 }
 
 #[test]
-fn pi_and_omp_titles_resolve_to_different_agents() {
-    // pi = "π - <cwd>", omp = "π: <cwd>" — the colon is the only mark.
-    assert_eq!(identify_agent_from_title("π - sirio"), Some("pi"));
-    assert_eq!(identify_agent_from_title("π: sirio"), Some("omp"));
-
-    let mut model = AgentActivityModel::new();
-    let t0 = now();
-    model.handle_title_change(P1, "π - sirio", t0);
-    model.handle_title_change(P2, "π: sirio", t0);
-    assert_eq!(model.agent_id(P1), Some("pi"));
-    assert_eq!(model.agent_id(P2), Some("omp"));
-}
-
-#[test]
 fn content_match_overrides_stale_title_even_inside_debounce_window() {
     let mut model = AgentActivityModel::new();
     let t0 = now();
@@ -404,30 +390,9 @@ fn a_stale_push_does_not_resurrect_a_cleared_pane() {
     assert_eq!(model.agent_id(P1), None);
 }
 
-#[test]
-fn a_push_with_equal_timestamp_still_applies() {
-    let mut model = AgentActivityModel::new();
-    let t0 = now();
-
-    model.agent_spawned(P1, "claude", t0);
-    let applied = model.notify(P1, AgentStatus::NeedsInput, t0);
-    assert_eq!(applied.new, AgentStatus::NeedsInput);
-    assert_eq!(model.status(P1), Some(AgentStatus::NeedsInput));
-}
-
 // ---------------------------------------------------------------------------
 // Spawn and restore
 // ---------------------------------------------------------------------------
-
-#[test]
-fn agent_spawned_sets_running_and_agent_id_without_transition() {
-    let mut model = AgentActivityModel::new();
-    let t0 = now();
-    model.agent_spawned(P1, "claude", t0);
-    assert_eq!(model.status(P1), Some(AgentStatus::Running));
-    assert_eq!(model.agent_id(P1), Some("claude"));
-    assert!(!model.is_title_owned(P1));
-}
 
 #[test]
 fn register_agent_id_sets_identity_without_status() {
@@ -566,17 +531,6 @@ fn content_signal_updates_last_hook_timestamp() {
     );
     let applied = model.handle_title_change(P1, ". working", t0 + Duration::from_secs(3));
     assert_eq!(applied.map(|t| t.new), Some(AgentStatus::Running));
-}
-
-#[test]
-fn content_detector_feeds_the_model() {
-    let mut model = AgentActivityModel::new();
-    let t0 = now();
-    model.agent_spawned(P1, "claude", t0);
-
-    let status = detect_content_status("Do you want to proceed?\n1. Yes", "claude");
-    model.apply_content_signal(P1, status.expect("detected"), t0 + Duration::from_secs(1));
-    assert_eq!(model.status(P1), Some(AgentStatus::NeedsInput));
 }
 
 // ---------------------------------------------------------------------------

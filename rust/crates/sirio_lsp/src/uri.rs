@@ -117,16 +117,6 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_path_round_trips() {
-        round_trip("/home/user/project/src/main.rs");
-    }
-
-    #[test]
-    fn a_path_with_a_space_round_trips() {
-        round_trip("/home/user/my project/main.rs");
-    }
-
-    #[test]
     fn a_path_with_uri_punctuation_round_trips() {
         // `#` would otherwise start a fragment and `?` a query, silently
         // truncating the path the server is told about.

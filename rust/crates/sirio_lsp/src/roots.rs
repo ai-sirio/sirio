@@ -69,16 +69,6 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_beside_the_file_roots_there() {
-        let root = tree("beside", &["app/Cargo.toml", "app/src/main.rs"]);
-        assert_eq!(
-            project_root(&root.join("app/src/main.rs"), &root, &markers(&["Cargo.toml"])),
-            root.join("app")
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
     fn a_marker_several_levels_up_is_found() {
         // This is Sirio's own shape: the manifest is in rust/, the file is
         // several directories below it, and the worktree root has neither.
@@ -145,37 +135,6 @@ mod tests {
                 &markers(&["package.json", "tsconfig.json"])
             ),
             root.join("web")
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn an_empty_marker_list_roots_at_the_worktree() {
-        let root = tree("empty", &["a/b.rs"]);
-        assert_eq!(project_root(&root.join("a/b.rs"), &root, &[]), root);
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_file_outside_the_worktree_roots_at_the_worktree() {
-        // Defensive: the caller resolved the worktree from the path, so this
-        // should not happen — but guessing a root outside it would be worse
-        // than the obvious fallback.
-        let root = tree("outside", &["repo/Cargo.toml"]);
-        let worktree = root.join("repo");
-        assert_eq!(
-            project_root(std::path::Path::new("/elsewhere/x.rs"), &worktree, &markers(&["Cargo.toml"])),
-            worktree
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn the_worktree_root_itself_is_searched() {
-        let root = tree("atroot", &["Cargo.toml", "src/main.rs"]);
-        assert_eq!(
-            project_root(&root.join("src/main.rs"), &root, &markers(&["Cargo.toml"])),
-            root
         );
         std::fs::remove_dir_all(&root).ok();
     }

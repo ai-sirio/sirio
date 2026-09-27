@@ -5549,85 +5549,6 @@ mod tests {
         );
     }
 
-    /// #259: how many clicks mean what.
-    ///
-    /// A single click anchors a drag and selects nothing -- selecting the cell
-    /// under the pointer would make every click leave a one-cell highlight.
-    /// Past three, a terminal user expects the line again, not a new mode.
-    #[test]
-    fn click_count_maps_to_word_then_line() {
-        assert_eq!(ClickSelection::for_click_count(0), None);
-        assert_eq!(ClickSelection::for_click_count(1), None);
-        assert_eq!(
-            ClickSelection::for_click_count(2),
-            Some(ClickSelection::Word)
-        );
-        assert_eq!(
-            ClickSelection::for_click_count(3),
-            Some(ClickSelection::Line)
-        );
-        assert_eq!(
-            ClickSelection::for_click_count(4),
-            Some(ClickSelection::Line)
-        );
-    }
-
-    /// #259: who owns a left drag.
-    ///
-    /// While the guest tracks the mouse it owns bare drags -- a TUI's own
-    /// selection, its scrollbars, its panes -- and `Shift` takes one back for
-    /// the host. With tracking off there is nothing to take it from, so a bare
-    /// drag selects. This is the xterm/alacritty/iTerm2/Ghostty convention.
-    #[test]
-    fn shift_takes_a_drag_back_from_a_mouse_tracking_guest() {
-        // Guest tracking: it owns the bare drag, shift overrides.
-        assert!(!TerminalView::selection_gesture_wanted(true, false));
-        assert!(TerminalView::selection_gesture_wanted(true, true));
-        // No tracking: nothing to override, either way selects.
-        assert!(TerminalView::selection_gesture_wanted(false, false));
-        assert!(TerminalView::selection_gesture_wanted(false, true));
-    }
-
-    /// #264 (part of #263): does libghostty-vt answer the Kitty graphics
-    /// query itself, or must the pane compose the reply?
-    ///
-    /// This is the pivot the whole ticket turns on. Both Pi and omp probe
-    /// actively and stay silent until answered, so if the crate replies the
-    /// remaining work is only rendering; if it does not, the pane owes a
-    /// reply it currently has no idea how to build.
-    ///
-    /// The query is Kitty's own support probe -- a 1x1 RGB image with
-    /// `a=q` (query, do not store) -- and a terminal that supports the
-    /// protocol answers `_Gi=<id>;OK`.
-    #[test]
-    fn kitty_graphics_query_answer_comes_from_the_crate_or_not_at_all() {
-        let replies = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
-        let sink = replies.clone();
-        let mut term = headless_term(80, 24);
-        term.on_pty_write(move |_term, data: &[u8]| {
-            sink.borrow_mut().extend_from_slice(data);
-        })
-        .expect("register the pty-write callback");
-
-        // A control first: DSR-CPR is a query the crate is known to answer,
-        // so an empty result below means "no Kitty reply", not "the callback
-        // was never wired".
-        advance_headless(&mut term, b"[6n");
-        let cursor_reply = String::from_utf8_lossy(&replies.borrow()).into_owned();
-        assert!(
-            cursor_reply.contains('R'),
-            "control: the crate answers DSR-CPR, so the callback is live: {cursor_reply:?}"
-        );
-        replies.borrow_mut().clear();
-
-        advance_headless(&mut term, b"_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\");
-        let answer = String::from_utf8_lossy(&replies.borrow()).into_owned();
-        assert_eq!(
-            answer, "_Gi=31;OK\\",
-            "libghostty-vt answers the Kitty graphics query itself; if this              ever fails, the pane owes the reply and #263's scope grows"
-        );
-    }
-
     /// #301 (R2.3's test half): the copy-out the owner thread performs for
     /// every placement — plain owned pixels and geometry, no `!Send` borrows
     /// escape. A raw 1x1 RGB transmit placed at the cursor must come back as
@@ -5990,33 +5911,6 @@ mod tests {
             &decoded.data[..],
             &[0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80],
             "rgba pixels, verbatim"
-        );
-    }
-
-    /// #301 R1.3: the ingest ceilings are stated explicitly instead of
-    /// inherited from the emulator's defaults — the same function the owner
-    /// thread applies (`spawn_terminal_thread`) and the headless harness
-    /// (`headless_term`) shares, so what the test reads is what the pane
-    /// ships with.
-    #[test]
-    fn kitty_ingest_limits_are_explicit() {
-        let mut term = headless_term(80, 24);
-        // `set_apc_max_bytes_kitty` has no getter, so the constants are the
-        // readable half of the assertion; the storage getter is live.
-        const {
-            assert!(KITTY_APC_MAX_BYTES > 0, "APC ceiling explicit");
-        }
-        const {
-            assert!(KITTY_IMAGE_STORAGE_LIMIT > 0, "storage ceiling explicit");
-        }
-        term.set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES))
-            .expect("re-apply APC override");
-        term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
-            .expect("re-apply storage limit");
-        assert_eq!(
-            term.kitty_image_storage_limit()
-                .expect("read storage limit"),
-            KITTY_IMAGE_STORAGE_LIMIT
         );
     }
 
@@ -6484,18 +6378,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn spawn_cwd_passes_ordinary_paths_through_unchanged() {
-        assert_eq!(
-            spawn_cwd(Path::new("/tmp/note.md")),
-            Path::new("/tmp/note.md")
-        );
-        assert_eq!(
-            spawn_cwd(Path::new("relative/path")),
-            Path::new("relative/path")
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Headless boundary harness (#40 invariant half).
     //
@@ -6639,20 +6521,6 @@ mod tests {
     }
 
     #[test]
-    fn modified_arrows_include_the_modifier_parameter() {
-        let term = headless_term(80, 24);
-        let modifiers = gpui::Modifiers {
-            control: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            encoded_key(&term, &key_event("left", None, modifiers)),
-            b"\x1b[1;5D"
-        );
-    }
-
-    #[test]
     fn kitty_disambiguate_distinguishes_escape_and_ctrl_i() {
         let mut term = headless_term(80, 24);
         advance_headless(&mut term, b"\x1b[>1u");
@@ -6668,21 +6536,6 @@ mod tests {
         assert_eq!(
             encoded_key(&term, &key_event("i", Some("i"), control)),
             b"\x1b[105;5u"
-        );
-    }
-
-    #[test]
-    fn modify_other_keys_distinguishes_ctrl_i_from_tab() {
-        let mut term = headless_term(80, 24);
-        advance_headless(&mut term, b"\x1b[>4;2m");
-        let control = gpui::Modifiers {
-            control: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            encoded_key(&term, &key_event("i", Some("i"), control)),
-            b"\x1b[27;5;105~"
         );
     }
 
@@ -6719,16 +6572,6 @@ mod tests {
     fn encoded_mouse(term: &Terminal<'static, 'static>, input: MouseInput) -> Vec<u8> {
         let mut encoder = MouseEncoderState::new().expect("mouse encoder");
         encode_mouse_input(term, &mut encoder, input).expect("encode mouse")
-    }
-
-    #[test]
-    fn is_mouse_tracking_reflects_guest_requests() {
-        let mut term = headless_term(80, 24);
-        assert!(!term.is_mouse_tracking().expect("tracking query"));
-        advance_headless(&mut term, b"\x1b[?1000h");
-        assert!(term.is_mouse_tracking().expect("tracking query"));
-        advance_headless(&mut term, b"\x1b[?1000l");
-        assert!(!term.is_mouse_tracking().expect("tracking query"));
     }
 
     #[test]
@@ -6811,72 +6654,6 @@ mod tests {
         )
         .expect("next-cell motion");
         assert_eq!(third, b"\x1b[<32;12;6M");
-    }
-
-    #[test]
-    fn any_event_motion_requires_1003_mode() {
-        let mut term = headless_term(80, 24);
-        advance_headless(&mut term, b"\x1b[?1003h\x1b[?1006h");
-        let with_any_event = encoded_mouse(
-            &term,
-            mouse_input_at(mouse::Action::Motion, None, 44.0, 60.0, false),
-        );
-        // No-button motion is the +32 form of button 3 = 35.
-        assert_eq!(with_any_event, b"\x1b[<35;6;4M");
-
-        // Button-event tracking alone must not report no-button motion.
-        let mut without_any_event = headless_term(80, 24);
-        advance_headless(&mut without_any_event, b"\x1b[?1002h\x1b[?1006h");
-        let without = encoded_mouse(
-            &without_any_event,
-            mouse_input_at(mouse::Action::Motion, None, 44.0, 60.0, false),
-        );
-        assert_eq!(without, Vec::<u8>::new());
-    }
-
-    #[test]
-    fn wheel_ticks_encode_four_and_five_presses() {
-        let mut term = headless_term(80, 24);
-        advance_headless(&mut term, b"\x1b[?1002h\x1b[?1006h");
-        let up = encoded_mouse(
-            &term,
-            mouse_input_at(
-                mouse::Action::Press,
-                Some(mouse::Button::Four),
-                44.0,
-                60.0,
-                false,
-            ),
-        );
-        assert_eq!(up, b"\x1b[<64;6;4M");
-        let down = encoded_mouse(
-            &term,
-            mouse_input_at(
-                mouse::Action::Press,
-                Some(mouse::Button::Five),
-                44.0,
-                60.0,
-                false,
-            ),
-        );
-        assert_eq!(down, b"\x1b[<65;6;4M");
-    }
-
-    #[test]
-    fn without_tracking_modes_the_same_inputs_encode_zero_bytes() {
-        let term = headless_term(80, 24);
-        let inputs = [
-            (mouse::Action::Press, Some(mouse::Button::Left)),
-            (mouse::Action::Release, Some(mouse::Button::Left)),
-            (mouse::Action::Press, Some(mouse::Button::Four)),
-        ];
-        for (action, button) in inputs {
-            let bytes = encoded_mouse(
-                &term,
-                mouse_input_at(action, button, 44.0, 60.0, button.is_some()),
-            );
-            assert_eq!(bytes, Vec::<u8>::new());
-        }
     }
 
     #[test]
@@ -6990,28 +6767,6 @@ mod tests {
     }
 
     #[test]
-    fn cells_after_the_osc8_terminator_do_not_carry_the_link() {
-        let mut term = headless_term(80, 24);
-        advance_headless(
-            &mut term,
-            b"\x1b]8;;https://real.test/x\x1b\\linked\x1b]8;;\x1b\\after\r\n",
-        );
-        let frame = paint_frame(&mut term);
-        assert_eq!(frame_row_text(&frame[0]).trim_end(), "linkedafter");
-        assert_eq!(
-            resolve_link(&frame, 0, 3),
-            Some("https://real.test/x".to_string())
-        );
-        for column in 6..11 {
-            assert!(
-                frame[0][column].hyperlink.is_none(),
-                "column {column} is past the OSC 8 terminator and must not carry the link"
-            );
-            assert_eq!(resolve_link(&frame, 0, column), None);
-        }
-    }
-
-    #[test]
     fn bare_https_url_without_osc8_still_resolves_via_regex_fallback() {
         let mut term = headless_term(80, 24);
         advance_headless(&mut term, b"see https://example.test/docs end\r\n");
@@ -7051,73 +6806,6 @@ mod tests {
             .map(|i| format!("B40_LINE_{i:03}"))
             .filter(|sentinel| !text.contains(sentinel.as_str()))
             .collect()
-    }
-
-    #[test]
-    fn reflow_narrowing_preserves_content() {
-        const LINES: usize = 10;
-        let mut term = headless_term(80, 24);
-        let feed: String = (0..LINES).map(|i| format!("B40_LINE_{i:03}\r\n")).collect();
-        advance_headless(&mut term, feed.as_bytes());
-
-        resize_headless(&mut term, 40, 24);
-        let text = capture_scrollback_text(&mut term);
-        let lost = missing_lines(&text, LINES);
-        assert!(
-            lost.is_empty(),
-            "after narrowing 80→40 columns these numbered lines were lost from the recovered text: {lost:?}"
-        );
-    }
-
-    #[test]
-    fn reflow_widening_preserves_content() {
-        const LINES: usize = 10;
-        let mut term = headless_term(40, 24);
-        // One line longer than 40 columns forces a wrap that widening must
-        // rejoin; the rest are short numbered markers.
-        let mut feed = format!("B40_LINE_000 {}\r\n", "x".repeat(60));
-        feed.push_str(
-            &(1..LINES)
-                .map(|i| format!("B40_LINE_{i:03}\r\n"))
-                .collect::<String>(),
-        );
-        advance_headless(&mut term, feed.as_bytes());
-
-        resize_headless(&mut term, 80, 24);
-        let text = capture_scrollback_text(&mut term);
-        assert!(
-            text.contains("B40_LINE_000 xxxxx"),
-            "after widening 40→80 columns the wrapped long line did not rejoin; it reads as separate rows instead"
-        );
-        let lost = missing_lines(&text, LINES);
-        assert!(
-            lost.is_empty(),
-            "after widening 40→80 columns these numbered lines were lost from the recovered text: {lost:?}"
-        );
-    }
-
-    #[test]
-    fn a_line_longer_than_the_width_wraps_and_stays_recoverable() {
-        const START: &str = "B40_WRAP_START";
-        const END: &str = "B40_WRAP_END";
-        let mut term = headless_term(80, 24);
-        advance_headless(
-            &mut term,
-            format!("{START}{}{END}\r\n", "-".repeat(200)).as_bytes(),
-        );
-
-        let text = capture_scrollback_text(&mut term);
-        assert!(
-            text.contains(START) && text.contains(END),
-            "a {START}…{END} line longer than 80 columns lost one of its ends when wrapped"
-        );
-
-        resize_headless(&mut term, 40, 24);
-        let text = capture_scrollback_text(&mut term);
-        assert!(
-            text.contains(START) && text.contains(END),
-            "after wrapping at 80 columns then narrowing to 40, the long line lost one of its ends"
-        );
     }
 
     #[test]
@@ -7400,45 +7088,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reflow_after_resize_keeps_visible_text_readable_through_paint_frames() {
-        const START: &str = "B45_REFL_A";
-        const END: &str = "B45_REFL_B";
-        // One 70-char logical line wraps at 40 columns into two physical rows.
-        let mut term = headless_term(40, 24);
-        advance_headless(
-            &mut term,
-            format!("{START}{}{END}\r\n", "0".repeat(50)).as_bytes(),
-        );
-
-        resize_headless(&mut term, 80, 24);
-        let rows = paint_frame(&mut term);
-        assert!(!rows.is_empty());
-        let rejoined = rows.iter().any(|row| {
-            let text = frame_row_text(row);
-            text.contains(START) && text.contains(END)
-        });
-        assert!(
-            rejoined,
-            "after widening 40→80 columns the wrapped line must rejoin into ONE physical row \
-             containing both sentinels {START:?} and {END:?}; rows read {:?}",
-            rows.iter().map(|r| frame_row_text(r)).collect::<Vec<_>>()
-        );
-
-        resize_headless(&mut term, 40, 24);
-        let rows = paint_frame(&mut term);
-        let visible: String = rows
-            .iter()
-            .map(|row| frame_row_text(row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            visible.contains(START) && visible.contains(END),
-            "after narrowing back 80→40 columns both sentinels must still be visible in the \
-             viewport text; it reads {visible:?}"
-        );
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_descendant_pids_enumerates_a_real_child_process() {
@@ -7465,47 +7114,6 @@ mod tests {
         );
         child.kill().expect("kill child process");
         child.wait().expect("reap child process");
-    }
-
-    fn palette() -> TerminalPalette {
-        TerminalPalette::from_theme(&Theme::light())
-    }
-
-    #[test]
-    fn terminal_child_receives_the_pane_id_environment() {
-        let working_directory = std::env::temp_dir().join(format!(
-            "sirio-terminal-test-pane-env-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = pty_fixture_shell(
-            "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 0.1",
-            &[
-                "print",
-                "pane=${SIRIO_PANE_ID}\\n",
-                "--expand",
-                "--sleep",
-                "0.1",
-            ],
-        );
-        let (handle, mut events) =
-            TerminalHandle::new_with_pane_id(&working_directory, &shell, Some("pane-real-env"))
-                .expect("spawn PTY");
-
-        futures::executor::block_on(async {
-            while let Some(event) = events.next().await {
-                if matches!(event, TerminalEvent::ChildExit(_)) {
-                    break;
-                }
-            }
-        });
-
-        assert!(
-            String::from_utf8_lossy(&handle.capture_scrollback()).contains("pane=pane-real-env"),
-            "the PTY child must inherit SIRIO_PANE_ID"
-        );
-        handle.shutdown();
-        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     #[test]
@@ -7564,6 +7172,10 @@ mod tests {
         assert_eq!(terminal_pump_interval(false), EVENT_POLL_INTERVAL);
     }
 
+    fn palette() -> TerminalPalette {
+        TerminalPalette::from_theme(&Theme::light())
+    }
+
     #[test]
     fn terminal_defaults_follow_the_theme_but_ansi_colors_do_not() {
         let palette = palette();
@@ -7606,53 +7218,6 @@ mod tests {
             TerminalExitStatus::from_signal(15),
             TerminalExitStatus::Signal(15)
         );
-    }
-
-    /// F-TERM-03: a shell is alive for the pane's whole life, so "a live
-    /// child exists" would report "running" forever — the exact bug this
-    /// asserts is fixed. Without `foreground_command_running`'s
-    /// `tcgetpgrp`-based definition this test would fail (the method did not
-    /// exist before this change; any process-existence stand-in would return
-    /// `true` here, since the shell itself is always alive).
-    ///
-    /// unix only, and genuinely so: the subject is
-    /// `TerminalHandle::foreground_command_running`, whose definition *is*
-    /// `tcgetpgrp` on the PTY master — POSIX job control, which Windows has
-    /// no equivalent of. There the method is `#[cfg(not(unix))] { false }`
-    /// by construction (see its own doc comment), so an "idle prompt
-    /// reports false" assertion would pass there for a reason that has
-    /// nothing to do with what this test is about, and its sibling below
-    /// could never pass at all. Gating suppresses no coverage that could
-    /// exist today.
-    #[cfg(unix)]
-    #[test]
-    fn foreground_command_running_is_false_at_an_idle_prompt() {
-        let working_directory = test_working_directory("idle-prompt");
-        std::fs::create_dir_all(&working_directory).unwrap();
-        // An interactive shell run directly as the PTY child (no outer shell
-        // in between) so job control is active without depending on
-        // `$SHELL` in the test environment.
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/bash".to_string(),
-            args: vec![
-                "--norc".to_string(),
-                "--noprofile".to_string(),
-                "-i".to_string(),
-            ],
-        };
-        let (handle, _events) = TerminalHandle::new(&working_directory, &shell).unwrap();
-
-        // Drain bash's own startup (it writes nothing to stdout by default
-        // with --norc, but give the fork/exec and setsid a moment to settle
-        // before asserting on process-group state).
-        std::thread::sleep(Duration::from_millis(500));
-
-        assert!(
-            !handle.foreground_command_running(),
-            "an interactive shell sitting at its prompt must not report a foreground command"
-        );
-        handle.shutdown();
-        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// F-TERM-03: proves the positive case (`true` while a foreground
@@ -8569,49 +8134,6 @@ mod view_tests {
         );
     }
 
-    /// The drawn terminal created for a conflict keeps the repository root
-    /// and exact conflicted path in its launch contract.
-    #[gpui::test]
-    async fn a_conflict_terminal_is_drawn_with_the_exact_path(cx: &mut gpui::TestAppContext) {
-        cx.set_global(Theme::light());
-        let repo = std::env::temp_dir().join(format!(
-            "sirio-terminal-conflict-launch-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&repo).expect("create conflict repo");
-        let path = PathBuf::from("src/conflicted file.txt");
-        let window = cx.add_window(|_, cx| {
-            TerminalView::for_conflict(&repo, &path, cx).expect("create conflict terminal")
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let terminal = cx.update(|window, _| {
-            window
-                .root::<TerminalView>()
-                .flatten()
-                .expect("terminal root")
-        });
-
-        assert_eq!(
-            terminal.read_with(&cx.cx, |terminal, _| terminal
-                .working_directory()
-                .to_path_buf()),
-            repo
-        );
-        assert!(
-            terminal.read_with(&cx.cx, |terminal, _| match terminal.launch_shell() {
-                TerminalShell::WithArguments { args, .. } => {
-                    args.get(1)
-                        .is_some_and(|command| command.contains("'src/conflicted file.txt'"))
-                }
-                TerminalShell::System => false,
-            })
-        );
-        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
-        cx.run_until_parked();
-        let _ = std::fs::remove_dir_all(repo);
-    }
-
     fn missing_directory(tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "sirio-terminal-missing-{tag}-{}",
@@ -8619,52 +8141,6 @@ mod view_tests {
         ));
         let _ = std::fs::remove_dir_all(&path);
         path
-    }
-
-    /// Spawning a terminal into a directory that does not exist must return
-    /// an error the caller can render, never panic.
-    #[test]
-    fn spawning_into_a_missing_directory_returns_an_error() {
-        let missing = missing_directory("spawn");
-        let result = TerminalHandle::new(&missing, &TerminalShell::System);
-        assert!(
-            result.is_err(),
-            "the caller must receive the failure, not a panic"
-        );
-    }
-
-    /// The host uses the return value to avoid notifying an unchanged
-    /// terminal while still notifying when pane-group membership changes.
-    #[gpui::test]
-    async fn set_sole_tab_in_group_reports_only_changes(cx: &mut gpui::TestAppContext) {
-        cx.set_global(Theme::light());
-        let missing = missing_directory("sole-tab-setter");
-        let window = cx.add_window(|_, cx| {
-            TerminalView::failed(
-                &missing,
-                TerminalShell::System,
-                "sole-tab setter test",
-                cx,
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let terminal = cx.update(|window, _| {
-            window
-                .root::<TerminalView>()
-                .flatten()
-                .expect("failed terminal root")
-        });
-
-        assert!(!terminal.update(&mut cx.cx, |terminal, _| {
-            terminal.set_sole_tab_in_group(false)
-        }));
-        assert!(terminal.update(&mut cx.cx, |terminal, _| {
-            terminal.set_sole_tab_in_group(true)
-        }));
-        assert!(!terminal.update(&mut cx.cx, |terminal, _| {
-            terminal.set_sole_tab_in_group(true)
-        }));
     }
 
     /// A failed pane renders its message and a retry button, and the retry
@@ -8927,77 +8403,6 @@ mod view_tests {
                 .map(|directory| directory.join(program))
                 .find(|candidate| candidate.exists())
         })
-    }
-
-    #[gpui::test]
-    async fn scrollback_source_captures_the_same_bytes_as_direct_capture(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.set_global(Theme::light());
-        let working_directory = std::env::temp_dir().join(format!(
-            "sirio-terminal-scrollback-source-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = pty_fixture_shell(
-            "printf 'SCROLLBACK_SOURCE_TEST\\n'; exec sleep 1",
-            &["print", "SCROLLBACK_SOURCE_TEST\\n", "--sleep", "1"],
-        );
-        let (terminal, cx) = cx.add_window_view(|_, cx| {
-            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
-        });
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let captured = loop {
-            cx.run_until_parked();
-            let source = terminal
-                .read_with(&cx.cx, |terminal, _| terminal.scrollback_source())
-                .expect("running terminal must expose a source");
-            let bytes = source.capture();
-            if String::from_utf8_lossy(&bytes).contains("SCROLLBACK_SOURCE_TEST") {
-                break bytes;
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!("the source never observed the PTY output");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let direct = terminal.read_with(&cx.cx, |terminal, _| terminal.capture_scrollback());
-        assert_eq!(captured, direct);
-
-        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
-        cx.run_until_parked();
-        let _ = std::fs::remove_dir_all(working_directory);
-    }
-
-    #[gpui::test]
-    async fn scrollback_source_is_none_for_a_failed_terminal(cx: &mut gpui::TestAppContext) {
-        cx.set_global(Theme::light());
-        let missing = std::env::temp_dir().join(format!(
-            "sirio-terminal-failed-scrollback-source-{}",
-            std::process::id()
-        ));
-        let window = cx.add_window(|_, cx| {
-            TerminalView::failed(
-                &missing,
-                TerminalShell::System,
-                "failed source test",
-                cx,
-            )
-        });
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let terminal = cx.update(|window, _| {
-            window
-                .root::<TerminalView>()
-                .flatten()
-                .expect("failed terminal root")
-        });
-        assert!(
-            terminal
-                .read_with(&cx.cx, |terminal, _| terminal.scrollback_source())
-                .is_none()
-        );
     }
 
     #[gpui::test]

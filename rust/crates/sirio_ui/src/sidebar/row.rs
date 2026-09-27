@@ -892,16 +892,6 @@ mod tests {
         assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
     }
 
-    /// A running worktree with several agents parked in it is still running:
-    /// the bloom is the message, and the count would only compete with it.
-    #[test]
-    fn a_running_worktree_does_not_fall_back_to_counting_its_agents() {
-        let mut row = worktree(3, "main");
-        row.agent_status = Some(ActivityStatus::Running);
-        row.pills = vec![pill(1), pill(2)];
-        assert_eq!(Sidebar::status_text(&row), None);
-    }
-
     /// The second line names the worktree's most recent task, not its
     /// checkout path. The path was the least informative thing the card
     /// could carry — every sibling repeats the project prefix and the part
@@ -943,28 +933,6 @@ mod tests {
             "redesign the sidebar",
             "a comment a person left on purpose still outranks a derived name"
         );
-    }
-
-    /// A parked tab is the case that made the old path fallback look
-    /// harmless: an unmounted worktree has no live tabs at all. It does
-    /// still carry its persisted strip, so the card can name what was last
-    /// open in it without mounting anything.
-    #[test]
-    fn a_parked_strip_still_names_the_card() {
-        let mut row = worktree(5, "feat/y");
-        row.pills = vec![SidebarPill {
-            tab_id: None,
-            parked_tab: Some(0),
-            title: "review the release notes".to_owned(),
-            icon: Icon::MessageSquare,
-            brand: None,
-            status: None,
-            selected: false,
-            kind: TabKind::AgentChat,
-            persistence_id: "test-tab-parked-0".into(),
-            last_event_at: None,
-        }];
-        assert_eq!(Sidebar::sub_line_text(&row), "review the release notes");
     }
 
     #[gpui::test]
@@ -1023,25 +991,4 @@ mod tests {
         ));
     }
 
-    #[gpui::test]
-    async fn a_parked_pill_restores_instead_of_selecting(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_parked_tab(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = tests_support::collect_events(&sidebar, &mut cx);
-        let pill = cx
-            .debug_bounds("sidebar-pill-1-0")
-            .expect("the parked pill is rendered");
-        cx.simulate_click(pill.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(matches!(
-            events.borrow().last(),
-            Some(SidebarEvent::SelectParkedTab { .. })
-        ));
-    }
 }

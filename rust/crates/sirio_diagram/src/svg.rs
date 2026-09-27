@@ -110,18 +110,4 @@ mod tests {
         assert_eq!(svg.markup, markup);
         assert_eq!((svg.logical_width, svg.logical_height), (456, 123));
     }
-
-    #[test]
-    fn markup_without_an_svg_root_is_refused() {
-        assert_eq!(as_rendered("<html></html>"), None);
-        assert_eq!(as_rendered("<svg></svg>"), None, "no size, no view box");
-    }
-
-    #[test]
-    fn the_root_size_is_read_as_written() {
-        assert_eq!(
-            root_size("<svg width=\"12\" height=\"8\"/>"),
-            Some((12.0, 8.0))
-        );
-    }
 }

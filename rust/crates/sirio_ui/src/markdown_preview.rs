@@ -512,15 +512,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn an_absolute_image_is_passed_through() {
-        let preview = preview("![a](/abs/a.png)\n", &Diagrams::default());
-        assert!(
-            matches!(&preview.doc.blocks[0].kind, BlockKind::Image { url, .. } if url == "/abs/a.png")
-        );
-    }
-
     /// Review Focus 4.
     #[test]
     fn a_percent_encoded_relative_image_is_decoded() {

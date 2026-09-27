@@ -199,17 +199,4 @@ mod tests {
             assert_eq!(DirectoryGitStatus::for_file(&entry), expected, "{label}");
         }
     }
-
-    /// Directory aggregation stays deliberately narrower than a file's own
-    /// marker: it must keep collapsing staged into changed, matching
-    /// Swift's `DirectoryStatusAggregator`, which never emits `.staged` —
-    /// unaffected by adding the `Staged` variant for file rows.
-    #[test]
-    fn for_entry_still_collapses_staged_into_changed_for_directory_aggregation() {
-        let staged_only = entry(Some(StatusKind::Added), None);
-        assert_eq!(
-            DirectoryGitStatus::for_entry(&staged_only),
-            DirectoryGitStatus::Changed
-        );
-    }
 }

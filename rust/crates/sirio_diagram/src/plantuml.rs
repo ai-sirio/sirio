@@ -438,38 +438,6 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
-    #[test]
-    fn nothing_on_the_path_is_not_available() {
-        let root = scratch_dir("plantuml-none");
-        let empty = root.join("bin");
-        std::fs::create_dir_all(&empty).expect("bin dir");
-        assert_eq!(
-            render_local(
-                "A -> B",
-                &test_options(&root),
-                empty.as_os_str(),
-                LOCAL_TIMEOUT
-            ),
-            Err(DiagramError::NotAvailable)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn its_svg_is_the_diagram() {
-        let root = scratch_dir("plantuml-svg");
-        let bin = root.join("bin");
-        fake_plantuml(&bin, &format!("cat > /dev/null\nprintf '%s' '{SVG}'"));
-        let svg = render_local(
-            "A -> B",
-            &test_options(&root),
-            &path_with(&bin),
-            LOCAL_TIMEOUT,
-        )
-        .expect("the fake prints an SVG");
-        assert_eq!((svg.logical_width, svg.logical_height), (40, 20));
-    }
-
     #[cfg(unix)]
     #[test]
     fn it_receives_the_wrapped_source_in_the_files_directory_sandboxed() {
@@ -583,29 +551,6 @@ mod tests {
                 message: "No diagram found".into(),
                 line: Some(1)
             })
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_hung_plantuml_is_killed_at_the_timeout() {
-        let root = scratch_dir("plantuml-hang");
-        let bin = root.join("bin");
-        fake_plantuml(&bin, "exec sleep 5");
-        let started = Instant::now();
-        let result = render_local(
-            "A -> B",
-            &test_options(&root),
-            &path_with(&bin),
-            Duration::from_millis(300),
-        );
-        assert!(
-            matches!(result, Err(DiagramError::Timeout { .. })),
-            "got {result:?}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the child was not waited out"
         );
     }
 

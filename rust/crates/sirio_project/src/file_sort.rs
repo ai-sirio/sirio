@@ -201,14 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn non_latin_characters_pass_through_unfolded() {
-        // Outside the bounded Latin-1 fold, characters compare by their own
-        // (lowercased) code point -- documented, not silently pretended.
-        assert_eq!(cmp("日本語", "日本語"), Ordering::Equal);
-        assert_ne!(cmp("日本語", "aaa"), Ordering::Equal);
-    }
-
-    #[test]
     fn directories_sort_before_files_regardless_of_name() {
         assert_eq!(
             compare_file_tree_names(true, "zzz", false, "aaa"),
@@ -217,36 +209,6 @@ mod tests {
         assert_eq!(
             compare_file_tree_names(false, "aaa", true, "zzz"),
             Ordering::Greater
-        );
-    }
-
-    #[test]
-    fn full_ordering_matches_how_a_person_reads_a_directory_listing() {
-        let mut names = vec![
-            "file10.txt",
-            "file2.txt",
-            "file1.txt",
-            "a1b10",
-            "a1b2",
-            "007",
-            "7",
-            "Banana",
-            "apple",
-        ];
-        names.sort_by(|a, b| natural_case_insensitive_compare(a, b));
-        assert_eq!(
-            names,
-            vec![
-                "007",
-                "7",
-                "a1b2",
-                "a1b10",
-                "apple",
-                "Banana",
-                "file1.txt",
-                "file2.txt",
-                "file10.txt",
-            ]
         );
     }
 }

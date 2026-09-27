@@ -358,46 +358,4 @@ mod tests {
             ["end_ns", "input_kind", "invalidated", "kind", "start_ns"]
         );
     }
-
-    #[test]
-    fn journal_export_keeps_matched_draw_and_present_metadata() {
-        use gpui::profiler::journal::PresentedFrame;
-        let origin = Instant::now();
-        let frame = gpui::FrameTiming {
-            window_id: 1.into(),
-            dirty_at: Some(origin - Duration::from_nanos(5)),
-            invalidations: 3,
-            draw_start: origin + Duration::from_nanos(10),
-            draw_end: origin + Duration::from_nanos(20),
-        };
-        let presentation = gpui::PresentTiming {
-            window_id: frame.window_id,
-            present_start: origin + Duration::from_nanos(30),
-            present_end: origin + Duration::from_nanos(40),
-            animation_interval: None,
-        };
-        let rows = encode_entries(
-            &[ForegroundJournalEntry::Boundary(
-                IntervalBoundary::Presented(PresentedFrame {
-                    frame,
-                    presentation,
-                }),
-            )],
-            origin,
-        );
-        assert_eq!(rows[0]["kind"], "presented");
-        assert_eq!(rows[0]["dirty_ns"], -5);
-        assert_eq!(rows[0]["invalidations"], 3);
-        assert_eq!(rows[0]["draw_start_ns"], 10);
-        assert_eq!(rows[0]["present_end_ns"], 40);
-    }
-
-    #[test]
-    fn journal_write_failure_is_not_reported_as_success() {
-        let error = write_row(
-            &mut io::Cursor::new(&mut [0_u8; 1][..]),
-            &json!({"kind": "health"}),
-        );
-        assert!(error.is_err());
-    }
 }

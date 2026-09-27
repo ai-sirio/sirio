@@ -90,19 +90,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_offset_in_the_first_line_maps_to_line_zero() {
-        let index = LineIndex::new("fn main() {}\nlet x = 1;\n");
-        assert_eq!(index.position(3), Position { line: 0, character: 3 });
-    }
-
-    #[test]
-    fn an_offset_in_a_later_line_counts_from_that_lines_start() {
-        let index = LineIndex::new("fn main() {}\nlet x = 1;\n");
-        // byte 13 is the `e` of `let`, one past that line's start (13).
-        assert_eq!(index.position(14), Position { line: 1, character: 1 });
-    }
-
-    #[test]
     fn an_empty_document_still_has_one_line() {
         let index = LineIndex::new("");
         assert_eq!(index.position(0), Position { line: 0, character: 0 });

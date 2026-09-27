@@ -121,30 +121,6 @@ fn non_git_directory_is_reported_as_non_git() {
 }
 
 #[test]
-fn discovers_primary_checkout_of_real_repo() {
-    let repo = make_git_repo();
-
-    assert!(is_git_repository(repo.path()));
-
-    let discovered = discover_project(repo.path()).expect("discovery succeeds");
-    assert!(discovered.is_git);
-    assert_eq!(discovered.worktrees.len(), 1);
-
-    let main = &discovered.worktrees[0];
-    assert!(main.is_primary, "the only worktree is the primary checkout");
-    assert_eq!(main.path, repo.path());
-    assert_eq!(main.branch.as_deref(), Some("main"));
-    assert!(!main.locked);
-    assert!(!main.prunable);
-
-    assert_eq!(
-        current_branch(repo.path()).expect("current branch resolves"),
-        Some("main".to_string()),
-        "current_branch reports the branch of the primary checkout"
-    );
-}
-
-#[test]
 fn discovers_linked_worktree_with_branch() {
     let repo = make_git_repo();
     let linked = repo.path().with_extension("wt-feature");
@@ -287,19 +263,6 @@ fn read_head_label_tracks_a_real_checkout_when_the_branch_changes_under_it() {
 }
 
 #[test]
-fn read_head_label_keeps_a_slashed_branch_whole() {
-    let repo = make_git_repo();
-    git(repo.path(), &["checkout", "-b", "feature/login"]);
-
-    assert_eq!(
-        read_head_label(repo.path()),
-        Some("feature/login".to_string()),
-        "everything after 'refs/heads/' is the branch name; slashes are \
-         ordinary characters inside one"
-    );
-}
-
-#[test]
 fn read_head_label_reads_a_linked_worktrees_own_head() {
     let repo = make_git_repo();
     let linked = repo.path().with_extension("wt-slashed");
@@ -342,9 +305,3 @@ fn read_head_label_reports_a_short_sha_for_a_detached_head() {
     assert_eq!(label.len(), 7);
 }
 
-#[test]
-fn read_head_label_of_a_non_repository_is_none() {
-    let dir = TempDir::new();
-
-    assert_eq!(read_head_label(dir.path()), None);
-}

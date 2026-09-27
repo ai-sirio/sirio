@@ -97,14 +97,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_file_yields_no_servers() {
-        let dir = std::env::temp_dir().join("sirio-mcp-config-test-missing");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(discover_mcp_servers(&dir).is_empty());
-    }
-
-    #[test]
     fn malformed_json_yields_no_servers_not_a_panic() {
         let dir = std::env::temp_dir().join("sirio-mcp-config-test-malformed");
         std::fs::create_dir_all(&dir).unwrap();

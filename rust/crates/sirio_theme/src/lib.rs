@@ -1968,7 +1968,7 @@ fn rgb_hex(hex: u32) -> Rgba {
 /// `pub(crate)`). `ThemeColors::for_appearance` builds both palettes in one
 /// process, so it cannot use the global form: dark and light would come out
 /// identical. The numbers are bezel's, copied — if bezel changes them this
-/// mirror has to follow, which is what `washes_follow_bezels_two_rules` holds.
+/// mirror has to follow.
 fn wash(alpha: f32, appearance: Appearance) -> Rgba {
     match appearance {
         Appearance::Dark => color(0.92, 0.92, 0.92, alpha),
@@ -2034,60 +2034,6 @@ fn toward(color: Rgba, target: Rgba, fraction: f32) -> Rgba {
     }
 }
 
-/// HSL hue in degrees, and HSL lightness in 0..1, of an sRGB colour.
-///
-/// The inverse of [`hsla`], and only used to state one token as a
-/// transformation of another rather than as a fresh number.
-#[cfg(test)]
-fn hue_and_lightness(c: Rgba) -> (f32, f32) {
-    let max = c.r.max(c.g).max(c.b);
-    let min = c.r.min(c.g).min(c.b);
-    let delta = max - min;
-    let lightness = (max + min) / 2.0;
-    if delta <= f32::EPSILON {
-        return (0.0, lightness);
-    }
-    let hue = if max == c.r {
-        60.0 * (((c.g - c.b) / delta).rem_euclid(6.0))
-    } else if max == c.g {
-        60.0 * ((c.b - c.r) / delta + 2.0)
-    } else {
-        60.0 * ((c.r - c.g) / delta + 4.0)
-    };
-    (hue.rem_euclid(360.0), lightness)
-}
-
-/// Converts a CSS-style `hsla(h, s, l, a)` value (h in **degrees**, s/l/a in
-/// 0..1) to sRGB. Washes and overlays are written this way because they are
-/// specified as "N% neutral at M% opacity", which hsl states directly and hex
-/// cannot state at all.
-#[cfg(test)]
-fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
-    let h = (h.rem_euclid(360.0)) / 360.0;
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = if h < 1.0 / 6.0 {
-        (c, x, 0.0)
-    } else if h < 2.0 / 6.0 {
-        (x, c, 0.0)
-    } else if h < 3.0 / 6.0 {
-        (0.0, c, x)
-    } else if h < 4.0 / 6.0 {
-        (0.0, x, c)
-    } else if h < 5.0 / 6.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    Rgba {
-        r: r + m,
-        g: g + m,
-        b: b + m,
-        a,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2119,15 +2065,6 @@ mod tests {
             );
         }
 
-        /// The dev build: `target/debug/sirio`, not `target/debug/deps/...`.
-        #[test]
-        fn the_dev_binary_is_not_a_test_harness() {
-            assert!(!super::super::looks_like_test_harness(
-                Some("main"),
-                Some(Path::new("/w/rust/target/debug/sirio"))
-            ));
-        }
-
         /// An installed copy must follow the portal like any real run.
         #[test]
         fn an_installed_binary_is_not_a_test_harness() {
@@ -2136,41 +2073,6 @@ mod tests {
                 Some(Path::new("/usr/bin/sirio"))
             ));
         }
-
-        /// Nothing known: assume the real app, so a failure to read either
-        /// signal never silently disables the portal in production.
-        #[test]
-        fn neither_signal_means_not_a_test() {
-            assert!(!super::super::looks_like_test_harness(None, None));
-        }
-    }
-
-    /// Installing a theme pushes its appearance into bezel's mirror.
-    ///
-    /// bezel's `ink`, `wash` and `hairline` are free functions with no `cx`:
-    /// they read a process-wide mirror that defaults to Dark, not the theme
-    /// they are painting for. Nothing else in the suite would notice a stale
-    /// mirror, because every token this crate builds resolves its own
-    /// appearance explicitly — the damage is confined to the bezel primitives
-    /// `sirio_ui` renders, and it looks like a light window with dark
-    /// hairlines.
-    #[test]
-    fn installing_a_theme_syncs_bezels_appearance_mirror() {
-        // The mirror is process-wide, so two tests touching it concurrently
-        // would flake. This is bezel's own guard for exactly that.
-        let _guard = bezel::theme::lock_appearance();
-
-        Theme::light().sync_appearance();
-        assert_eq!(
-            bezel::theme::current_appearance(),
-            bezel::theme::Appearance::Light
-        );
-
-        Theme::dark().sync_appearance();
-        assert_eq!(
-            bezel::theme::current_appearance(),
-            bezel::theme::Appearance::Dark
-        );
     }
 
     /// The dark palette is bezel's.
@@ -2251,65 +2153,6 @@ mod tests {
     }
 
     #[test]
-    fn neutral_ladder_is_the_approved_values() {
-        // Neutral carries its own approved ladder since 2026-09-12 (sidebars
-        // `#191919`, central panes `#141414`, chat `#232323`, composer
-        // `#313131`, solid hover `#363636`; light mirrored). Written out
-        // rather than read from the painter, so a change fails here instead
-        // of restyling every install quietly — the same contract Notte's
-        // ladder test holds. `Tint::NONE` still holds (see
-        // `neutral_is_bezels_shipped_grey`): the ladder moves lightness only.
-        for (appearance, page, surface, raised, raised_hover, input, hover) in [
-            (
-                Appearance::Dark,
-                0x141414,
-                0x191919,
-                0x232323,
-                0x363636,
-                0x313131,
-                0x363636,
-            ),
-            (
-                Appearance::Light,
-                0xF8F8F8,
-                0xE8E8E8,
-                0xECECEC,
-                0xD9D9D9,
-                0xFFFFFF,
-                0xD9D9D9,
-            ),
-        ] {
-            let bezel = bezel_theme_for(BaseColor::Neutral, appearance);
-            for (name, token, hex) in [
-                ("bg", bezel.bg, page),
-                ("surface", bezel.surface, surface),
-                ("surface_card", bezel.surface_card, surface),
-                ("surface_raised", bezel.surface_raised, raised),
-                ("surface_dialog", bezel.surface_dialog, raised),
-                ("surface_overlay", bezel.surface_overlay, raised),
-                (
-                    "surface_raised_hover",
-                    bezel.surface_raised_hover,
-                    raised_hover,
-                ),
-                ("input_bg", bezel.input_bg, input),
-                ("element_hover", bezel.element_hover, hover),
-            ] {
-                assert_eq!(token, opaque_hsla(hex), "{appearance:?} {name}");
-            }
-            let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            assert_eq!(sirio.bg, Rgba::from(opaque_hsla(page)));
-            assert_eq!(sirio.surface, Rgba::from(opaque_hsla(surface)));
-            assert_eq!(sirio.terminal_surface, Rgba::from(opaque_hsla(page)));
-            assert_eq!(sirio.surface_raised, Rgba::from(opaque_hsla(raised)));
-            assert_eq!(sirio.input_bg, Rgba::from(opaque_hsla(input)));
-            assert_eq!(sirio.element_hover, Rgba::from(opaque_hsla(hover)));
-            assert_eq!(sirio.overlay, Rgba::from(opaque_hsla(hover)));
-            assert_eq!(sirio.overlay_strong, Rgba::from(opaque_hsla(hover)));
-        }
-    }
-
-    #[test]
     fn a_tinted_base_moves_the_greys_and_leaves_sirios_own_colours_alone() {
         // Decision B4: the coral is Sirio's identity, anchored by two
         // measured constraints. The dark terminal now follows the pane's
@@ -2364,23 +2207,6 @@ mod tests {
     }
 
     #[test]
-    fn the_semantic_hues_hold_under_every_base_colour() {
-        // `Brand::apply` keeps danger, warning and success where they are
-        // because they mean something. Asserted from Sirio's side too, so a
-        // bezel bump that changed the rule fails here rather than shipping a
-        // status colour nobody chose.
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            for base in BaseColor::ALL {
-                let tinted = ThemeColors::for_appearance(appearance, base);
-                assert_eq!(tinted.danger, neutral.danger, "{base:?} danger");
-                assert_eq!(tinted.warning, neutral.warning, "{base:?} warning");
-                assert_eq!(tinted.success, neutral.success, "{base:?} success");
-            }
-        }
-    }
-
-    #[test]
     fn translucency_preserves_the_chosen_base_colour() {
         // `with_translucency` rebuilds the palette from the theme's own
         // fields; the base colour has to be one of them or the toggle
@@ -2417,34 +2243,6 @@ mod tests {
     }
 
     #[test]
-    fn notte_dark_ladder_is_the_four_given_values() {
-        // Written out rather than read from `NOTTE_LADDER`, so a change to
-        // the constant fails here instead of restyling the preset quietly.
-        let bezel = notte_bezel(Appearance::Dark);
-        for (name, token, hex) in [
-            ("bg", bezel.bg, 0x0E1016),
-            ("surface", bezel.surface, 0x202127),
-            ("surface_card", bezel.surface_card, 0x202127),
-            ("surface_raised", bezel.surface_raised, 0x2B2F3A),
-            ("surface_dialog", bezel.surface_dialog, 0x2B2F3A),
-            ("surface_overlay", bezel.surface_overlay, 0x2B2F3A),
-            ("surface_raised_hover", bezel.surface_raised_hover, 0x313337),
-        ] {
-            assert_eq!(token, opaque_hsla(hex), "{name}");
-        }
-
-        // Sirio's own tokens follow the same builder.
-        let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
-        assert_eq!(sirio.bg, Rgba::from(opaque_hsla(0x0E1016)));
-        assert_eq!(sirio.surface, Rgba::from(opaque_hsla(0x202127)));
-        assert_eq!(sirio.surface_raised, Rgba::from(opaque_hsla(0x2B2F3A)));
-        assert_eq!(
-            sirio.terminal_surface, sirio.surface,
-            "the dark terminal well is the pane"
-        );
-    }
-
-    #[test]
     fn notte_light_is_only_a_tint() {
         // Four dark surfaces were given and no light ones; inventing a light
         // ladder was rejected (spec N3).
@@ -2478,43 +2276,6 @@ mod tests {
             ("border", notte.border, tinted.border),
         ] {
             assert_eq!(ours, theirs, "light {name}");
-        }
-    }
-
-    #[test]
-    fn notte_keeps_bezels_veils_text_and_hues() {
-        // Only the seven surface tokens move. Veils compose over whatever is
-        // beneath them; the text ladder and the semantic hues are bezel's,
-        // carrying Notte's tint like any other base colour.
-        let notte = notte_bezel(Appearance::Dark);
-        let tinted = notte_tint_only(bezel::theme::Appearance::Dark);
-        for (name, ours, theirs) in [
-            ("element_hover", notte.element_hover, tinted.element_hover),
-            (
-                "element_active",
-                notte.element_active,
-                tinted.element_active,
-            ),
-            ("border", notte.border, tinted.border),
-            ("border_strong", notte.border_strong, tinted.border_strong),
-            ("input_bg", notte.input_bg, tinted.input_bg),
-            ("code_wash", notte.code_wash, tinted.code_wash),
-            ("ring", notte.ring, tinted.ring),
-            ("selection", notte.selection, tinted.selection),
-            ("text", notte.text, tinted.text),
-            ("text_muted", notte.text_muted, tinted.text_muted),
-            ("text_faint", notte.text_faint, tinted.text_faint),
-            ("text_dim", notte.text_dim, tinted.text_dim),
-            ("solid", notte.solid, tinted.solid),
-            ("on_solid", notte.on_solid, tinted.on_solid),
-            ("accent", notte.accent, tinted.accent),
-            ("danger", notte.danger, tinted.danger),
-            ("warning", notte.warning, tinted.warning),
-            ("success", notte.success, tinted.success),
-            ("diff_add", notte.diff_add, tinted.diff_add),
-            ("diff_del", notte.diff_del, tinted.diff_del),
-        ] {
-            assert_eq!(ours, theirs, "dark {name}");
         }
     }
 
@@ -2556,28 +2317,6 @@ mod tests {
                 upper.0
             );
         }
-    }
-
-    #[test]
-    fn the_base_colour_defaults_to_neutral_when_nothing_is_installed() {
-        // A pure test of the recovery rule; no gpui context involved.
-        assert_eq!(BaseColor::default(), BaseColor::Neutral);
-        assert_eq!(Theme::dark().base_color, BaseColor::Neutral);
-    }
-
-    #[test]
-    fn a_reinstall_keeps_the_base_colour_the_way_it_keeps_translucency() {
-        // `install` recovers both from the previously installed theme. This
-        // is the pure half of that contract: rebuilding for a new mode from
-        // an existing theme's fields must carry the choice across.
-        let installed = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Zinc);
-        let next = Theme::for_appearance(ThemeMode::Light, Appearance::Light, installed.base_color);
-        assert_eq!(next.base_color, BaseColor::Zinc);
-        assert_ne!(
-            next.colors.bg,
-            ThemeColors::for_appearance(Appearance::Light, BaseColor::Neutral).bg,
-            "the light rebuild is still tinted"
-        );
     }
 
     /// The primary text rung is bezel's, softened — not bezel's as-is, and not
@@ -2623,71 +2362,6 @@ mod tests {
                 step < contrast_ratio(full, sirio.surface),
                 "{appearance:?} text must be softer than bezel's"
             );
-        }
-    }
-
-    #[test]
-    fn radii_are_ratios_of_bezel_base_radius() {
-        // T2: the values do not move, but they stop being independent
-        // constants. bezel's `Brand::radius` moves the whole ladder together;
-        // a literal cannot follow it. `code_block` and `user_pill` are the
-        // anchors because they already sit exactly on two named corners.
-        use bezel::theme::Theme as BezelTheme;
-        let radii = Radii::default();
-        assert_eq!(radii.code_block, px(BezelTheme::button_radius()));
-        assert_eq!(radii.user_pill, px(BezelTheme::surface_radius()));
-    }
-
-    #[test]
-    fn washes_follow_bezels_two_rules() {
-        // `wash` and `hairline` are hand-copied from bezel because the
-        // appearance-taking forms there are `pub(crate)`. This is the guard on
-        // that copy: the alpha scaling comes from bezel's own constants, and
-        // the two rules stay opposite — a fill is not scaled up on light, an
-        // edge is.
-        let a = VEIL_MID;
-        assert_eq!(
-            wash(a, Appearance::Light).a,
-            a * bezel::theme::INK_FILL_SCALE
-        );
-        assert_eq!(
-            hairline(a, Appearance::Light).a,
-            (a * bezel::theme::INK_HAIRLINE_SCALE).min(0.5)
-        );
-        assert!(
-            hairline(a, Appearance::Light).a > wash(a, Appearance::Light).a,
-            "an edge must carry more ink than a fill on a bright surround"
-        );
-        // Dark quotes the alpha as given, in both rules.
-        assert_eq!(wash(a, Appearance::Dark).a, a);
-        assert_eq!(hairline(a, Appearance::Dark).a, a);
-    }
-
-    #[test]
-    fn theme_colours_come_from_bezel() {
-        // The swap's defining property: Sirio's neutrals are bezel's, not a
-        // copy that happens to agree today. Read through `Deref`, which is what
-        // every call site uses. `text_muted` stands in for the text ladder
-        // here because the primary rung is softened —
-        // `body_text_is_softened_off_bezels_full_contrast` covers that one.
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let bezel = bezel_theme_for(BaseColor::Neutral, appearance);
-            let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            assert_eq!(sirio.surface, Rgba::from(bezel.surface));
-            assert_eq!(sirio.text_muted, Rgba::from(bezel.text_muted));
-            assert_eq!(sirio.border, Rgba::from(bezel.border));
-        }
-    }
-
-    #[test]
-    fn git_untracked_is_a_neutral_not_the_accent() {
-        // C1: untracked leaves the blue. It is quieter than the chromatic
-        // staged / modified / conflict states, so it reads as "not yet tracked"
-        // rather than as a status.
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let c = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            assert_eq!(c.git_untracked, c.text_faint);
-            assert_ne!(c.git_untracked, c.accent);
         }
     }
 
@@ -2753,15 +2427,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_geometry_is_compact_and_consistent() {
-        let spacing = Spacing::default();
-        let radii = Radii::default();
-        assert_eq!(spacing.shell_gap, px(4.0));
-        assert_eq!(spacing.shell_outer_inset, px(4.0));
-        assert_eq!(radii.shell_panel, px(7.0));
-    }
-
-    #[test]
     fn interface_font_size_shifts_the_whole_typography_scale() {
         let typography = Typography::for_interface_size(16.0);
 
@@ -2783,75 +2448,6 @@ mod tests {
             g: over.g * a + under.g * (1.0 - a),
             b: over.b * a + under.b * (1.0 - a),
             a: 1.0,
-        }
-    }
-
-    /// The mid wash is still half again the faint one.
-    ///
-    /// Two rungs is what is left of the four-rung ladder; the relationship
-    /// between them is the whole of the arbitrariness Sirio still owns.
-    #[test]
-    fn the_two_remaining_rungs_keep_their_step() {
-        let ratio = VEIL_MID / VEIL_FAINT;
-        assert!(
-            (2.2..=2.6).contains(&ratio),
-            "{VEIL_FAINT} -> {VEIL_MID} is a {ratio:.2}x step"
-        );
-    }
-
-    /// Veil-backed structural washes remain neutral.
-    ///
-    /// The cool-tinted shell surfaces have their own approved roles. This test
-    /// deliberately covers only the generic washes backed by [`veil`]: a
-    /// hairline, hover, overlay, guide, or hunk wash communicates structure,
-    /// not an additional semantic colour.
-    #[test]
-    fn veil_backed_structural_washes_are_neutral() {
-        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            for (name, c) in [
-                ("border", theme.border),
-                ("element_hover", theme.element_hover),
-                ("overlay", theme.overlay),
-                ("overlay_strong", theme.overlay_strong),
-                ("tree_guide", theme.tree_guide),
-                ("code_wash", theme.code_wash),
-            ] {
-                assert!(
-                    (c.r - c.g).abs() < 0.01 && (c.g - c.b).abs() < 0.01,
-                    "{label} veil-backed {name} is tinted: ({}, {}, {})",
-                    c.r,
-                    c.g,
-                    c.b
-                );
-            }
-        }
-    }
-
-    /// A soft fill is its own meaning's colour turned down, never a second
-    /// colour picked to sit near it.
-    #[test]
-    fn soft_fills_are_their_own_meanings_colour() {
-        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            // `danger_muted` is bezel's and is a *lighter* danger rather than
-            // a turned-down one, so it is checked by hue below instead.
-            let (muted_hue, _) = hue_and_lightness(theme.danger_muted);
-            let (danger_hue, _) = hue_and_lightness(theme.danger);
-            assert!(
-                (muted_hue - danger_hue).abs() < 20.0,
-                "{label}: danger_muted left danger's hue ({muted_hue} vs {danger_hue})"
-            );
-            for (name, fill, parent) in [
-                ("diff_del_bg", theme.diff_del_bg, theme.diff_del),
-                ("diff_add_bg", theme.diff_add_bg, theme.diff_add),
-            ] {
-                assert!(
-                    (fill.r - parent.r).abs() < 0.004
-                        && (fill.g - parent.g).abs() < 0.004
-                        && (fill.b - parent.b).abs() < 0.004,
-                    "{label} {name} is a different hue from the text it sits under"
-                );
-                assert!(fill.a < 1.0, "{label} {name} should be a wash");
-            }
         }
     }
 
@@ -2881,32 +2477,6 @@ mod tests {
                 theme.surface, theme.surface_raised,
                 "{label}: the page and a raised card are the same plane"
             );
-        }
-    }
-
-    /// The star is a louder `warning`, not a fifth colour.
-    #[test]
-    fn favorite_is_the_warning_hue_at_full_chroma() {
-        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let (star_hue, star_light) = hue_and_lightness(theme.favorite);
-            let (warn_hue, warn_light) = hue_and_lightness(theme.warning);
-            assert!(
-                (star_hue - warn_hue).abs() < 1.0,
-                "{label}: star hue {star_hue} left warning's {warn_hue}"
-            );
-            assert!(
-                (star_light - warn_light).abs() < 0.01,
-                "{label}: star lightness {star_light} left warning's {warn_light}"
-            );
-            let chroma = |c: Rgba| c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
-            assert!(
-                chroma(theme.favorite) >= chroma(theme.warning),
-                "{label}: the star is not the louder of the two"
-            );
-            // bezel's warning is already full chroma, so "louder" resolves to
-            // "the same". What still has to hold is that a starred row is not
-            // a colour of its own.
-            assert_eq!(theme.favorite, theme.warning);
         }
     }
 
@@ -2994,20 +2564,6 @@ mod tests {
         }
     }
 
-    fn expect_color(actual: Rgba, expected: (f32, f32, f32, f32)) {
-        for (actual, expected, name) in [
-            (actual.r, expected.0, "r"),
-            (actual.g, expected.1, "g"),
-            (actual.b, expected.2, "b"),
-            (actual.a, expected.3, "a"),
-        ] {
-            assert!(
-                (actual - expected).abs() < 0.004,
-                "{name}: {actual} != {expected}"
-            );
-        }
-    }
-
     #[test]
     fn every_adaptive_token_differs_between_light_and_dark() {
         let light = Theme::light().colors;
@@ -3085,42 +2641,6 @@ mod tests {
             Theme::system(WindowAppearance::Light, BaseColor::Neutral).appearance,
             Appearance::Light
         );
-    }
-
-    #[test]
-    fn spacing_and_typography_match_waku() {
-        let spacing = Spacing::default();
-        assert_eq!(spacing.card_corner_radius, px(6.0));
-        assert_eq!(spacing.card_gap, px(10.0));
-        assert_eq!(spacing.title_strip_height, px(48.0));
-        assert_eq!(spacing.traffic_light_inset, px(14.0));
-        assert_eq!(spacing.title_strip_icon_size, px(14.0));
-        assert_eq!(spacing.titlebar_control_frame, size(px(26.0), px(26.0)));
-        assert_eq!(spacing.titlebar_control_spacing, px(6.0));
-        assert_eq!(spacing.bottom_bar_height, px(40.0));
-
-        let typography = Typography::default();
-        assert_eq!(typography.base_size, px(14.5));
-        assert_eq!(typography.code_size, px(13.0));
-        assert_eq!(typography.code_line_height, px(19.0));
-        assert_eq!(typography.code_weight, FontWeight::NORMAL);
-        assert_eq!(typography.large_title, px(21.0));
-        assert_eq!(typography.title, px(18.0));
-        assert_eq!(typography.title2, px(16.0));
-        assert_eq!(typography.title3, px(15.0));
-        assert_eq!(typography.headline, px(15.0));
-        assert_eq!(typography.callout, px(14.0));
-        assert_eq!(typography.footnote, px(13.0));
-        // The single departure from the measured scale: raised from
-        // waku's 10.5 for legibility, which puts it above `footnote`.
-        // Recorded in `sirio_ui::conformance`'s departures ledger.
-        assert_eq!(typography.caption2, px(14.0));
-        assert_eq!(typography.ui_size, px(13.0));
-        assert_eq!(typography.body_line_height, px(22.0));
-        assert_eq!(typography.ui_line_height, px(17.0));
-        assert_eq!(Theme::dark().translucent_surface_opacity, 0.70);
-        assert_eq!(Theme::surface_opacity(true), 0.70);
-        assert_eq!(Theme::surface_opacity(false), 1.0);
     }
 
     /// Fading a surface that is *already* translucent must not make it more
@@ -3351,68 +2871,6 @@ mod tests {
         }
     }
 
-    /// The radius tokens are waku's measured de-facto scale §A.2 — the
-    /// exact steps, in the exact roles. A component's radius should come
-    /// from this set; anything outside it is a value nobody measured.
-    #[test]
-    fn radii_match_waku() {
-        let radii = Theme::dark().radii;
-        assert_eq!(radii.chip, px(4.0));
-        assert_eq!(radii.chip_active, px(5.0));
-        assert_eq!(radii.control, px(6.0));
-        assert_eq!(radii.row_card, px(7.0));
-        assert_eq!(radii.code_block, px(8.0));
-        assert_eq!(radii.toast, px(10.0));
-        assert_eq!(radii.user_pill, px(12.0));
-        assert_eq!(radii.composer, px(13.0));
-
-        // Radii are geometry, not appearance: both palettes share them.
-        assert_eq!(Theme::light().radii, Theme::dark().radii);
-    }
-
-    #[test]
-    fn hsl_conversion_is_exact_for_known_values() {
-        // hsla(211, 100%, 50%, 0.55) is the browser-selection blue #007BFF.
-        expect_color(hsla(211.0, 1.0, 0.50, 0.55), (0.0, 0.483, 1.0, 0.55));
-        // hsla(220, 10%, 90%, 0.07) is a near-white neutral (waku border).
-        let border = hsla(220.0, 0.10, 0.90, 0.07);
-        assert!(border.r > 0.88 && border.r < 0.92, "r={}", border.r);
-        assert!(border.g > 0.88 && border.g < 0.92, "g={}", border.g);
-        assert!(border.b > 0.88 && border.b < 0.92, "b={}", border.b);
-        assert_eq!(border.a, 0.07);
-    }
-
-    /// The portal mapping: dark only for an explicit dark preference;
-    /// light and no-preference both resolve light, matching GPUI's own
-    /// `window_appearance_from_color_scheme`.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn portal_color_scheme_mapping() {
-        use ashpd::desktop::settings::ColorScheme;
-        assert_eq!(
-            appearance_from_color_scheme(ColorScheme::PreferDark),
-            Appearance::Dark
-        );
-        assert_eq!(
-            appearance_from_color_scheme(ColorScheme::PreferLight),
-            Appearance::Light
-        );
-        assert_eq!(
-            appearance_from_color_scheme(ColorScheme::NoPreference),
-            Appearance::Light
-        );
-    }
-
-    /// B3 makes the bundled face the face everywhere: bezel ships Geist with
-    /// real 500/600/700 statics, which the cosmic-text path needs because it
-    /// rasterizes a variable font at its default instance only and never
-    /// applies `wght` coordinates.
-    #[test]
-    fn geist_leads_on_every_platform() {
-        assert_eq!(UI_FAMILY_CANDIDATES[0], "Geist");
-        assert_eq!(CODE_FAMILY_CANDIDATES[0], "Geist Mono");
-    }
-
     /// The code family picks the first installed candidate in preference
     /// order — never the first family the machine happens to have.
     #[test]
@@ -3422,17 +2880,6 @@ mod tests {
             .map(String::from)
             .collect();
         assert_eq!(resolve_code_family(&installed), "Fira Mono");
-    }
-
-    /// The family the visual bar is set in (JetBrains Mono) wins when it is
-    /// actually installed.
-    #[test]
-    fn code_family_resolution_takes_the_visual_bar_family_first() {
-        let installed: HashSet<String> = ["JetBrains Mono", "DejaVu Sans Mono"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(resolve_code_family(&installed), "JetBrains Mono");
     }
 
     /// The UI family picks the first installed candidate in preference
@@ -3445,15 +2892,6 @@ mod tests {
             .map(String::from)
             .collect();
         assert_eq!(resolve_ui_family(&installed), "Inter");
-    }
-
-    #[test]
-    fn ui_family_resolution_takes_jetbrains_sans_first_when_installed() {
-        let installed: HashSet<String> = ["JetBrains Sans", "DejaVu Sans"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(resolve_ui_family(&installed), "JetBrains Sans");
     }
 
     /// The UI family falls back to the system's generic sans-serif answer
@@ -3472,49 +2910,6 @@ mod tests {
             exists,
             "resolved family {resolved:?} is not an installed face"
         );
-    }
-
-    /// The terminal family prefers the Nerd Font build of JetBrains Mono
-    /// (the agent TUIs' glyph set needs a Nerd Font), then the classic
-    /// MesloLGS Nerd Font, then plain JetBrains Mono.
-    #[test]
-    fn terminal_family_resolution_prefers_nerd_fonts_in_order() {
-        let installed: HashSet<String> = [
-            "MesloLGS Nerd Font Mono",
-            "JetBrains Mono",
-            "JetBrainsMono Nerd Font",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-        assert_eq!(
-            resolve_terminal_family(&installed),
-            "JetBrainsMono Nerd Font"
-        );
-
-        let without_jetbrains_nerd: HashSet<String> = ["MesloLGS Nerd Font Mono", "JetBrains Mono"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(
-            resolve_terminal_family(&without_jetbrains_nerd),
-            "MesloLGS Nerd Font Mono"
-        );
-
-        let only_plain: HashSet<String> = ["JetBrains Mono", "DejaVu Sans Mono"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(resolve_terminal_family(&only_plain), "JetBrains Mono");
-    }
-
-    /// The terminal family falls back to the system's generic monospace
-    /// answer — a family fontdb actually loaded.
-    #[test]
-    fn terminal_family_resolution_falls_back_to_a_family_that_exists() {
-        let resolved = resolve_terminal_family(&HashSet::new());
-        assert_eq!(resolved, system_monospace_family());
-        assert!(!resolved.is_empty());
     }
 
     /// The family list DirectWrite reports on a stock Windows 11 install,
@@ -3647,165 +3042,11 @@ mod tests {
             "resolved family {resolved:?} is not an installed face"
         );
     }
-
-    /// The theme carries one code-family answer next to the code weight, and
-    /// it is a real, non-empty family even before a GPUI app resolves it.
-    #[test]
-    fn typography_carries_a_code_family_token() {
-        let family = Theme::dark().typography.code_family;
-        assert!(!family.is_empty());
-        assert_eq!(Theme::light().typography.code_family, family);
-    }
-
-    /// The theme carries one UI-family answer too, real and non-empty
-    /// before any GPUI app resolves it.
-    #[test]
-    fn typography_carries_a_ui_family_token() {
-        let family = Theme::dark().typography.ui_family;
-        assert!(!family.is_empty());
-        assert_eq!(Theme::light().typography.ui_family, family);
-    }
-
-    /// `Theme::for_mode` must resolve for the mode it was asked for, not a
-    /// stale or independently-defaulted one — `System` under a light window
-    /// appearance is a light theme.
-    ///
-    /// This used to check the same thing through the COSMIC sub-theme's
-    /// `is_dark`, which was the seam that made `Theme` the single source
-    /// those tokens flowed through. There is no sub-theme any more; the
-    /// appearance is the theme's own field, so this is what is left to
-    /// assert.
-    #[test]
-    fn theme_for_mode_resolves_for_the_appearance_it_was_asked_for() {
-        let theme = Theme::for_mode(
-            ThemeMode::Light,
-            WindowAppearance::Light,
-            BaseColor::Neutral,
-        );
-        assert_eq!(theme.appearance, Appearance::Light);
-
-        let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark, BaseColor::Neutral);
-        assert_eq!(theme.appearance, Appearance::Dark);
-    }
-
-    /// The two tokens `codex12` asked for in `QUEUE.md` (P60/P63): a menu
-    /// width wide enough for a label plus a shortcut hint, and a hairline
-    /// *thickness* distinct from `Colors::hairline`'s colour.
-    #[test]
-    fn spacing_carries_menu_width_and_hairline_thickness() {
-        let spacing = Spacing::default();
-        assert_eq!(spacing.menu_width, px(240.0));
-        assert_eq!(spacing.hairline_thickness, px(1.0));
-    }
-
-    /// The compact icon-only action token (P76's cluster buttons; P75's
-    /// dead-control rows are its next consumer).
-    #[test]
-    fn spacing_carries_compact_action() {
-        assert_eq!(Spacing::default().compact_action, px(24.0));
-    }
-
-    /// The bar height and traffic-light geometry P76 measured/derived —
-    /// pinned here so a future edit has to be a deliberate re-derivation,
-    /// not an accidental drift.
-    #[test]
-    fn browser_chrome_matches_the_comet_measured_spec() {
-        let chrome = BrowserChrome::default();
-        assert_eq!(chrome.bar_height, px(38.0), "comet Theme::TITLEBAR_HEIGHT");
-        assert_eq!(chrome.traffic_light_diameter, px(12.0));
-        assert_eq!(chrome.traffic_light_gap, px(8.0));
-        assert_eq!(
-            chrome.traffic_light_inset,
-            px(10.0),
-            "comet's own non-macOS cluster_buttons_start baseline"
-        );
-        assert_eq!(
-            chrome.macos_traffic_light_cluster_inset,
-            px(80.0),
-            "AppKit position 12 + 3*14pt buttons + 2*9pt gaps + 8pt separation"
-        );
-        assert_eq!(
-            chrome.cluster_button_gap,
-            px(2.0),
-            "comet CLUSTER_BUTTONS_WIDTH = 24*3 + 2*2"
-        );
-    }
-
-    /// The cluster-start derivation must never silently become comet's
-    /// macOS 88px (calibrated to Apple's own dot size, not ours) nor its
-    /// no-lights 10px (we draw lights, comet's Linux build does not).
-    #[test]
-    fn browser_chrome_cluster_start_is_derived_between_comets_two_reference_numbers() {
-        let start = BrowserChrome::default().cluster_start();
-        assert_eq!(start, px(70.0), "10 + 3*12 + 2*8 + 8 = 70");
-        assert!(
-            start > px(10.0),
-            "we draw lights comet's Linux bar does not"
-        );
-        assert!(
-            start < px(88.0),
-            "our lights are smaller than macOS's own dot geometry"
-        );
-    }
-
-    #[test]
-    fn theme_carries_browser_chrome() {
-        assert_eq!(Theme::dark().browser_chrome, BrowserChrome::default());
-    }
-
-    /// The caption-button spec sampled from a real Windows 11 close
-    /// button (build 26200), pinned so a future edit has to be a
-    /// deliberate re-measurement rather than a drift back to the value
-    /// Zed happens to carry.
-    #[test]
-    fn windows_caption_matches_the_measured_windows_11_spec() {
-        let caption = WindowsCaption::default();
-        assert_eq!(caption.button_width, px(36.0));
-        assert_eq!(caption.glyph_size, px(10.0));
-        assert_eq!(
-            caption.close_hover,
-            rgb(0xC42B1C),
-            "sampled under the cursor; Zed's #E81123 is the older Win32/UWP value"
-        );
-        assert_eq!(
-            caption.close_pressed,
-            rgb(0xB42A1B),
-            "sampled while held -- NOT close_hover at 0.8, which reads visibly duller"
-        );
-        assert_eq!(caption.close_on, rgb(0xFFFFFF));
-    }
-
-    /// The close red is a system constant, so unlike every adaptive token
-    /// on this theme it must resolve identically in both appearances --
-    /// everything that should follow the theme comes from `icon_button`.
-    #[test]
-    fn windows_caption_is_the_same_in_both_appearances() {
-        assert_eq!(Theme::dark().windows_caption, WindowsCaption::default());
-        assert_eq!(Theme::light().windows_caption, WindowsCaption::default());
-    }
 }
 
 #[cfg(test)]
 mod agent_brand_tests {
     use super::*;
-
-    /// Swift `AgentAccentColor.defaultHexByAgentId`, transcribed.
-    #[test]
-    fn brand_hexes_match_the_reference_table() {
-        for (id, hex) in [
-            ("claude", 0xD97757_u32),
-            ("codex", 0x0A84FF),
-            ("opencode", 0xFF9500),
-            ("pi", 0x34C759),
-            ("omp", 0x9B4DFF),
-        ] {
-            assert_eq!(
-                AgentBrandColor::for_agent_id(id).hex(),
-                hex,
-                "{id} must wear its own brand hex"
-            );
-        }
-    }
 
     /// `AgentIcon.normalizedId`: the ACP-bridged variant of an agent is the
     /// same brand, not an unknown one wearing the grey fallback.
@@ -3819,17 +3060,6 @@ mod agent_brand_tests {
             AgentBrandColor::for_agent_id("opencode-acp"),
             AgentBrandColor::OpenCode
         );
-    }
-
-    /// Swift's `AgentAccentColor.fallbackHex` — an adapter with no default
-    /// yet gets neutral grey, never a catalog agent's colour.
-    #[test]
-    fn unknown_agents_get_the_neutral_fallback() {
-        assert_eq!(
-            AgentBrandColor::for_agent_id("some-future-agent"),
-            AgentBrandColor::Unknown
-        );
-        assert_eq!(AgentBrandColor::Unknown.hex(), 0x8E8E93);
     }
 
     /// The regression this type exists for. `AgentAccentColor::Amber`

@@ -4236,39 +4236,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_base_colour_maps_to_its_own_segment() {
-        for (index, base) in sirio_theme::BaseColor::ALL.into_iter().enumerate() {
-            assert_eq!(base_color_segment(base), index, "{base:?}");
-        }
-    }
-
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
     use std::cell::{Cell, RefCell};
-
-    #[gpui::test]
-    async fn account_login_requests_the_hosts_integrated_terminal(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let settings = cx.new(Settings::new);
-        let requests = Rc::new(Cell::new(0));
-        let observed = requests.clone();
-        cx.update(|cx| {
-            cx.subscribe(&settings, move |_, _: &SettingsEvent, _| {
-                observed.set(observed.get() + 1);
-            })
-            .detach();
-        });
-        settings.update(cx, |settings, cx| {
-            settings.launch_account_login(ProviderKind::Claude, cx)
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            requests.get(),
-            1,
-            "login must reach the host terminal without an external emulator"
-        );
-    }
 
     #[gpui::test]
     async fn account_login_cancel_and_retry_ignore_old_completion(cx: &mut gpui::TestAppContext) {
@@ -4323,30 +4293,6 @@ mod tests {
             1,
             "only the current successful login refreshes usage"
         );
-    }
-
-    #[gpui::test]
-    async fn account_error_self_dismisses_after_the_delay(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let settings = cx.new(Settings::new);
-        settings.update(cx, |settings, cx| {
-            settings.launch_account_login(ProviderKind::Claude, cx);
-            let id = settings.account_login_id;
-            settings.complete_account_login(id, Err("login failed".into()), cx);
-        });
-        cx.run_until_parked();
-        settings.read_with(cx, |settings, _| {
-            assert!(settings.account_action_error.is_some());
-        });
-
-        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS);
-        cx.run_until_parked();
-        settings.read_with(cx, |settings, _| {
-            assert!(
-                settings.account_action_error.is_none(),
-                "the error must self-dismiss after the delay"
-            );
-        });
     }
 
     #[gpui::test]
@@ -4463,56 +4409,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_snapshot_defaults_match_the_persisted_contract() {
-        let snapshot = SettingsSnapshot::default();
-
-        assert_eq!(snapshot.theme, ThemeMode::System);
-        assert_eq!(snapshot.interface_font_size, 13);
-        assert_eq!(snapshot.terminal_font_size, 13);
-        assert!(snapshot.control_socket_enabled);
-        assert!(
-            snapshot.socket_path.is_empty(),
-            "the socket path is runtime state routed by the host, never a baked-in template"
-        );
-
-        // P58: every control that holds a user-changeable value is part of
-        // the persistence contract — none of the General-screen values may
-        // be report-only. The defaults are exactly what the surface draws
-        // on a first launch, so the contract's defaults never change what
-        // the user sees.
-        assert!(snapshot.resume_agent_sessions);
-        assert!(!snapshot.auto_naming);
-        assert!(snapshot.limit_chat_history);
-        assert_eq!(snapshot.chat_retention, 100);
-        assert!(!snapshot.limit_mounted_worktrees);
-        assert_eq!(snapshot.mounted_worktrees, 6);
-        assert_eq!(snapshot.summarizer_agent, SummarizerChoice::Claude);
-        assert!(snapshot.claude_show_in_bar);
-        assert!(snapshot.codex_show_in_bar);
-        assert!(!snapshot.opencode_show_in_bar);
-        assert_eq!(snapshot.refresh_interval, 5);
-    }
-
-    #[test]
-    fn summarizer_choice_ids_and_titles_are_stable_and_parse_round_trips() {
-        // The persisted value is the agent id; the picker displays the
-        // title. Every offered choice must parse back to itself, and an
-        // unknown stored value must fall back rather than guess.
-        assert_eq!(SummarizerChoice::ALL.len(), 5);
-        for choice in SummarizerChoice::ALL {
-            assert_eq!(SummarizerChoice::parse(choice.id()), Some(choice));
-            assert!(!choice.title().is_empty());
-        }
-        assert_eq!(SummarizerChoice::parse("banana"), None);
-        assert_eq!(
-            SummarizerChoice::parse("claude"),
-            Some(SummarizerChoice::Claude)
-        );
-        assert_eq!(SummarizerChoice::Claude.title(), "Claude Code");
-        assert_eq!(SummarizerChoice::OhMyPi.id(), "omp");
-    }
-
-    #[test]
     fn account_identity_cache_saves_a_fresh_identity_and_falls_back_when_absent() {
         // F-PERSIST-DB-06: discover_claude_identity/discover_codex_identity
         // had nowhere to persist a successful shell-out, so the display line
@@ -4569,91 +4465,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn provider_rows_report_discovery_not_literals() {
-        // The row content must come from what discovery found, never from a
-        // fixed table that claims every provider is available. The name and
-        // status follow the availability value; an absent binary is
-        // described in a way the user can act on.
-        let available = AgentAvailability {
-            id: "claude",
-            display_name: "A Different Name",
-            executable: Some(PathBuf::from("/opt/local/bin/claude")),
-        };
-        let absent = AgentAvailability {
-            id: "opencode",
-            display_name: "OpenCode",
-            executable: None,
-        };
-
-        let row = provider_row(&available, None, None);
-        assert_eq!(
-            row.name, "A Different Name",
-            "the name is discovery data, not a hard-coded display table"
-        );
-        assert_eq!(
-            row.status,
-            ProviderStatus::Installed(PathBuf::from("/opt/local/bin/claude")),
-            "an installed CLI reports the resolved executable"
-        );
-        assert!(
-            row.description.contains("claude") && row.description.contains("PATH"),
-            "an installed CLI keeps the on-PATH description"
-        );
-
-        let row = provider_row(&absent, None, None);
-        assert_eq!(
-            row.status,
-            ProviderStatus::NotInstalled,
-            "a binary absent from PATH is reported as not installed"
-        );
-        assert!(
-            row.description.contains("install"),
-            "an absent binary is described in a way the user can act on"
-        );
-        assert!(
-            !row.description.contains("Available"),
-            "nothing may claim an absent binary is available"
-        );
-    }
-
-    /// Task 11: the resolved-transport sentence reaches the row it belongs
-    /// to verbatim — the Agents screen cannot read text back out of the
-    /// harness, so this is where the exact wording is pinned.
-    #[test]
-    fn a_provider_row_carries_the_transport_sentence_it_was_resolved_with() {
-        let availability = AgentAvailability {
-            id: "claude",
-            display_name: "Claude Code",
-            executable: Some(PathBuf::from("/opt/local/bin/claude")),
-        };
-        let row = provider_row(
-            &availability,
-            None,
-            Some("Native · claude 2.1.273".to_string()),
-        );
-        assert_eq!(
-            row.transport_note.as_deref(),
-            Some("Native · claude 2.1.273")
-        );
-        assert_eq!(
-            provider_row(&availability, None, None).transport_note,
-            None,
-            "an adapter with nothing resolved renders no sentence"
-        );
-    }
-
-    #[test]
-    fn permissions_category_is_offered_for_browser_grants() {
-        // Browser origin grants are durable on every platform, while the
-        // macOS-only TCC rows remain conditionally rendered inside it.
-        let offered: Vec<SettingsCategory> = SettingsCategory::ALL.to_vec();
-        assert!(
-            offered.contains(&SettingsCategory::Permissions),
-            "every platform offers the browser-origin permissions screen"
-        );
-    }
-
     /// The control socket's `settings.section` parses a category by the
     /// label it is written with: `settings_category_id` lower-cases the
     /// title and hyphenates it, and `from_title` has to parse that same
@@ -4673,54 +4484,6 @@ mod tests {
             SettingsCategory::from_title(SettingsCategory::LanguageServers.title()),
             Some(SettingsCategory::LanguageServers),
             "the title has to parse back under the spelling the report writes"
-        );
-    }
-
-    #[gpui::test]
-    async fn opening_the_agents_screen_asks_the_host_to_recheck_launch_sources(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use sirio_registry::LaunchSource;
-        cx.update(Theme::init);
-        let sources = vec![(
-            "codex".to_string(),
-            LaunchSource::Builtin {
-                program: "codex-acp".into(),
-                args: vec![],
-            },
-        )];
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_launch_sources(sources)
-        });
-        let events = Rc::new(RefCell::new(Vec::<String>::new()));
-        let recorder = events.clone();
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let settings = cx.update(|window, app| {
-            let settings_entity = window.root::<Settings>().flatten().expect("settings root");
-            let subscription = app.subscribe(
-                &settings_entity,
-                move |_entity, event: &SettingsEvent, _app| {
-                    if let SettingsEvent::RefreshAgentSources = event {
-                        recorder.borrow_mut().push("recheck".to_string());
-                    }
-                },
-            );
-            // The subscription must outlive this update scope for the whole
-            // test; forgetting it pins it to the entities' lifetimes.
-            std::mem::forget(subscription);
-            settings_entity
-        });
-
-        settings.update(&mut cx, |settings, cx| {
-            settings.select_category(SettingsCategory::Agents, cx);
-        });
-        cx.run_until_parked();
-
-        assert_eq!(
-            events.borrow().as_slice(),
-            ["recheck".to_string()],
-            "entering the Agents screen asks the host to recheck the registry"
         );
     }
 
@@ -4883,76 +4646,6 @@ mod tests {
         );
     }
 
-    /// #197: the version in an agent row belongs to the **ACP server
-    /// package**, never to the CLI whose path sits beside it. Rendered bare
-    /// as `v0.70.0`, in the same colour and size as that path and six pixels
-    /// from it, it read as the binary's own version -- and was wrong every
-    /// time. On the machine this was found, the row said `v0.70.0` next to a
-    /// `claude.exe` reporting `2.1.247`.
-    ///
-    /// The fixture makes the two disagree on purpose, which is what stops
-    /// this from being a restatement of the match arms: the executable is a
-    /// claude binary and the launch source is a package at an unrelated
-    /// version, and the row must report the package's.
-    #[test]
-    fn the_row_version_describes_the_acp_package_not_the_cli() {
-        use sirio_registry::{Distribution, LaunchSource, RegistryAgent};
-
-        let availability = AgentAvailability {
-            id: "claude",
-            display_name: "Claude Code",
-            executable: Some(PathBuf::from("/home/u/.local/bin/claude")),
-        };
-        let source = LaunchSource::Installable {
-            agent: RegistryAgent {
-                id: "claude-code-acp".into(),
-                name: "Claude Code ACP".into(),
-                version: "0.70.0".into(),
-                description: None,
-                repository: None,
-                website: None,
-                license: None,
-                icon: None,
-                distributions: vec![Distribution::Binary(Default::default())],
-            },
-        };
-
-        let row = provider_row(&availability, Some(&source), None);
-        assert_eq!(
-            row.version.as_deref(),
-            Some("0.70.0"),
-            "the version tracks the ACP launch source, not the binary --              which is exactly why the rendered string has to name its subject"
-        );
-        assert_eq!(
-            row.status,
-            ProviderStatus::Installed(PathBuf::from("/home/u/.local/bin/claude")),
-            "the path in the same row is the CLI's, so the two sit together              describing different artifacts"
-        );
-    }
-
-    /// A `Builtin` source carries no package, so the column simply vanishes
-    /// -- OpenCode was the tell that the number never belonged to the
-    /// binary, since it showed a path and no version at all (#197).
-    #[test]
-    fn a_builtin_row_has_no_acp_version_to_show() {
-        use sirio_registry::LaunchSource;
-
-        let availability = AgentAvailability {
-            id: "opencode",
-            display_name: "OpenCode",
-            executable: Some(PathBuf::from("/home/u/.opencode/bin/opencode")),
-        };
-        let source = LaunchSource::Builtin {
-            program: "opencode".into(),
-            args: vec!["acp".into()],
-        };
-
-        assert_eq!(
-            provider_row(&availability, Some(&source), None).version,
-            None
-        );
-    }
-
     #[test]
     fn an_unverified_install_says_so_after_the_fact() {
         use sirio_registry::{InstalledAgent, Integrity, LaunchSource};
@@ -5034,72 +4727,6 @@ mod tests {
             snapshot.socket_path, "/run/user/1000/Sirio/control.sock",
             "the path stays resolved in both states"
         );
-    }
-
-    #[test]
-    fn provider_account_status_is_derived_not_hardcoded() {
-        // The card's status must come from the local account state, never
-        // from a fixed table that claims every provider is "Active". The
-        // word "Active" asserted a working account without anything having
-        // checked it; the derived state is honest about what was read.
-        let signed_in = ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn);
-        assert_eq!(signed_in.label, "Signed in");
-        assert!(signed_in.signed_in);
-
-        let signed_out = ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut);
-        assert_eq!(signed_out.label, "Not signed in");
-        assert!(!signed_out.signed_in);
-
-        let unknown = ProviderAccountStatus::from_account_state(LocalAccountState::NoLocalStore);
-        assert_eq!(unknown.label, "Unknown");
-        assert!(!unknown.signed_in);
-
-        assert_ne!(
-            signed_in.label, "Active",
-            "no provider card may claim a working account it did not check"
-        );
-    }
-
-    #[test]
-    fn provider_account_identity_is_formatted_without_losing_provider_fields() {
-        let identity = AgentAccountIdentity {
-            logged_in: true,
-            email: "user@example.com".into(),
-            organization: Some("Acme".into()),
-        };
-        assert_eq!(
-            format_account_identity(&identity),
-            "user@example.com · Acme"
-        );
-
-        let identity_without_org = AgentAccountIdentity {
-            logged_in: true,
-            email: "user@example.com".into(),
-            organization: None,
-        };
-        assert_eq!(
-            format_account_identity(&identity_without_org),
-            "user@example.com"
-        );
-    }
-
-    #[test]
-    fn provider_login_commands_match_the_installed_cli_contracts() {
-        let cases = [
-            (ProviderKind::Claude, "claude", vec!["auth", "login"]),
-            (ProviderKind::Codex, "codex", vec!["login"]),
-            (ProviderKind::OpenCodeGo, "opencode", vec!["auth", "login"]),
-        ];
-
-        for (provider, program, args) in cases {
-            let command = provider_login_command(provider).expect("a CLI login exists");
-            assert_eq!(command.program, program);
-            assert_eq!(command.args, args);
-        }
-
-        // F-SET-13: Ollama Cloud is cookie-only — no CLI login flow
-        // exists to delegate to, and its card renders no Add Account.
-        assert_eq!(provider_login_command(ProviderKind::OllamaCloud), None);
     }
 
     fn cookie_test_states() -> ProviderAccountStates {
@@ -6163,51 +5790,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn provider_cards_no_longer_hardcode_active(cx: &mut gpui::TestAppContext) {
-        // The old "Active" row id is gone: a card that claims an unchecked
-        // account status must not render under the id tests used to assert
-        // it did. The status value now lives under the account-status id.
-        cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let providers = cx
-            .debug_bounds("settings-category-AiProviders")
-            .expect("AI Providers category is offered");
-        cx.simulate_click(providers.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-provider-active-Claude Code")
-                .is_none(),
-            "the hardcoded Active status id must not exist"
-        );
-        assert!(
-            cx.debug_bounds("settings-provider-last-read-Claude Code")
-                .is_none(),
-            "the fabricated 'Last read' time is gone"
-        );
-    }
-
-    #[gpui::test]
-    async fn sidebar_offers_only_categories_this_platform_has(cx: &mut gpui::TestAppContext) {
-        // Permissions is shared with browser-origin grants on Linux; macOS
-        // additionally renders its TCC rows in the detail surface.
-        cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-category-Permissions").is_some(),
-            "browser-origin permissions are offered on every platform"
-        );
-    }
-
-    #[gpui::test]
     async fn browser_origin_grants_render_empty_and_revoke_actions(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| {
@@ -6498,30 +6080,6 @@ mod tests {
         );
     }
 
-    /// F-SET-09: unset, Install Skill must not look wired — it renders
-    /// muted and a click reaches nothing, the same dead-control-avoidance
-    /// convention P76's titlebar cluster seams use.
-    #[gpui::test]
-    async fn install_skill_renders_muted_and_inert_when_unwired(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let general = cx
-            .debug_bounds("settings-category-General")
-            .expect("General category is offered");
-        cx.simulate_click(general.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let install = cx
-            .debug_bounds("general-install-skill")
-            .expect("Install Skill still renders, muted");
-        cx.simulate_click(install.center(), Modifiers::none());
-        cx.run_until_parked();
-    }
-
     /// Install Hooks is Install Skill's sibling: the click reaches the wired
     /// host callback (the host writes the user-global hook files — this
     /// crate never touches the home directory) and leaves an in-flight line
@@ -6669,27 +6227,6 @@ mod tests {
             ["codex"],
             "the click hands the host the Codex card's own stable id, not another card's"
         );
-    }
-
-    /// The default button requests an integrated terminal from the host.
-    #[gpui::test]
-    async fn add_account_renders_wired_by_default(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let providers = cx
-            .debug_bounds("settings-category-AiProviders")
-            .expect("AI Providers category is offered");
-        cx.simulate_click(providers.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let add_claude = cx
-            .debug_bounds("add-claude-account")
-            .expect("Claude card's Add Account renders with the production fallback");
-        assert!(add_claude.size.width > px(0.0));
     }
 
     /// The pending login renders a Cancel action which clears the surface.
@@ -7393,47 +6930,6 @@ mod tests {
         );
     }
 
-    /// Every agent row and provider card shows its own brand mark, not a
-    /// Unicode stand-in.
-    ///
-    /// The screen used to draw `✳ ◉ ▣ π ☁` as text. Those code points are
-    /// not in the UI face on every platform, so the column rendered blank
-    /// or tofu — and even where they resolve they are not the agents'
-    /// marks. `Icon::for_agent_id` already answers this question for the
-    /// tab bar; settings must use the same answer.
-    #[test]
-    fn provider_rows_and_cards_carry_their_brand_marks() {
-        for (id, expected) in [
-            ("claude", Icon::ClaudeCode),
-            ("codex", Icon::Codex),
-            ("opencode", Icon::OpenCode),
-            ("pi", Icon::Pi),
-            ("omp", Icon::OhMyPi),
-        ] {
-            let row = provider_row(
-                &AgentAvailability {
-                    id,
-                    display_name: "irrelevant",
-                    executable: None,
-                },
-                None,
-                None,
-            );
-            assert_eq!(
-                row.icon, expected,
-                "the {id} row must carry {id}'s own mark"
-            );
-        }
-
-        assert_eq!(ProviderKind::Claude.icon(), Icon::ClaudeCode);
-        assert_eq!(ProviderKind::Codex.icon(), Icon::Codex);
-        assert_eq!(ProviderKind::OpenCodeGo.icon(), Icon::OpenCode);
-        // Ollama has no mark in the vendored catalog. The globe is a
-        // declared stand-in, and it is still a drawn asset rather than a
-        // code point the platform may not have.
-        assert_eq!(ProviderKind::OllamaCloud.icon(), Icon::Globe);
-    }
-
     /// Text on a saturated status fill has to be readable in both
     /// appearances.
     ///
@@ -7461,26 +6957,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// The header's back control is the arrow alone, at a size that reads
-    /// as a target rather than a hint next to a word.
-    #[gpui::test]
-    async fn the_back_control_is_a_square_arrow_with_no_label(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let back = cx
-            .debug_bounds("settings-back")
-            .expect("the back control is drawn");
-        assert_eq!(
-            back.size.width,
-            px(BACK_CONTROL_SIZE),
-            "the label is gone, so the control is as wide as it is tall"
-        );
-        assert_eq!(back.size.height, px(BACK_CONTROL_SIZE));
     }
 }

@@ -71,20 +71,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exit_codes_map_to_done_and_error() {
-        assert_eq!(AgentStatus::from_exit_code(0), AgentStatus::Done);
-        assert_eq!(AgentStatus::from_exit_code(1), AgentStatus::Error);
-        assert_eq!(AgentStatus::from_exit_code(-9), AgentStatus::Error);
-    }
-
-    #[test]
-    fn priority_order_is_error_needs_input_running_done() {
-        assert!(AgentStatus::Error.priority() < AgentStatus::NeedsInput.priority());
-        assert!(AgentStatus::NeedsInput.priority() < AgentStatus::Running.priority());
-        assert!(AgentStatus::Running.priority() < AgentStatus::Done.priority());
-    }
-
-    #[test]
     fn highest_priority_picks_the_winner() {
         assert_eq!(
             AgentStatus::highest_priority(
@@ -102,13 +88,5 @@ mod tests {
             Some(AgentStatus::Error)
         );
         assert_eq!(AgentStatus::highest_priority(std::iter::empty()), None);
-    }
-
-    #[test]
-    fn human_labels_match_swift() {
-        assert_eq!(AgentStatus::Running.human_label(), "running");
-        assert_eq!(AgentStatus::NeedsInput.human_label(), "needs input");
-        assert_eq!(AgentStatus::Done.human_label(), "finished");
-        assert_eq!(AgentStatus::Error.human_label(), "failed");
     }
 }

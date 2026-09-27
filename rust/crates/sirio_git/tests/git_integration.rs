@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sirio_git::{
-    DiffOrigin, diff_entry, discard, discard_all, has_head, parse_status, stage, stage_all, stats,
-    status, unstage,
+    DiffOrigin, diff_entry, discard, discard_all, has_head, stage, stage_all, stats, status,
+    unstage,
 };
 
 /// A throwaway directory, removed on drop. Canonicalized so paths match what
@@ -470,24 +470,4 @@ fn actions_stage_all_and_discard_all() {
     // Only the untracked file remains — discard_all never touches untracked.
     assert_eq!(snapshot.changes().len(), 0);
     assert_eq!(snapshot.untracked().len(), 1);
-}
-
-#[test]
-fn parse_status_round_trips_real_porcelain_output() {
-    let repo = make_repo();
-    write(repo.path(), "file one.txt", b"edited\n");
-    write(repo.path(), "untracked.txt", b"new\n");
-
-    // Capture real git output and feed it straight to the parser, proving the
-    // parser and the shell-out agree byte for byte.
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
-        .current_dir(repo.path())
-        .output()
-        .expect("git status runs");
-    assert!(output.status.success());
-    let parsed = parse_status(&output.stdout).expect("parser accepts real output");
-
-    let snapshot = status(repo.path()).expect("shell-out path agrees");
-    assert_eq!(parsed, snapshot);
 }

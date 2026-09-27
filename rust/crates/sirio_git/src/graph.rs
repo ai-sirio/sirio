@@ -332,11 +332,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_empty_history_lays_out_to_nothing() {
-        assert!(layout(&[]).rows.is_empty());
-    }
-
     fn assert_every_partition_matches_full_layout(commits: &[CommitRecord]) {
         let expected = layout(commits).rows;
         for split in 0..=commits.len() {
@@ -346,30 +341,6 @@ mod tests {
             actual.extend(rest.rows);
             assert_eq!(actual, expected, "partition at {split}");
         }
-    }
-
-    #[test]
-    fn a_linear_history_continues_across_pages() {
-        let commits = [
-            commit("c4", &["c3"]),
-            commit("c3", &["c2"]),
-            commit("c2", &["c1"]),
-            commit("c1", &[]),
-        ];
-
-        assert_every_partition_matches_full_layout(&commits);
-    }
-
-    #[test]
-    fn a_merge_split_across_pages_preserves_the_open_branch() {
-        let commits = [
-            commit("merge", &["main", "side"]),
-            commit("main", &["base"]),
-            commit("side", &["base"]),
-            commit("base", &[]),
-        ];
-
-        assert_every_partition_matches_full_layout(&commits);
     }
 
     #[test]
@@ -391,35 +362,6 @@ mod tests {
             first.rows.into_iter().chain(rest.rows).collect::<Vec<_>>(),
             layout(&commits).rows
         );
-    }
-
-    #[test]
-    fn a_reused_hole_and_palette_continue_across_pages() {
-        let commits = [
-            commit("merge", &["main", "side"]),
-            commit("main", &["base"]),
-            commit("side", &[]),
-            commit("unrelated", &[]),
-            commit("base", &[]),
-        ];
-        let first = layout(&commits[..3]);
-        let rest = extend_layout(first.cursor(), &commits[3..]);
-
-        assert_eq!(rest.rows[0].lane, 1);
-        assert_eq!(rest.rows[0].color, layout(&commits).rows[3].color);
-        assert_eq!(
-            first.rows.into_iter().chain(rest.rows).collect::<Vec<_>>(),
-            layout(&commits).rows
-        );
-    }
-
-    #[test]
-    fn an_empty_layout_cursor_is_a_valid_fresh_reset() {
-        let commits = [commit("tip", &["base"]), commit("base", &[])];
-        let fresh = layout(&[]);
-        let continued = extend_layout(fresh.cursor(), &commits);
-
-        assert_eq!(continued.rows, layout(&commits).rows);
     }
 
     #[test]

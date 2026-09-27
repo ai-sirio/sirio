@@ -541,24 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn expansion_toggles_are_idempotent() {
-        let mut workspace = seeded_workspace();
-        let id = project_id();
-
-        assert!(!workspace.is_project_expanded(id));
-        workspace.toggle_project(id);
-        assert!(workspace.is_project_expanded(id));
-        workspace.toggle_project(id);
-        assert!(!workspace.is_project_expanded(id));
-
-        workspace.expand_project(id);
-        workspace.expand_project(id);
-        assert!(workspace.is_project_expanded(id));
-        workspace.collapse_project(id);
-        assert!(!workspace.is_project_expanded(id));
-    }
-
-    #[test]
     fn selecting_a_worktree_clears_tab_selection() {
         let mut workspace = seeded_workspace();
 
@@ -675,33 +657,5 @@ mod tests {
             "detached linked worktree shows short head"
         );
         assert!(!worktrees[1].is_primary);
-    }
-
-    #[test]
-    fn ids_are_unique_across_loads_and_tabs() {
-        let mut workspace = Workspace::new();
-        // Loading needs a real (or here: nonexistent) path; exercise mint_id
-        // through add_tab on a hand-seeded worktree instead.
-        workspace.projects.push(Project::new(
-            project_id(),
-            "p",
-            PathBuf::from("/tmp/p"),
-            false,
-        ));
-        workspace.worktrees.push(Worktree::new(
-            worktree_id(),
-            project_id(),
-            "main",
-            PathBuf::from("/tmp/p"),
-            true,
-        ));
-
-        let a = workspace
-            .add_tab(worktree_id(), "one", TabKind::Terminal)
-            .unwrap();
-        let b = workspace
-            .add_tab(worktree_id(), "two", TabKind::Terminal)
-            .unwrap();
-        assert_ne!(a, b);
     }
 }

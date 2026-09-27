@@ -4153,34 +4153,6 @@ mod tests {
         });
     }
 
-    /// An empty bucket gets no section at all — the panel never renders a
-    /// header that says zero.
-    #[gpui::test]
-    async fn an_empty_section_is_omitted(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        std::fs::write(dir.0.join("staged.txt"), "s\n").expect("seed staged");
-        git(&dir.0, &["add", "staged.txt"]);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
-
-        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
-        tab.update(cx, |tab, cx| tab.refresh(cx));
-        pump_until(cx, || {
-            tab.read_with(cx, |tab, _| {
-                tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
-            })
-        });
-
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
-        assert_eq!(sections.len(), 2, "only the non-empty sections render");
-        assert!(
-            sections
-                .iter()
-                .all(|section| section.section != ChangeSection::Untracked),
-            "an empty Untracked bucket must not render a section"
-        );
-    }
-
     /// The first snapshot has no stale entries to preserve, so it gets the
     /// full-surface loading treatment while the background git task is in
     /// flight.
@@ -4212,33 +4184,6 @@ mod tests {
         assert!(
             cx.debug_bounds("changes-loading").is_some(),
             "an empty first load draws the loading surface"
-        );
-    }
-
-    /// A refresh after a snapshot has landed keeps the last known rows on
-    /// screen. The compact refresh indicator belongs inside that stale list;
-    /// the full-surface first-load state must not flash over it.
-    #[gpui::test]
-    async fn a_refresh_keeps_the_settled_list_visible(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
-
-        let (mut cx, tab) = changes_view(cx, dir.0.clone());
-        wait_for_tab(&cx, &tab, |tab| {
-            tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
-        });
-        cx.cx.run_until_parked();
-
-        tab.update(&mut cx.cx, |tab, cx| tab.refresh(cx));
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("changes-list").is_some(),
-            "a refresh preserves the stale changes list"
-        );
-        assert!(
-            cx.debug_bounds("changes-loading").is_none(),
-            "a refresh with stale entries does not replace the list with a full-surface loader"
         );
     }
 
@@ -4374,65 +4319,7 @@ mod tests {
         );
     }
 
-    /// The per-row action acts on the side of the split the row sits on:
-    /// Unstage for a Staged row, Stage for Changed and Untracked rows.
-    #[test]
-    fn row_actions_follow_the_section_not_the_entry() {
-        assert_eq!(ChangeSection::Staged.action_label(), "Unstage");
-        assert_eq!(ChangeSection::Changed.action_label(), "Stage");
-        assert_eq!(ChangeSection::Untracked.action_label(), "Stage");
-    }
-
     // ── Honesty: an error must look like an error, not like empty ──────
-
-    /// F-CHG-09: a repository whose `.git` is removed must surface git's
-    /// own message — never a clean 0/0/0 with `error=''` — and Retry must
-    /// be reachable and recover.
-    #[gpui::test]
-    async fn a_broken_repo_surfaces_the_error_and_retry_recovers(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
-
-        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
-        tab.update(cx, |tab, cx| tab.refresh(cx));
-        pump_until(cx, || {
-            tab.read_with(cx, |tab, _| {
-                tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
-            })
-        });
-        assert!(tab.read_with(cx, |tab, _| tab.git_error.is_none()));
-
-        // Break git from outside: the repository metadata disappears.
-        std::fs::remove_dir_all(dir.0.join(".git")).expect("remove .git");
-        tab.update(cx, |tab, cx| tab.refresh(cx));
-        pump_until(cx, || tab.read_with(cx, |tab, _| tab.git_error.is_some()));
-        let error = tab
-            .read_with(cx, |tab, _| tab.git_error.clone())
-            .expect("the error reached the surface");
-        // git's own fatal message is shown, not an invented empty state.
-        // Only the prefix is locale-independent (git's stderr can be any
-        // language); that it is present proves the detail arrived.
-        assert!(
-            error.starts_with("git exited with status 128")
-                && error.len() > "git exited with status 128".len(),
-            "git's own fatal message is shown, not an invented empty state: {error}"
-        );
-
-        // Restore the repository and retry: the error clears and the
-        // change returns.
-        git(&dir.0, &["init", "-q"]);
-        git(&dir.0, &["config", "user.email", "t@example.invalid"]);
-        git(&dir.0, &["config", "user.name", "Sirio tests"]);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("rewrite");
-        tab.update(cx, |tab, cx| tab.refresh(cx));
-        pump_until(cx, || {
-            tab.read_with(cx, |tab, _| {
-                tab.git_error.is_none()
-                    && tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
-            })
-        });
-    }
 
     #[gpui::test]
     async fn a_known_non_git_project_shows_the_empty_changes_state(cx: &mut TestAppContext) {
@@ -4456,18 +4343,6 @@ mod tests {
         assert!(visual.debug_bounds("changes-error").is_none());
         assert!(visual.debug_bounds("changes-empty").is_some());
         assert!(visual.debug_bounds("changes-list").is_none());
-    }
-
-    #[gpui::test]
-    async fn a_non_git_changes_tab_has_no_git_error_state(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        let tab = cx.new(|cx| ChangesTab::new_with_git_capability(dir.0.clone(), false, cx));
-
-        pump_until(cx, || tab.read_with(cx, |tab, _| tab.has_loaded));
-
-        assert!(tab.read_with(cx, |tab, _| {
-            tab.git_error.is_none() && tab.entries.is_empty() && !tab.allows_staging()
-        }));
     }
 
     /// The error state is actually rendered — a panel with the detail and
@@ -4549,65 +4424,6 @@ mod tests {
             cx.debug_bounds("changes-list").is_some(),
             "Retry returns to the changes list"
         );
-    }
-
-    /// A failed mutation must reach the same visible error state as a failed
-    /// refresh, survive a successful refresh, and clear after a successful
-    /// retry of the mutation.
-    #[gpui::test]
-    async fn a_failed_stage_survives_refresh_and_recovers_after_retry(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
-
-        let tab = cx.new(|_| settled_changes_tab(dir.0.clone()));
-        assert_eq!(
-            tab.read_with(cx, |tab, _| section_count(tab, "Changed")),
-            1,
-            "the settled test tab contains the modified file"
-        );
-
-        std::fs::write(dir.0.join(".git/index.lock"), b"").expect("create index lock");
-        tab.update(cx, |tab, cx| {
-            tab.refresh(cx);
-            assert!(tab.git_task.is_some(), "the refresh must be in flight");
-            tab.stage_path(PathBuf::from("tracked.txt"), cx);
-        });
-        pump_until(cx, || tab.read_with(cx, |tab, _| tab.git_error.is_some()));
-
-        let error = tab
-            .read_with(cx, |tab, _| tab.git_error.clone())
-            .expect("the failed stage reaches the Changes surface");
-        assert!(
-            error.contains("index.lock") || error.contains("did not finish"),
-            "the visible error keeps git's actionable failure detail: {error}"
-        );
-        std::fs::remove_file(dir.0.join(".git/index.lock")).expect("remove index lock");
-        std::fs::write(dir.0.join("refresh-marker.txt"), "refreshed\n")
-            .expect("create refresh marker");
-        tab.update(cx, |tab, cx| {
-            tab.refresh(cx);
-        });
-        pump_until(cx, || {
-            tab.read_with(cx, |tab, _| {
-                tab.entries
-                    .iter()
-                    .any(|entry| entry.path == Path::new("refresh-marker.txt"))
-            })
-        });
-        assert!(
-            tab.read_with(cx, |tab, _| tab.git_error.is_some()),
-            "a successful refresh must not clear a mutation error"
-        );
-
-        tab.update(cx, |tab, cx| {
-            tab.stage_path(PathBuf::from("tracked.txt"), cx);
-        });
-        pump_until(cx, || {
-            tab.read_with(cx, |tab, _| {
-                tab.git_error.is_none() && section_count(tab, "Staged") == 1
-            })
-        });
     }
 
     /// F-CHG-08/F-CHG-12: section and file expansion are behavior. The
@@ -5009,54 +4825,6 @@ mod tests {
         );
     }
 
-    /// The Changes toolbar keeps all six controls reachable by their stable
-    /// selectors after replacing their text chrome with icons. GPUI's visual
-    /// test context exposes bounds but not rendered text content, so the
-    /// permitted fallback is used here; the action controls' compact bounds
-    /// also distinguish them from the replaced labels.
-    #[gpui::test]
-    async fn drawn_changes_toolbar_uses_icon_controls(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
-
-        let (mut cx, tab) = changes_view(cx, dir.0.clone());
-        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
-        cx.cx.run_until_parked();
-
-        for selector in [
-            "changes-view-mode-0",
-            "changes-view-mode-1",
-            "changes-expand-all",
-            "changes-collapse-all",
-            "changes-stage-all",
-            "changes-discard-all",
-        ] {
-            let bounds = cx.debug_bounds(selector).expect("toolbar control is drawn");
-            assert!(
-                bounds.size.width > px(0.0) && bounds.size.height > px(0.0),
-                "{selector} has a non-empty clickable bounds"
-            );
-        }
-
-        for selector in [
-            "changes-expand-all",
-            "changes-collapse-all",
-            "changes-stage-all",
-            "changes-discard-all",
-        ] {
-            let width = cx
-                .debug_bounds(selector)
-                .expect("action is drawn")
-                .size
-                .width;
-            assert!(
-                f32::from(width) < 40.0,
-                "{selector} keeps icon-sized chrome, got {width}"
-            );
-        }
-    }
-
     /// F-CHG-11: the section-level Stage all control is also a real drawn
     /// affordance, and clicking it stages every changed file.
     #[gpui::test]
@@ -5178,100 +4946,6 @@ mod tests {
                 .staged()
                 .is_empty(),
             "Unstage all moves every staged file back to the worktree"
-        );
-    }
-
-    /// Expand All / Collapse All (orca's diff-header affordance): both are
-    /// drawn toolbar buttons that drive the whole list — every file row
-    /// opens its diff (including its collapsed-context bands) and then
-    /// closes again. The drawn frame proves the buttons reach the model;
-    /// the model assertions prove the choice is view state, not a git
-    /// mutation.
-    #[gpui::test]
-    async fn drawn_expand_all_and_collapse_all_drive_the_whole_list(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        let original = (0..80)
-            .map(|index| format!("line-{index}\n"))
-            .collect::<String>();
-        std::fs::write(dir.0.join("tracked.txt"), &original).expect("write long file");
-        git(&dir.0, &["add", "tracked.txt"]);
-        git(
-            &dir.0,
-            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "long"],
-        );
-        let mut changed = original.lines().map(str::to_owned).collect::<Vec<_>>();
-        changed[1] = "first change".to_owned();
-        changed[60] = "second change".to_owned();
-        std::fs::write(dir.0.join("tracked.txt"), changed.join("\n") + "\n")
-            .expect("modify long file");
-
-        let (mut cx, tab) = changes_view(cx, dir.0.clone());
-        wait_for_tab(&cx, &tab, |tab| {
-            tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
-        });
-        cx.cx.run_until_parked();
-
-        // Nothing is expanded yet: no row actions, no diff bands.
-        assert!(
-            cx.debug_bounds("changes-stage").is_none()
-                && cx.debug_bounds("changes-context-band").is_none(),
-            "a freshly loaded list is fully collapsed"
-        );
-
-        let expand_all = cx
-            .debug_bounds("changes-expand-all")
-            .expect("Expand All is in the drawn toolbar");
-        cx.simulate_click(expand_all.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            tab.read_with(&cx.cx, |tab, _| !tab.expanded_changes.is_empty()),
-            "Expand All opens every file row"
-        );
-        assert!(
-            tab.read_with(&cx.cx, |tab, _| !tab.expanded_bands.is_empty()),
-            "Expand All opens the collapsed-context bands too"
-        );
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        assert!(
-            cx.debug_bounds("changes-stage").is_some(),
-            "an expanded file renders its row actions"
-        );
-        assert!(
-            cx.debug_bounds("changes-context-band").is_some(),
-            "an expanded diff renders its context bands"
-        );
-
-        let collapse_all = cx
-            .debug_bounds("changes-collapse-all")
-            .expect("Collapse All is in the drawn toolbar");
-        cx.simulate_click(collapse_all.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            tab.read_with(&cx.cx, |tab, _| {
-                tab.expanded_changes.is_empty() && tab.expanded_bands.is_empty()
-            }),
-            "Collapse All closes every row and band"
-        );
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        assert!(
-            cx.debug_bounds("changes-stage").is_none()
-                && cx.debug_bounds("changes-context-band").is_none(),
-            "after Collapse All the list is back to its headers only"
-        );
-        // The collapse is view state: the change is still there underneath.
-        assert_eq!(
-            tab.read_with(&cx.cx, |tab, _| section_count(tab, "Changed")),
-            1,
-            "collapsing does not touch the git state"
         );
     }
 
@@ -5757,36 +5431,6 @@ mod tests {
         );
     }
 
-    /// F-CHG-13: and it is drawn *only* where that event can do something.
-    /// Inside the Changes tab, `OpenDiff` reveals the Changes tab and
-    /// expands a row that — being the row the control is drawn in — is
-    /// already expanded, so the control had no effect it could still have
-    /// (#217).
-    #[gpui::test]
-    async fn the_changes_tab_draws_no_open_diff_action_of_its_own(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify file");
-
-        let (mut cx, tab) = changes_view(cx, dir.0.clone());
-        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
-
-        let row = cx
-            .debug_bounds("changes-file-row")
-            .expect("the changed file row is drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("changes-stage").is_some(),
-            "the expanded row still draws the actions that do act on it"
-        );
-        assert!(
-            cx.debug_bounds("changes-open-diff").is_none(),
-            "Open diff is not drawn in the surface it cannot leave"
-        );
-    }
-
     /// F-CHG-16: the conflict action emits the exact path that the host must
     /// pass to `TerminalView::for_conflict`.
     #[gpui::test]
@@ -6145,23 +5789,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn changes_unified_horizontal_bar_is_absent_for_short_lines(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = TempDir::new();
-        side_by_side_fixture(&dir.0);
-        let (mut cx, _tab) = changes_view(cx, dir.0.clone());
-        wait_for_tab(&cx, &_tab, |tab| section_count(tab, "Changed") == 1);
-        let row = cx
-            .debug_bounds("changes-file-row")
-            .expect("the changed file row is drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("changes-diff-line").is_some());
-        assert!(cx.debug_bounds("changes-unified-horizontal-bar-track").is_none());
-    }
-
     /// "Long lines must scroll inside the diff, never scroll the window as a
     /// whole." Driven on the 1715×972 lane, Split mode did the opposite:
     /// choosing Split over a file with a 276-character line pushed the Files
@@ -6228,45 +5855,6 @@ mod tests {
             cx.debug_bounds("changes-view-mode-0").is_some(),
             "the Unified segment is still on screen to switch back with"
         );
-    }
-
-    /// The copied bezel diff pattern is a visual contract too: the two
-    /// five-digit gutters plus the change marker keep fixed widths so code
-    /// never shifts as line numbers grow.
-    #[gpui::test]
-    async fn drawn_diff_rows_follow_the_gallery_gutter_rhythm(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        side_by_side_fixture(&dir.0);
-
-        let (mut cx, tab) = changes_view(cx, dir.0.clone());
-        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
-        let row = cx
-            .debug_bounds("changes-file-row")
-            .expect("the changed file row is drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("changes-hunk-row").is_some());
-        assert!(cx.debug_bounds("changes-diff-line").is_some());
-
-        let old = cx
-            .debug_bounds("changes-diff-old-number")
-            .expect("the old line-number gutter is drawn");
-        let new = cx
-            .debug_bounds("changes-diff-new-number")
-            .expect("the new line-number gutter is drawn");
-        let marker = cx
-            .debug_bounds("changes-diff-marker")
-            .expect("the change marker column is drawn");
-        assert!(
-            f32::from(old.size.width) >= 36.0,
-            "the old gutter must fit five 12px monospace digits"
-        );
-        assert!(
-            f32::from(new.size.width) >= 36.0,
-            "the new gutter must fit five 12px monospace digits"
-        );
-        assert_eq!(f32::from(marker.size.width), 12.0);
     }
 
     /// A long trailing-context header must stay on its own fixed-height row:

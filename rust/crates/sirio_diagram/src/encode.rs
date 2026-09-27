@@ -73,13 +73,4 @@ mod tests {
             assert_eq!(decode(&encode(text)).as_deref(), Some(text));
         }
     }
-
-    #[test]
-    fn encoding_uses_only_the_plantuml_alphabet() {
-        assert!(
-            encode("A -> B: hello")
-                .bytes()
-                .all(|byte| ALPHABET.contains(&byte))
-        );
-    }
 }

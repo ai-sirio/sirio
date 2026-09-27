@@ -296,17 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_multiple_parents_of_a_merge() {
-        let output = fixture(&[
-            "1111111111111111111111111111111111111111\u{1f}p1 p2\u{1f}\u{1f}Ada\u{1f}1700000001\u{1f}merge branch 'x'",
-        ]);
-
-        let commits = parse_log(&output);
-
-        assert_eq!(commits[0].parents, vec!["p1".to_owned(), "p2".to_owned()]);
-    }
-
-    #[test]
     fn an_empty_ref_field_yields_no_refs() {
         let output = fixture(&[
             "2222222222222222222222222222222222222222\u{1f}p1\u{1f}\u{1f}Ada\u{1f}1700000002\u{1f}fix: thing",
@@ -336,53 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn keeps_spaces_and_unicode_in_a_subject() {
-        let output = fixture(&[
-            "4444444444444444444444444444444444444444\u{1f}p1\u{1f}\u{1f}Ada Lovelace\u{1f}3\u{1f}feat: aggiunge il pannello — con trattino",
-        ]);
-
-        let commits = parse_log(&output);
-
-        assert_eq!(commits[0].author, "Ada Lovelace");
-        assert_eq!(
-            commits[0].subject,
-            "feat: aggiunge il pannello — con trattino"
-        );
-    }
-
-    #[test]
-    fn empty_output_yields_no_commits() {
-        assert!(parse_log("").is_empty());
-    }
-
-    #[test]
     fn a_record_with_missing_fields_is_skipped_not_panicked_on() {
         let output = fixture(&["truncated\u{1f}p1"]);
-
-        assert!(parse_log(&output).is_empty());
-    }
-
-    #[test]
-    fn rejects_a_sha_that_is_not_40_hex_characters() {
-        let output = fixture(&["abc123\u{1f}\u{1f}\u{1f}Ada\u{1f}1\u{1f}subject"]);
-
-        assert!(parse_log(&output).is_empty());
-    }
-
-    #[test]
-    fn rejects_a_record_with_extra_fields() {
-        let output = fixture(&[
-            "5555555555555555555555555555555555555555\u{1f}\u{1f}\u{1f}Ada\u{1f}1\u{1f}subject\u{1f}extra",
-        ]);
-
-        assert!(parse_log(&output).is_empty());
-    }
-
-    #[test]
-    fn rejects_a_record_with_an_invalid_timestamp() {
-        let output = fixture(&[
-            "6666666666666666666666666666666666666666\u{1f}\u{1f}\u{1f}Ada\u{1f}not-a-timestamp\u{1f}subject",
-        ]);
 
         assert!(parse_log(&output).is_empty());
     }

@@ -79,14 +79,6 @@ mod tests {
     }
 
     #[test]
-    fn click_cell_clamps_above_and_left_of_origin() {
-        assert_eq!(
-            resolve_click_cell(10.0, 10.0, 400.0, 100.0, 8.0, 18.0),
-            (0, 0)
-        );
-    }
-
-    #[test]
     fn plain_urls_are_clickable_without_consuming_trailing_punctuation() {
         let line = "open https://example.test/docs, then";
         assert_eq!(

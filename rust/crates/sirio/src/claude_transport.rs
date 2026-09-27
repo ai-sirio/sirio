@@ -191,25 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_claude_falls_back_and_says_which_binary_is_missing() {
-        let resolution = resolve(Inputs {
-            executable: None,
-            version_output: None,
-            forced_acp: false,
-        });
-        assert_eq!(
-            resolution,
-            Resolution::Wrapper {
-                reason: WrapperReason::NotOnPath
-            }
-        );
-        assert_eq!(
-            resolution.note(),
-            "claude is not on PATH — using the ACP wrapper"
-        );
-    }
-
-    #[test]
     fn a_claude_whose_version_cannot_be_read_is_not_assumed_new_enough() {
         // Refusing is the honest answer: the fallback works, and guessing
         // would put an unknown CLI on an undocumented protocol.

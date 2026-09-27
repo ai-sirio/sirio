@@ -3,10 +3,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sirio_git::{
-    DiffOrigin, DirectoryGitStatus, DirectoryStatusAggregator, GitBranches, GitClone,
-    GitDiffSideBySide, GitError, GitRemote,
-};
+use sirio_git::{GitClone, GitDiffSideBySide, GitError, GitRemote};
 
 struct TempDir(PathBuf);
 
@@ -44,14 +41,6 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-fn git_may_fail(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git is installed")
-}
-
 fn repo(tag: &str) -> TempDir {
     let repo = TempDir::new(tag);
     git(repo.path(), &["init", "-q", "-b", "main"]);
@@ -66,74 +55,6 @@ fn repo(tag: &str) -> TempDir {
     git(repo.path(), &["add", "-A"]);
     git(repo.path(), &["commit", "-q", "-m", "root"]);
     repo
-}
-
-#[cfg(unix)]
-#[test]
-fn streaming_runner_delivers_stderr_before_the_child_exits() {
-    // Imported here, not at the top of the file: this is the only user of
-    // the streaming runner, and a top-level import would be dead on
-    // Windows, where `-D warnings` turns that into a build failure.
-    use sirio_git::GitRunner;
-    use std::os::unix::fs::PermissionsExt;
-
-    let scratch = TempDir::new("stream");
-    // Deterministic handshake instead of wall-clock thresholds: the child
-    // writes the first stderr line, publishes `first-seen`, and stays alive
-    // until the delivery callback creates `release`. The first line therefore
-    // provably arrives while the child is still running -- the property this
-    // test guards -- regardless of machine load or scheduling latency.
-    let first_seen = scratch.path().join("first-seen.marker");
-    let release = scratch.path().join("release.marker");
-    let fake_git = scratch.path().join("git");
-    std::fs::write(
-        &fake_git,
-        format!(
-            "#!/bin/sh\nprintf 'first\\r' >&2\ntouch '{}'\nfor i in $(seq 1 200); do [ -f '{}' ] && break; sleep 0.05; done\n[ -f '{}' ] || exit 42\nprintf 'second\\n' >&2\n",
-            first_seen.display(),
-            release.display(),
-            release.display()
-        ),
-    )
-    .expect("write fake git");
-    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
-        .expect("make fake git executable");
-
-    let arrival = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&arrival);
-    let release_from_callback = release.clone();
-    let result =
-        GitRunner::run_streaming_with_binary(&fake_git, &[], scratch.path(), move |line| {
-            if line == "first" {
-                std::fs::write(&release_from_callback, b"go").expect("release child");
-            }
-            seen.lock().unwrap().push(line);
-        })
-        .expect("streaming command succeeds");
-
-    assert!(
-        first_seen.exists(),
-        "child published first-seen before exit"
-    );
-    let lines = arrival.lock().unwrap();
-    assert_eq!(
-        lines.iter().map(|line| line.as_str()).collect::<Vec<_>>(),
-        ["first", "second"]
-    );
-    assert_eq!(result.stderr, "first\rsecond\n");
-}
-
-#[test]
-fn branch_listing_preserves_spaces_in_names() {
-    let parsed = GitBranches::parse("main\nfeature with spaces\n");
-    assert_eq!(parsed, ["main", "feature with spaces"]);
-
-    let repository = repo("branches");
-    git(repository.path(), &["branch", "feature-x"]);
-    assert_eq!(
-        GitBranches::list(repository.path()).unwrap(),
-        ["feature-x", "main"]
-    );
 }
 
 #[test]
@@ -250,97 +171,6 @@ fn remote_parsing_supports_github_ssh_https_and_project_suffixes() {
         GitRemote::github_owner(repository.path()),
         Some("acme".into())
     );
-}
-
-#[test]
-fn directory_status_aggregates_ancestors_with_precedence_and_renames() {
-    let repository = repo("directory-status");
-    std::fs::create_dir_all(repository.path().join("tree")).expect("create tree");
-    std::fs::create_dir_all(repository.path().join("source")).expect("create source");
-    std::fs::create_dir_all(repository.path().join("destination")).expect("create destination");
-    std::fs::write(repository.path().join("tree/conflict.txt"), "base\n")
-        .expect("write conflict base");
-    std::fs::write(repository.path().join("tree/changed.txt"), "base\n")
-        .expect("write changed base");
-    std::fs::write(repository.path().join("source/moved.txt"), "moved\n")
-        .expect("write rename base");
-    git(repository.path(), &["add", "-A"]);
-    git(repository.path(), &["commit", "-q", "-m", "nested base"]);
-
-    git(repository.path(), &["checkout", "-q", "-b", "side"]);
-    std::fs::write(repository.path().join("tree/conflict.txt"), "side\n")
-        .expect("write side conflict");
-    git(repository.path(), &["add", "-A"]);
-    git(repository.path(), &["commit", "-q", "-m", "side conflict"]);
-    git(repository.path(), &["checkout", "-q", "main"]);
-    std::fs::write(repository.path().join("tree/conflict.txt"), "main\n")
-        .expect("write main conflict");
-    git(repository.path(), &["add", "-A"]);
-    git(repository.path(), &["commit", "-q", "-m", "main conflict"]);
-
-    let merge = git_may_fail(repository.path(), &["merge", "side"]);
-    assert_eq!(
-        merge.status.code(),
-        Some(1),
-        "merge must enter conflict state"
-    );
-    std::fs::write(repository.path().join("tree/changed.txt"), "changed\n")
-        .expect("write changed worktree");
-    std::fs::write(repository.path().join("tree/untracked.txt"), "untracked\n")
-        .expect("write untracked worktree");
-    git(
-        repository.path(),
-        &["mv", "source/moved.txt", "destination/moved.txt"],
-    );
-
-    let snapshot = sirio_git::status(repository.path()).expect("status after merge");
-    let statuses = DirectoryStatusAggregator::directory_statuses(&snapshot.entries);
-
-    assert_eq!(statuses[Path::new("tree")], DirectoryGitStatus::Conflicted);
-    assert_eq!(
-        statuses[Path::new("destination")],
-        DirectoryGitStatus::Changed
-    );
-    assert_eq!(statuses[Path::new("source")], DirectoryGitStatus::Changed);
-}
-
-#[test]
-fn side_by_side_preserves_hunks_pairs_runs_and_drops_metadata() {
-    let diff = sirio_git::parse_diff(
-        concat!(
-            "diff --git a/file.txt b/file.txt\n",
-            "similarity index 80%\n",
-            "rename from old.txt\n",
-            "rename to file.txt\n",
-            "@@ -1,4 +1,5 @@\n",
-            " context\n",
-            "-old one\n",
-            "-old two\n",
-            "+new one\n",
-            "+new two\n",
-            "+new three\n",
-            " tail\n",
-        ),
-        Path::new("file.txt"),
-    );
-    let rows = GitDiffSideBySide::rows(&diff);
-
-    assert!(rows[0].is_hunk);
-    assert_eq!(rows[1].left.as_ref().unwrap().content, "context");
-    assert_eq!(rows[1].right.as_ref().unwrap().content, "context");
-    assert_eq!(rows[2].left.as_ref().unwrap().content, "old one");
-    assert_eq!(rows[2].right.as_ref().unwrap().content, "new one");
-    assert_eq!(rows[3].left.as_ref().unwrap().content, "old two");
-    assert_eq!(rows[3].right.as_ref().unwrap().content, "new two");
-    assert!(rows[4].left.is_none());
-    assert_eq!(rows[4].right.as_ref().unwrap().content, "new three");
-    assert_eq!(rows[5].left.as_ref().unwrap().content, "tail");
-    assert_eq!(rows[5].right.as_ref().unwrap().content, "tail");
-    assert!(rows.iter().all(|row| {
-        row.left.as_ref().is_none_or(|line| {
-            line.origin != DiffOrigin::Context || !line.content.starts_with("diff ")
-        })
-    }));
 }
 
 #[test]

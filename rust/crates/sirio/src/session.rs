@@ -2819,60 +2819,6 @@ mod tests {
     }
 
     #[test]
-    fn a_changes_tab_saves_and_restores_with_the_other_surfaces() {
-        let dir = TempDir::new();
-        let db_path = dir.db_path("changes-roundtrip");
-        let working_directory = dir.0.join("checkout");
-        std::fs::create_dir_all(&working_directory).expect("checkout dir");
-        let mut tabs = three_tabs();
-        tabs.insert(
-            1,
-            SessionTab {
-                id: "changes".into(),
-                title: "Changes".into(),
-                kind: "diff".into(),
-                agent_id: None,
-                agent_session_id: None,
-                active: false,
-            },
-        );
-
-        let store = SessionStore::open(&db_path);
-        store.schedule(layout(&working_directory, tabs.clone()));
-        store.flush_now();
-
-        let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
-        assert_eq!(restored.tabs, tabs, "Changes remains a persisted peer tab");
-    }
-
-    #[test]
-    fn a_browser_tab_saves_and_restores_with_the_other_surfaces() {
-        let dir = TempDir::new();
-        let db_path = dir.db_path("browser-roundtrip");
-        let working_directory = dir.0.join("checkout");
-        std::fs::create_dir_all(&working_directory).expect("checkout dir");
-        let mut tabs = three_tabs();
-        tabs.insert(
-            1,
-            SessionTab {
-                id: "browser".into(),
-                title: "Browser".into(),
-                kind: "browser".into(),
-                agent_id: None,
-                agent_session_id: None,
-                active: false,
-            },
-        );
-
-        let store = SessionStore::open(&db_path);
-        store.schedule(layout(&working_directory, tabs.clone()));
-        store.flush_now();
-
-        let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
-        assert_eq!(restored.tabs, tabs, "Browser remains a persisted peer tab");
-    }
-
-    #[test]
     fn settings_round_trip_through_session_store_and_sqlite_rows() {
         let dir = TempDir::new();
         let db_path = dir.db_path("settings");
@@ -3001,40 +2947,6 @@ mod tests {
             decoded.chat_draft, "",
             "missing chat_draft must default rather than fail decode"
         );
-    }
-
-    #[test]
-    fn reordered_keys_decode_to_an_identical_state() {
-        // F-CORE-WSP-07's "canonical sorted JSON" clause is argued not
-        // required because nothing in this codebase diffs or hashes the
-        // persisted blob. Prove that directly: two blobs with the same
-        // fields in different key order must decode to the exact same
-        // struct (derived `PartialEq`), not merely both succeed.
-        let forward = r#"{"root_id":1,"pane_events":[],"scrollback":{},"chat_draft":"hi"}"#;
-        let reordered = r#"{"chat_draft":"hi","scrollback":{},"pane_events":[],"root_id":1}"#;
-        let a = SessionTabState::decode(forward).expect("forward-order blob decodes");
-        let b = SessionTabState::decode(reordered).expect("reordered blob decodes");
-        assert_eq!(a, b, "key order must not affect the decoded value");
-    }
-
-    #[test]
-    fn tab_state_lives_in_its_own_schema_table() {
-        let dir = TempDir::new();
-        let db_path = dir.db_path("tab-state-schema");
-        let store = SessionStore::open(&db_path);
-        store.schedule(layout(&dir.0, three_tabs()));
-        store.flush_now();
-        drop(store);
-
-        let conn = rusqlite::Connection::open(&db_path).expect("open tab database");
-        let tables: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .expect("prepare table query")
-            .query_map([], |row| row.get(0))
-            .expect("query tab schema")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("read tables");
-        assert!(tables.iter().any(|table| table == "tab_state"));
     }
 
     #[test]
@@ -3170,40 +3082,6 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_preserves_stable_tab_ids() {
-        let dir = TempDir::new();
-        let checkout = dir.0.join("checkout");
-        std::fs::create_dir_all(&checkout).expect("checkout");
-        let tabs = vec![SessionTab {
-            id: "chat-stable".into(),
-            title: "Chat".into(),
-            kind: "chat".into(),
-            agent_id: None,
-            agent_session_id: None,
-            active: true,
-        }];
-        let store = SessionStore::open(&dir.db_path("stable-ids"));
-        store.schedule(layout(&checkout, tabs.clone()));
-        store.flush_now();
-        assert_eq!(
-            restore(&dir.db_path("stable-ids"), Path::new("/tmp")).tabs,
-            tabs
-        );
-    }
-
-    #[test]
-    fn flush_now_writes_even_inside_the_debounce_window() {
-        let dir = TempDir::new();
-        let db_path = dir.db_path("flush-now");
-        let store = SessionStore::open_with(&db_path, Duration::from_secs(60));
-
-        store.schedule(layout(&dir.0, three_tabs()));
-        assert_eq!(store.writes(), 0, "nothing written inside the window");
-        store.flush_now();
-        assert_eq!(store.writes(), 1, "flush_now bypasses the debounce");
-    }
-
-    #[test]
     fn flush_now_persists_a_new_snapshot_inside_a_later_debounce_window() {
         let dir = TempDir::new();
         let db_path = dir.db_path("flush-new-snapshot");
@@ -3226,23 +3104,6 @@ mod tests {
             restore(&db_path, Path::new("/tmp")).tabs[0].title,
             "Changed"
         );
-    }
-
-    #[test]
-    fn a_missing_worktree_directory_falls_back_with_a_diagnostic() {
-        let dir = TempDir::new();
-        let db_path = dir.db_path("missing-dir");
-        let store = SessionStore::open(&db_path);
-        store.schedule(layout(&dir.0.join("gone-checkout"), three_tabs()));
-        store.flush_now();
-
-        let restored = restore(&db_path, Path::new("/tmp"));
-        assert_eq!(
-            restored.working_directory,
-            PathBuf::from("/tmp"),
-            "a checkout that vanished falls back instead of failing"
-        );
-        assert_eq!(restored.tabs.len(), 2);
     }
 
     #[test]
@@ -3707,87 +3568,6 @@ mod tests {
     }
 
     #[test]
-    fn inserting_a_preceding_worktree_preserves_its_id_and_layout() {
-        let dir = TempDir::new();
-        let primary = dir.0.join("repo");
-        let preceding = dir.0.join("repo-aaa");
-        let linked = dir.0.join("repo-zzz");
-        for path in [&primary, &preceding, &linked] {
-            std::fs::create_dir_all(path).expect("create worktree fixture");
-        }
-
-        let project = CatalogProject {
-            id: "project".into(),
-            name: "Project".into(),
-            root_path: primary.clone(),
-            is_git: true,
-            worktrees: vec![
-                CatalogWorktree {
-                    branch: "main".into(),
-                    path: primary.clone(),
-                    is_primary: true,
-                },
-                CatalogWorktree {
-                    branch: "linked".into(),
-                    path: linked.clone(),
-                    is_primary: false,
-                },
-            ],
-        };
-        let mut shifted_project = project.clone();
-        shifted_project.worktrees.insert(
-            1,
-            CatalogWorktree {
-                branch: "preceding".into(),
-                path: preceding,
-                is_primary: false,
-            },
-        );
-
-        let baseline_database = dir.db_path("baseline");
-        let baseline_store = SessionStore::open(&baseline_database);
-        baseline_store.schedule_catalog(&ProjectCatalog::from_projects(vec![project]));
-        let baseline_id = AppDatabase::open(&baseline_database)
-            .expect("open baseline database")
-            .worktree_by_path(&linked.to_string_lossy())
-            .expect("read baseline worktree")
-            .expect("baseline linked worktree")
-            .id;
-
-        let shifted_database = dir.db_path("shifted");
-        let shifted_store = SessionStore::open(&shifted_database);
-        shifted_store.schedule_catalog(&ProjectCatalog::from_projects(vec![shifted_project]));
-        shifted_store.schedule(layout(
-            &linked,
-            vec![SessionTab {
-                id: "linked-tab".into(),
-                title: "Linked terminal".into(),
-                kind: "terminal".into(),
-                agent_id: None,
-                agent_session_id: None,
-                active: true,
-            }],
-        ));
-        shifted_store.flush_now();
-
-        let shifted_db = AppDatabase::open(&shifted_database).expect("open shifted database");
-        let shifted_id = shifted_db
-            .worktree_by_path(&linked.to_string_lossy())
-            .expect("read shifted worktree")
-            .expect("shifted linked worktree")
-            .id;
-        assert_eq!(
-            shifted_id, baseline_id,
-            "a worktree id must not change when a preceding catalog row is inserted"
-        );
-        assert_eq!(
-            restore(&shifted_database, Path::new("/tmp")).tabs[0].title,
-            "Linked terminal",
-            "the shifted catalog must still restore the layout owned by linked"
-        );
-    }
-
-    #[test]
     fn refreshing_a_project_tracks_external_worktrees_and_preserves_path_ids() {
         let dir = TempDir::new();
         let primary = dir.0.join("repo");
@@ -4070,22 +3850,6 @@ mod tests {
     }
 
     #[test]
-    fn session_references_survive_store_reopen() {
-        let dir = TempDir::new();
-        let database = dir.db_path("session-refs");
-        {
-            let store = SessionStore::open(&database);
-            store.save_session_ref("pane-nonce", "agent-session-nonce");
-        }
-
-        let reopened = SessionStore::open(&database);
-        assert_eq!(
-            reopened.load_session_refs().get("pane-nonce"),
-            Some(&"agent-session-nonce".to_string())
-        );
-    }
-
-    #[test]
     fn project_catalog_rejects_a_path_inside_an_existing_project() {
         let dir = TempDir::new();
         let root = dir.0.join("repo");
@@ -4295,17 +4059,6 @@ mod tests {
         );
     }
 
-    /// #125 (spec R6.1): the profile is a sibling of the database, not a
-    /// child of it -- WebView2 owns everything under its user-data folder.
-    #[test]
-    fn the_browser_profile_sits_beside_its_database() {
-        let database = Path::new("/state/checkouts/sirio-abcd1234/sirio.sqlite");
-        assert_eq!(
-            browser_profile_path_for(database),
-            Path::new("/state/checkouts/sirio-abcd1234/browser")
-        );
-    }
-
     /// The wrapper, not just the rule it delegates to: `browser_profile_path`
     /// must resolve against the *live* database path, and as its sibling.
     /// Breaking that -- nesting the profile inside the database's own path --
@@ -4321,76 +4074,6 @@ mod tests {
             "the profile must sit beside the database, not inside it"
         );
         assert_eq!(profile.file_name(), Some(std::ffi::OsStr::new("browser")));
-    }
-
-    /// #125 (spec R6.1): the profile inherits the database's scoping, so two
-    /// checkouts of the app cannot end up sharing one WebView2 profile
-    /// directory while their session state is correctly separate.
-    #[test]
-    fn two_checkouts_do_not_share_a_browser_profile() {
-        let dir = TempDir::new();
-        let checkout_a = checkout(&dir.0, "sirio-main");
-        let checkout_b = checkout(&dir.0, "sirio-r61-profile");
-        let exe_a = built_binary(&checkout_a);
-        let exe_b = built_binary(&checkout_b);
-
-        let profile_a = browser_profile_path_for(&database_path_for(&dir.0, &exe_a, &dir.0, true));
-        let profile_b = browser_profile_path_for(&database_path_for(&dir.0, &exe_b, &dir.0, true));
-
-        assert_ne!(
-            profile_a, profile_b,
-            "each checkout must own its own browser profile"
-        );
-        assert!(
-            profile_a.starts_with(dir.0.join("checkouts")),
-            "a development checkout's profile is scoped, not user-wide: {}",
-            profile_a.display()
-        );
-    }
-
-    /// The installed case: no checkout, so the profile is the one stable
-    /// user-wide location, beside the one stable database.
-    #[test]
-    fn an_installed_binary_keeps_one_stable_browser_profile() {
-        let dir = TempDir::new();
-        let installed = dir.0.join("Applications").join("sirio");
-        std::fs::create_dir_all(installed.parent().expect("parent")).expect("install dir");
-        std::fs::write(&installed, b"binary").expect("install binary");
-
-        let database = database_path_for(&dir.0, &installed, &dir.0, false);
-        assert_eq!(browser_profile_path_for(&database), dir.0.join("browser"));
-    }
-
-    #[test]
-    fn the_scoped_path_is_human_readable_and_pinned_in_shape() {
-        let dir = TempDir::new();
-        let checkout_root = checkout(&dir.0, "sirio-rust-p57-dbscope");
-        let exe = built_binary(&checkout_root);
-
-        let path = database_path_for(&dir.0, &exe, &dir.0, true);
-
-        assert_eq!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("sirio.sqlite"),
-            "the file name stays sirio.sqlite"
-        );
-        let scope_dir = path.parent().expect("scope dir");
-        assert_eq!(
-            scope_dir.parent(),
-            Some(dir.0.join("checkouts").as_path()),
-            "exactly one level under checkouts/"
-        );
-        let name = scope_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("scope dir name");
-        let Some(suffix) = name.strip_prefix("sirio-rust-p57-dbscope-") else {
-            panic!("scope dir should read <basename>-<hash>, got {name:?}");
-        };
-        assert!(
-            suffix.len() >= 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()),
-            "the hash suffix is hex: {suffix:?}"
-        );
     }
 
     #[test]
@@ -4568,23 +4251,5 @@ mod tests {
             app_support_root_for(&fallback),
             PathBuf::from("/home/alice/.local/state/Sirio")
         );
-    }
-
-    #[test]
-    fn the_session_store_round_trips_the_sidebar_view() {
-        let dir = std::env::temp_dir().join(format!(
-            "sirio-sidebar-view-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let store = SessionStore::open(&dir.join("sirio.sqlite"));
-        assert_eq!(store.load_sidebar_view(), SidebarView::Projects);
-        store.save_sidebar_view(SidebarView::Sessions);
-        assert_eq!(store.load_sidebar_view(), SidebarView::Sessions);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

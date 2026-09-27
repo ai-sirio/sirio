@@ -9487,18 +9487,6 @@ enum DiffLine {
 }
 
 impl DiffLine {
-    // `render_tool_diff` now reads `number` directly per-variant to split it
-    // into old/new columns, so this accessor's only remaining caller is
-    // `diff_preview_lines_number_each_side_against_its_own_file` below.
-    #[allow(dead_code)]
-    fn number(&self) -> usize {
-        match self {
-            Self::Context { number, .. }
-            | Self::Removed { number, .. }
-            | Self::Added { number, .. } => *number,
-        }
-    }
-
     fn text(&self) -> &str {
         match self {
             Self::Context { text, .. } | Self::Removed { text, .. } | Self::Added { text, .. } => {
@@ -9863,44 +9851,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn composer_field_edge_hides_the_bright_focus_ring() {
-        for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
-            let edge = composer_field_edge(&theme);
-            // Opaque: the bezel ring underneath must not show through.
-            assert_eq!(edge.a, 1.0, "the field edge must be opaque, got {edge:?}");
-            // Distinct from the focus ring it covers, in both appearances
-            // (white ring on dark, black ring on light).
-            let gap = (edge.l - theme.ring.l).abs();
-            assert!(
-                gap > 0.05,
-                "the field edge must read apart from the bezel ring, edge={edge:?} ring={:?}",
-                theme.ring
-            );
-        }
-    }
-
-    #[test]
-    fn composer_focus_border_is_the_theme_ring_not_body_text() {
-        for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
-            assert_eq!(composer_border(false, &theme), theme.border);
-            let focused = composer_border(true, &theme);
-            // Focus never brightens the card: same hairline as idle, close
-            // to the background, never the body text colour.
-            assert_eq!(focused, theme.border);
-            assert_ne!(focused, theme.text);
-            assert!(
-                focused.a < 1.0,
-                "the focus border must be translucent, got {focused:?}"
-            );
-            assert!(
-                focused.a < theme.ring.a,
-                "the composer focus must stay darker than the bezel ring, got {focused:?} vs {:?}",
-                theme.ring
-            );
-        }
-    }
-
     /// A model that offers no effort retires the selector rather than
     /// opening an empty one. The levels are the model's own, so this is a
     /// state a plain model switch reaches (Claude's Haiku advertises no
@@ -9951,132 +9901,6 @@ mod tests {
         (chat, cx)
     }
 
-    /// #239: the indicator shown while a turn streams is the Activity-derived
-    /// reasoning header (Task 6), not a Chat-owned animation.
-    #[gpui::test]
-    async fn the_running_reasoning_header_shows_the_thinking_indicator(cx: &mut TestAppContext) {
-        let (chat, cx) = spinner_test_chat(cx);
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_some(),
-            "a streaming turn shows the Activity-derived indicator"
-        );
-    }
-
-    /// #239: the indicator is shown for exactly as long as a turn is in
-    /// flight, driven by the streaming flag the composer's border already
-    /// uses — no lifecycle of its own to fall out of step.
-    #[gpui::test]
-    async fn the_generating_spinner_appears_while_a_turn_streams(cx: &mut TestAppContext) {
-        let (chat, cx) = spinner_test_chat(cx);
-
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_none(),
-            "an idle chat shows no spinner"
-        );
-
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_some(),
-            "a streaming turn shows the spinner"
-        );
-    }
-
-    /// The same assertion covers completion, cancellation and error: all three
-    /// clear `streaming`, and the spinner is a pure function of that flag.
-    #[gpui::test]
-    async fn the_generating_spinner_disappears_when_the_turn_ends(cx: &mut TestAppContext) {
-        let (chat, cx) = spinner_test_chat(cx);
-
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
-
-        chat.update(cx, |chat, cx| {
-            chat.streaming = false;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_none(),
-            "the spinner leaves with the turn"
-        );
-    }
-
-    /// The transient generating spinner is the same row a live thought's
-    /// header is: orb, `Thinking`, same paddings — one shape for a run in
-    /// progress whether or not a thought has arrived.
-    #[gpui::test]
-    async fn the_generating_spinner_shares_the_thought_header_shape(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
-        cx.update(|_window, cx| init(cx));
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            chat.handle_event(AcpEvent::ThoughtChunk("a".into()), cx);
-        });
-        refresh_frame(cx);
-        let header = cx
-            .debug_bounds("thought-toggle-0")
-            .expect("live thought header");
-        chat.update(cx, |chat, cx| {
-            chat.handle_event(AcpEvent::AgentMessageChunk("b".into()), cx);
-        });
-        refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_some(),
-            "the spinner row while the turn streams"
-        );
-        let spinner_header = cx
-            .debug_bounds("thought-toggle-18446744073709551615")
-            .expect("the spinner draws the thought header row");
-        assert_eq!(
-            spinner_header.size.height, header.size.height,
-            "one row shape: spinner={spinner_header:?} header={header:?}"
-        );
-    }
-
-    /// #239 requires the indicator stay transient and never join the
-    /// transcript. It is a sibling of the virtualized list rather than an
-    /// entry in it, so streaming must not move the entry count at all — this
-    /// is what makes "not persisted" and "never duplicated" structural.
-    #[gpui::test]
-    async fn the_transcript_gains_no_entry_for_the_spinner(cx: &mut TestAppContext) {
-        let (chat, cx) = spinner_test_chat(cx);
-        let before = chat.read_with(&*cx, |chat, _| chat.entries.len());
-
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-
-        let during = chat.read_with(&*cx, |chat, _| chat.entries.len());
-        assert_eq!(
-            before, during,
-            "the spinner is not a transcript entry, so streaming adds none"
-        );
-    }
-
     /// #239 piece 2: the spinner must leave when a turn *completes*, driven
     /// through the real fixture agent rather than by setting the flag — the
     /// flag is what the earlier tests pin, and a flag can be right while the
@@ -10106,104 +9930,6 @@ mod tests {
         assert!(
             cx.debug_bounds("chat-generating-spinner").is_none(),
             "and gone once the turn has ended"
-        );
-    }
-
-    /// #239 piece 2: cancellation. Escape reaches `Chat::cancel` through the
-    /// real binding, so this exercises the same door a user does.
-    #[gpui::test]
-    async fn the_spinner_leaves_when_a_turn_is_cancelled(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
-        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        focus_and_type(cx, "hello");
-        cx.simulate_keystrokes("enter");
-        pump_chat_until(cx, &chat, |chat| chat.streaming);
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
-
-        cx.simulate_keystrokes("escape");
-        pump_chat_until(cx, &chat, |chat| !chat.streaming);
-        refresh_frame(cx);
-
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_none(),
-            "cancelling a turn takes the spinner with it"
-        );
-    }
-
-    /// #239 piece 2: the error path. `TransportError` is handed to
-    /// `handle_event` directly — it is the same handler the transport calls,
-    /// and killing a live fixture mid-turn from a test would be racing the
-    /// very state under assertion.
-    #[gpui::test]
-    async fn the_spinner_leaves_when_the_transport_fails(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
-        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        focus_and_type(cx, "hello");
-        cx.simulate_keystrokes("enter");
-        pump_chat_until(cx, &chat, |chat| chat.streaming);
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
-
-        chat.update(cx, |chat, cx| {
-            chat.handle_event(AcpEvent::TransportError("agent went away".into()), cx);
-        });
-        pump_chat_until(cx, &chat, |chat| !chat.streaming);
-        refresh_frame(cx);
-
-        assert!(
-            cx.debug_bounds("chat-generating-spinner").is_none(),
-            "a failed turn must not leave the spinner running forever"
-        );
-    }
-
-    /// #239 piece 3, and the acceptance criterion most likely to fail: the
-    /// spinner appears in the same column as the composer, so it could push
-    /// it down or shrink it. The composer's drawn rectangle must be
-    /// bit-identical between idle and streaming.
-    #[gpui::test]
-    async fn the_spinner_does_not_move_or_resize_the_composer(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
-        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        let idle = cx.debug_bounds("composer").expect("the composer is drawn");
-
-        focus_and_type(cx, "hello");
-        cx.simulate_keystrokes("enter");
-        pump_chat_until(cx, &chat, |chat| chat.streaming);
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
-
-        let streaming = cx.debug_bounds("composer").expect("the composer is drawn");
-
-        // #242 fixed: the streaming ring no longer participates in layout,
-        // so the composer's drawn rectangle is identical either way. It used
-        // to move 1px and shrink 2px every time a turn started, because the
-        // ring wrapped the card and padded it inward -- the opposite of what
-        // `STREAMING_BORDER_WIDTH`'s own comment promised.
-        //
-        // The spinner is a ~20px row in the same column, so this equality is
-        // also what proves the spinner itself displaces nothing.
-        assert_eq!(
-            idle.size, streaming.size,
-            "streaming must not resize the composer: idle {:?} vs streaming {:?}",
-            idle.size, streaming.size
-        );
-        assert_eq!(
-            idle.origin, streaming.origin,
-            "streaming must not move the composer: idle {:?} vs streaming {:?}",
-            idle.origin, streaming.origin
         );
     }
 
@@ -10506,15 +10232,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn the_label_says_files_not_conversation(cx: &mut TestAppContext) {
-        // It restores the filesystem. A label that implied the turn itself
-        // was undone would promise something this cannot do.
-        let chat = native_chat_with_one_turn(cx);
-        let label = chat.read_with(cx, |chat, _| chat.rewind_action_label());
-        assert_eq!(label, "Restore files to this message");
-    }
-
     /// The card carries the chip row and the send disc: field on top, then
     /// one wrapping row of chips ending in the disc — no toolbar above the
     /// card, no hint text in it.
@@ -10630,77 +10347,6 @@ two"
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input(text);
-    }
-
-    struct MarkdownHarness {
-        document: markdown::Doc,
-    }
-
-    impl Render for MarkdownHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(
-                div()
-                    .id("assistant-response-0")
-                    .debug_selector(|| "assistant-response-0".into())
-                    .w_full()
-                    .child(MarkdownBody::new(self.document.clone())),
-            )
-        }
-    }
-
-    fn markdown_view(cx: &mut TestAppContext, markdown: String) -> VisualTestContext {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        cx.update(init);
-        let window = cx.open_window(size(px(900.0), px(900.0)), move |_, _| MarkdownHarness {
-            document: parse_chat_markdown(&markdown),
-        });
-        VisualTestContext::from_window(window.into(), cx)
-    }
-
-    /// #239/Task 7: the rotating streaming border is retired, so the
-    /// composer's border is the same footprint and color idle or streaming —
-    /// nothing wraps the card, and nothing shifts the draft text inside it.
-    #[gpui::test]
-    async fn the_composer_has_no_rotating_border_while_streaming(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &[]);
-        refresh_frame(cx);
-
-        let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
-        let idle_input = cx
-            .debug_bounds("composer-input")
-            .expect("the composer input is drawn");
-
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            cx.notify();
-        });
-        refresh_frame(cx);
-
-        let streaming_card = cx.debug_bounds("composer").expect("the composer is drawn");
-        let streaming_input = cx
-            .debug_bounds("composer-input")
-            .expect("the composer input is drawn");
-        assert_eq!(
-            idle_card, streaming_card,
-            "the composer's footprint does not move when a turn starts streaming"
-        );
-        assert_eq!(
-            idle_input, streaming_input,
-            "the draft text must not shift when a turn starts streaming"
-        );
-
-        chat.update(cx, |chat, cx| {
-            chat.streaming = false;
-            cx.notify();
-        });
-        refresh_frame(cx);
-
-        let idle_again = cx.debug_bounds("composer").expect("the composer is drawn");
-        assert_eq!(
-            idle_card, idle_again,
-            "the composer's footprint is unchanged after streaming ends"
-        );
     }
 
     /// A draft longer than the composer is wide must wrap onto a second line
@@ -11206,65 +10852,6 @@ two"
         assert!(cx.debug_bounds("thought-body-0").is_none());
     }
 
-    /// An open body is the gallery's reasoning box: a capped scrolling well
-    /// with the fade strip along its top and the follow pin + scrollbar laid
-    /// over it. A closed thought draws none of it.
-    #[gpui::test]
-    async fn an_open_thought_body_is_a_capped_well_with_a_fade_strip(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.push_entry(Entry::Thought {
-                text: long,
-                open: Default::default(),
-                started: None,
-                duration_ms: Some(2_000),
-            });
-            chat
-        });
-        cx.update(|_window, cx| init(cx));
-        refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("thought-well-0").is_none(),
-            "closed: no well"
-        );
-        assert!(
-            cx.debug_bounds("thought-fade-0").is_none(),
-            "closed: no fade"
-        );
-
-        let header = cx.debug_bounds("thought-toggle-0").expect("header");
-        cx.simulate_click(header.center(), Modifiers::none());
-        refresh_frame(cx);
-        let body = cx.debug_bounds("thought-body-0").expect("open: the body");
-        let well = cx.debug_bounds("thought-well-0").expect("open: the well");
-        let fade = cx
-            .debug_bounds("thought-fade-0")
-            .expect("open: the fade strip");
-        assert!(
-            well.size.height <= px(160.0),
-            "the well is capped at 160: {well:?}"
-        );
-        assert_eq!(fade.size.height, px(20.0));
-        assert_eq!(
-            fade.top(),
-            well.top(),
-            "the strip sits on the well's top edge"
-        );
-        assert!(
-            body.left() < well.left(),
-            "the well is inset from the border line"
-        );
-        chat.read_with(cx, |chat, _| {
-            assert!(
-                chat.thought_scroll.contains_key(&0),
-                "scroll state was created on first draw"
-            );
-        });
-    }
-
     /// Execute espanso: la well è cappata a 256px e ha un handle persistente
     /// che isola la wheel dalla lista (niente doppio scroll).
     #[gpui::test]
@@ -11494,45 +11081,6 @@ two"
         );
     }
 
-    /// The rail stays out of sight until the pointer reaches its strip along
-    /// the left margin, and goes again once the pointer leaves it.
-    #[gpui::test]
-    async fn the_turn_rail_appears_only_while_its_strip_is_hovered(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &[]);
-        chat.update(cx, |chat, cx| {
-            for text in ["first", "latest"] {
-                chat.push_entry(Entry::User {
-                    text: text.into(),
-                    at: None,
-                });
-            }
-            cx.notify();
-        });
-        cx.simulate_resize(size(px(600.0), px(600.0)));
-        refresh_frame(cx);
-        let widths = |cx: &mut VisualTestContext| {
-            ["turn-tick-line-0", "turn-tick-line-1"].map(|selector| {
-                cx.debug_bounds(selector)
-                    .unwrap_or_else(|| panic!("{selector} is laid out"))
-                    .size
-                    .width
-            })
-        };
-        assert_eq!(widths(cx), [px(0.0); 2], "at rest the rail is hidden");
-
-        hover_turn_rail(cx);
-        assert_eq!(
-            widths(cx),
-            [turn_rail::TICK, turn_rail::ACTIVE_TICK],
-            "hovering the strip reveals every tick at its full length"
-        );
-
-        let transcript = cx.debug_bounds("chat-transcript").expect("transcript");
-        cx.simulate_mouse_move(transcript.center(), None, Modifiers::none());
-        refresh_frame(cx);
-        assert_eq!(widths(cx), [px(0.0); 2], "leaving the strip hides it again");
-    }
-
     /// Puts the pointer on the turn rail's strip with reduced motion on, so
     /// the reveal lands whole on the next frame instead of 150ms of wall
     /// time later.
@@ -11685,63 +11233,6 @@ two"
         );
     }
 
-    /// #159: nothing is drawn between the composer card and the bottom of
-    /// the pane. A centred caption naming the agent's working directory used
-    /// to sit there, duplicating what the worktree selection already says.
-    /// Measured rather than assumed: the card now ends 18px above the pane's
-    /// bottom edge, which is the container's own padding; the caption added
-    /// its 8px margin and a caption2 line on top of that, so it pushed the
-    /// card roughly 22px higher.
-    #[gpui::test]
-    async fn nothing_is_drawn_below_the_composer(cx: &mut TestAppContext) {
-        const PANE_HEIGHT: f32 = 600.0;
-        let (_chat, cx) = chat_view(cx, &[]);
-        cx.simulate_resize(size(px(900.0), px(PANE_HEIGHT)));
-        refresh_frame(cx);
-
-        let card = cx.debug_bounds("composer").expect("the composer is drawn");
-        let below = px(PANE_HEIGHT) - card.bottom();
-        assert!(
-            below <= px(20.0),
-            "only the container's own padding may sit below the composer, but \r
-             {below:?} does — something is being drawn under the card again: \r
-             card={card:?}"
-        );
-    }
-
-    #[gpui::test]
-    async fn narrow_composer_placeholder_stays_inside_composer_card(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        chat.update(cx, |chat, cx| {
-            chat.set_agent_name("OpenCode");
-            chat.available_commands.push(AvailableCommandInfo {
-                name: "help".into(),
-                description: "Show help".into(),
-                argument_hint: None,
-            });
-            cx.notify();
-        });
-        cx.simulate_resize(size(px(595.0), px(600.0)));
-        refresh_frame(cx);
-
-        let card = cx
-            .debug_bounds("composer")
-            .expect("the composer card is drawn");
-        let input = cx
-            .debug_bounds("composer-input")
-            .expect("the composer input is drawn");
-        assert!(
-            input.left() >= card.left() && input.right() <= card.right(),
-            "the field must stay inside the composer card: card={card:?} input={input:?}"
-        );
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
-            chat.read_with(&cx.cx, |chat, _| chat.default_placeholder()),
-            "the default placeholder is what the field shows"
-        );
-    }
-
     /// At Sirio's real pane width the chip row degrades by wrapping chip
     /// by chip — never by clipping a chip at the pane's edge — and every
     /// essential control stays drawn and reachable inside the card.
@@ -11837,82 +11328,6 @@ two"
         );
     }
 
-    #[gpui::test]
-    async fn wide_composer_remains_capped_at_transcript_maximum(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        cx.simulate_resize(size(px(1140.0), px(600.0)));
-        refresh_frame(cx);
-
-        let card = cx
-            .debug_bounds("composer")
-            .expect("the composer card is drawn");
-        assert_eq!(
-            card.size.width,
-            px(TRANSCRIPT_WIDTH),
-            "the composer stays capped below a wider pane: card={card:?}"
-        );
-        // The card sits where the transcript sits: centred in a wide pane.
-        let window_center_x = 1140.0 / 2.0;
-        assert!(
-            (card.center().x.as_f32() - window_center_x).abs() <= 1.0,
-            "the composer card is centred with the transcript: card={card:?}"
-        );
-    }
-
-    #[gpui::test]
-    async fn bezel_markdown_renders_lists_tasks_code_and_tables(cx: &mut TestAppContext) {
-        let source = r#"1. first
-2. second
-
-- [x] done
-- [ ] pending
-
-```rust
-let answer = 42;
-```
-
-| left | right |
-| --- | --- |
-| one | two |"#;
-        let document = parse_chat_markdown(source);
-        assert!(
-            document
-                .blocks
-                .iter()
-                .any(|block| matches!(block.kind, markdown::BlockKind::Ordered { .. })),
-            "ordered lists stay structured in the bezel Doc"
-        );
-        assert!(
-            document
-                .blocks
-                .iter()
-                .any(|block| matches!(block.kind, markdown::BlockKind::Task { .. })),
-            "task lists stay structured in the bezel Doc"
-        );
-        assert!(
-            document
-                .blocks
-                .iter()
-                .any(|block| matches!(block.kind, markdown::BlockKind::Code { .. })),
-            "fenced code stays structured in the bezel Doc"
-        );
-        assert!(
-            document
-                .blocks
-                .iter()
-                .any(|block| matches!(block.kind, markdown::BlockKind::Table { .. })),
-            "tables stay structured in the bezel Doc"
-        );
-
-        let mut cx = markdown_view(cx, source.into());
-        refresh_frame(&mut cx);
-        assert!(
-            cx.debug_bounds("assistant-response-0").is_some(),
-            "the mixed markdown document renders as an assistant response"
-        );
-    }
-
     #[test]
     fn persisted_transcript_contains_only_completed_turns() {
         let entries = vec![
@@ -11933,72 +11348,6 @@ let answer = 42;
         let transcript = Chat::transcript_from_entries("tab-chat", &entries);
         assert_eq!(transcript.turns.len(), 1);
         assert_eq!(transcript.turns[0].entries.len(), 3);
-    }
-
-    /// F-CHAT-37: a fresh chat shows an empty transcript with the composer
-    /// and its controls, and typing does not send.
-    #[gpui::test]
-    async fn empty_chat_renders_composer_and_typing_does_not_send(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| {
-                chat.entries.is_empty() && chat.list_state.item_count() == 0
-            }),
-            "before any message there are no transcript items"
-        );
-        assert!(
-            cx.debug_bounds("composer").is_some(),
-            "the composer card is drawn"
-        );
-        assert!(
-            cx.debug_bounds("send").is_some(),
-            "the send control is drawn"
-        );
-        assert!(
-            cx.debug_bounds("chat-status").is_some(),
-            "the status pill is drawn"
-        );
-        assert!(
-            cx.debug_bounds("chat-transcript").is_some(),
-            "the transcript surface is drawn"
-        );
-
-        focus_and_type(cx, "hello");
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
-            "hello",
-            "typing fills the composer"
-        );
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.entries.is_empty()),
-            "typing alone must not send anything"
-        );
-    }
-
-    /// The control socket must edit this entity's composer, rather than an
-    /// unrendered ACP session with a coincidentally matching tab id.
-    #[gpui::test]
-    async fn control_compose_changes_the_rendered_composer(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-
-        chat.update(&mut cx.cx, |chat, cx| {
-            chat.control_compose("MARKER_P107", cx);
-        });
-        refresh_frame(cx);
-
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
-            "MARKER_P107",
-            "the visible composer owns socket-driven draft text"
-        );
-        assert!(
-            cx.debug_bounds("composer-input").is_some(),
-            "the edited composer remains mounted in the rendered chat"
-        );
     }
 
     /// Appending is not composing: a snippet must land beside the draft the
@@ -12832,77 +12181,6 @@ let answer = 42;
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
             "Waiting for permission response…".to_string(),
-            "the placeholder survives the blocked keystrokes"
-        );
-    }
-
-    /// F-CHAT-05: sweep E03 drove a real offline composer (agent process
-    /// never came up) and found typing + Enter genuinely inert, but nothing
-    /// on screen said why — the empty composer fell back to the same
-    /// generic "Message…" placeholder used once connected. This is one half
-    /// of the fix: a distinct placeholder names the offline state, the way
-    /// permission-wait and queueing above already do. The other half —
-    /// typed characters and Enter actually being refused, not merely
-    /// looking refused — is asserted directly here too, mirroring
-    /// `permission_wait_disables_the_composer_and_shows_its_own_placeholder`
-    /// above: a wave-I critic checked the row's cited `SRC`
-    /// (`ChatComposerView.swift:25-28`) against the real reference and found
-    /// `canInteract` excludes `.disconnected` exactly like it excludes a
-    /// pending permission, so the editor must be equally inert in both
-    /// states, not just visually different.
-    #[gpui::test]
-    async fn offline_composer_shows_its_own_placeholder(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            Chat::from_test_command(
-                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
-                cx,
-            )
-        });
-        // ACP owns a real worker thread and subprocess; permit its wakeups
-        // to cross the deterministic test scheduler boundary (same as
-        // `failed_launch_can_retry_and_complete` above).
-        cx.executor().allow_parking();
-        cx.run_until_parked();
-        chat.read_with(cx, |chat, _| {
-            assert!(
-                chat.client.is_none(),
-                "the missing binary must fail to launch"
-            );
-        });
-        refresh_frame(cx);
-
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
-            "Agent offline — reconnecting when you send…".to_string(),
-            "an empty, disconnected composer must name the offline state"
-        );
-
-        let entries_before = chat.read_with(cx, |chat, _| chat.entries.len());
-        focus_and_type(cx, "should not appear");
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        refresh_frame(cx);
-
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
-                && chat.attachments.is_empty()),
-            "the disabled editor must refuse typed characters entirely while offline"
-        );
-        assert_eq!(
-            chat.read_with(&*cx, |chat, _| chat.entries.len()),
-            entries_before,
-            "Enter must neither send nor start a fresh reconnect attempt while offline"
-        );
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| !chat.connecting),
-            "a blocked Enter must not itself trigger a new connection attempt"
-        );
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
-            "Agent offline — reconnecting when you send…".to_string(),
             "the placeholder survives the blocked keystrokes"
         );
     }
@@ -14302,61 +13580,6 @@ let answer = 42;
         assert_eq!(badge, "Unknown agent");
     }
 
-    #[gpui::test]
-    fn default_placeholder_names_agent_without_commands(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.set_agent_name("OpenCode");
-            chat
-        });
-
-        // The placeholder is the gallery's sentence; the agent's name lives
-        // in the toolbar's pill and model chip, not here.
-        assert_eq!(
-            chat.read_with(cx, |chat, _| chat.default_placeholder()),
-            "Ask anything, or @ to attach a file"
-        );
-    }
-
-    #[gpui::test]
-    fn default_placeholder_names_agent_commands(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.set_agent_name("OpenCode");
-            chat.available_commands.push(AvailableCommandInfo {
-                name: "help".into(),
-                description: "Show help".into(),
-                argument_hint: None,
-            });
-            chat
-        });
-
-        assert_eq!(
-            chat.read_with(cx, |chat, _| chat.default_placeholder()),
-            "Ask anything, / for commands, or @ to attach a file"
-        );
-    }
-
-    #[gpui::test]
-    fn default_placeholder_without_agent_keeps_file_affordance(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
-
-        let placeholder = chat.read_with(cx, |chat, _| chat.default_placeholder());
-        assert!(placeholder.starts_with("Ask anything"));
-        assert!(placeholder.contains("@ to attach a file"));
-    }
-
-    #[test]
-    fn default_agent_cwd_follows_the_process_workspace() {
-        assert_eq!(default_agent_cwd(), std::env::current_dir().unwrap());
-    }
-
     /// F-CHAT-31: matching lines stay context; a changed line emits the old
     /// text as `Removed` then the new text as `Added` at the point the two
     /// texts diverge, and a pure addition/deletion needs no counterpart.
@@ -14399,36 +13622,6 @@ let answer = 42;
                 number: 1,
                 text: "brand new".into()
             }]
-        );
-    }
-
-    /// F-CHAT-31: the numbers a reader uses to find the change in the file.
-    /// A removed line carries its position in the *old* file and the added
-    /// line replacing it carries its position in the *new* one — the same
-    /// pair Swift's `ChatDiffPreviewModel.rows` assigns from `oldIndex` and
-    /// `newIndex`, which is why both read `2` for a one-line replacement
-    /// while a line inserted later shifts only the new side.
-    #[test]
-    fn diff_preview_lines_number_each_side_against_its_own_file() {
-        let rows = diff_preview_lines(Some("a\nb\nc\n"), "a\nB\nc\nd\n");
-        assert_eq!(
-            rows.iter().map(DiffLine::number).collect::<Vec<_>>(),
-            vec![1, 2, 2, 3, 4]
-        );
-
-        // A pure insertion in the middle: the new side advances past the old.
-        let inserted = diff_preview_lines(Some("a\nc\n"), "a\nb\nc\n");
-        assert_eq!(
-            inserted
-                .iter()
-                .map(|line| (line.number(), line.text().to_string()))
-                .collect::<Vec<_>>(),
-            vec![
-                (1, "a".to_string()),
-                (2, "c".to_string()),
-                (2, "b".to_string()),
-                (3, "c".to_string()),
-            ]
         );
     }
 
@@ -14500,71 +13693,6 @@ let answer = 42;
         let entry: ChatEntry =
             serde_json::from_str(r#"{"UserMessage":{"text":"hi"}}"#).expect("deserializes");
         assert!(matches!(entry, ChatEntry::UserMessage { at: None, .. }));
-    }
-
-    /// Every entry of a turn stays in view once it ends — thought, prose,
-    /// tool run — and the prose the model writes between its tool calls
-    /// reads with the same weight as its answer: no `Worked · N steps`
-    /// header, no muted interim rendering.
-    #[gpui::test]
-    async fn a_finished_turn_keeps_its_work_in_view_and_its_prose_reads_as_an_answer(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.push_entry(Entry::User {
-                text: "q".into(),
-                at: None,
-            });
-            chat.push_entry(Entry::Thought {
-                text: "hmm".into(),
-                open: Default::default(),
-                started: None,
-                duration_ms: Some(1000),
-            });
-            chat.push_entry(Entry::Assistant {
-                text: "looking".into(),
-                document: parse_chat_markdown("looking"),
-            });
-            chat.push_entry(test_tool_call("a"));
-            chat.push_entry(test_tool_call("b"));
-            chat.push_entry(Entry::Assistant {
-                text: "the answer".into(),
-                document: parse_chat_markdown("the answer"),
-            });
-            chat.push_entry(Entry::TurnFooter("12:00".into()));
-            chat
-        });
-        cx.update(|_window, cx| init(cx));
-        refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("work-toggle-0").is_none(),
-            "no Work header under the question"
-        );
-        let bubble = cx.debug_bounds("user-bubble-0").expect("bubble");
-        let thought = cx
-            .debug_bounds("thought-toggle-1")
-            .expect("the thought row is drawn");
-        assert!(
-            cx.debug_bounds("interim-2").is_none(),
-            "prose before the last tool call is not drawn muted"
-        );
-        let prose = cx
-            .debug_bounds("assistant-response-2")
-            .expect("prose before the last tool call is drawn as an answer");
-        let run = cx.debug_bounds("tool-run-3").expect("the run box is drawn");
-        assert!(
-            cx.debug_bounds("answer-5").is_some(),
-            "the closing prose is an answer too"
-        );
-        assert!(
-            thought.top() >= bubble.bottom()
-                && prose.top() >= thought.bottom()
-                && run.top() >= prose.bottom(),
-            "rows keep transcript order"
-        );
     }
 
     /// A turn's tool run is drawn while it streams and stays drawn once the
@@ -15697,61 +14825,6 @@ let answer = 42;
         assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
     }
 
-    /// #233: the model name in an option row never shrinks below
-    /// min-content, so a long agent-advertised name pushes the "Recommended"
-    /// badge past the fixed picker border. The name must truncate (the
-    /// agent-badge pattern: `flex_1` + `min_w_0` + `text_ellipsis`, with a
-    /// `flex_shrink_0` badge) instead of overflowing. The name is chosen
-    /// far past the popup's usable width so font-metric drift cannot
-    /// silently un-reproduce the bug.
-    #[gpui::test]
-    async fn a_long_model_name_does_not_push_the_recommended_badge_outside(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::from_test_command(
-                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.has_completed_turn = true;
-            chat.available_models = vec![ModelOption {
-                id: "long".into(),
-                name: "claude-sonnet-4-5-20250929-with-a-very-long-suffix-string-0123456789abcdef"
-                    .into(),
-                description: None,
-            }];
-            chat
-        });
-        cx.update(|window, _| window.refresh());
-
-        let chip = cx
-            .debug_bounds("model-chip")
-            .expect("model chip is rendered");
-        cx.simulate_click(chip.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-
-        let picker = cx
-            .debug_bounds("model-picker")
-            .expect("model picker is rendered");
-        let badge = cx
-            .debug_bounds("model-option-recommended")
-            .expect("the first-listed model is badged Recommended");
-        assert!(
-            badge.right() <= picker.right(),
-            "Recommended badge overflows the picker border: \
-             badge right {} vs picker right {}",
-            badge.right(),
-            picker.right(),
-        );
-    }
-
     /// A structured question is named by its own header, not by the asking
     /// tool (the native transport's title for every question is the
     /// constant `Question`), and its options keep their descriptions; a
@@ -15831,62 +14904,6 @@ let answer = 42;
             assert_eq!(title, "/repo/src/main.rs");
             assert!(!*is_question);
         });
-    }
-
-    /// The dock is where a question is answered: every answer is drawn
-    /// there, one under the other, and none on the transcript's card, which
-    /// keeps the record. Answering takes the dock away.
-    #[gpui::test]
-    async fn the_open_question_is_answered_from_the_dock_not_the_card(cx: &mut TestAppContext) {
-        let (chat, cx) = offline_chat_view(cx);
-        chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(
-                1,
-                "/repo/src/main.rs",
-                &["Allow", "Reject"],
-            ));
-            cx.notify();
-        });
-        refresh_frame(cx);
-
-        let dock = cx
-            .debug_bounds("question-dock")
-            .expect("the dock is drawn while the question is open");
-        let card = cx
-            .debug_bounds("permission-card-1")
-            .expect("the transcript keeps its record of the question");
-        let allow = cx
-            .debug_bounds("permission-option-allow")
-            .expect("the first answer is drawn");
-        let reject = cx
-            .debug_bounds("permission-option-reject")
-            .expect("every answer is drawn");
-        assert!(
-            allow.top() >= dock.top() && reject.bottom() <= dock.bottom(),
-            "the answers live in the dock: {allow:?} {reject:?} vs {dock:?}"
-        );
-        assert!(
-            allow.bottom() <= reject.top(),
-            "the answers are listed one under the other: {allow:?} {reject:?}"
-        );
-        assert!(
-            !(allow.top() >= card.top() && allow.bottom() <= card.bottom()),
-            "the card carries no buttons: {allow:?} inside {card:?}"
-        );
-
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
-        cx.run_until_parked();
-        cx.simulate_click(reject.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
-        assert!(chat.read_with(&*cx, |chat, _| matches!(
-            chat.entries.first(),
-            Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Reject"
-        )));
-        assert!(
-            cx.debug_bounds("question-dock").is_none(),
-            "the dock goes once the question is answered"
-        );
     }
 
     /// Pi sends the question itself as the title: the dock draws all of it,
@@ -16006,20 +15023,6 @@ let answer = 42;
             composer.top() >= dock.bottom(),
             "the composer sits below the dock, on screen: {composer:?} vs {dock:?}"
         );
-    }
-
-    /// No part of a question is drawn in the warning colour any more: the
-    /// card's accent is the neutral one the Plan and Rewind cards use, and
-    /// the dock wears the composer's own hairline.
-    #[test]
-    fn a_question_is_never_painted_in_the_warning_colour() {
-        for theme in [Theme::dark(), Theme::light()] {
-            assert_eq!(permission_card_accent(&theme), theme.border_strong);
-            assert_ne!(permission_card_accent(&theme), theme.warning);
-        }
-        for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
-            assert_eq!(question_dock::dock_border(&theme), theme.border);
-        }
     }
 
     /// A blocked digit neither answers the question nor moves the selection.
@@ -16454,60 +15457,6 @@ let answer = 42;
         assert!(composer_is_focused(&chat, cx));
     }
 
-    /// A diff header's path is external text of arbitrary length: without
-    /// `min_w_0` the flex row never shrinks below the path's min-content,
-    /// so the `+added/-removed` counts are pushed past the header's border
-    /// (the same `#233` pattern as the former waiting bar above).
-    #[gpui::test]
-    async fn a_long_diff_path_does_not_push_the_change_counts_out_of_the_header(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let long_path = format!("src/{}/edited.rs", "deeply-nested-segment/".repeat(20));
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.push_entry(Entry::ToolCall {
-                id: "edit-long-path".into(),
-                title: "Edit file".into(),
-                status: "Completed".into(),
-                kind: "Edit".into(),
-                content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
-                    path: PathBuf::from(long_path),
-                    old_text: Some("old\n".into()),
-                    new_text: "new\n".into(),
-                })],
-                locations: vec![],
-                raw_input: None,
-                raw_output: None,
-                expanded: true,
-                duration_ms: None,
-            });
-            chat
-        });
-        refresh_frame(cx);
-
-        let header = cx
-            .debug_bounds("tool-diff-0-0-open")
-            .expect("the diff header is drawn");
-        let counts = cx
-            .debug_bounds("tool-diff-0-0-counts")
-            .expect("the header carries its +added/-removed counts");
-        assert!(
-            counts.right() <= header.right(),
-            "the change counts overflow the diff header: \
-             counts right {} vs header right {}",
-            counts.right(),
-            header.right(),
-        );
-    }
-
     /// The edit-summary row's path is external text too: `flex_1` alone
     /// leaves the row at the path's min-content width and pushes Revert
     /// past the card's border.
@@ -16558,72 +15507,6 @@ let answer = 42;
              revert right {} vs card right {}",
             revert.right(),
             card.right(),
-        );
-    }
-
-    /// A fold row's label is the first user message clipped to 60 chars, and
-    /// wide text can still exceed the row: without `min_w_0` the label keeps
-    /// the row at its min-content width and pushes the timestamp out.
-    #[gpui::test]
-    async fn a_long_turn_label_does_not_push_the_timestamp_out_of_the_fold_row(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let long_first_turn = format!(
-            "{} {}",
-            "W".repeat(TURN_LABEL_MAX_CHARS),
-            "and the rest of a message far longer than its clipped label ".repeat(6)
-        );
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            // Four turns so the oldest fold; the first carries the wide label.
-            chat.push_entry(Entry::User {
-                text: long_first_turn,
-                at: None,
-            });
-            chat.push_entry(test_tool_call("long-turn-step"));
-            chat.push_entry(Entry::TurnFooter("10:00".into()));
-            chat.push_entry(Entry::User {
-                text: "second question".into(),
-                at: None,
-            });
-            chat.push_entry(Entry::TurnFooter("10:01".into()));
-            chat.push_entry(Entry::User {
-                text: "third question".into(),
-                at: None,
-            });
-            chat.push_entry(Entry::TurnFooter("10:02".into()));
-            chat.push_entry(Entry::User {
-                text: "fourth question".into(),
-                at: None,
-            });
-            chat
-        });
-        // The label is clipped at 60 chars, so it can only outgrow a
-        // narrower pane: the default test window is ~1273px wide.
-        cx.simulate_resize(size(px(420.0), px(900.0)));
-        cx.run_until_parked();
-        refresh_frame(cx);
-
-        let row = cx
-            .debug_bounds("turn-fold-2")
-            .expect("the oldest turn draws its collapsed row");
-        let at = cx
-            .debug_bounds("turn-fold-2-at")
-            .expect("the fold row carries its timestamp");
-        assert!(
-            at.right() <= row.right(),
-            "the timestamp overflows the fold row: \
-             at right {} vs row right {}",
-            at.right(),
-            row.right(),
         );
     }
 
@@ -16770,284 +15653,6 @@ let answer = 42;
             cx.debug_bounds("context-usage-25-of-100").is_some(),
             "the used/size percent from the earlier UsageUpdate survives the merge"
         );
-    }
-
-    /// Every floating menu keeps its content at least this far inside the
-    /// card's own edge -- the inset `bezel::ui::popover::popover_card`
-    /// bakes in as `MENU_PAD`, restated here because three of this pane's
-    /// popovers mount their content straight onto the popover *surface*
-    /// (`anchored_menu_*` -> `surface::popover`), which paints the fill and
-    /// the hairline but no padding, so a label sat flush against the
-    /// border.
-    const MENU_INSET: f32 = 4.0;
-
-    /// Asserts a menu's first and last row stay `MENU_INSET` inside the
-    /// card on every side. `first`/`last` may name the same element when a
-    /// menu draws a single row.
-    #[track_caller]
-    fn assert_menu_content_is_inset(
-        cx: &mut VisualTestContext,
-        card: &'static str,
-        first: &'static str,
-        last: &'static str,
-    ) {
-        let card_bounds = cx
-            .debug_bounds(card)
-            .unwrap_or_else(|| panic!("{card} is drawn"));
-        let first_bounds = cx
-            .debug_bounds(first)
-            .unwrap_or_else(|| panic!("{first} is drawn"));
-        let last_bounds = cx
-            .debug_bounds(last)
-            .unwrap_or_else(|| panic!("{last} is drawn"));
-        let inset = px(MENU_INSET);
-        assert!(
-            first_bounds.top() >= card_bounds.top() + inset,
-            "{first} touches the top border of {card}: \
-             row top {} vs card top {}",
-            first_bounds.top(),
-            card_bounds.top(),
-        );
-        assert!(
-            first_bounds.left() >= card_bounds.left() + inset,
-            "{first} touches the left border of {card}: \
-             row left {} vs card left {}",
-            first_bounds.left(),
-            card_bounds.left(),
-        );
-        assert!(
-            first_bounds.right() <= card_bounds.right() - inset,
-            "{first} touches the right border of {card}: \
-             row right {} vs card right {}",
-            first_bounds.right(),
-            card_bounds.right(),
-        );
-        assert!(
-            last_bounds.bottom() <= card_bounds.bottom() - inset,
-            "{last} touches the bottom border of {card}: \
-             row bottom {} vs card bottom {}",
-            last_bounds.bottom(),
-            card_bounds.bottom(),
-        );
-    }
-
-    /// The context ring's popover mounts on the bare popover surface, so
-    /// its usage lines need the card inset of their own.
-    #[gpui::test]
-    async fn context_popover_insets_its_text_from_the_card_edge(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::from_test_command(
-                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
-                cx,
-            );
-            configure_test_chat(&mut chat);
-            chat
-        });
-        cx.update(|window, _| window.refresh());
-
-        let ring = cx
-            .debug_bounds("context-ring")
-            .expect("context ring is rendered");
-        cx.simulate_click(ring.center(), Modifiers::none());
-        cx.run_until_parked();
-        // The breakdown gives the popover a last row with a selector of
-        // its own, so the bottom inset is observable.
-        chat.update(cx, |chat, cx| {
-            chat.handle_event(
-                AcpEvent::TokenUsageBreakdown {
-                    input_tokens: 40,
-                    output_tokens: 12,
-                    cached_read_tokens: Some(8),
-                },
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        refresh_frame(cx);
-
-        assert_menu_content_is_inset(
-            cx,
-            "context-popover",
-            "context-usage-25-of-100",
-            "context-usage-breakdown",
-        );
-    }
-
-    /// Same for the composer's overflow menu: its rows carry their own
-    /// hover wash, which ran flush to the card border without the inset.
-    #[gpui::test]
-    async fn composer_overflow_menu_insets_its_rows_from_the_card_edge(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        let overflow = cx
-            .debug_bounds("composer-overflow")
-            .expect("the overflow control is drawn");
-        cx.simulate_click(overflow.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
-
-        assert_menu_content_is_inset(
-            cx,
-            "composer-overflow-menu",
-            "overflow-follow",
-            "overflow-chat-history",
-        );
-    }
-
-    /// And for the Chat History popover (F-CHAT-34).
-    #[gpui::test]
-    async fn chat_history_menu_insets_its_rows_from_the_card_edge(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.history_open = true;
-            chat.history_sessions = vec![ChatSessionSummary {
-                tab_id: "only-chat".into(),
-                title: "Only chat".into(),
-                agent_id: None,
-                turn_count: 1,
-                last_activity: 0,
-            }];
-            chat
-        });
-        refresh_frame(cx);
-        refresh_frame(cx);
-
-        assert_menu_content_is_inset(
-            cx,
-            "chat-history-menu",
-            "chat-history-row-only-chat",
-            "chat-history-row-only-chat",
-        );
-    }
-
-    #[gpui::test]
-    async fn thought_starts_collapsed_and_toggles_on_click(cx: &mut TestAppContext) {
-        // F-CHAT-21: thinking renders collapsed to a summary until clicked,
-        // live or historical, and clicking again folds it back.
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.push_entry(Entry::Thought {
-                text: "considering the approach".into(),
-                open: Default::default(),
-                started: None,
-                duration_ms: None,
-            });
-            chat
-        });
-        cx.update(|window, _| window.refresh());
-
-        fn is_expanded(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
-            chat.read_with(cx, |chat, _| {
-                matches!(chat.entries.last(), Some(Entry::Thought { open, .. }) if open.get(false))
-            })
-        }
-        assert!(!is_expanded(&chat, cx), "a new thought starts collapsed");
-
-        let toggle = cx
-            .debug_bounds("thought-toggle-0")
-            .expect("thought toggle is rendered");
-        cx.simulate_click(toggle.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            is_expanded(&chat, cx),
-            "clicking the toggle expands the thought"
-        );
-
-        let toggle = cx
-            .debug_bounds("thought-toggle-0")
-            .expect("thought toggle stays rendered while expanded");
-        cx.simulate_click(toggle.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
-    }
-
-    /// P91 part 2: `ToolCallStarted` carries the widened fields straight
-    /// into `Entry::ToolCall`, and the card starts collapsed like a
-    /// thought — the reader opts into the detail, live or historical.
-    #[gpui::test]
-    async fn tool_call_started_carries_widened_fields_and_starts_collapsed(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            )
-        });
-        chat.update(cx, |chat, cx| {
-            chat.handle_event(
-                AcpEvent::ToolCallStarted {
-                    id: "tool-1".into(),
-                    title: "Edit file".into(),
-                    status: "InProgress".into(),
-                    kind: "Edit".into(),
-                    content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
-                        path: PathBuf::from("src/lib.rs"),
-                        old_text: Some("old\n".into()),
-                        new_text: "new\n".into(),
-                    })],
-                    locations: vec![ToolCallLocationInfo {
-                        path: PathBuf::from("src/lib.rs"),
-                        line: Some(3),
-                    }],
-                    raw_input: Some("{\"path\":\"src/lib.rs\"}".into()),
-                    raw_output: Some("{\"bytesWritten\":12}".into()),
-                },
-                cx,
-            );
-        });
-        chat.read_with(cx, |chat, _| match chat.entries.last() {
-            Some(Entry::ToolCall {
-                id,
-                title,
-                status,
-                kind,
-                content,
-                locations,
-                raw_input,
-                raw_output,
-                expanded,
-                duration_ms,
-            }) => {
-                assert_eq!(id, "tool-1");
-                assert_eq!(title, "Edit file");
-                assert_eq!(status, "InProgress");
-                assert_eq!(kind, "Edit");
-                assert_eq!(content.len(), 1);
-                assert_eq!(locations.len(), 1);
-                assert!(raw_input.is_some());
-                assert!(raw_output.is_some());
-                assert!(!expanded, "a new tool call starts collapsed");
-                assert!(duration_ms.is_none(), "a running tool call has no duration");
-            }
-            other => panic!("expected a widened ToolCall entry, got {other:?}"),
-        });
     }
 
     /// A status-only `ToolCallUpdated` (the common case — a spinner or
@@ -17344,36 +15949,6 @@ let answer = 42;
         );
     }
 
-    /// A long title truncates in the row's detail slot instead of wrapping:
-    /// the row stays one line tall.
-    #[gpui::test]
-    async fn a_tool_row_with_a_long_title_stays_one_line(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.push_entry(test_tool_call("short"));
-            let mut long = test_tool_call("long");
-            if let Entry::ToolCall { title, kind, .. } = &mut long {
-                *title = format!("{}file.rs", "directory ".repeat(80));
-                *kind = "Execute".into();
-            }
-            chat.push_entry(long);
-            // The row is the subject, so the turn streams and the zone
-            // opens by itself.
-            chat.streaming = true;
-            chat
-        });
-        refresh_frame(cx);
-        let short = cx.debug_bounds("tool-call-toggle-0").expect("short row");
-        let long = cx.debug_bounds("tool-call-toggle-1").expect("long row");
-        assert_eq!(
-            short.size.height, long.size.height,
-            "the detail truncates, the row does not grow"
-        );
-        assert!(long.right() <= cx.debug_bounds("tool-run-0").unwrap().right());
-    }
-
     /// A title with newlines draws as one truncating line: the row stays the
     /// same height as a single-line title.
     #[gpui::test]
@@ -17402,43 +15977,6 @@ let answer = 42;
             single.size.height, multi.size.height,
             "a multi-line title does not grow the row"
         );
-    }
-
-    #[gpui::test]
-    async fn transcript_only_lays_out_rows_near_the_viewport(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            for index in 0..100 {
-                chat.push_entry(Entry::User {
-                    text: format!("Transcript entry {index}"),
-                    at: None,
-                });
-            }
-            chat
-        });
-        cx.update(|window, _| window.refresh());
-
-        let (entry_count, first_bounds, last_bounds) = chat.read_with(cx, |chat, _| {
-            (
-                chat.list_state.item_count(),
-                chat.list_state.bounds_for_item(0),
-                chat.list_state.bounds_for_item(99),
-            )
-        });
-        assert_eq!(entry_count, 100);
-        assert!(
-            first_bounds.is_none(),
-            "rows outside the viewport should not be laid out"
-        );
-        assert!(last_bounds.is_some(), "the tail should be laid out");
     }
 
     #[gpui::test]
@@ -17628,25 +16166,6 @@ let answer = 42;
         });
     }
 
-    #[gpui::test]
-    async fn connecting_state_renders_while_startup_is_in_flight(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.connecting = true;
-            chat
-        });
-        cx.update(|window, _| window.refresh());
-        assert!(cx.debug_bounds("chat-connecting").is_some());
-    }
-
     /// F-CHAT-09: typing `/` through the real keystroke path opens the slash
     /// popup fed by the agent's advertised commands; a filter prefix narrows
     /// it; up/down move the keyboard selection; Enter accepts the selected
@@ -17797,60 +16316,6 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
             Some(0)
         );
-    }
-
-    /// The command popup is a card of its own, floated above the composer.
-    /// It used to be anchored 43px up from the composer's *bottom* — inside
-    /// the card, in the card's own `surface_raised` fill — so it covered the
-    /// input rows and, being the same colour as what it lay on, read as a
-    /// transparent veil. A row carries only the command name; the
-    /// description is its tooltip, so a row is exactly one line tall.
-    #[gpui::test]
-    async fn slash_popup_floats_above_the_composer_with_single_line_rows(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        focus_and_type(cx, "/");
-        refresh_frame(cx);
-        let popup = cx
-            .debug_bounds("slash-popup")
-            .expect("typing / opens the command popup");
-        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
-        assert!(
-            popup.bottom() <= composer.top(),
-            "the popup must float above the composer, never over its input rows \
-             (popup bottom {:?}, composer top {:?})",
-            popup.bottom(),
-            composer.top()
-        );
-
-        let row = cx
-            .debug_bounds("slash-option-cr")
-            .expect("a command row is drawn");
-        let name = cx
-            .debug_bounds("slash-option-name-cr")
-            .expect("the row draws the command name");
-        // One line: bezel's `menu_row` adds 6px of vertical padding to the
-        // name's line box; anything meaningfully taller means a second line
-        // — the description — crept back into the row.
-        assert!(
-            row.size.height <= name.size.height + px(13.0),
-            "a row is the command name alone, one line tall \
-             (row {:?}, name {:?})",
-            row.size.height,
-            name.size.height
-        );
-    }
-
-    #[test]
-    fn slash_option_tooltip_carries_the_description_and_skips_a_blank_one() {
-        assert_eq!(
-            slash_option_tooltip("  Deep research harness.  ").as_deref(),
-            Some("Deep research harness.")
-        );
-        assert_eq!(slash_option_tooltip(""), None);
-        assert_eq!(slash_option_tooltip("   "), None);
     }
 
     /// F-CHAT-10: typing `@` opens the mention popup fed by a real bounded
@@ -18487,53 +16952,6 @@ let answer = 42;
         );
     }
 
-    /// The chevron has to stay beside the name it qualifies.
-    ///
-    /// The chip used to carry `flex_1`, stretching the pill across the whole
-    /// control row, and the name div carried it too, so the name ate the
-    /// slack and the chip's own chevron landed at the row's right edge --
-    /// next to the overflow button, ~200px from the model it belonged to. A
-    /// blind review of the composer read it as "a lone chevron floating
-    /// mid-row, orphaned from whatever it belongs to", and read the model
-    /// value as a caption rather than something clickable.
-    #[gpui::test]
-    async fn the_model_chips_chevron_stays_beside_the_model_name(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| {
-            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
-        });
-        refresh_frame(cx);
-        focus_and_type(cx, "hi");
-        cx.simulate_keystrokes("enter");
-        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
-        refresh_frame(cx);
-
-        let chip = cx
-            .debug_bounds("model-chip")
-            .expect("the model chip is drawn");
-        let chevron = cx
-            .debug_bounds("model-chip-chevron")
-            .expect("the chip's chevron is drawn");
-
-        // The chevron sits inside the pill, near its right edge -- which is
-        // only true when the pill is sized to its content.
-        let trailing_gap = f32::from(chip.right() - chevron.right());
-        assert!(
-            trailing_gap < 24.0,
-            "the chevron must sit at the pill's own right edge, not be stranded              by a stretched pill: gap {trailing_gap}px"
-        );
-
-        // And the pill must not span the control row. The composer is far
-        // wider than a model name; a pill claiming most of it is the bug.
-        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
-        assert!(
-            f32::from(chip.size.width) < f32::from(composer.size.width) * 0.6,
-            "the pill must hug its content, not the row: pill {}px of {}px",
-            f32::from(chip.size.width),
-            f32::from(composer.size.width)
-        );
-    }
-
     /// F-CHAT-17: the slider carries the agent's advertised effort levels,
     /// the session's current one included, and picking one updates both the
     /// selection and the label on the chip.
@@ -18698,45 +17116,6 @@ let answer = 42;
     }
 
     #[gpui::test]
-    async fn a_finished_background_task_repeats_the_clis_own_sentence(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        cx.run_until_parked();
-        chat.update(cx, |chat, cx| {
-            chat.apply_notice(SessionNotice::BackgroundTaskEnded {
-                summary: "Background command \"build\" completed (exit code 0)".into(),
-            });
-            cx.notify();
-        });
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("notice-task").is_some());
-        let text = chat.read_with(cx, |chat, _| match chat.entries.last() {
-            Some(Entry::Notice { text, .. }) => text.clone(),
-            other => panic!("expected a notice entry, got {other:?}"),
-        });
-        // The CLI already wrote this for a reader; rewording it would only
-        // risk saying something the task did not do.
-        assert_eq!(text, "Background command \"build\" completed (exit code 0)");
-    }
-
-    #[gpui::test]
-    async fn a_rate_limit_warns_and_names_the_window(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        cx.run_until_parked();
-        chat.update(cx, |chat, cx| {
-            chat.apply_notice(SessionNotice::RateLimited {
-                status: "rejected".into(),
-                window: Some("five_hour".into()),
-                resets_at: None,
-            });
-            cx.notify();
-        });
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("notice-warning").is_some());
-    }
-
-    #[gpui::test]
     async fn only_what_happened_to_the_conversation_survives_a_reopen(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
@@ -18768,32 +17147,6 @@ let answer = 42;
         // and reopening the tab tomorrow under it would be a lie — the same
         // reason a rewind card is not persisted either.
         assert_eq!(kept, vec![true, true, false]);
-    }
-
-    #[gpui::test]
-    async fn the_toolbar_counts_only_the_tasks_still_running(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        cx.run_until_parked();
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("background-tasks-chip").is_none());
-
-        chat.update(cx, |chat, cx| {
-            chat.background_tasks = 2;
-            cx.notify();
-        });
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("background-tasks-chip").is_some());
-
-        chat.update(cx, |chat, cx| {
-            chat.background_tasks = 0;
-            cx.notify();
-        });
-        refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("background-tasks-chip").is_none(),
-            "nothing is running, so there is nothing to count"
-        );
     }
 
     #[gpui::test]
@@ -18832,84 +17185,6 @@ let answer = 42;
         assert!(
             cx.debug_bounds("fast-mode-chip").is_none(),
             "a blocked chip is not also a live one"
-        );
-    }
-
-    #[gpui::test]
-    async fn the_effort_control_is_a_peer_of_the_model_not_a_caption(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| {
-            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
-        });
-        refresh_frame(cx);
-        focus_and_type(cx, "hi");
-        cx.simulate_keystrokes("enter");
-        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
-        refresh_frame(cx);
-
-        assert_effort_is_a_peer_of_the_model(cx);
-
-        // And it opens its own control, rather than being a label the user
-        // has to know is hidden behind the model chip.
-        let effort = cx
-            .debug_bounds("effort-chip")
-            .expect("the effort pill is drawn");
-        cx.simulate_click(effort.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("effort-picker").is_some(),
-            "clicking the effort pill must open the effort control"
-        );
-        assert!(
-            cx.debug_bounds("effort-slider").is_some(),
-            "effort is a scale, so the control is a slider"
-        );
-        assert!(
-            cx.debug_bounds("model-picker").is_none(),
-            "the effort pill opens its own picker, not the model's"
-        );
-    }
-
-    /// The context meter is a ring and its name, and no longer a number.
-    ///
-    /// The number left the row to make space for the effort control beside
-    /// the model. What it measured has to survive that: the ring still shows
-    /// the fill and still turns to the danger tone past 80%, its name still
-    /// sits beside it -- a bare ring nobody can read was the state this row
-    /// deliberately left -- and the exact figure is one click away in the
-    /// popover, which spells out "N% of context used".
-    #[gpui::test]
-    async fn the_context_meter_names_what_it_measures(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| chat.context_usage.is_some());
-        refresh_frame(cx);
-
-        let ring = cx
-            .debug_bounds("context-ring")
-            .expect("the context ring is drawn");
-        let label = cx
-            .debug_bounds("context-label")
-            .expect("the context meter is labelled");
-
-        assert!(
-            f32::from(label.left()) >= f32::from(ring.right()),
-            "the label follows the ring: label left {}px vs ring right {}px",
-            f32::from(label.left()),
-            f32::from(ring.right())
-        );
-        for gone in ["context-percent", "context-percent-unknown"] {
-            assert!(
-                cx.debug_bounds(gone).is_none(),
-                "the percentage left the row, but {gone} is still drawn"
-            );
-        }
-
-        // The figure itself is not lost, only moved.
-        cx.simulate_click(ring.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("context-popover").is_some(),
-            "the ring still opens the popover that carries the number"
         );
     }
 
@@ -19819,46 +18094,6 @@ let answer = 42;
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.attachments.is_empty()),
             "Send consumes the pasted attachment"
-        );
-    }
-
-    /// macOS copies with Cmd+C: the transcript's selection must answer the
-    /// platform chord, not only the Linux ctrl-c.
-    #[gpui::test]
-    async fn cmd_c_copies_the_transcript_selection(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(LaunchSpec::Acp(AgentCommand::new(
-                    "/definitely/missing/sirio-acp-agent",
-                ))),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.push_entry(Entry::User {
-                text: "user question".into(),
-                at: None,
-            });
-            chat
-        });
-        refresh_frame(cx);
-        chat.update(cx, |chat, _| {
-            chat.transcript_selection = Some(TranscriptSelection {
-                anchor: 0,
-                head: "user question".len(),
-            });
-        });
-        cx.update(|window, cx| {
-            let focus = chat.read(cx).transcript_focus.clone();
-            window.focus(&focus, cx);
-        });
-        cx.simulate_keystrokes("cmd-c");
-        cx.run_until_parked();
-        assert_eq!(
-            cx.cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("user question".into()),
-            "Cmd+C copies the transcript selection"
         );
     }
 

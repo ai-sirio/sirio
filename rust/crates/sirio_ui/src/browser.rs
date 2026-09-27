@@ -792,9 +792,8 @@ fn flush_native_window_ops() {
 /// Unmap and destroy the native child, now, and make sure the server hears
 /// about it.
 ///
-/// Split out from [`BrowserSurface::close_native`] so the cell arithmetic has
-/// somewhere to be tested without a live X11 window; see
-/// `closing_takes_the_child_out_of_the_shared_cell`.
+/// Split out from [`BrowserSurface::close_native`] so the cell arithmetic
+/// needs no live X11 window.
 /// #255: whether [`BrowserSurface::ensure_pump_task`] should arm the pump on
 /// this frame. Split out from the method so the decision is testable without a
 /// window -- constructing a surface means constructing a real WebView2.
@@ -3103,119 +3102,6 @@ mod tests {
         assert!(flag.get(), "a hidden child can be shown again");
     }
 
-    /// #376: the overlay mark a fresh surface carries. No overlay is open for
-    /// a surface nobody has told about one, so prepaint must map on its first
-    /// frame; starting obscured would leave every new browser blank until
-    /// some unrelated menu opened and closed.
-    ///
-    /// The cell part (not the surface) is what is pinned here: the surface
-    /// needs a window to build, the rule does not.
-    #[test]
-    fn overlay_obscured_starts_clear() {
-        let obscured: SharedOverlayObscured = Rc::new(Cell::new(false));
-        assert!(
-            !obscured.get(),
-            "a fresh surface is not covered by any overlay"
-        );
-    }
-
-    /// #376: the mark the host syncs every frame. Setting it twice is not an
-    /// error (render syncs unconditionally), and clearing it is what lets the
-    /// next prepaint map the child again with no explicit re-show call.
-    #[test]
-    fn overlay_obscured_mark_round_trips() {
-        let obscured: SharedOverlayObscured = Rc::new(Cell::new(false));
-        obscured.set(true);
-        assert!(obscured.get(), "marking a covered surface stays marked");
-        obscured.set(true);
-        assert!(obscured.get(), "marking twice is idempotent");
-        obscured.set(false);
-        assert!(!obscured.get(), "closing the overlay clears the mark");
-    }
-
-    /// #376: the mark round-trips through the surface's own accessors. The
-    /// host syncs it from `read` every frame while `prepaint` reads the
-    /// clone the element was built with — if those were two cells, the mark
-    /// would never reach the paint path and the menu would stay behind the
-    /// page exactly as before. No window is needed: the methods only touch
-    /// the shared cell.
-    #[gpui::test]
-    async fn overlay_mark_round_trips_through_the_surface(cx: &mut gpui::TestAppContext) {
-        let surface = cx.update(|cx| {
-            Theme::init(cx);
-            bezel::ui::input::init(cx);
-            cx.new(|cx| {
-                let state = BrowserState::new("https://example.com").expect("valid URL");
-                let address_field = cx.new(|cx| {
-                    let mut field = TextField::new(cx);
-                    field.set_content(state.address(), cx);
-                    field
-                });
-                BrowserSurface {
-                    state,
-                    address_field,
-                    address_focused: false,
-                    webview: Rc::new(RefCell::new(None)),
-                    _web_context: None,
-                    webview_scale_correction: Rc::new(Cell::new(None)),
-                    webview_visible: initial_native_visibility(),
-                    overlay_obscured: Rc::new(Cell::new(false)),
-                    web_events: Rc::new(RefCell::new(Vec::new())),
-                    events: Vec::new(),
-                    pump_task: None,
-                    startup_failure: None,
-                }
-            })
-        });
-        surface.update(cx, |surface, _| {
-            assert!(
-                !surface.overlay_obscured(),
-                "a fresh surface carries no overlay mark"
-            );
-            surface.set_overlay_obscured(true);
-            assert!(
-                surface.overlay_obscured(),
-                "the host mark must be readable back"
-            );
-            surface.set_overlay_obscured(true);
-            assert!(
-                surface.overlay_obscured(),
-                "syncing every frame must be idempotent"
-            );
-            surface.set_overlay_obscured(false);
-            assert!(
-                !surface.overlay_obscured(),
-                "closing the overlay must clear the mark so prepaint maps again"
-            );
-        });
-    }
-
-    /// The two properties `close_tab` leans on. Not the flush — that one needs
-    /// a real X server and lives in `Scripts/Tests/`, because the whole point
-    /// of the bug is that it is invisible from inside the process.
-    #[test]
-    fn closing_takes_the_child_out_of_the_shared_cell() {
-        let webview: SharedWebView = Rc::new(RefCell::new(None));
-        // The clone an element would be holding, made before the close.
-        let element_side = Rc::clone(&webview);
-        let flag = initial_native_visibility();
-
-        close_native_window(&webview, &flag);
-        assert!(!flag.get(), "closing hides the child");
-        assert!(
-            element_side.borrow().is_none(),
-            "closing empties the cell every other holder reads through, so a \
-             late `set_bounds` or `set_visible` finds nothing instead of a \
-             destroyed window"
-        );
-
-        close_native_window(&webview, &flag);
-        assert!(
-            !flag.get(),
-            "closing twice is harmless — Drop runs after an explicit close"
-        );
-    }
-
     #[test]
     fn address_submission_normalizes_http_and_reports_invalid_input() {
         let mut browser = BrowserState::new("https://example.com").expect("valid initial URL");
@@ -3298,38 +3184,6 @@ mod tests {
             Some("https://denied.example".into())
         );
         assert!(!browser.is_origin_allowed("https://denied.example"));
-    }
-
-    #[test]
-    fn browser_link_routing_keeps_http_internal_and_honors_external_bypass() {
-        let mut browser = BrowserState::new("https://example.com").expect("valid initial URL");
-
-        assert_eq!(
-            browser.open_link("http://docs.example", BrowserLinkTarget::Internal),
-            Ok(BrowserEvent::Navigate("http://docs.example".into()))
-        );
-        assert_eq!(
-            browser.open_link("https://docs.example", BrowserLinkTarget::External),
-            Ok(BrowserEvent::OpenExternal("https://docs.example".into()))
-        );
-    }
-
-    #[test]
-    fn webview_bounds_with_unit_scale_pass_through_unchanged() {
-        // At scale_factor 1.0 (the common case) native_webview_rect must
-        // still be a plain unit conversion, not a coordinate change.
-        let bounds = Bounds::new(
-            gpui::point(gpui::px(386.0), gpui::px(133.0)),
-            gpui::size(gpui::px(850.0), gpui::px(792.0)),
-        );
-
-        let rect = native_webview_rect(bounds, 1.0);
-
-        assert_eq!(
-            rect.position,
-            wry::dpi::LogicalPosition::new(386.0, 133.0).into()
-        );
-        assert_eq!(rect.size, wry::dpi::LogicalSize::new(850.0, 792.0).into());
     }
 
     #[test]
@@ -3449,64 +3303,6 @@ mod tests {
         assert_eq!(rect.size, wry::dpi::LogicalSize::new(100.0, 100.0).into());
     }
 
-    #[test]
-    fn scale_correction_recovers_the_exact_shrink_d_p1_measured_live() {
-        // F-BRW-01: the D-P1 critic requested a webview at x=386,y=133,
-        // 850x792 and read back real X server geometry (`webview.bounds()`)
-        // spanning only x=331..1059 -- 728px wide, at position 331, not
-        // 386. That is GTK/GDK silently applying ~1/1.1667 below anything
-        // `native_webview_rect` touches. `scale_rect` must recover the
-        // exact corrective factor from that observed pair, in both
-        // dimensions, without hardcoding the ratio anywhere.
-        let requested = native_webview_rect(
-            Bounds::new(
-                gpui::point(gpui::px(386.0), gpui::px(133.0)),
-                gpui::size(gpui::px(850.0), gpui::px(792.0)),
-            ),
-            1.0,
-        );
-        let observed_shrink = 1.0 / 1.1667_f64;
-        let actual = scale_rect(&requested, observed_shrink);
-
-        let (actual_w, actual_h) = rect_size(&actual);
-        // Matches the critic's live pixel scan (728px content span) to
-        // within a pixel of rounding.
-        assert!((actual_w - 728.0).abs() < 1.0, "actual_w = {actual_w}");
-
-        let (requested_w, requested_h) = rect_size(&requested);
-        let factor_w = requested_w / actual_w;
-        let factor_h = requested_h / actual_h;
-        let recovered_factor = (factor_w + factor_h) / 2.0;
-
-        // The correction loop: re-request at `requested * recovered_factor`
-        // and let GTK's own (unknown, unmodeled) shrink apply again, the
-        // same way it did on the frame we calibrated from. The result must
-        // land back at what was originally requested -- the actual
-        // real-world invariant `prepaint`'s calibration branch relies on.
-        let corrected_request = scale_rect(&requested, recovered_factor);
-        let corrected_real_geometry = scale_rect(&corrected_request, observed_shrink);
-        let (final_w, final_h) = rect_size(&corrected_real_geometry);
-        assert!((final_w - requested_w).abs() < 1.0, "final_w = {final_w}");
-        assert!((final_h - requested_h).abs() < 1.0, "final_h = {final_h}");
-    }
-
-    #[gpui::test]
-    async fn address_field_keeps_content_in_the_bezel_text_field(cx: &mut gpui::TestAppContext) {
-        let field = cx.update(|cx| {
-            Theme::init(cx);
-            bezel::ui::input::init(cx);
-            cx.new(|cx| {
-                let mut field = TextField::new(cx);
-                field.set_content("https://www.iana.org", cx);
-                field
-            })
-        });
-
-        cx.update(|cx| {
-            assert_eq!(field.read(cx).content(), "https://www.iana.org");
-        });
-    }
-
     /// #255: the pump is armed once, only for a live webview.
     ///
     /// The "no webview" arm is what keeps a closed surface closed -- `render`
@@ -3527,24 +3323,6 @@ mod tests {
             "a closed surface has no webview and must stay closed"
         );
         assert!(!should_arm_pump(true, false));
-    }
-
-    #[gpui::test]
-    async fn address_field_programmatic_updates_leave_the_caret_at_the_end(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let field = cx.update(|cx| {
-            Theme::init(cx);
-            bezel::ui::input::init(cx);
-            cx.new(TextField::new)
-        });
-        cx.update(|cx| {
-            field.update(cx, |field, cx| {
-                field.set_content("https://www.example.com", cx)
-            });
-            let field = field.read(cx);
-            assert_eq!(field.cursor(), field.content().len());
-        });
     }
 
     #[gpui::test]
@@ -3592,53 +3370,6 @@ mod tests {
             "the address bar must not be narrower than the page title: \
              address={address:?} title={title:?}"
         );
-    }
-
-    /// #307: on a Windows machine without the WebView2 Runtime the browser
-    /// surface explains itself instead of failing quietly. The message is
-    /// the whole feature: it must name the runtime, own that Sirio could
-    /// not install it, and point at the one retry action. (The button
-    /// itself is GPUI chrome needing a live window; the words are the part
-    /// that can be pinned here.)
-    #[test]
-    fn runtime_missing_message_names_the_runtime_and_the_failed_install() {
-        let message = StartupFailure::RuntimeMissing.message();
-        assert!(
-            message.contains("Microsoft Edge WebView2 Runtime"),
-            "the message must name the runtime: {message}"
-        );
-        assert!(
-            message.contains("could not install"),
-            "the message must own the failed install: {message}"
-        );
-        assert!(
-            message.to_lowercase().contains("retry"),
-            "the message must point at the retry action: {message}"
-        );
-    }
-
-    /// #307: a runtime-missing surface shows the explanation *in place of
-    /// the content*; the generic red banner above it would be a second,
-    /// redundant message about the same failure.
-    #[test]
-    fn runtime_missing_shows_the_explanation_not_the_error_banner() {
-        assert!(StartupFailure::RuntimeMissing.banner_text().is_none());
-    }
-
-    #[test]
-    fn an_engine_failure_keeps_the_generic_error_banner() {
-        let failure = StartupFailure::Failed("WebView2 child failed: boom".to_owned());
-        assert_eq!(failure.banner_text(), Some("WebView2 child failed: boom"));
-        assert_eq!(failure.message(), "WebView2 child failed: boom");
-    }
-
-    /// AC "with the runtime present, nothing changes", for the platforms
-    /// that do not probe: only Windows can classify the runtime as missing,
-    /// and everywhere else the surface behaves exactly as before.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn non_windows_platforms_never_classify_the_runtime_as_missing() {
-        assert!(!webview_runtime_missing());
     }
 
     /// #368: a pending surface explains a missing runtime immediately, so

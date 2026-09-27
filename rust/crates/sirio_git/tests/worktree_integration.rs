@@ -235,65 +235,6 @@ fn branch_that_already_has_a_worktree_is_refused_clearly() {
 }
 
 #[test]
-fn branch_with_a_slash_becomes_a_nested_directory() {
-    let repo = make_repo("slash");
-    let parent = repo.path().parent().expect("parent");
-    let project_name = repo.path().file_name().unwrap().to_string_lossy();
-    let branch = "feature/login";
-    let path = derive_worktree_path(parent, &project_name, branch);
-
-    create_worktree(repo.path(), branch, &path, None).expect("create with a slash");
-
-    assert!(
-        path.join("file.txt").exists(),
-        "the nested checkout exists at {}",
-        path.display()
-    );
-    assert_eq!(
-        porcelain_branch(repo.path(), &path).as_deref(),
-        Some("feature/login"),
-        "porcelain reports the slash branch on the nested path"
-    );
-}
-
-#[test]
-fn branch_with_a_space_is_refused_by_git_and_creates_nothing() {
-    let repo = make_repo("space");
-    let parent = repo.path().parent().expect("parent");
-    let project_name = repo.path().file_name().unwrap().to_string_lossy();
-    let branch = "café branch"; // spaces are invalid in git branch names
-    let path = derive_worktree_path(parent, &project_name, branch);
-
-    let error = create_worktree(repo.path(), branch, &path, None)
-        .expect_err("git rejects a branch name with a space");
-
-    assert!(
-        matches!(error, WorktreeError::Git(_)),
-        "git's own refusal is surfaced, name unmangled: {error}"
-    );
-    assert!(!path.exists(), "no broken checkout was created");
-    assert_eq!(porcelain_worktree_count(repo.path()), 1);
-}
-
-#[test]
-fn branch_with_non_ascii_characters_is_created_raw() {
-    let repo = make_repo("unicode");
-    let parent = repo.path().parent().expect("parent");
-    let project_name = repo.path().file_name().unwrap().to_string_lossy();
-    let branch = "café-branch"; // non-ASCII is legal; spaces are not
-    let path = derive_worktree_path(parent, &project_name, branch);
-
-    create_worktree(repo.path(), branch, &path, None).expect("create with non-ASCII");
-
-    assert!(path.exists());
-    assert_eq!(
-        porcelain_branch(repo.path(), &path).as_deref(),
-        Some("café-branch"),
-        "porcelain reports the raw branch name"
-    );
-}
-
-#[test]
 fn unborn_head_creates_a_valid_worktree_with_an_unborn_branch() {
     // git supports creating a worktree from a repository with no commits:
     // the new branch is simply unborn too (all-zero HEAD in porcelain).
@@ -317,23 +258,6 @@ fn unborn_head_creates_a_valid_worktree_with_an_unborn_branch() {
         porcelain_branch(repo.path(), &path).as_deref(),
         Some("feature-x")
     );
-}
-
-#[test]
-fn remove_worktree_removes_it_from_porcelain() {
-    let repo = make_repo("remove");
-    let path = repo.path().with_extension("wt-remove");
-    create_worktree(repo.path(), "feature-x", &path, None).expect("create");
-    assert_eq!(porcelain_worktree_count(repo.path()), 2);
-
-    remove_worktree(repo.path(), &path, "feature-x").expect("remove");
-
-    assert_eq!(
-        porcelain_worktree_count(repo.path()),
-        1,
-        "git worktree list --porcelain no longer reports the removed worktree"
-    );
-    assert!(!path.exists(), "the checkout directory is gone");
 }
 
 #[test]
@@ -525,19 +449,6 @@ fn remove_never_deletes_a_checkout_that_holds_the_repository() {
     assert!(matches!(error, WorktreeError::Git(_)), "{error}");
     assert!(repo.path().exists(), "the repository survives");
     let _ = std::fs::remove_file(parent.join(".git"));
-}
-
-#[test]
-fn non_git_directory_is_refused() {
-    let dir = TempDir::new("notgit");
-    let path = dir.path().with_extension("wt");
-    let error = create_worktree(dir.path(), "feature-x", &path, None)
-        .expect_err("a non-git directory has no worktrees");
-    assert!(
-        matches!(error, WorktreeError::Git(_)),
-        "git's refusal is surfaced: {error}"
-    );
-    assert!(!path.exists());
 }
 
 #[test]

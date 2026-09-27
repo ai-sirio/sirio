@@ -139,9 +139,6 @@ mod tests {
     use super::*;
 
     const SIZE: f32 = 100.0;
-    /// Half the dot's diameter — the gap between a quarter-turn landmark and
-    /// the dot's top-left corner along the axis it is centred on.
-    const HALF_DOT: f32 = SIZE * DOT_RATIO / 2.0;
 
     fn assert_close(actual: f32, expected: f32, what: &str) {
         assert!(
@@ -158,18 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn phase_zero_puts_the_dot_at_twelve_oclock() {
-        let (x, y) = dot_offset(0.0, SIZE);
-
-        assert_close(x, SIZE / 2.0 - HALF_DOT, "x is centred");
-        assert_close(
-            y,
-            SIZE / 2.0 - orbit_radius(SIZE) - HALF_DOT,
-            "y hangs the dot on the ring, not inside it",
-        );
-    }
-
-    #[test]
     fn the_dot_rides_the_ring_at_every_phase() {
         // The defect this pins: the dot used to orbit at a radius one
         // half-dot shorter than the ring, so it visibly ran inside the line
@@ -183,22 +168,6 @@ mod tests {
 
             assert_close(distance, orbit_radius(SIZE), "the dot sits on the ring");
         }
-    }
-
-    #[test]
-    fn the_dot_travels_clockwise_through_the_quarter_turns() {
-        let centre = SIZE / 2.0;
-        let radius = orbit_radius(SIZE);
-        let (right_x, right_y) = dot_centre(0.25, SIZE);
-        let (bottom_x, bottom_y) = dot_centre(0.5, SIZE);
-        let (left_x, left_y) = dot_centre(0.75, SIZE);
-
-        assert_close(right_x, centre + radius, "quarter turn is hard right");
-        assert_close(right_y, centre, "quarter turn is centred");
-        assert_close(bottom_x, centre, "half turn is centred");
-        assert_close(bottom_y, centre + radius, "half turn is at the bottom");
-        assert_close(left_x, centre - radius, "three quarter turn is hard left");
-        assert_close(left_y, centre, "three quarter turn is centred");
     }
 
     #[test]

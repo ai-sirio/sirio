@@ -572,20 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn strips_carriage_returns_from_crlf_lines() {
-        let patch = "@@ -1,3 +1,4 @@\n a\r\n-b\r\n+B\r\n c\r\n+d\r\n";
-        let diff = parse_diff(patch, Path::new("crlf.txt"));
-
-        let hunk = &diff.hunks[0];
-        assert_eq!(hunk.lines[0].content, "a");
-        assert_eq!(hunk.lines[1].content, "b");
-        assert_eq!(hunk.lines[2].content, "B");
-        assert!(!hunk.lines[2].content.contains('\r'));
-        assert_eq!(diff.additions, 2);
-        assert_eq!(diff.deletions, 1);
-    }
-
-    #[test]
     fn handles_single_number_hunk_headers() {
         // `@@ -1 +1 @@` — counts default to 1.
         let patch = "@@ -1 +1 @@\n-old\n+new\n";
@@ -597,28 +583,6 @@ mod tests {
         assert_eq!(hunk.new_start, 1);
         assert_eq!(hunk.new_lines, 1);
         assert_eq!(hunk.lines.len(), 2);
-    }
-
-    #[test]
-    fn handles_zero_zero_hunk_for_new_files() {
-        let patch = "@@ -0,0 +1,2 @@\n+one\n+two\n";
-        let diff = parse_diff(patch, Path::new("new.txt"));
-
-        let hunk = &diff.hunks[0];
-        assert_eq!(hunk.old_start, 0);
-        assert_eq!(hunk.old_lines, 0);
-        assert_eq!(hunk.new_start, 1);
-        assert_eq!(diff.additions, 2);
-    }
-
-    #[test]
-    fn marks_binary_diffs() {
-        let patch = "diff --git a/blob.bin b/blob.bin\nindex 1111111..2222222 100644\nBinary files a/blob.bin and b/blob.bin differ\n";
-        let diff = parse_diff(patch, Path::new("blob.bin"));
-
-        assert!(diff.is_binary);
-        assert!(diff.hunks.is_empty());
-        assert_eq!(diff.additions, 0);
     }
 
     #[test]

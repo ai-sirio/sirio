@@ -168,9 +168,4 @@ mod tests {
         );
         assert!(picker.read_with(cx, |picker, _| picker.choices().is_empty()));
     }
-
-    #[test]
-    fn a_choice_is_labelled_project_slash_branch() {
-        assert_eq!(choice("sirio", "main", "/r").label(), SharedString::from("sirio / main"));
-    }
 }

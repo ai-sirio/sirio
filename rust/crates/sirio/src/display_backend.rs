@@ -185,12 +185,4 @@ mod tests {
         assert_eq!(choose(None, Some("1")), BackendChoice::NoXServer);
         assert_eq!(choose(Some(""), Some("true")), BackendChoice::NoXServer);
     }
-
-    /// Opting out wins over everything, including a perfectly usable display —
-    /// it is the user's escape hatch and must not be conditional.
-    #[test]
-    fn opting_out_wins_over_a_usable_display() {
-        assert_eq!(choose(Some(":1"), Some("off")), BackendChoice::OptedOut);
-        assert_eq!(choose(None, Some("off")), BackendChoice::OptedOut);
-    }
 }

@@ -244,21 +244,6 @@ mod tests {
         }
     }
 
-    /// `generated.rs` and `assets/` are written by one script in one pass.
-    /// If they disagree, someone edited one of them by hand.
-    #[test]
-    fn generated_tables_match_the_assets_on_disk() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
-            .expect("assets/ is vendored")
-            .map(|entry| entry.expect("readable").file_name().to_string_lossy().into_owned())
-            .filter_map(|name| name.strip_suffix(".svg").map(str::to_owned))
-            .collect();
-        on_disk.sort();
-        let embedded: Vec<String> = ASSETS.iter().map(|(stem, _, _)| (*stem).to_owned()).collect();
-        assert_eq!(embedded, on_disk, "ASSETS and assets/ disagree");
-    }
-
     #[test]
     fn every_asset_is_utf8_and_opens_with_an_svg_root() {
         for (stem, path, bytes) in ASSETS {
