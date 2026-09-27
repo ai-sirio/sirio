@@ -31,6 +31,12 @@ Scripts/ci-linux.sh
 # prints each stage the probe reported.
 Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 
+# Live end-to-end test of the forge layer (sirio_forge): the token transport
+# and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
+# transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1
+# prints every probe answer.
+Scripts/Tests/test-forge-e2e.sh    # -> prints "FORGE E2E OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -89,7 +95,10 @@ sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram, sirio_forge
                                  stdio protocol as types and pure functions —
                                  no process, no channels — which is what lets
                                  sirio_agents, sirio_acp and sirio_usage all
-                                  take it without inverting the graph; sirio_forge is GitHub and GitLab change requests over GraphQL, with the token handed in by its caller)
+                                 take it without inverting the graph;
+                                 sirio_forge is GitHub and GitLab change
+                                 requests over GraphQL, with the token
+                                 handed in by its caller)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
@@ -171,6 +180,24 @@ app, and drives the real `Updater` through check → download → verify → app
 on Windows, the real silent spawn of the staged extensionless PE. Run it after any change
 to the three crates or to the compiled-in environment; `Scripts/ci-linux.sh` runs it as a
 stage.
+
+### Change requests: one GraphQL layer, two transports (`sirio_forge`)
+
+`sirio_forge` reads GitHub pull requests and GitLab merge requests —
+"change requests" — through GraphQL on both forges, and parses each forge's
+answers once. How the request travels is the user's *means*: `CliTransport`
+hands it to `gh api` / `glab api --include`, which own authentication;
+`TokenTransport` sends it with `ureq` and the platform certificate verifier,
+so a self-managed forge behind a corporate CA verifies. The token is handed
+in by the caller and never stored or logged by the crate. GitLab queries
+that carry a merge request summary have a baseline variant, used from the
+first `Field '…' doesn't exist` onward, because GraphQL rejects a whole
+query that names a field an older server lacks. `SIRIO_FORGE_TEST_ENDPOINTS`
+points hosts at loopback in debug builds only. `Scripts/Tests/test-forge-e2e.sh`
+proves the seam; `tests/forge_live.rs` notices the day a query stops
+matching the live schema (it SKIPs without credentials and is off both
+gates). `docs/superpowers/specs/2026-09-27-change-requests-design.md` has the
+design.
 
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 
