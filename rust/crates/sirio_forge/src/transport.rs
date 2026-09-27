@@ -5,7 +5,10 @@
 //! hands the request to `gh api` / `glab api`, which own authentication.
 //! Neither reads the answer — `graphql::execute` does that once for both.
 
+use std::io::{Read as _, Write as _};
+use std::process::{Command, Stdio};
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::error::ForgeError;
 use crate::model::Forge;
@@ -91,7 +94,11 @@ impl Transport for TokenTransport {
             .into_body()
             .read_to_vec()
             .map_err(|error| classify(&self.host, error))?;
-        Ok(ApiResponse { status, headers, body })
+        Ok(ApiResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }
 
@@ -172,4 +179,230 @@ fn test_base(host: &str) -> Option<String> {
         let _ = host;
         None
     }
+}
+
+const CLI_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Which forge CLI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliProgram {
+    Gh,
+    Glab,
+}
+
+impl CliProgram {
+    pub fn for_forge(forge: Forge) -> Self {
+        match forge {
+            Forge::GitHub => Self::Gh,
+            Forge::GitLab => Self::Glab,
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Gh => "gh",
+            Self::Glab => "glab",
+        }
+    }
+}
+
+/// The forge's own CLI, which owns authentication — its keyring, OAuth
+/// refresh, SSO. The request goes to
+/// `<cli> api --hostname H --include --method POST graphql --input -`, the
+/// body on stdin.
+#[derive(Debug)]
+pub struct CliTransport {
+    program: CliProgram,
+    host: String,
+}
+
+impl CliTransport {
+    pub fn new(program: CliProgram, host: &str) -> Self {
+        Self {
+            program,
+            host: host.to_string(),
+        }
+    }
+}
+
+impl Transport for CliTransport {
+    fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError> {
+        let _perf = sirio_perf::span("forge.cli_request", 0);
+        let args = [
+            "api",
+            "--hostname",
+            &self.host,
+            "--include",
+            "--method",
+            "POST",
+            "graphql",
+            "--input",
+            "-",
+        ];
+        let output =
+            run(self.program, &args, Some(body), CLI_TIMEOUT).map_err(|error| match error {
+                RunError::NotInstalled => ForgeError::NotInstalled {
+                    program: self.program.command(),
+                },
+                RunError::TimedOut => ForgeError::Network {
+                    host: self.host.clone(),
+                    detail: format!(
+                        "{} did not answer within {} s",
+                        self.program.command(),
+                        CLI_TIMEOUT.as_secs()
+                    ),
+                },
+                RunError::Io(detail) => ForgeError::Network {
+                    host: self.host.clone(),
+                    detail,
+                },
+            })?;
+        interpret_cli(self.program, &self.host, &output)
+    }
+}
+
+pub(crate) struct CliOutput {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+pub(crate) enum RunError {
+    NotInstalled,
+    TimedOut,
+    Io(String),
+}
+
+/// Runs a CLI with a deadline, feeding it `stdin`. Output drains on two
+/// threads so a chatty child cannot fill a pipe and stall; past the
+/// deadline the child is killed.
+pub(crate) fn run(
+    program: CliProgram,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<CliOutput, RunError> {
+    let mut child = Command::new(program.command())
+        .args(args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RunError::NotInstalled
+            } else {
+                RunError::Io(error.to_string())
+            }
+        })?;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let out_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        let _ = pipe.write_all(input);
+        // `pipe` drops here: the CLI sees the end of its input.
+    }
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(error) => return Err(RunError::Io(error.to_string())),
+        }
+    };
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    match status {
+        Some(status) => Ok(CliOutput {
+            code: status.code(),
+            stdout,
+            stderr,
+        }),
+        None => Err(RunError::TimedOut),
+    }
+}
+
+/// Both CLIs print an HTTP error's whole answer under `--include` and exit
+/// 1, so output that starts with a status line is an answer whatever the
+/// exit code. Otherwise `gh` exits 4 when it holds no credential for the
+/// host, and anything else failed to reach it.
+fn interpret_cli(
+    program: CliProgram,
+    host: &str,
+    output: &CliOutput,
+) -> Result<ApiResponse, ForgeError> {
+    if output.stdout.starts_with(b"HTTP/") {
+        return parse_included(&output.stdout).ok_or_else(|| ForgeError::UnexpectedResponse {
+            host: host.to_string(),
+            detail: format!("unreadable `{} --include` output", program.command()),
+        });
+    }
+    if program == CliProgram::Gh && output.code == Some(4) {
+        return Err(ForgeError::NotAuthenticated {
+            host: host.to_string(),
+        });
+    }
+    Err(ForgeError::Network {
+        host: host.to_string(),
+        detail: first_line(&output.stderr),
+    })
+}
+
+/// Splits `--include` output into status, headers and body. Both CLIs end
+/// the status line with `\n` and header lines with `\r\n` (gh 2.100, glab
+/// 1.119), so lines split on `\n` and lose a trailing `\r`.
+fn parse_included(raw: &[u8]) -> Option<ApiResponse> {
+    let mut rest = raw;
+    let mut lines = Vec::new();
+    loop {
+        let newline = rest.iter().position(|&byte| byte == b'\n')?;
+        let line = &rest[..newline];
+        rest = &rest[newline + 1..];
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break;
+        }
+        lines.push(String::from_utf8_lossy(line).into_owned());
+    }
+    let mut lines = lines.into_iter();
+    let status = lines.next()?.split_whitespace().nth(1)?.parse().ok()?;
+    let headers = lines
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    Some(ApiResponse {
+        status,
+        headers,
+        body: rest.to_vec(),
+    })
+}
+
+/// glab boxes its errors in blank lines and an `ERROR` banner.
+fn first_line(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "ERROR")
+        .unwrap_or("no output")
+        .to_string()
 }

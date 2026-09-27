@@ -92,7 +92,7 @@ unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITLAB_T
 
 echo "building the probe"
 (cd "$CARGO_DIR" && cargo build --quiet -p sirio_forge --example forge_probe)
-PROBE="$CARGO_DIR/target/debug/examples/forge_probe"
+PROBE="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/examples/forge_probe"
 
 PROBE_OUT=""
 PROBE_CODE=0
@@ -144,6 +144,58 @@ expect_line "ERR Network"
 probe "$PROBE" --forge github --host nowhere.test --project acme/widgets --token good viewer
 expect_code 20 "a host that is not a forge"
 expect_line "ERR NotFound"
+
+write_gh_hosts() { # dir credential
+  mkdir -p "$1"
+  printf 'github.localhost:\n    users:\n        fake-user:\n            oauth_token: %s\n    git_protocol: https\n    user: fake-user\n    oauth_token: %s\n' "$2" "$2" >"$1/hosts.yml"
+}
+write_glab_config() { # dir credential
+  mkdir -p "$1"
+  chmod 700 "$1"
+  printf 'hosts:\n    gitlab.localhost:\n        token: %s\n        api_protocol: http\n        api_host: 127.0.0.1:%s\n        git_protocol: https\n' "$2" "$GL_PORT" >"$1/config.yml"
+  chmod 600 "$1/config.yml"
+}
+write_gh_hosts "$WORK/gh-good" good
+write_gh_hosts "$WORK/gh-expired" expired
+write_glab_config "$WORK/glab-good" good
+write_glab_config "$WORK/glab-expired" expired
+# gh serves `github.localhost` over plain HTTP at api.github.localhost and
+# honours HTTP_PROXY, which routes it to the github fake. glab refuses a
+# port in --hostname, so its host key is portless and `api_host` carries the
+# fake's address.
+GH_CLI=(HTTP_PROXY="http://127.0.0.1:$GH_PORT")
+GH_CLI_ARGS=(--forge github --host github.localhost --project acme/widgets --cli)
+GL_CLI_ARGS=(--forge gitlab --host gitlab.localhost --project team/app --cli)
+
+echo "case 3: the real gh and glab carry the same requests, and keep their HTTP errors' meaning"
+if command -v gh >/dev/null; then
+  probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" viewer
+  expect_code 0 "gh viewer"
+  expect_line "VIEWER fake-user"
+  expect_log github "POST /graphql Viewer"
+  probe GH_CONFIG_DIR="$WORK/gh-expired" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" viewer
+  expect_code 20 "gh answering 401 with --include and exit 1"
+  expect_line "ERR NotAuthenticated"
+  probe GH_CONFIG_DIR="$WORK/gh-empty" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" viewer
+  expect_code 20 "gh holding no credential for the host (exit 4)"
+  expect_line "ERR NotAuthenticated"
+else
+  echo "SKIP: gh is not on PATH -- the gh transport was not exercised"
+fi
+if command -v glab >/dev/null; then
+  probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" "${GL_CLI_ARGS[@]}" viewer
+  expect_code 0 "glab viewer"
+  expect_line "VIEWER fake-user"
+  expect_log gitlab "POST /api/graphql CurrentUser"
+  probe GLAB_CONFIG_DIR="$WORK/glab-expired" "$PROBE" "${GL_CLI_ARGS[@]}" viewer
+  expect_code 20 "glab answering 401 with --include and exit 1"
+  expect_line "ERR NotAuthenticated"
+else
+  echo "SKIP: glab is not on PATH -- the glab transport was not exercised"
+fi
+probe PATH="$WORK/no-programs" "$PROBE" "${GH_CLI_ARGS[@]}" viewer
+expect_code 20 "a CLI that is not installed"
+expect_line "ERR NotInstalled"
 
 # Later cases are added above this line.
 

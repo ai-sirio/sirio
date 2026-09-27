@@ -25,4 +25,4 @@ pub use model::{
     Listing, PageCursor, Progress, ReviewOutcome, ReviewState, Reviewer, TimelineItem,
 };
 pub use target::{ForgeTarget, parse_remote_url};
-pub use transport::{ApiResponse, TokenTransport, Transport};
+pub use transport::{ApiResponse, CliProgram, CliTransport, TokenTransport, Transport};

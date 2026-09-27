@@ -16,7 +16,10 @@
 
 use std::process::ExitCode;
 
-use sirio_forge::{Forge, ForgeClient, ForgeError, ForgeTarget, TokenTransport, Transport};
+use sirio_forge::{
+    CliProgram, CliTransport, Forge, ForgeClient, ForgeError, ForgeTarget, TokenTransport,
+    Transport,
+};
 
 enum Failure {
     Usage(String),
@@ -121,7 +124,9 @@ fn client(args: &Args) -> Result<ForgeClient, Failure> {
         .flag("project")
         .ok_or_else(|| usage("--project P"))?
         .to_string();
-    let transport: Box<dyn Transport> = {
+    let transport: Box<dyn Transport> = if args.switch("cli") {
+        Box::new(CliTransport::new(CliProgram::for_forge(forge), &host))
+    } else {
         let token = args
             .flag("token")
             .ok_or_else(|| usage("--cli or --token T"))?;

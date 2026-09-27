@@ -78,7 +78,10 @@ fn interpret(host: &str, response: &ApiResponse) -> Result<Value, ForgeError> {
         let text = error.get("message").and_then(Value::as_str).unwrap_or("");
         // Only a missing repository or change request is "not found"; a
         // deeper NOT_FOUND (a deleted team among the reviewers) degrades.
-        let depth = error.get("path").and_then(Value::as_array).map_or(0, Vec::len);
+        let depth = error
+            .get("path")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
         if kind == "NOT_FOUND" && depth <= 2 {
             return Err(ForgeError::NotFound { host });
         }
@@ -129,7 +132,9 @@ fn rate_limit_reset(response: &ApiResponse) -> Option<i64> {
 /// `X-GitHub-SSO: required; url=https://github.com/orgs/…/sso?…`.
 fn sso_url(response: &ApiResponse) -> Option<String> {
     let value = response.header("x-github-sso")?;
-    value.split_once("url=").map(|(_, url)| url.trim().to_string())
+    value
+        .split_once("url=")
+        .map(|(_, url)| url.trim().to_string())
 }
 
 fn message(body: &[u8]) -> Option<String> {
@@ -166,7 +171,10 @@ pub(crate) fn u32_at(value: &Value, pointer: &str) -> u32 {
 }
 
 pub(crate) fn bool_at(value: &Value, pointer: &str) -> bool {
-    value.pointer(pointer).and_then(Value::as_bool).unwrap_or(false)
+    value
+        .pointer(pointer)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub(crate) fn time_at(value: &Value, pointer: &str) -> Option<i64> {
@@ -186,8 +194,12 @@ pub(crate) fn array_at<'a>(value: &'a Value, pointer: &str) -> Vec<&'a Value> {
 /// next page.
 pub(crate) fn next_cursor(value: &Value, connection: &str) -> Option<String> {
     let info = value.pointer(&format!("{connection}/pageInfo"))?;
-    info.get("hasNextPage").and_then(Value::as_bool).filter(|more| *more)?;
-    info.get("endCursor").and_then(Value::as_str).map(str::to_string)
+    info.get("hasNextPage")
+        .and_then(Value::as_bool)
+        .filter(|more| *more)?;
+    info.get("endCursor")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// A connection read with `last:` has older items before this page.
