@@ -17,8 +17,8 @@
 use std::process::ExitCode;
 
 use sirio_forge::{
-    CliProgram, CliTransport, Forge, ForgeClient, ForgeError, ForgeTarget, TokenTransport,
-    Transport,
+    CliProgram, CliTransport, Forge, ForgeClient, ForgeError, ForgeTarget, HostSetting, Means,
+    Resolution, SystemProbes, TokenTransport, Transport, resolve,
 };
 
 enum Failure {
@@ -145,10 +145,68 @@ fn run(args: &Args) -> Result<(), Failure> {
         .first()
         .cloned()
         .ok_or_else(|| usage("a command"))?;
+    if command == "resolve" {
+        return resolve_command(args);
+    }
     let client = client(args)?;
     match command.as_str() {
         "viewer" => println!("VIEWER {}", client.viewer()?),
         other => return Err(usage(&format!("unknown command {other}"))),
+    }
+    Ok(())
+}
+
+fn forge_word(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => "github",
+        Forge::GitLab => "gitlab",
+    }
+}
+
+/// `resolve --host H [--setting github|gitlab[:cli|token]] [--token-forge github|gitlab]`
+fn resolve_command(args: &Args) -> Result<(), Failure> {
+    let host = args.flag("host").ok_or_else(|| usage("--host H"))?;
+    let setting = match args.flag("setting") {
+        None => None,
+        Some(text) => {
+            let (forge, means) = match text.split_once(':') {
+                Some((forge, means)) => (forge, Some(means)),
+                None => (text, None),
+            };
+            let forge = match forge {
+                "github" => Forge::GitHub,
+                "gitlab" => Forge::GitLab,
+                _ => return Err(usage("--setting github|gitlab[:cli|token]")),
+            };
+            let means = match means {
+                None => None,
+                Some("cli") => Some(Means::Cli),
+                Some("token") => Some(Means::Token),
+                Some(_) => return Err(usage("--setting github|gitlab[:cli|token]")),
+            };
+            Some(HostSetting {
+                host: host.to_string(),
+                forge,
+                means,
+            })
+        }
+    };
+    let stored = match args.flag("token-forge") {
+        None => None,
+        Some(_) => Some(forge_flag(args, "token-forge")?),
+    };
+    match resolve(host, setting.as_ref(), stored, &SystemProbes) {
+        Resolution::Ready { forge, means } => {
+            let means = match means {
+                Means::Cli => "cli",
+                Means::Token => "token",
+            };
+            println!("RESOLVE ready {} {means}", forge_word(forge));
+        }
+        Resolution::NotConnected { forge } => {
+            println!("RESOLVE not-connected {}", forge_word(forge))
+        }
+        Resolution::UnknownForge => println!("RESOLVE unknown"),
     }
     Ok(())
 }

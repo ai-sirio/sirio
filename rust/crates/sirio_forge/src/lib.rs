@@ -13,6 +13,7 @@ mod gitlab;
 mod graphql;
 mod mapping;
 mod model;
+mod resolve;
 mod target;
 mod transport;
 
@@ -24,5 +25,6 @@ pub use model::{
     CommitSummary, EventKind, FileChange, FileChangeKind, Filter, Forge, LineComment, ListQuery,
     Listing, PageCursor, Progress, ReviewOutcome, ReviewState, Reviewer, TimelineItem,
 };
+pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};
 pub use target::{ForgeTarget, parse_remote_url};
 pub use transport::{ApiResponse, CliProgram, CliTransport, TokenTransport, Transport};

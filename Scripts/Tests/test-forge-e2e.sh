@@ -197,6 +197,34 @@ probe PATH="$WORK/no-programs" "$PROBE" "${GH_CLI_ARGS[@]}" viewer
 expect_code 20 "a CLI that is not installed"
 expect_line "ERR NotInstalled"
 
+echo "case 4: a host resolves to its forge and means, asking the system only as far as it must"
+if command -v gh >/dev/null; then
+  probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" resolve --host github.localhost
+  expect_code 0 "gh signed in to github.localhost"
+  expect_line "RESOLVE ready github cli"
+else
+  echo "SKIP: gh is not on PATH -- CLI detection for GitHub was not exercised"
+fi
+if command -v glab >/dev/null; then
+  probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" resolve --host gitlab.localhost
+  expect_code 0 "glab signed in to gitlab.localhost"
+  expect_line "RESOLVE ready gitlab cli"
+else
+  echo "SKIP: glab is not on PATH -- CLI detection for GitLab was not exercised"
+fi
+meta_before=$(log_count github "GET /api/v3/meta")
+probe "$PROBE" resolve --host ghe.test
+expect_line "RESOLVE not-connected github"
+[ "$(log_count github "GET /api/v3/meta")" -gt "$meta_before" ] || fail "ghe.test was never asked /api/v3/meta"
+probe "$PROBE" resolve --host nowhere.test
+expect_line "RESOLVE unknown"
+meta_before=$(log_count gitlab "GET /api/v3/meta")
+probe "$PROBE" resolve --host gitlab.test --token-forge gitlab
+expect_line "RESOLVE ready gitlab token"
+[ "$(log_count gitlab "GET /api/v3/meta")" = "$meta_before" ] || fail "a stored token must settle the forge without the meta probe"
+probe "$PROBE" resolve --host nowhere.test --setting gitlab:token
+expect_line "RESOLVE not-connected gitlab"
+
 # Later cases are added above this line.
 
 echo "artifact: $OUT_DIR"
