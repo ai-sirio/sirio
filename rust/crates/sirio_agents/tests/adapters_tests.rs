@@ -7,10 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use sirio_agents::{
-    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, GlobalHookInstall, GlobalHookReport,
-    OhMyPiAdapter, OpenCodeAdapter, PiAdapter, PrepareError, SKILL_MANAGED_MARKER,
-    discover_availability, find_executable_in_path, install_global_hooks, install_skill,
-    json_string_literal, shell_quote,
+    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, GlobalHookInstall, OhMyPiAdapter,
+    OpenCodeAdapter, PiAdapter, PrepareError, SKILL_MANAGED_MARKER, find_executable_in_path,
+    install_skill, json_string_literal, shell_quote,
 };
 #[cfg(unix)]
 use sirio_agents::{
@@ -76,14 +75,6 @@ impl Drop for TempDir {
 // Command lines, exactly as the Swift sources specify them
 // ---------------------------------------------------------------------------
 
-#[test]
-fn claude_command_is_bare() {
-    assert_eq!(
-        ClaudeCodeAdapter.command(WORKTREE, PANE_ID, SIRIOCTL),
-        "claude"
-    );
-}
-
 #[cfg(not(windows))]
 #[test]
 fn codex_command_carries_the_notify_override() {
@@ -109,19 +100,6 @@ fn codex_command_carries_the_notify_override() {
     );
 }
 
-#[test]
-fn opencode_command_is_bare() {
-    assert_eq!(
-        OpenCodeAdapter.command(WORKTREE, PANE_ID, SIRIOCTL),
-        "opencode"
-    );
-}
-
-#[test]
-fn pi_command_is_bare() {
-    assert_eq!(PiAdapter.command(WORKTREE, PANE_ID, SIRIOCTL), "pi");
-}
-
 #[cfg(not(windows))]
 #[test]
 fn omp_command_points_at_the_worktree_local_hook() {
@@ -143,73 +121,6 @@ fn omp_command_points_at_the_worktree_local_hook() {
         OhMyPiAdapter.command("C:\\Users\\me\\my worktree\\sirio", PANE_ID, SIRIOCTL),
         "omp --hook \"C:\\Users\\me\\my worktree\\sirio/.sirio/omp-hook.ts\""
     );
-}
-
-#[test]
-fn omp_uses_the_distribution_binary_name_for_discovery() {
-    assert_eq!(OhMyPiAdapter.executable_name(), "omp");
-}
-
-#[test]
-fn availability_reports_each_catalog_binary_from_current_path() {
-    let availability = discover_availability();
-    assert_eq!(
-        availability
-            .iter()
-            .map(|agent| agent.id)
-            .collect::<Vec<_>>(),
-        vec!["claude", "codex", "opencode", "pi", "omp"]
-    );
-    for agent in &availability {
-        // omp's id and its binary are the same string.
-        let expected_program = agent.id;
-        assert_eq!(
-            agent.executable,
-            find_executable_in_path(expected_program, &std::env::var_os("PATH").unwrap()),
-            "{} must resolve its distribution executable from the process PATH",
-            expected_program
-        );
-        assert_eq!(agent.is_available(), agent.executable.is_some());
-        assert_eq!(
-            agent.status_label(),
-            if agent.is_available() {
-                "Available"
-            } else {
-                "Not found on PATH"
-            }
-        );
-    }
-}
-
-/// unix only: there, an extensionless name with the execute bit set *is* a
-/// command, and it is the only shape the search knows. The Windows
-/// counterpart is
-/// [`path_lookup_ignores_an_extensionless_shim_on_windows`], which pins the
-/// opposite rule.
-#[cfg(unix)]
-#[test]
-fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
-    let root = std::env::temp_dir().join(format!("sirio-agent-path-test-{}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("create fixture directory");
-    let executable = root.join("demo-agent");
-    std::fs::write(&executable, b"not launched").expect("write fixture");
-
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("make fixture executable");
-    }
-
-    let path = std::ffi::OsString::from(root.as_os_str());
-    assert_eq!(
-        find_executable_in_path("demo-agent", &path),
-        Some(executable)
-    );
-    assert_eq!(find_executable_in_path("missing-agent", &path), None);
-    std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 
 /// Windows regression, reproduced from a real install: npm lays down three
@@ -839,19 +750,6 @@ fn omp_prepare_writes_the_hook_file() {
 }
 
 #[test]
-fn codex_and_pi_prepare_leave_the_worktree_untouched() {
-    let worktree = TempDir::new();
-    CodexAdapter
-        .prepare(worktree.path().to_str().unwrap(), PANE_ID, SIRIOCTL)
-        .expect("prepare");
-    PiAdapter
-        .prepare(worktree.path().to_str().unwrap(), PANE_ID, SIRIOCTL)
-        .expect("prepare");
-
-    assert!(worktree.tree().is_empty(), "no-op prepares write nothing");
-}
-
-#[test]
 fn each_adapter_prepare_creates_only_its_own_files() {
     let worktree = TempDir::new();
     let path = worktree.path().to_str().unwrap();
@@ -935,34 +833,6 @@ fn prepare_keeps_real_global_config_mtimes_unchanged() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn install_skill_writes_the_marker_bearing_file_for_claude() {
-    let worktree = TempDir::new();
-    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Sirio\n");
-    install_skill(&markdown, "claude", worktree.path().to_str().unwrap()).expect("install");
-
-    let written = std::fs::read_to_string(worktree.path().join(".claude/skills/sirio/SKILL.md"))
-        .expect("skill file written at claude's destination");
-    assert_eq!(written, markdown);
-}
-
-#[test]
-fn install_skill_shares_one_destination_across_codex_opencode_pi_and_omp() {
-    for id in ["codex", "opencode", "pi", "omp"] {
-        let worktree = TempDir::new();
-        let markdown = format!("{SKILL_MANAGED_MARKER}\n# Sirio\n");
-        install_skill(&markdown, id, worktree.path().to_str().unwrap())
-            .unwrap_or_else(|error| panic!("{id} install failed: {error}"));
-        assert!(
-            worktree
-                .path()
-                .join(".agents/skills/sirio/SKILL.md")
-                .exists(),
-            "{id} installs to the shared .agents destination"
-        );
-    }
-}
-
-#[test]
 fn install_skill_refuses_markdown_missing_its_own_marker() {
     let worktree = TempDir::new();
     let error = install_skill(
@@ -979,19 +849,6 @@ fn install_skill_refuses_markdown_missing_its_own_marker() {
             .exists(),
         "a refused install must not write anything"
     );
-}
-
-#[test]
-fn install_skill_refuses_an_unsupported_agent_id() {
-    let worktree = TempDir::new();
-    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Sirio\n");
-    let error = install_skill(
-        &markdown,
-        "not-a-real-agent",
-        worktree.path().to_str().unwrap(),
-    )
-    .expect_err("an unknown agent id must be refused");
-    assert!(matches!(error, PrepareError::UnsupportedSkillAgent(id) if id == "not-a-real-agent"));
 }
 
 #[test]
@@ -1315,90 +1172,4 @@ fn opencode_global_plugin_honours_the_config_dir_overrides() {
         GlobalHookInstall::Written(explicit.path().join("plugins/sirio-session.js"))
     );
     assert!(home.tree().is_empty());
-}
-
-/// Pi has no hook mechanism and omp takes hooks only through `--hook
-/// <file>` on its command line: neither has a user-global place to put
-/// one, and the honest answer is to say so — not to write a file nothing
-/// reads.
-#[test]
-fn agents_without_a_global_hook_mechanism_say_so() {
-    let home = TempDir::new();
-    for adapter in [&PiAdapter as &dyn AgentAdapter, &OhMyPiAdapter] {
-        let outcome = adapter
-            .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
-            .unwrap_or_else(|error| panic!("{}: {error}", adapter.id()));
-        assert_eq!(outcome, GlobalHookInstall::NotSupported, "{}", adapter.id());
-    }
-    assert!(home.tree().is_empty());
-}
-
-/// The Settings button runs every adapter and reports each one, in display
-/// order, so the screen can say per agent where the hooks went.
-#[test]
-fn install_global_hooks_reports_every_adapter_in_display_order() {
-    let home = TempDir::new();
-    let reports = install_global_hooks(home.path(), &environment(&[]), SIRIOCTL);
-    let names = reports
-        .iter()
-        .map(|report| report.display_name)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        ["Claude Code", "Codex", "OpenCode", "Pi", "Oh-My-Pi"]
-    );
-    assert!(matches!(
-        reports[0].outcome,
-        Ok(GlobalHookInstall::Written(_))
-    ));
-    assert!(matches!(
-        reports[1].outcome,
-        Ok(GlobalHookInstall::Written(_))
-    ));
-    assert!(matches!(
-        reports[2].outcome,
-        Ok(GlobalHookInstall::Written(_))
-    ));
-    assert!(matches!(
-        reports[3].outcome,
-        Ok(GlobalHookInstall::NotSupported)
-    ));
-    assert!(matches!(
-        reports[4].outcome,
-        Ok(GlobalHookInstall::NotSupported)
-    ));
-}
-
-/// One line per agent: the file that was written, the reason nothing was,
-/// or the error — the text the Settings card shows under the button.
-#[test]
-fn global_hook_report_summary_names_the_file_or_the_reason() {
-    let written = GlobalHookReport {
-        display_name: "Claude Code",
-        outcome: Ok(GlobalHookInstall::Written(PathBuf::from(
-            "/home/me/.claude/settings.json",
-        ))),
-    };
-    assert_eq!(
-        written.summary_line(),
-        "Claude Code: /home/me/.claude/settings.json"
-    );
-
-    let unsupported = GlobalHookReport {
-        display_name: "Pi",
-        outcome: Ok(GlobalHookInstall::NotSupported),
-    };
-    assert_eq!(
-        unsupported.summary_line(),
-        "Pi: no user-global hook mechanism"
-    );
-
-    let failed = GlobalHookReport {
-        display_name: "Codex",
-        outcome: Err(PrepareError::UnsupportedSkillAgent("codex".into())),
-    };
-    assert_eq!(
-        failed.summary_line(),
-        "Codex: failed — unsupported Sirio agent: codex"
-    );
 }

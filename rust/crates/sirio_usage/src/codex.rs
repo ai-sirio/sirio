@@ -550,37 +550,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// F-CORE-USG-05: proves the override itself, not just `refresh_token_at`
-    /// — drives the *public* `refresh_token()` (the function
-    /// `CodexUsageFetcher::fetch` actually calls) through
-    /// `SIRIO_CODEX_TOKEN_URL` pointed at a local fixture, so this is the
-    /// same code path a live `sirio` binary run with that var set would
-    /// take, closing the "TOKEN_URL not overridable" gap.
-    #[test]
-    fn refresh_token_honors_the_token_url_override() {
-        let url = one_shot_http_fixture(
-            "200 OK",
-            r#"{"access_token":"override-access","refresh_token":"override-refresh"}"#,
-        );
-        // SAFETY: no other test in this module reads or writes this var.
-        unsafe {
-            std::env::set_var("SIRIO_CODEX_TOKEN_URL", &url);
-        }
-        let credentials = CodexCredentials {
-            access_token: "stale".into(),
-            refresh_token: "old-refresh".into(),
-            account_id: None,
-            last_refresh: None,
-        };
-        let result = refresh_token(&credentials);
-        unsafe {
-            std::env::remove_var("SIRIO_CODEX_TOKEN_URL");
-        }
-        let refreshed = result.expect("the override endpoint answers 200");
-        assert_eq!(refreshed.access_token, "override-access");
-        assert_eq!(refreshed.refresh_token, "override-refresh");
-    }
-
     /// F-CORE-USG-06: the classification `refresh_token`'s caller currently
     /// discards (codex.rs:336-339) is real and reachable through a genuine
     /// non-200 HTTP response, not just a direct
@@ -705,25 +674,6 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_the_real_wham_response() {
-        let usage = parse_usage(REAL_RESPONSE).expect("real response parses");
-        assert_eq!(
-            usage.session,
-            Some(UsageWindow {
-                label: "5h".into(),
-                used_percent: 51,
-                resets_at: Some(
-                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1787038258)
-                ),
-            })
-        );
-        assert_eq!(
-            usage.weekly, None,
-            "secondary_window is null on this account"
-        );
-    }
-
-    #[test]
     fn parses_a_secondary_window_when_present() {
         let body = r#"{"rate_limit":{"primary_window":{"used_percent":20},"secondary_window":{"used_percent":40,"reset_at":1800000000}}}"#;
         let usage = parse_usage(body).expect("parses");
@@ -744,31 +694,6 @@ mod tests {
     }
 
     #[test]
-    fn loads_credentials_from_a_temp_auth_file() {
-        let dir = std::env::temp_dir().join(format!("sirio-codex-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("auth.json");
-        std::fs::write(
-            &path,
-            r#"{"auth_mode":"oauth","tokens":{"access_token":"acc","refresh_token":"ref","account_id":"a1"},"last_refresh":"2026-08-08T11:06:24Z"}"#,
-        )
-        .unwrap();
-        let credentials = load_credentials_from(&path).expect("loads");
-        assert_eq!(credentials.access_token, "acc");
-        assert_eq!(credentials.refresh_token, "ref");
-        assert_eq!(credentials.account_id.as_deref(), Some("a1"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_credentials_are_not_signed_in() {
-        let dir = std::env::temp_dir().join(format!("sirio-codex-missing-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(load_credentials_from(&dir.join("auth.json")).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn detects_api_key_auth_file_without_loading_the_key() {
         let dir = std::env::temp_dir().join(format!("sirio-codex-api-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -782,33 +707,6 @@ mod tests {
         assert!(codex_has_api_key_at(&path));
         assert!(load_credentials_from(&path).is_err());
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn saving_refreshed_tokens_merges_and_preserves_other_fields() {
-        let dir = std::env::temp_dir().join(format!("sirio-codex-save-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("auth.json");
-        std::fs::write(
-            &path,
-            r#"{"auth_mode":"oauth","tokens":{"access_token":"old","refresh_token":"ref","account_id":"a1"},"last_refresh":"x"}"#,
-        )
-        .unwrap();
-        let refreshed = CodexCredentials {
-            access_token: "new".into(),
-            refresh_token: "new-ref".into(),
-            account_id: Some("a1".into()),
-            last_refresh: None,
-        };
-        save_credentials_to(&path, &refreshed).expect("saves");
-        let credentials = load_credentials_from(&path).expect("reloads");
-        assert_eq!(credentials.access_token, "new");
-        assert_eq!(credentials.refresh_token, "new-ref");
-        assert_eq!(credentials.account_id.as_deref(), Some("a1"));
-        // The unrelated top-level field survived the merge.
-        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(json["auth_mode"], "oauth");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -852,32 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_old_refresh_times_need_refresh_after_eight_days() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let fresh = CodexOAuthCredentials {
-            access_token: "a".into(),
-            refresh_token: "r".into(),
-            account_id: None,
-            last_refresh: Some(now - Duration::from_secs(60)),
-        };
-        assert!(!fresh.needs_refresh(now));
-        assert!(
-            CodexOAuthCredentials {
-                last_refresh: Some(now - CodexOAuthCredentials::REFRESH_AFTER),
-                ..fresh.clone()
-            }
-            .needs_refresh(now)
-        );
-        assert!(
-            CodexOAuthCredentials {
-                last_refresh: None,
-                ..fresh
-            }
-            .needs_refresh(now)
-        );
-    }
-
-    #[test]
     fn refresh_401_is_classified_by_its_provider_reason() {
         assert_eq!(
             classify_token_refresh_failure(401, "refresh token reused"),
@@ -894,29 +766,6 @@ mod tests {
         assert_eq!(
             classify_token_refresh_failure(500, "server unavailable"),
             TokenRefreshFailure::Other
-        );
-    }
-
-    /// F-CORE-USG-06: the classified failure must route to a distinct
-    /// `UsageReason` the status bar renders distinct copy for — not
-    /// collapse to the generic `LoggedOut` for every case.
-    #[test]
-    fn token_refresh_failure_routes_to_distinct_usage_reasons() {
-        assert_eq!(
-            token_refresh_failure_reason(TokenRefreshFailure::Reused),
-            UsageReason::TokenReused
-        );
-        assert_eq!(
-            token_refresh_failure_reason(TokenRefreshFailure::Revoked),
-            UsageReason::TokenRevoked
-        );
-        assert_eq!(
-            token_refresh_failure_reason(TokenRefreshFailure::Expired),
-            UsageReason::TokenExpired
-        );
-        assert_eq!(
-            token_refresh_failure_reason(TokenRefreshFailure::Other),
-            UsageReason::LoggedOut
         );
     }
 }

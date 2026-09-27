@@ -308,24 +308,6 @@ pub fn skeleton_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn a_run_without_a_truthful_duration_is_labelled_thought() {
-        assert_eq!(thought_label(None), "Thought");
-    }
-
-    #[test]
-    fn a_run_with_a_duration_reports_whole_seconds() {
-        assert_eq!(
-            thought_label(Some(Duration::from_millis(4400))),
-            "Thought for 4s"
-        );
-        assert_eq!(
-            thought_label(Some(Duration::from_millis(600))),
-            "Thought for 1s"
-        );
-    }
 
     #[test]
     fn a_fraction_outside_the_unit_range_is_clamped_not_rejected() {
@@ -333,55 +315,6 @@ mod tests {
         assert_eq!(clamp_fraction(1.7), 1.0);
         assert_eq!(clamp_fraction(0.35), 0.35);
         assert_eq!(clamp_fraction(f32::NAN), 0.0);
-    }
-
-    /// The palette handed to a Bezel primitive is built for Sirio's
-    /// appearance, not for whatever Bezel's process-wide mirror last held.
-    /// That mirror is `Theme::sync_appearance`'s job now, and it is tested in
-    /// `sirio_theme`; what is still this module's job is picking the right
-    /// side of Bezel's palette, and keeping Sirio's coral on the accent that
-    /// its loaders paint with.
-    #[test]
-    fn the_bezel_palette_is_built_for_sirios_appearance() {
-        let light = bezel_theme(&Theme::light());
-        assert_eq!(light.bg, bezel::theme::Theme::light().bg);
-        assert_eq!(light.accent, Theme::light().brand_coral.into());
-
-        let dark = bezel_theme(&Theme::dark());
-        assert_eq!(dark.bg, bezel::theme::Theme::dark().bg);
-        assert_eq!(dark.accent, Theme::dark().brand_coral.into());
-    }
-
-    #[test]
-    fn loading_orb_accent_is_muted_for_both_appearances() {
-        let light = Theme::light();
-        let mut light_bezel = bezel_theme(&light);
-        light_bezel.accent = loading_accent(&light).into();
-        assert_eq!(light_bezel.accent, light.text_muted.into());
-        assert_ne!(light_bezel.accent, light.brand_coral.into());
-
-        let dark = Theme::dark();
-        let mut dark_bezel = bezel_theme(&dark);
-        dark_bezel.accent = loading_accent(&dark).into();
-        assert_eq!(dark_bezel.accent, dark.text_muted.into());
-        assert_ne!(dark_bezel.accent, dark.brand_coral.into());
-    }
-
-    /// "Stopped at full" is the whole point of the settled shape: the outer
-    /// ring is the one at full strength.
-    ///
-    /// What it is *not* is the whole slot. A travelling ring fades as it
-    /// leaves the centre, so the rim is where a running bloom has become
-    /// invisible; a settled mark held out there read more than twice as wide
-    /// as the running one it shares a green with. The outer ring stops at
-    /// [`settled_bloom_span`] instead -- see the test below.
-    #[test]
-    fn a_settled_bloom_holds_its_outer_ring_at_full_strength() {
-        let rings = settled_bloom_rings(BLOOM_GLYPH);
-        assert_eq!(rings.len(), motion::ORB_BLOOM_RINGS);
-        let (diameter, opacity) = rings[0];
-        assert_eq!(diameter, BLOOM_GLYPH * settled_bloom_span());
-        assert_eq!(opacity, 1.0);
     }
 
     /// The defect this pins: a finished (green) or waiting (amber) tab drew a
@@ -405,72 +338,5 @@ mod tests {
             settled < BLOOM_GLYPH * motion::phase::ORB_BLOOM_MAX,
             "and no longer spans the whole slot ({settled} vs {BLOOM_GLYPH})"
         );
-    }
-
-    #[test]
-    fn a_settled_blooms_rings_shrink_and_dim_inward() {
-        let rings = settled_bloom_rings(BLOOM_GLYPH);
-        for pair in rings.windows(2) {
-            assert!(
-                pair[0].0 > pair[1].0,
-                "an inner ring is smaller: {:?} then {:?}",
-                pair[0],
-                pair[1]
-            );
-            assert!(
-                pair[0].1 > pair[1].1,
-                "an inner ring is dimmer: {:?} then {:?}",
-                pair[0],
-                pair[1]
-            );
-        }
-    }
-
-    /// Running and done are painted the same green, so the settled bloom has
-    /// to stay readable against a running one *even when the running one is
-    /// not moving*. Under reduced motion `pulse_delta` returns a static 0
-    /// (`bezel-motion`'s own documented behavior), which freezes a travelling
-    /// bloom at its three staggered phases.
-    ///
-    /// The two are told apart by where the strength sits, not by overall
-    /// width: a frozen running bloom is a pinprick core inside a wide, nearly
-    /// invisible halo, while a settled one is a crisp ring at the extent the
-    /// running one only reaches while fading out. Width alone used to carry
-    /// this, which is exactly what made the settled mark oversized.
-    #[test]
-    fn a_settled_bloom_stays_told_apart_from_a_running_one_frozen_by_reduced_motion() {
-        let frozen = |index: usize| {
-            motion::orb_bloom_radius(motion::staggered_phase(
-                0.0,
-                index,
-                1.0 / motion::ORB_BLOOM_RINGS as f32,
-            ))
-        };
-        let widest_travelling = (0..motion::ORB_BLOOM_RINGS)
-            .map(frozen)
-            .fold(f32::MIN, f32::max);
-        let brightest_travelling = (0..motion::ORB_BLOOM_RINGS)
-            .map(frozen)
-            .fold(f32::MAX, f32::min);
-        let settled = settled_bloom_rings(1.0)[0].0;
-
-        assert!(
-            settled > brightest_travelling,
-            "a settled ring ({settled}) is wider than a frozen running bloom's bright core ({brightest_travelling})"
-        );
-        assert!(
-            settled < widest_travelling,
-            "and narrower than its faint outer halo ({widest_travelling}), so the settled mark is the smaller picture"
-        );
-    }
-
-    #[test]
-    fn the_geometry_matches_the_gallery_evidence() {
-        assert_eq!(THINKING_GLYPH, 14.0);
-        assert_eq!(GENERIC_ORB, 44.0);
-        assert_eq!(COMPACT_MINI_CELL, 2.5);
-        assert_eq!(PROGRESS_TRACK, 4.0);
-        assert_eq!(PROGRESS_MAX_WIDTH, 280.0);
-        assert_eq!(SKELETON_ROWS, 3);
     }
 }

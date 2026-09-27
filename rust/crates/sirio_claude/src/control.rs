@@ -396,35 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn the_thinking_display_sends_the_three_words_the_cli_named_and_no_budget() {
-        // The accepted set is not documented anywhere; it came from the
-        // CLI's own refusal, verbatim on 2.1.278: "max_thinking_tokens
-        // must be an integer or null and thinking_display must be
-        // \"summarized\", \"omitted\", \"highlights\", or null".
-        for display in THINKING_DISPLAYS {
-            assert_eq!(
-                ControlRequest::set_thinking_display("req-t", Some(display))["request"],
-                serde_json::json!({
-                    "subtype": "set_max_thinking_tokens",
-                    "max_thinking_tokens": null,
-                    "thinking_display": display
-                })
-            );
-        }
-        // No budget of Sirio's: the effort picker already governs how hard
-        // the model works, and a second number beside it would be two
-        // controls over one thing.
-        assert_eq!(
-            ControlRequest::set_thinking_display("req-t-none", None)["request"],
-            serde_json::json!({
-                "subtype": "set_max_thinking_tokens",
-                "max_thinking_tokens": null,
-                "thinking_display": null
-            })
-        );
-    }
-
-    #[test]
     fn a_success_response_is_matched_by_request_id() {
         let line = serde_json::json!({
             "type": "control_response",

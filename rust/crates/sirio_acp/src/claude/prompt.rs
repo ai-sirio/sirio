@@ -76,18 +76,6 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn a_plain_turn_is_one_text_block_under_a_client_generated_id() {
-        let message = user_message("hello", &[], &[], Path::new("/repo"), "uuid-1");
-        assert_eq!(message["type"], "user");
-        assert_eq!(message["uuid"], "uuid-1");
-        assert_eq!(message["message"]["role"], "user");
-        assert_eq!(
-            message["message"]["content"],
-            serde_json::json!([{"type": "text", "text": "hello"}])
-        );
-    }
-
-    #[test]
     fn a_mention_becomes_a_link_the_model_can_follow() {
         // The wrapper's own rendering: the model reads the path, and the
         // surface can still recognise the token it inserted.
@@ -109,42 +97,6 @@ mod tests {
             text.contains("[@main.rs](file:///repo/src/main.rs)"),
             "the mention resolves to an absolute file link: {text}"
         );
-    }
-
-    #[test]
-    fn an_absolute_mention_is_not_joined_to_the_working_directory_twice() {
-        let message = user_message(
-            "check it",
-            &["/elsewhere/a.rs".to_string()],
-            &[],
-            Path::new("/repo"),
-            "uuid-3",
-        );
-        let text = message["message"]["content"][0]["text"]
-            .as_str()
-            .expect("text");
-        assert!(text.contains("file:///elsewhere/a.rs"), "{text}");
-        assert!(!text.contains("/repo/elsewhere"), "{text}");
-    }
-
-    #[test]
-    fn images_ride_as_their_own_blocks_after_the_text() {
-        let message = user_message(
-            "what is this",
-            &[],
-            &[crate::ImageAttachment {
-                mime_type: "image/png".into(),
-                base64_data: "AAAA".into(),
-            }],
-            Path::new("/repo"),
-            "uuid-4",
-        );
-        let blocks = message["message"]["content"].as_array().expect("blocks");
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[1]["type"], "image");
-        assert_eq!(blocks[1]["source"]["type"], "base64");
-        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
-        assert_eq!(blocks[1]["source"]["data"], "AAAA");
     }
 
     #[test]

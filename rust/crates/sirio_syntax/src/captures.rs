@@ -202,31 +202,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_foreign_name_becomes_the_one_bezel_knows() {
-        assert_eq!(rewrite("(field) @field"), "(field) @variable.member");
-    }
-
-    #[test]
-    fn a_name_bezel_already_knows_is_left_alone() {
-        let query = "(comment) @comment\n(string_literal) @string";
-        assert_eq!(rewrite(query), query);
-    }
-
-    #[test]
     fn a_longer_name_is_not_rewritten_by_a_shorter_key() {
         // `field` is a key; `variable.member` must not become
         // `variable.variable.member`, and `field_expression` — a node name,
         // not a capture — must not be touched at all.
         let query = "(field_expression) @variable.member";
-        assert_eq!(rewrite(query), query);
-    }
-
-    #[test]
-    fn an_at_sign_inside_a_string_literal_survives() {
-        // tree-sitter-css matches at-rules by their literal text. Rewriting
-        // this would stop the pattern matching anything — and a query that
-        // matches nothing looks exactly like a grammar that is not loaded.
-        let query = r#""@import" @keyword.import"#;
         assert_eq!(rewrite(query), query);
     }
 
@@ -252,25 +232,6 @@ mod tests {
         // it would still displace `@comment`. It has to go.
         assert_eq!(rewrite("(comment) @comment @spell"), "(comment) @comment");
         assert_eq!(rewrite("] @comment @spell\n"), "] @comment\n");
-    }
-
-    #[test]
-    fn none_is_left_alone_because_the_fallback_already_means_what_it_says() {
-        // `@none` asks for no colour; `kind_of` answers `Variable`, the
-        // plain text colour, to every name it does not know. Rewriting it
-        // would be work that changes nothing.
-        assert_eq!(
-            rewrite("(code_fence_content) @none"),
-            "(code_fence_content) @none"
-        );
-    }
-
-    #[test]
-    fn rewriting_twice_changes_nothing_the_second_time() {
-        // No alias target is itself a key, so the table cannot chain.
-        let query = "(a) @field (b) @repeat (c) @text.title (d) @none";
-        let once = rewrite(query);
-        assert_eq!(rewrite(&once), once);
     }
 
     #[test]

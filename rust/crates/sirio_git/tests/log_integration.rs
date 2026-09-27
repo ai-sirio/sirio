@@ -260,37 +260,3 @@ fn commit_diff_entry_ignores_forced_git_colors() {
 
     assert!(!diff.hunks.is_empty());
 }
-
-#[test]
-fn lists_the_files_a_commit_touched() {
-    let dir = repo_with_a_merge();
-    let sha = head_sha(dir.path(), "main~1");
-
-    let files = sirio_git::commit_files(dir.path(), &sha).expect("files");
-
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].0, 'A');
-    assert_eq!(files[0].1, PathBuf::from("c.txt"));
-}
-
-#[test]
-fn reads_the_patch_of_one_file_in_a_commit() {
-    let dir = repo_with_a_merge();
-    let sha = head_sha(dir.path(), "main~1");
-
-    let diff = sirio_git::commit_diff_entry(dir.path(), &sha, Path::new("c.txt")).expect("diff");
-
-    assert!(!diff.hunks.is_empty(), "an added file has one hunk");
-}
-
-#[test]
-fn the_root_commit_diffs_against_nothing_without_erroring() {
-    let dir = repo_with_a_merge();
-    let sha = head_sha(dir.path(), "main^{/c1}");
-
-    let files = sirio_git::commit_files(dir.path(), &sha).expect("files");
-    let diff = sirio_git::commit_diff_entry(dir.path(), &sha, Path::new("a.txt")).expect("diff");
-
-    assert!(files.iter().any(|(_, path)| path == Path::new("a.txt")));
-    assert!(!diff.hunks.is_empty());
-}

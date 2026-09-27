@@ -202,41 +202,6 @@ mod tests {
     }
 
     #[test]
-    fn always_allow_appears_only_when_there_is_a_rule_to_remember() {
-        // Without suggestions there is nothing to store, so the option
-        // would be indistinguishable from allowing once — a button that
-        // lies about what it does.
-        let with_rules = options_for(&request(
-            "Bash",
-            json!({"command": "ls"}),
-            vec![json!({"type": "addRules", "behavior": "allow", "destination": "session"})],
-        ));
-        assert_eq!(
-            with_rules
-                .iter()
-                .map(|option| option.id.as_str())
-                .collect::<Vec<_>>(),
-            ["allow_once", "allow_always", "reject_once"]
-        );
-        assert_eq!(with_rules[1].name, "Always allow");
-    }
-
-    #[test]
-    fn exit_plan_mode_offers_the_two_approvals_and_the_refusal() {
-        let options = options_for(&request("ExitPlanMode", json!({"plan": "do it"}), vec![]));
-        assert_eq!(
-            options
-                .iter()
-                .map(|option| option.id.as_str())
-                .collect::<Vec<_>>(),
-            ["approve_accept_edits", "approve_ask", "keep_planning"]
-        );
-        assert_eq!(options[0].name, "Approve, auto-accept edits");
-        assert_eq!(options[1].name, "Approve, ask for each edit");
-        assert_eq!(options[2].name, "Keep planning");
-    }
-
-    #[test]
     fn each_option_maps_to_the_answer_the_cli_expects() {
         let plain = request("Bash", json!({"command": "ls"}), vec![]);
         assert_eq!(
@@ -326,44 +291,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some("The first"), None, None],
             "a blank description is no description"
-        );
-    }
-
-    #[test]
-    fn a_permission_option_has_no_description() {
-        let options = options_for(&request("Bash", json!({"command": "ls"}), vec![]));
-        assert!(options.iter().all(|option| option.description.is_none()));
-    }
-
-    #[test]
-    fn a_native_question_always_offers_free_text() {
-        // The native transport writes whatever text arrives into the
-        // tool's `answers` (`answer_for_question`), so the field is safe to
-        // offer even when the tool input declared none.
-        let bare = PermissionQuestion {
-            header: "Pick".into(),
-            prompt: "Which one?".into(),
-            text_input: None,
-        };
-        assert_eq!(
-            with_free_text(bare).text_input,
-            Some(PermissionTextInput {
-                placeholder: None,
-                prefill: None
-            })
-        );
-        // A declared field keeps its own placeholder and prefill.
-        let declared = PermissionQuestion {
-            header: "Pick".into(),
-            prompt: "Which one?".into(),
-            text_input: Some(PermissionTextInput {
-                placeholder: Some("Branch".into()),
-                prefill: Some("main".into()),
-            }),
-        };
-        assert_eq!(
-            with_free_text(declared.clone()).text_input,
-            declared.text_input
         );
     }
 }

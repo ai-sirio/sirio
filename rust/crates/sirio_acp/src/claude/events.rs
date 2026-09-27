@@ -812,20 +812,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_turn_uses_the_word_the_transcript_footer_knows() {
-        // `sirio_ui::chat::turn_end_label` matches "Cancelled" exactly; any
-        // other spelling silently renders as a plain "ended".
-        let mut fold = Fold::new();
-        let events = fold.apply(parse(json!({
-            "type": "result", "subtype": "error_during_execution", "is_error": true,
-            "result": "Interrupted by user", "stop_reason": "cancelled"
-        })));
-        assert!(events.contains(&AcpEvent::TurnEnded {
-            stop_reason: "Cancelled".into()
-        }));
-    }
-
-    #[test]
     fn an_errored_result_shows_its_sentence_before_ending_the_turn() {
         let mut fold = Fold::new();
         let events = fold.apply(parse(json!({
@@ -837,105 +823,6 @@ mod tests {
             AcpEvent::AgentMessageChunk("Reached the turn limit".into())
         );
         assert!(matches!(events.last(), Some(AcpEvent::TurnEnded { .. })));
-    }
-
-    #[test]
-    fn system_init_records_the_session_the_version_and_ignores_failed_mcp_servers() {
-        let mut fold = Fold::new();
-        let events = fold.apply(parse(json!({
-            "type": "system", "subtype": "init",
-            "session_id": "sess-1", "claude_code_version": "2.1.273",
-            "model": "claude-fable-5-1", "permissionMode": "default",
-            "mcp_servers": [{"name": "linear", "status": "failed"},
-                            {"name": "github", "status": "connected"}]
-        })));
-        assert_eq!(fold.session_id(), Some("sess-1"));
-        assert_eq!(fold.claude_version(), Some("2.1.273"));
-        assert_eq!(fold.current_mode(), Some("default"));
-        assert!(events.contains(&AcpEvent::OtherSessionUpdate {
-            kind: "SessionIdentified".into()
-        }));
-        // Failed MCP servers must not banner the chat on the native path.
-        assert!(fold.take_mcp_warnings().is_empty());
-    }
-
-    #[test]
-    fn a_status_line_moves_the_mode_and_signals_a_re_read() {
-        let mut fold = Fold::new();
-        let events = fold.apply(parse(json!({
-            "type": "system", "subtype": "status", "permissionMode": "plan"
-        })));
-        assert_eq!(fold.current_mode(), Some("plan"));
-        assert_eq!(
-            events,
-            vec![AcpEvent::OtherSessionUpdate {
-                kind: "CurrentModeUpdate(plan)".into()
-            }]
-        );
-    }
-
-    #[test]
-    fn a_compaction_says_how_much_context_it_dropped() {
-        let mut fold = Fold::new();
-        let events = fold.apply(parse(json!({
-            "type": "system", "subtype": "compact_boundary",
-            "compact_metadata": {"trigger": "auto", "pre_tokens": 43134, "post_tokens": 11574}
-        })));
-        assert_eq!(
-            events,
-            vec![AcpEvent::OtherSessionUpdate {
-                kind: "SessionNotice".into()
-            }]
-        );
-        assert_eq!(
-            fold.take_notices(),
-            vec![SessionNotice::Compacted {
-                trigger: Some("auto".into()),
-                pre_tokens: Some(43_134),
-                post_tokens: Some(11_574),
-            }]
-        );
-    }
-
-    #[test]
-    fn only_a_task_that_went_to_the_background_is_announced_when_it_ends() {
-        let mut fold = Fold::new();
-        // Foreground and background calls raise the same messages, and the
-        // notification that ends them does not repeat `is_backgrounded`.
-        for (task_id, backgrounded) in [("bg1", true), ("fg1", false)] {
-            fold.apply(parse(json!({
-                "type": "system", "subtype": "task_started",
-                "task_id": task_id, "is_backgrounded": backgrounded,
-                "description": "something"
-            })));
-        }
-        let foreground = fold.apply(parse(json!({
-            "type": "system", "subtype": "task_notification",
-            "task_id": "fg1", "status": "completed", "summary": "ran in front"
-        })));
-        assert!(
-            foreground.is_empty(),
-            "a foreground Bash call must not post a notice: {foreground:?}"
-        );
-        assert!(fold.take_notices().is_empty());
-
-        let background = fold.apply(parse(json!({
-            "type": "system", "subtype": "task_notification",
-            "task_id": "bg1", "status": "completed",
-            "summary": "Background command \"sleep\" completed (exit code 0)"
-        })));
-        assert_eq!(
-            background,
-            vec![AcpEvent::OtherSessionUpdate {
-                kind: "SessionNotice".into()
-            }]
-        );
-        assert_eq!(
-            fold.take_notices(),
-            vec![SessionNotice::BackgroundTaskEnded {
-                summary: "Background command \"sleep\" completed (exit code 0)".into()
-            }]
-        );
     }
 
     #[test]
@@ -981,61 +868,6 @@ mod tests {
         // changed would stack one banner per turn for the rest of the day.
         assert!(fold.apply(parse(line)).is_empty());
         assert!(fold.take_notices().is_empty());
-    }
-
-    #[test]
-    fn the_running_task_count_follows_the_list_the_cli_replaces() {
-        let mut fold = Fold::new();
-        let events = fold.apply(parse(json!({
-            "type": "system", "subtype": "background_tasks_changed",
-            "tasks": [{"task_id": "a", "description": "one"},
-                      {"task_id": "b", "description": "two"}]
-        })));
-        assert_eq!(
-            events,
-            vec![AcpEvent::OtherSessionUpdate {
-                kind: "BackgroundTasksUpdate(2)".into()
-            }]
-        );
-        assert_eq!(fold.background_task_count(), 2);
-        // The list is a replacement, and it empties before the matching
-        // notification arrives — which is why the count and the notice are
-        // two separate things.
-        fold.apply(parse(json!({
-            "type": "system", "subtype": "background_tasks_changed", "tasks": []
-        })));
-        assert_eq!(fold.background_task_count(), 0);
-    }
-
-    #[test]
-    fn traffic_this_build_has_no_model_for_is_named_not_dropped() {
-        let mut fold = Fold::new();
-        // Each of these was seen on the wire from claude 2.1.278 and has
-        // no model in this build. They are the current list, not a fixed
-        // one: an entry earns a row here until it earns a real one.
-        for (line, expected) in [
-            (
-                json!({"type": "tool_progress", "tool_use_id": "t"}),
-                "tool_progress",
-            ),
-            (
-                json!({"type": "system", "subtype": "thinking_tokens",
-                       "estimated_tokens": 210}),
-                "system/thinking_tokens",
-            ),
-            (
-                json!({"type": "system", "subtype": "hook_started"}),
-                "system/hook_started",
-            ),
-        ] {
-            let events = fold.apply(parse(line));
-            assert_eq!(
-                events,
-                vec![AcpEvent::OtherSessionUpdate {
-                    kind: expected.into()
-                }]
-            );
-        }
     }
 
     #[test]

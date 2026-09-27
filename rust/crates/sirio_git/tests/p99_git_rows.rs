@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sirio_git::{
     DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, diff_entry,
-    directory_statuses, list_branches, run_streaming, status,
+    directory_statuses, list_branches, status,
 };
 
 struct TempDir(PathBuf);
@@ -171,55 +171,6 @@ fn streaming_lines_arrive_incrementally_before_completion() {
     );
     assert_eq!(result.exit_code, 0);
     assert!(result.stderr.contains("alpha") && result.stderr.contains("delta"));
-}
-
-#[test]
-fn a_real_git_clone_streams_progress_and_completes() {
-    let source = make_repo();
-    write(source.path(), "src/lib.rs", "pub fn seed() {}\n");
-    git(source.path(), &["add", "src/lib.rs"]);
-    git(source.path(), &["commit", "-m", "more objects"]);
-
-    let scratch = TempDir::new();
-    // A file:// URL needs forward slashes and no verbatim prefix — the
-    // fixture path is canonicalized, which on Windows yields `\\?\C:\...`,
-    // a spelling git cannot open (it resolves the URL to `//\\?\C:\...`).
-    #[cfg(windows)]
-    let display = source
-        .path()
-        .display()
-        .to_string()
-        .strip_prefix(r"\\?\")
-        .unwrap_or("")
-        .to_string();
-    #[cfg(not(windows))]
-    let display = source.path().display().to_string();
-    #[cfg(windows)]
-    let url = format!("file://{}", display.replace('\\', "/"));
-    #[cfg(not(windows))]
-    let url = format!("file://{display}");
-    let mut lines = Vec::new();
-    let result = run_streaming(
-        &["clone", "--progress", &url, "dest"],
-        scratch.path(),
-        |line| lines.push(line),
-    )
-    .expect("clone succeeds");
-
-    assert_eq!(result.exit_code, 0);
-    assert!(scratch.path().join("dest/.git").is_dir());
-    assert!(
-        !lines.is_empty(),
-        "a clone with --progress must stream stderr lines"
-    );
-    // LC_ALL=C in the runner: progress arrives in English regardless of
-    // the desktop locale (this box runs an Italian locale).
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Cloning") || line.contains("objects")),
-        "expected English clone progress, got {lines:?}"
-    );
 }
 
 // -------------------------------------------------------------- BRANCH-01

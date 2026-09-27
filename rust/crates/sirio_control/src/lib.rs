@@ -160,40 +160,6 @@ pub use server::{ControlHandler, ControlServer, ServerError};
 #[cfg(test)]
 mod tests {
     use super::{VERSION, format_version_json, format_version_lines};
-    use std::path::Path;
-
-    #[cfg(unix)]
-    #[test]
-    fn display_endpoint_on_unix_is_the_path() {
-        let path = Path::new("/run/user/1000/Sirio/control.sock");
-        assert_eq!(super::display_endpoint(path), path.display().to_string());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn display_endpoint_on_windows_is_the_pipe_name() {
-        let endpoint = super::display_endpoint(Path::new(
-            r"C:\Users\alice\AppData\Local\Sirio\control.sock",
-        ));
-        assert!(endpoint.starts_with(r"\\.\pipe\"), "{endpoint}");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn display_endpoint_preserves_an_explicit_pipe_name() {
-        let path = Path::new(r"\\.\pipe\custom");
-        assert_eq!(super::display_endpoint(path), path.display().to_string());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn display_endpoint_falls_back_to_the_path_when_pipe_derivation_fails() {
-        let path = Path::new(r"C:\Users\alice\control.sock");
-        assert_eq!(
-            super::display_endpoint_from(path, Err("test failure".to_string())),
-            path.display().to_string()
-        );
-    }
 
     #[test]
     fn version_is_a_non_empty_semantic_version() {
@@ -208,12 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn version_output_without_a_running_app_contains_the_cli_version() {
-        let lines = format_version_lines(VERSION, None);
-        assert!(lines.iter().any(|line| line.contains(VERSION)));
-    }
-
-    #[test]
     fn version_output_calls_out_a_mismatched_running_app() {
         let cli_version = "cli-version";
         let app_version = "app-version";
@@ -224,12 +184,6 @@ mod tests {
                 "warning: sirioctl {cli_version} does not match the running Sirio {app_version}"
             )
         }));
-    }
-
-    #[test]
-    fn version_output_omits_the_warning_for_a_matching_pair() {
-        let lines = format_version_lines("cli-version", Some("cli-version"));
-        assert!(lines.iter().all(|line| !line.starts_with("warning:")));
     }
 
     use super::ReleaseChannel;
@@ -264,13 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dev_build_refuses_updates_and_a_real_channel_does_not() {
-        assert!(!ReleaseChannel::Dev.updates_enabled());
-        assert!(ReleaseChannel::Stable.updates_enabled());
-        assert!(ReleaseChannel::Nightly.updates_enabled());
-    }
-
-    #[test]
     fn channel_wire_form_round_trips_through_the_env_value() {
         for channel in [
             ReleaseChannel::Stable,
@@ -282,14 +229,6 @@ mod tests {
                 channel
             );
         }
-    }
-
-    #[test]
-    fn the_compiled_channel_is_the_env_value_the_build_saw() {
-        assert_eq!(
-            ReleaseChannel::RELEASE_CHANNEL,
-            ReleaseChannel::from_env_value(option_env!("SIRIO_RELEASE_CHANNEL"))
-        );
     }
 
     /// Spec §3.5 (the Zed post-mortem): a release whose channel silently

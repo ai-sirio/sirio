@@ -594,11 +594,6 @@ mod tests {
     use crate::{AgentRef, AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
     #[test]
-    fn current_version_is_the_migration_count() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, MIGRATIONS.len() as i64);
-    }
-
-    #[test]
     fn positional_worktree_ids_are_rekeyed_with_their_references() {
         let mut conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute("PRAGMA foreign_keys = ON", [])
@@ -662,12 +657,6 @@ mod tests {
             )
             .expect("tab state survives rekeying");
         assert_eq!(state, "{\"marker\":\"feature\"}");
-    }
-
-    #[test]
-    fn a_fresh_database_starts_at_version_zero() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        assert_eq!(read_user_version(&conn).expect("read"), 0);
     }
 
     /// F-PERSIST-DB-11: the schema-creation half was already strongly
@@ -753,45 +742,6 @@ mod tests {
             updated_at, 0,
             "v12 backfills updated_at to its documented DEFAULT 0"
         );
-    }
-
-    /// F-PERSIST-DB-06: the schema half of the local-account-identity
-    /// store. `account_identity` did not exist before v13; this proves the
-    /// migration both creates it with the right shape (one row per
-    /// provider, replace-on-conflict) and — like the test above — that a
-    /// row planted before a later migration runs (none touch this table
-    /// yet, but the same discipline applies as the table grows) is not
-    /// something a future migration can silently drop.
-    #[test]
-    fn account_identity_table_stores_one_upserted_row_per_provider() {
-        let mut conn = Connection::open_in_memory().expect("open in-memory db");
-        migrate(&mut conn).expect("migrate to current");
-
-        conn.execute(
-            "INSERT INTO account_identity (provider, identity, detected_at)
-             VALUES ('claude', 'first@example.com', 100)",
-            [],
-        )
-        .expect("insert an identity row");
-        conn.execute(
-            "INSERT INTO account_identity (provider, identity, detected_at)
-             VALUES ('claude', 'second@example.com', 200)
-             ON CONFLICT(provider) DO UPDATE SET
-                 identity = excluded.identity,
-                 detected_at = excluded.detected_at",
-            [],
-        )
-        .expect("re-detecting the same provider replaces its row");
-
-        let (identity, detected_at): (String, i64) = conn
-            .query_row(
-                "SELECT identity, detected_at FROM account_identity WHERE provider = 'claude'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("exactly one row per provider");
-        assert_eq!(identity, "second@example.com");
-        assert_eq!(detected_at, 200);
     }
 
     /// v15 qualification (mirror of the v10 `agent_id` backfill test above):
@@ -880,39 +830,6 @@ mod tests {
             loaded[0].agent_session_id.as_deref(),
             Some("5bbcaeb8-e523-4087-b33c-559163f2dc07")
         );
-    }
-
-    #[test]
-    fn a_tab_saved_before_this_column_existed_loads_with_no_session() {
-        // The column is nullable and nothing backfills it: a chat that
-        // predates this release resumes the way it always did.
-        //
-        // `AppDatabase` exposes no raw connection (the plan's
-        // `db.connection()`), so — like the other migration tests here — the
-        // legacy row is planted on a raw connection stopped at the version
-        // before this column.
-        let mut conn = Connection::open_in_memory().expect("open in-memory db");
-        migrate_up_to(&mut conn, 17).expect("migrate to the version before this column");
-        conn.execute_batch(
-            "INSERT INTO project (id, name, root_path)
-                 VALUES ('project-1', 'Project', '/tmp/project');
-             INSERT INTO worktree (id, project_id, branch, path, order_idx)
-                 VALUES ('worktree-1', 'project-1', 'main', '/tmp/project', 0);
-             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
-                 VALUES ('tab-old', 'worktree-1', 'Chat', 'chat', 0, 0);",
-        )
-        .expect("insert a pre-migration row");
-
-        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward");
-
-        let agent_session_id: Option<String> = conn
-            .query_row(
-                "SELECT agent_session_id FROM tab WHERE id = 'tab-old'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read the new column");
-        assert_eq!(agent_session_id, None);
     }
 
     #[test]

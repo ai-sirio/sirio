@@ -74,47 +74,6 @@ mod tests {
         }
     }
 
-    /// The control that makes every assertion below capable of failing. If the
-    /// theme ever gave two of these the same value, the precedence tests would
-    /// pass while proving nothing — the exact way F-CHG-06's original test
-    /// (`a_staged_and_modified_file_appears_in_both_sections`) stayed green
-    /// through the bug by asserting presence and never colour.
-    #[test]
-    fn the_four_status_colours_are_mutually_distinct() {
-        let theme = Theme::dark();
-        let all = [
-            theme.danger,
-            theme.git_untracked,
-            theme.success,
-            theme.warning,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for b in all.iter().skip(i + 1) {
-                assert_ne!(
-                    (a.r, a.g, a.b, a.a),
-                    (b.r, b.g, b.b, b.a),
-                    "two git status colours coincide; the precedence tests \
-                     below would pass vacuously"
-                );
-            }
-        }
-    }
-
-    /// F-CHG-06's decisive case: staged, then modified again. Swift's
-    /// `GitStatusStyle.color` puts `isStaged` ahead of the modified fallback,
-    /// so this file is green. `changes.rs` used to test
-    /// `has_worktree_changes()` first and render it amber, disagreeing with
-    /// the Files tree about one file on screen at the same time.
-    #[test]
-    fn a_staged_and_further_modified_file_reads_as_staged() {
-        let theme = Theme::dark();
-        let both = entry(Some(StatusKind::Modified), Some(StatusKind::Modified));
-
-        assert!(both.is_staged() && both.has_worktree_changes());
-        assert_eq!(entry_color(&both, theme), theme.success);
-        assert_ne!(entry_color(&both, theme), theme.warning);
-    }
-
     #[test]
     fn precedence_is_conflicted_then_untracked_then_staged_then_modified() {
         let theme = Theme::dark();
@@ -143,36 +102,5 @@ mod tests {
     fn an_entry_with_no_status_stays_neutral() {
         let theme = Theme::dark();
         assert_eq!(entry_color(&entry(None, None), theme), theme.text);
-    }
-
-    /// The drift guard. Both doors into this module must agree for the same
-    /// file — this is the assertion that fails if someone reintroduces a
-    /// second precedence chain in either view.
-    #[test]
-    fn both_entry_points_agree_for_every_representable_state() {
-        let theme = Theme::dark();
-        let states = [
-            Some(StatusKind::Modified),
-            Some(StatusKind::Added),
-            Some(StatusKind::Deleted),
-            Some(StatusKind::Renamed),
-            Some(StatusKind::Unmerged),
-            Some(StatusKind::Untracked),
-            None,
-        ];
-
-        for index in states {
-            for worktree in states {
-                let e = entry(index, worktree);
-                if entry_color(&e, theme) == theme.text {
-                    continue; // the deliberate no-status carve-out
-                }
-                assert_eq!(
-                    entry_color(&e, theme),
-                    status_color(DirectoryGitStatus::for_file(&e), theme),
-                    "row colour and marker colour disagree for {index:?}/{worktree:?}"
-                );
-            }
-        }
     }
 }

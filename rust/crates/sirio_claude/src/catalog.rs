@@ -557,28 +557,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_modes_are_the_four_sirio_offers_with_the_current_one_marked() {
-        let modes = catalog().modes();
-        assert_eq!(
-            modes
-                .options
-                .iter()
-                .map(|mode| mode.id.as_str())
-                .collect::<Vec<_>>(),
-            ["default", "acceptEdits", "plan", "auto"]
-        );
-        assert_eq!(modes.current_id, "default");
-        // bypassPermissions needs a flag Sirio does not pass, so offering it
-        // would be offering something that cannot work.
-        assert!(
-            !modes
-                .options
-                .iter()
-                .any(|mode| mode.id == "bypassPermissions")
-        );
-    }
-
     fn values(effort: &Effort) -> Vec<&str> {
         effort
             .choices

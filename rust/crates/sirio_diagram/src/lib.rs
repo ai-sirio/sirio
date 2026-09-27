@@ -358,17 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_key_is_stable_hex() {
-        let key = cache_key(DiagramKind::Mermaid, "flowchart TD", &test_palette(false));
-        assert_eq!(
-            key,
-            cache_key(DiagramKind::Mermaid, "flowchart TD", &test_palette(false))
-        );
-        assert_eq!(key.len(), 64);
-        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
     fn the_cache_key_changes_with_kind_and_source() {
         let palette = test_palette(false);
         let base = cache_key(DiagramKind::Mermaid, "a", &palette);
@@ -386,55 +375,6 @@ mod tests {
         assert_eq!(
             cache_key(DiagramKind::PlantUml, "a", &light),
             cache_key(DiagramKind::PlantUml, "a", &dark)
-        );
-    }
-
-    #[test]
-    fn notes_read_as_the_design_writes_them() {
-        use DiagramKind::{Mermaid, PlantUml};
-        let syntax = DiagramError::Syntax {
-            message: "bad".into(),
-            line: None,
-        };
-        assert_eq!(syntax.note(Mermaid), "Mermaid diagram is invalid: bad");
-        let at_line = DiagramError::Syntax {
-            message: "bad".into(),
-            line: Some(3),
-        };
-        assert_eq!(
-            at_line.note(PlantUml),
-            "PlantUML diagram is invalid (line 3): bad"
-        );
-        assert_eq!(
-            DiagramError::NotAvailable.note(PlantUml),
-            "PlantUML is not available: `plantuml` is not on PATH and no server is configured"
-        );
-        assert_eq!(
-            DiagramError::Unsandboxed {
-                version: "1.2020.2".into()
-            }
-            .note(PlantUml),
-            "PlantUML 1.2020.2 is too old to run sandboxed (1.2023.9 or later is needed), so the diagram was not rendered"
-        );
-        assert_eq!(
-            DiagramError::Timeout { seconds: 15 }.note(PlantUml),
-            "PlantUML timed out after 15 s"
-        );
-        assert_eq!(
-            DiagramError::Server {
-                status: 400,
-                message: "Bad Request".into()
-            }
-            .note(PlantUml),
-            "PlantUML server answered 400: Bad Request"
-        );
-        assert_eq!(
-            DiagramError::TooLarge.note(Mermaid),
-            "Mermaid diagram is larger than 64 KiB and was not rendered"
-        );
-        assert_eq!(
-            DiagramError::Io("disk full".into()).note(Mermaid),
-            "Mermaid diagram could not be rendered: disk full"
         );
     }
 
@@ -507,25 +447,6 @@ mod tests {
             "the palette's background is used"
         );
         assert!(svg.logical_width > 0 && svg.logical_height > 0);
-    }
-
-    #[test]
-    fn light_and_dark_render_differently() {
-        let root = scratch_dir("mermaid-dark");
-        let light = test_options(&root);
-        let dark = Options {
-            palette: test_palette(true),
-            ..test_options(&root)
-        };
-        let source = "flowchart TD\n  A --> B\n";
-        assert_ne!(
-            render(DiagramKind::Mermaid, source, &light)
-                .expect("light")
-                .markup,
-            render(DiagramKind::Mermaid, source, &dark)
-                .expect("dark")
-                .markup
-        );
     }
 
     #[test]

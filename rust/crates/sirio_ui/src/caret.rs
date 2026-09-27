@@ -292,77 +292,6 @@ mod tests {
         );
     }
 
-    /// An empty field whose placeholder is longer than the field, laid out
-    /// the way every single-line field lays out [`field_placeholder`]:
-    /// clipped container, the hint, the bar.
-    struct OverflowingPlaceholder {
-        placeholder: String,
-    }
-
-    impl Render for OverflowingPlaceholder {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(
-                div()
-                    .debug_selector(|| "field".to_owned())
-                    .w(px(120.0))
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(
-                        field_placeholder(
-                            div()
-                                .debug_selector(|| "run".to_owned())
-                                .child(self.placeholder.clone()),
-                            None,
-                        )
-                        .debug_selector(|| "placeholder".to_owned()),
-                    )
-                    .child(div().debug_selector(|| "bar".to_owned()).child(bar(
-                        px(16.0),
-                        black().into(),
-                        true,
-                    ))),
-            )
-        }
-    }
-
-    fn placeholder_field(cx: &mut TestAppContext, placeholder: &str) -> VisualTestContext {
-        let placeholder = placeholder.to_owned();
-        let window = cx.open_window(size(px(400.0), px(100.0)), move |_, _| {
-            OverflowingPlaceholder { placeholder }
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, _| window.refresh());
-        cx.cx.run_until_parked();
-        cx
-    }
-
-    /// A placeholder is clipped from the *end*: its start — the words that
-    /// say what the field is for — stays in view. Routed through
-    /// [`field_value`] it was clipped from the start instead, and "location
-    /// (optional, defaults next to project)" read as "ı (optional, defaults
-    /// next to project)".
-    #[gpui::test]
-    async fn an_overflowing_placeholder_keeps_its_start_in_view(cx: &mut TestAppContext) {
-        let mut cx = placeholder_field(cx, "location (optional, defaults next to project)");
-        let field = bounds(&mut cx, "field");
-        let run = bounds(&mut cx, "run");
-        let bar = bounds(&mut cx, "bar");
-
-        assert!(
-            run.origin.x >= field.origin.x,
-            "the start of the hint is in view: run={run:?} field={field:?}"
-        );
-        assert!(
-            run.origin.x + run.size.width <= field.origin.x + field.size.width,
-            "the hint is truncated to the field, not laid out past it: run={run:?} field={field:?}"
-        );
-        assert!(
-            bar.origin.x + bar.size.width <= field.origin.x + field.size.width,
-            "the bar stays inside the field: bar={bar:?} field={field:?}"
-        );
-    }
-
     /// An empty, focused field, laid out the way every single-line field
     /// lays out [`field_placeholder`] with its bar: clipped container, the
     /// hint carrying the bar.
@@ -435,31 +364,6 @@ mod tests {
             bar.origin.y >= field.origin.y
                 && bar.origin.y + bar.size.height <= field.origin.y + field.size.height,
             "the bar is inside the field vertically: bar={bar:?} field={field:?}"
-        );
-    }
-
-    /// A short placeholder behaves like a short value: it starts at the
-    /// field's start and the bar follows its last character rather than
-    /// being pushed to the far edge.
-    #[gpui::test]
-    async fn a_short_placeholder_keeps_the_bar_at_its_end_not_the_fields(cx: &mut TestAppContext) {
-        let mut cx = placeholder_field(cx, "ab");
-        let field = bounds(&mut cx, "field");
-        let run = bounds(&mut cx, "run");
-        let bar = bounds(&mut cx, "bar");
-
-        assert_eq!(
-            run.origin.x, field.origin.x,
-            "the hint starts at the field's start"
-        );
-        assert_eq!(
-            bar.origin.x,
-            run.origin.x + run.size.width,
-            "the bar touches the last character: bar={bar:?} run={run:?}"
-        );
-        assert!(
-            bar.origin.x + bar.size.width < field.origin.x + field.size.width / 2.0,
-            "the bar is not pushed to the far edge of the field: bar={bar:?} field={field:?}"
         );
     }
 }

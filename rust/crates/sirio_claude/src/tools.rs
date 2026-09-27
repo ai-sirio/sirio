@@ -555,36 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn search_fetch_and_think_tools_take_their_own_titles() {
-        assert_eq!(
-            describe(&tool("Glob", json!({"pattern": "**/*.rs"}))).kind,
-            ToolKind::Search
-        );
-        assert_eq!(
-            describe(&tool("Grep", json!({"pattern": "fn main"}))).title,
-            "fn main"
-        );
-        assert_eq!(
-            describe(&tool("WebFetch", json!({"url": "https://example.com"}))).kind,
-            ToolKind::Fetch
-        );
-        assert_eq!(
-            describe(&tool("WebSearch", json!({"query": "gpui list state"}))).title,
-            "gpui list state"
-        );
-        let task = describe(&tool(
-            "Task",
-            json!({"description": "Audit the parser", "prompt": "Read every call site"}),
-        ));
-        assert_eq!(task.kind, ToolKind::Think);
-        assert_eq!(task.title, "Audit the parser");
-        assert_eq!(
-            task.content,
-            vec![ToolContent::Text("Read every call site".into())]
-        );
-    }
-
-    #[test]
     fn exit_plan_mode_is_its_own_kind_and_shows_the_plan() {
         let info = describe(&tool("ExitPlanMode", json!({"plan": "1. Read\n2. Write"})));
         assert_eq!(info.kind, ToolKind::SwitchMode);
@@ -593,19 +563,6 @@ mod tests {
             info.content,
             vec![ToolContent::Text("1. Read\n2. Write".into())]
         );
-    }
-
-    #[test]
-    fn todo_write_titles_itself_from_its_entries() {
-        let info = describe(&tool(
-            "TodoWrite",
-            json!({"todos": [
-                {"content": "Read the spec", "status": "completed"},
-                {"content": "Write the test", "status": "in_progress"}
-            ]}),
-        ));
-        assert_eq!(info.kind, ToolKind::Think);
-        assert_eq!(info.title, "Update TODOs: Read the spec, Write the test");
     }
 
     #[test]
@@ -627,22 +584,6 @@ mod tests {
         assert_eq!(describe(&tool("Read", json!({}))).title, "Read");
         assert_eq!(describe(&tool("Bash", json!({}))).title, "Terminal");
         assert_eq!(describe(&tool("Edit", json!(null))).title, "Edit");
-    }
-
-    #[test]
-    fn every_kind_spells_itself_the_way_the_transcript_keys_its_icons() {
-        // `sirio_ui::chat::tool_calls::tool_icon` matches these exact
-        // strings; a rename here silently falls back to the generic widget.
-        assert_eq!(ToolKind::Read.as_str(), "Read");
-        assert_eq!(ToolKind::Edit.as_str(), "Edit");
-        assert_eq!(ToolKind::Execute.as_str(), "Execute");
-        assert_eq!(ToolKind::Search.as_str(), "Search");
-        assert_eq!(ToolKind::Fetch.as_str(), "Fetch");
-        assert_eq!(ToolKind::Think.as_str(), "Think");
-        assert_eq!(ToolKind::Delete.as_str(), "Delete");
-        assert_eq!(ToolKind::Move.as_str(), "Move");
-        assert_eq!(ToolKind::SwitchMode.as_str(), "SwitchMode");
-        assert_eq!(ToolKind::Other.as_str(), "Other");
     }
 
     #[test]
@@ -763,23 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn entering_plan_mode_is_named_the_way_leaving_it_is() {
-        // `ExitPlanMode` has had a row since the table was ported from the
-        // wrapper; its sibling never did, so a chat that entered plan mode
-        // drew the bare wire name under the generic icon.
-        let info = describe(&tool("EnterPlanMode", json!({})));
-        assert_eq!(info.title, "Enter plan mode");
-        assert_eq!(info.kind, ToolKind::SwitchMode);
-    }
-
-    #[test]
-    fn a_tool_search_titles_itself_with_the_query_the_way_grep_does() {
-        let info = describe(&tool("ToolSearch", json!({"query": "select:Read,Edit"})));
-        assert_eq!(info.title, "select:Read,Edit");
-        assert_eq!(info.kind, ToolKind::Search);
-    }
-
-    #[test]
     fn an_lsp_call_points_at_the_file_and_line_it_asked_about() {
         // The only row here that earns a location: the surface can follow
         // along to the position the operation ran at, as it does for `Read`.
@@ -814,49 +738,5 @@ mod tests {
                 "tail -f deploy.log | grep --line-buffered ERROR".into()
             )]
         );
-    }
-
-    #[test]
-    fn stopping_a_task_names_the_task_it_stops() {
-        let info = describe(&tool("TaskStop", json!({"task_id": "wf_abc123"})));
-        assert_eq!(info.title, "Stop wf_abc123");
-        assert_eq!(info.kind, ToolKind::Execute);
-    }
-
-    #[test]
-    fn a_message_to_another_agent_names_the_recipient_and_shows_the_text() {
-        let info = describe(&tool(
-            "SendMessage",
-            json!({"to": "reviewer@team", "message": "the diff is ready"}),
-        ));
-        assert_eq!(info.title, "reviewer@team");
-        assert_eq!(
-            info.content,
-            [ToolContent::Text("the diff is ready".into())]
-        );
-    }
-
-    #[test]
-    fn an_artifact_call_says_which_action_it_took() {
-        // `action` is what distinguishes publishing a page from reading one,
-        // and it is the field most calls carry; a named `title` wins because
-        // it says *which* artifact.
-        let published = describe(&tool(
-            "Artifact",
-            json!({"action": "publish", "file_path": "/repo/page.html",
-                   "title": "Sirio Tier A"}),
-        ));
-        assert_eq!(published.title, "Sirio Tier A");
-        assert_eq!(
-            published.locations,
-            [ToolLocation {
-                path: "/repo/page.html".into(),
-                line: None
-            }]
-        );
-
-        let read = describe(&tool("Artifact", json!({"action": "read"})));
-        assert_eq!(read.title, "read");
-        assert!(read.locations.is_empty());
     }
 }

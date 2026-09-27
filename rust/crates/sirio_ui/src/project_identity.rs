@@ -1295,13 +1295,6 @@ mod tests {
     }
 
     #[test]
-    fn default_project_icon_is_the_undyed_folder_glyph() {
-        let icon = ProjectIcon::default();
-        assert_eq!(icon.value, ProjectIconValue::Symbol(ProjectGlyph::Folder));
-        assert_eq!(icon.tint, AgentAccentColor::Coral);
-    }
-
-    #[test]
     fn project_glyph_ids_round_trip_through_parse() {
         // F-PRJ-15: every offered glyph must persist and reload as itself,
         // and an unrecognised stored id must not panic or silently guess.

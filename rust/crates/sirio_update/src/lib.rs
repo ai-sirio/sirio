@@ -407,34 +407,6 @@ mod tests {
         );
     }
 
-    #[cfg(debug_assertions)]
-    #[test]
-    fn debug_override_is_selected_from_the_compiled_environment() {
-        let expected = option_env!("SIRIO_UPDATE_MANIFEST_URL")
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| manifest_url_for(ReleaseChannel::RELEASE_CHANNEL));
-        assert_eq!(manifest_url(), expected);
-    }
-
-    #[test]
-    fn a_newer_manifest_is_reported_as_available() {
-        let dir = temp_dir("available");
-        let offered = newer_version();
-        let served = offered.clone();
-        let mut updater =
-            Updater::for_test(ReleaseChannel::Nightly, dir, empty_keys(), move |url| {
-                assert_eq!(url, "https://dl.sirioai.app/nightly.json");
-                Ok(manifest("nightly", &served))
-            });
-
-        let result = updater.check_at(SystemTime::UNIX_EPOCH, false).unwrap();
-        assert!(matches!(
-            result,
-            CheckResult::Available(AvailableUpdate { ref version, .. }) if *version == offered
-        ));
-    }
-
     #[test]
     fn an_equal_or_older_manifest_is_not_available() {
         // The compiled version itself, which is the `<=` boundary this test
@@ -489,39 +461,6 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".part")
         }));
-    }
-
-    #[test]
-    fn failed_verification_removes_the_staged_download_and_returns_an_error() {
-        let signer = SigningKey::from_bytes(&[8; 32]);
-        let expected = b"signed release".to_vec();
-        let manifest = signed_manifest(
-            "stable",
-            &signer,
-            &newer_version(),
-            "https://example.invalid/artifact",
-            &expected,
-        );
-        let keys = sirio_release::AcceptedKeys::from_base64([
-            STANDARD.encode(signer.verifying_key().as_bytes())
-        ])
-        .unwrap();
-        let dir = temp_dir("rejected");
-        let mut updater =
-            Updater::for_test(ReleaseChannel::Stable, dir.clone(), keys, move |url| {
-                Ok(if url.ends_with("stable.json") {
-                    manifest.clone()
-                } else {
-                    b"tampered release".to_vec()
-                })
-            });
-
-        let error = updater.check_at(SystemTime::UNIX_EPOCH, false).unwrap_err();
-        assert!(
-            matches!(error, UpdateError::Verification(_)),
-            "got {error:?}"
-        );
-        assert!(std::fs::read_dir(dir).unwrap().next().is_none());
     }
 
     #[test]

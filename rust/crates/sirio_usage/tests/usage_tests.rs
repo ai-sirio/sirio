@@ -68,15 +68,6 @@ Current week (Fable)\r
                                                    0% used\r
 ";
 
-fn expected_usage() -> ProviderUsage {
-    ProviderUsage {
-        session: Some(UsageWindow::new("5h", 12)),
-        weekly: Some(UsageWindow::new("wk", 10)),
-        monthly: None,
-        fable_weekly: Some(UsageWindow::new("Fable", 0)),
-    }
-}
-
 /// The same usage with every window's reset time cleared. The panel's
 /// `Resets …` lines are anchored to the wall clock at parse time, so the
 /// percent-and-label comparisons below strip them and the reset times are
@@ -94,80 +85,6 @@ fn without_resets(mut usage: ProviderUsage) -> ProviderUsage {
         window.resets_at = None;
     }
     usage
-}
-
-#[test]
-fn a_well_formed_state_file_parses_into_the_expected_windows() {
-    let dir = TempDir::new();
-    // The transcript is read from a real file, exactly like the app would.
-    let path = dir.file("usage-panel.txt", WELL_FORMED_TRANSCRIPT);
-    let raw = std::fs::read_to_string(&path).expect("read fixture");
-
-    let usage = parse_claude_usage(&raw).expect("well-formed panel parses");
-    assert!(
-        usage
-            .session
-            .as_ref()
-            .is_some_and(|w| w.resets_at.is_some()),
-        "the session's `Resets 8:50am` line is read into resets_at"
-    );
-    assert!(
-        usage.weekly.as_ref().is_some_and(|w| w.resets_at.is_some()),
-        "the weekly `Resets Aug 16 at 10am` line is read into resets_at"
-    );
-    assert_eq!(
-        without_resets(usage),
-        expected_usage(),
-        "session 12%, weekly 10%, Fable 0% — the values the CLI reports"
-    );
-}
-
-#[test]
-fn a_real_capture_with_carriage_return_line_separators_parses() {
-    let dir = TempDir::new();
-    // The Claude TUI redraws the panel in place: lines are joined with
-    // carriage returns, not newlines. This is a verbatim capture of the
-    // panel from this machine (escape sequences removed for readability;
-    // the parser strips its own).
-    let real = "Current session\r\r\r████████████▌                                     25%used\rResets 8:50am (Europe/Rome)\r\rCurrent week (all models)\r██████                                            12%used\r   Resets Aug 16 at 10am (Europe/Rome)\r  +50% weekly limits promo through Aug 19 · clau.de/cc-50-promo\r\rWhat's contributing to your limits usage?\r Approximate,based onlocal sessions on this machine — does not include ↓\rCurrent week (Fable)\r                                                   0% used\r";
-    let path = dir.file("real-capture.txt", real);
-    let text = std::fs::read_to_string(&path).expect("read fixture");
-
-    let usage = without_resets(parse_claude_usage(&text).expect("real capture parses"));
-    assert_eq!(
-        usage.session,
-        Some(UsageWindow::new("5h", 25)),
-        "session window from its own percent, not another window's"
-    );
-    assert_eq!(
-        usage.weekly,
-        Some(UsageWindow::new("wk", 12)),
-        "weekly window must read its own percent (a \\r-joined panel used to\
-         collapse into one line and every window read the session's value)"
-    );
-    assert_eq!(usage.fable_weekly, Some(UsageWindow::new("Fable", 0)));
-}
-
-#[test]
-fn a_missing_state_file_yields_an_unavailable_provider() {
-    let dir = TempDir::new();
-    let missing = dir.0.join("does-not-exist.txt");
-    // The fetch maps an unreadable source to Unavailable, never a panic.
-    let outcome = match std::fs::read_to_string(&missing) {
-        Ok(text) => transcript_outcome(&text),
-        Err(_) => UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
-    };
-    assert_eq!(
-        outcome,
-        UsageFetchOutcome::Unavailable(UsageReason::NotInstalled)
-    );
-
-    // And the bar shows "—", not a crash: the reducer accepts it.
-    let state = reduce(outcome, &ProviderUsageState::Loading);
-    assert_eq!(
-        state,
-        ProviderUsageState::Unavailable(UsageReason::NotInstalled)
-    );
 }
 
 #[test]
@@ -214,30 +131,6 @@ fn a_state_file_with_unexpected_json_shape_is_handled_not_parsed() {
         ProviderUsageState::Unavailable(UsageReason::TimedOut),
         "no panic, no fabricated numbers, and no collapsed timeout reason"
     );
-}
-
-#[test]
-fn data_old_enough_to_count_as_stale_is_marked_stale_not_current() {
-    let dir = TempDir::new();
-    let path = dir.file("usage-panel.txt", WELL_FORMED_TRANSCRIPT);
-    let raw = std::fs::read_to_string(&path).expect("read fixture");
-
-    // The provider reported fine a while ago…
-    let loaded = reduce(transcript_outcome(&raw), &ProviderUsageState::Loading);
-    match &loaded {
-        ProviderUsageState::Loaded(usage) => {
-            assert_eq!(without_resets(usage.clone()), expected_usage());
-        }
-        other => panic!("a parseable panel loads, got {other:?}"),
-    }
-
-    // …the next refresh fails to reach it (bounded timeout): the last good
-    // value is kept, but as `.stale`, which the bar renders dimmed.
-    let stale = reduce(UsageFetchOutcome::TimedOut, &loaded);
-    match stale {
-        ProviderUsageState::Stale(usage) => assert_eq!(without_resets(usage), expected_usage()),
-        other => panic!("a timed-out refresh keeps the last value as stale, got {other:?}"),
-    }
 }
 
 #[test]

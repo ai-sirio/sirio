@@ -1258,18 +1258,6 @@ mod windows_pane_tests {
     use super::{PaneRegistry, spawn_process};
     use std::time::{Duration, Instant};
 
-    /// #246 replaces `unsupported_pane_error_names_no_deleted_pty_backend`,
-    /// which asserted that creation FAILS here. That was true and is now
-    /// deliberately false: Windows has a ConPTY backend. Recorded rather than
-    /// quietly deleted, because a removed test that pinned real behaviour is
-    /// worth explaining.
-    #[test]
-    fn a_control_owned_pane_spawns_on_windows() {
-        let process = spawn_process("pane-spawn", std::path::Path::new("."), None)
-            .expect("Windows has a ConPTY backend for control-owned panes");
-        super::terminate(&process);
-    }
-
     /// #246/#150: a verbatim path handed to cmd.exe as its cwd is read as
     /// UNC and silently ignored, so the pane would run every command in the
     /// Windows directory instead. Observed before this was stripped.

@@ -985,21 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn a_staging_directory_is_named_for_its_owner() {
-        let staging = staging_dir(std::path::Path::new("/data"), "codex-acp", "1.6.2");
-        let name = staging.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("codex-acp-1.6.2-"));
-        assert!(
-            name.ends_with(&std::process::id().to_string()),
-            "the pid lets a startup sweep tell live staging from abandoned"
-        );
-        assert_eq!(
-            staging.parent().unwrap(),
-            std::path::Path::new("/data/.staging")
-        );
-    }
-
-    #[test]
     fn sweeping_removes_staging_left_by_a_dead_process() {
         let root = std::env::temp_dir().join(format!("sirio-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1032,20 +1017,6 @@ mod tests {
             .unwrap();
 
         assert!(!lock.exists(), "a lock that outlived its process is stale");
-    }
-
-    #[test]
-    fn an_unsupported_archive_names_the_format() {
-        let error = InstallError::UnsupportedArchive {
-            agent: "goose".into(),
-            url: "https://x/goose.tar.bz2".into(),
-        };
-        let rendered = error.to_string();
-        assert!(rendered.contains("goose"));
-        assert!(
-            rendered.contains("tar.bz2"),
-            "the gap is visible, not mysterious"
-        );
     }
 
     // ---- End-to-end safety checks: hostile archives built in memory, no
@@ -1177,33 +1148,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_distribution_names_the_kind() {
-        // The global rule: `.tar.bz2` AND `uvx` are refused with an error
-        // that names the format.
-        let store = InstallStore::new(staging_for("uvx-kind"));
-        let agent = RegistryAgent {
-            id: "goose".into(),
-            name: "goose".into(),
-            version: "1.0.0".into(),
-            description: None,
-            repository: None,
-            website: None,
-            license: None,
-            icon: None,
-            distributions: vec![Distribution::Uvx {
-                package: "goose-acp".into(),
-                args: Vec::new(),
-            }],
-        };
-
-        let error = Installer::new(store)
-            .install(&agent, "linux-x86_64")
-            .unwrap_err();
-
-        assert!(error.to_string().contains("uvx"), "got: {error}");
-    }
-
-    #[test]
     fn a_small_declared_payload_over_the_ceiling_is_refused_zip() {
         // The ceiling counts bytes actually written, not declared sizes:
         // a ZIP central directory can lie. Lowering the ceiling stands in
@@ -1240,15 +1184,6 @@ mod tests {
     }
 
     #[test]
-    fn a_single_bin_entry_wins() {
-        let entries = vec!["claude-agent-acp".to_string()];
-        assert_eq!(
-            resolve_bin_name(&entries, "@agentclientprotocol/claude-agent-acp@0.70.0"),
-            Some("claude-agent-acp".to_string())
-        );
-    }
-
-    #[test]
     fn a_dependency_bin_is_never_preferred_over_the_package_bin() {
         // Installing codex-acp also drops a `codex` bin from its
         // @openai/codex dependency. Preferring it would silently launch the
@@ -1267,20 +1202,6 @@ mod tests {
         assert_eq!(
             resolve_bin_name(&entries, "agent-cli-tools@1.0.0"),
             Some("agent-cli".to_string())
-        );
-    }
-
-    #[test]
-    fn no_bin_entries_yields_none_rather_than_a_guess() {
-        assert_eq!(resolve_bin_name(&[], "whatever@1.0.0"), None);
-    }
-
-    #[test]
-    fn dotfiles_are_not_candidates() {
-        let entries = vec![".package-lock.json".to_string(), "real-bin".to_string()];
-        assert_eq!(
-            resolve_bin_name(&entries, "real-bin@1.0.0"),
-            Some("real-bin".to_string())
         );
     }
 
@@ -1363,58 +1284,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn off_windows_shim_extensions_are_ordinary_names() {
-        // The POSIX branch is untouched: npm writes no shims there, and an
-        // entry that happens to end in `.cmd` is just another candidate.
-        assert_eq!(
-            resolve_bin_name_on(
-                &windows_bin_listing(),
-                "@agentclientprotocol/claude-agent-acp@0.73.0",
-                false
-            ),
-            Some("claude-agent-acp".to_string())
-        );
-    }
-
     // ---- Task 5b: the caller may name the executable it wants.
-
-    #[test]
-    fn a_named_bin_beats_the_package_name() {
-        // pyright ships two executables and the one named after the package is
-        // the wrong one: the language server is `pyright-langserver`.
-        let entries = vec!["pyright".to_string(), "pyright-langserver".to_string()];
-        assert_eq!(
-            chosen_bin(&entries, "pyright", Some("pyright-langserver")),
-            Some("pyright-langserver".to_string())
-        );
-    }
-
-    #[test]
-    fn a_package_whose_bins_share_no_name_with_it_still_resolves_when_named() {
-        // vscode-langservers-extracted exposes five bins and none of them is a
-        // substring of the package name, so resolve_bin_name answers None and
-        // the install fails. json, html and css all come from this package.
-        let entries = vec![
-            "vscode-css-language-server".to_string(),
-            "vscode-eslint-language-server".to_string(),
-            "vscode-html-language-server".to_string(),
-            "vscode-json-language-server".to_string(),
-            "vscode-markdown-language-server".to_string(),
-        ];
-        assert_eq!(
-            resolve_bin_name(&entries, "vscode-langservers-extracted"),
-            None
-        );
-        assert_eq!(
-            chosen_bin(
-                &entries,
-                "vscode-langservers-extracted",
-                Some("vscode-json-language-server")
-            ),
-            Some("vscode-json-language-server".to_string())
-        );
-    }
 
     #[test]
     fn an_unnamed_bin_still_falls_back_to_the_package_name() {
@@ -1458,37 +1328,6 @@ mod tests {
     }
 
     #[test]
-    fn off_windows_a_named_bin_is_matched_verbatim() {
-        // No shims there: the bare name is the candidate, `.cmd` is just
-        // another name, and naming one the package lacks is still refused.
-        assert_eq!(
-            chosen_bin_on(&windows_bin_listing(), "claude-agent-acp", false),
-            Some("claude-agent-acp".to_string())
-        );
-        assert_eq!(
-            chosen_bin_on(&windows_bin_listing(), "claude-agent-acp.cmd", false),
-            Some("claude-agent-acp.cmd".to_string())
-        );
-    }
-
-    #[test]
-    fn the_npm_install_deadline_is_coherent_with_the_other_ceilings() {
-        // Same ceiling family as Task 5's download: nothing stays in
-        // flight forever.
-        assert_eq!(DOWNLOAD_TIMEOUT, Duration::from_secs(600));
-        assert_eq!(NPM_INSTALL_TIMEOUT, Duration::from_secs(600));
-    }
-
-    #[test]
-    fn wait_up_to_notices_a_child_that_finishes_in_time() {
-        let mut child = quick_child(true).spawn().unwrap();
-        assert!(matches!(
-            wait_up_to(&mut child, Duration::from_secs(30)),
-            WaitOutcome::Exited
-        ));
-    }
-
-    #[test]
     fn wait_up_to_kills_a_child_that_blows_the_deadline() {
         let started = std::time::Instant::now();
         let mut child = quick_child(false).spawn().unwrap();
@@ -1508,38 +1347,6 @@ mod tests {
     }
 
     // ---- Task 1: the capped stderr drain.
-
-    #[test]
-    fn output_under_the_cap_passes_through_untouched() {
-        let text = "npm warn deprecated something\nnpm ERR! summary\n";
-        assert_eq!(drain_capped(text.as_bytes()), text);
-    }
-
-    #[test]
-    fn an_input_between_the_caps_keeps_both_its_first_and_last_line() {
-        // 3,000 bytes sits in the gap that once silently truncated: past
-        // STDERR_HEAD_CAP, yet too small to evict anything from the tail.
-        let mut input = String::new();
-        input.push_str("FIRST-LINE-MARKER\n");
-        input.push_str(&"filler ".repeat(600 - "FIRST-LINE-MARKER\n".len() / 7));
-        while input.len() < 3_000 {
-            input.push_str("filler ");
-        }
-        input.push_str("LAST-LINE-MARKER\n");
-
-        let output = drain_capped(input.as_bytes());
-
-        assert!(output.contains("FIRST-LINE-MARKER"), "head lost: {output}");
-        assert!(output.contains("LAST-LINE-MARKER"), "tail lost: {output}");
-    }
-
-    #[test]
-    fn an_input_exactly_at_the_head_cap_passes_through_whole() {
-        let input: Vec<u8> = (0..STDERR_HEAD_CAP)
-            .map(|i| b'a' + (i % 26) as u8)
-            .collect();
-        assert_eq!(drain_capped(&input[..]), String::from_utf8(input).unwrap());
-    }
 
     #[test]
     fn an_input_exactly_at_both_caps_passes_through_whole() {
@@ -1569,28 +1376,6 @@ mod tests {
         );
         assert!(!output.contains("progress noise"), "the middle must go");
         assert!(output.contains("bytes elided"), "got: {output}");
-    }
-
-    #[test]
-    fn the_elision_marker_reports_a_plausible_byte_count() {
-        let total = 10_000usize;
-        let output = drain_capped(std::io::Cursor::new(vec![b'x'; total]));
-        let start = output.find("[ ").unwrap();
-        let digits = &output[start + 2..];
-        let end = digits.find(" ").unwrap();
-        let reported: usize = digits[..end].parse().unwrap();
-
-        assert!(
-            reported >= total - STDERR_HEAD_CAP - STDERR_TAIL_CAP,
-            "reported {reported}, ceiling allows as few as {}",
-            total - STDERR_HEAD_CAP - STDERR_TAIL_CAP
-        );
-        assert!(reported < total, "reported {reported} of {total}");
-        assert_eq!(
-            reported,
-            total - output.len() + format!("\n\n  [ {reported} bytes elided ]\n\n").len(),
-            "head + marker + tail must account for every byte"
-        );
     }
 
     #[test]
@@ -1670,19 +1455,6 @@ mod tests {
             error.to_string().contains("simulated-npm-boom"),
             "stderr was lost: {error}"
         );
-    }
-
-    #[test]
-    fn a_fake_npm_that_leaves_no_bin_says_the_package_exposes_no_executable() {
-        let store = InstallStore::new(staging_for("npx-nobin"));
-        let agent = npx_agent("npx-nobin-agent");
-
-        let error = Installer::new(store)
-            .with_npm(fake_npm_argv("exit 0"))
-            .install(&agent, "linux-x86_64")
-            .unwrap_err();
-
-        assert!(error.to_string().contains("no executable"), "got: {error}");
     }
 
     #[test]

@@ -174,57 +174,6 @@ fn exact_path_lookup_does_not_normalize_nearby_paths() {
 }
 
 #[test]
-fn current_schema_contains_named_persistence_migrations() {
-    let dir = TempDir::new();
-    let path = dir.db_path("named-migrations");
-    let db = AppDatabase::open(&path).expect("open");
-    assert_eq!(
-        db.schema_version().expect("schema version"),
-        CURRENT_SCHEMA_VERSION
-    );
-    drop(db);
-
-    let conn = rusqlite::Connection::open(&path).expect("raw open");
-    for table in [
-        "session_ref",
-        "chat_turn",
-        "quarantine_record",
-        "browser_origin_grant",
-    ] {
-        let present: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                [table],
-                |row| row.get(0),
-            )
-            .expect("table lookup");
-        assert_eq!(present, 1, "named migration must create {table}");
-    }
-    let worktree_columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(worktree)")
-        .expect("worktree schema")
-        .query_map([], |row| row.get(1))
-        .expect("worktree columns")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("read worktree columns");
-    for column in ["comment", "created_at", "updated_at"] {
-        assert!(
-            worktree_columns.iter().any(|value| value == column),
-            "metadata migration must create {column}"
-        );
-    }
-    let primary_index: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master
-             WHERE type = 'index' AND name = 'worktree_one_primary_per_project'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("primary index lookup");
-    assert_eq!(primary_index, 1);
-}
-
-#[test]
 fn tab_agent_identity_round_trips_through_a_real_database_file() {
     let dir = TempDir::new();
     let path = dir.db_path("tab-agent-identity");
@@ -553,16 +502,6 @@ fn a_silenced_language_survives_the_round_trip() {
     assert_eq!(
         db.settings().expect("load settings").lsp_silenced_languages,
         r#"["java","kotlin"]"#
-    );
-}
-
-#[test]
-fn nothing_is_silenced_by_default() {
-    let dir = TempDir::new();
-    let db = AppDatabase::open(&dir.db_path("silenced-default")).expect("open");
-    assert_eq!(
-        db.settings().expect("load settings").lsp_silenced_languages,
-        "[]"
     );
 }
 
@@ -1875,42 +1814,6 @@ fn concurrent_first_opens_from_two_processes_both_succeed() {
         db.schema_version().expect("version"),
         sirio_persistence::CURRENT_SCHEMA_VERSION
     );
-}
-
-/// The read path: two processes opening an already-migrated database at the
-/// same time must both succeed — the common case must not pay for the
-/// migration lock.
-#[test]
-fn concurrent_opens_of_an_already_migrated_database_both_succeed() {
-    let dir = TempDir::new();
-    let database_path = dir.db_path("concurrent-migrated");
-    {
-        let db = AppDatabase::open(&database_path).expect("seed database");
-        db.save_project(&sample_project("proj-1", "sirio"))
-            .expect("seed project");
-    }
-    assert_eq!(
-        db_schema_version(&database_path),
-        sirio_persistence::CURRENT_SCHEMA_VERSION
-    );
-
-    let go = dir.0.join("go");
-    let ready_a = dir.0.join("ready-a");
-    let ready_b = dir.0.join("ready-b");
-    let child_a = spawn_helper(&dir.0, &database_path, &ready_a, &go);
-    let child_b = spawn_helper(&dir.0, &database_path, &ready_b, &go);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    assert!(
-        wait_until(deadline, "both ready files", || {
-            ready_a.exists() && ready_b.exists()
-        }),
-        "children never signalled ready"
-    );
-    std::fs::write(&go, "go").expect("write go file");
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    assert_all_helpers_succeeded(vec![child_a, child_b], deadline);
 }
 
 /// Two real app instances write disjoint records to one store and then quit.

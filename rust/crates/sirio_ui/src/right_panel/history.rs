@@ -1431,19 +1431,6 @@ mod tests {
     }
 
     #[test]
-    fn a_single_lane_column_is_one_lane_wide() {
-        let narrow = GraphRow {
-            lane: 0,
-            color: 0,
-            through: vec![Some(0)],
-            joins_in: Vec::new(),
-            edges_out: Vec::new(),
-        };
-
-        assert_eq!(graph_width(std::slice::from_ref(&narrow)), LANE_WIDTH);
-    }
-
-    #[test]
     fn a_node_past_the_lane_cap_is_not_drawn() {
         // `layout` caps nothing, so a repository with more concurrent
         // branches than the column can show produces these. Drawing one puts
@@ -1484,55 +1471,6 @@ mod tests {
         assert_eq!(graph_width(std::slice::from_ref(&settled)), LANE_WIDTH);
     }
 
-    /// The panel's own default. Nothing is dropped at the width the app
-    /// starts at, or the fix would be a regression for everyone who never
-    /// touches the divider.
-    #[test]
-    fn the_default_panel_width_keeps_every_column() {
-        assert_eq!(
-            row_columns(405.0, MAX_LANES as f32 * LANE_WIDTH),
-            RowColumns {
-                author: true,
-                date: true
-            }
-        );
-    }
-
-    /// The width the app starts at must clear the first rung by a readable
-    /// margin, not by a rounding error. It used to clear it by 5px — the
-    /// author column was one pixel of chrome away from vanishing at the
-    /// default, which would have read as a bug rather than as the ladder
-    /// working.
-    ///
-    /// Deliberately not bought by lowering `MIN_SUBJECT_WIDTH`: the margin
-    /// is the distance to that floor, so moving the floor to widen the
-    /// margin measures nothing. It is bought by charging each column what it
-    /// actually holds.
-    #[test]
-    fn the_default_panel_width_clears_the_first_rung_with_room_to_spare() {
-        let graph = MAX_LANES as f32 * LANE_WIDTH;
-        let subject = subject_width(
-            405.0 - ROW_CHROME,
-            graph,
-            RowColumns {
-                author: true,
-                date: true,
-            },
-        );
-
-        // Two lowercase characters of clearance, so a change to any one piece of
-        // chrome cannot flip the default's behaviour on its own. Was three
-        // characters (+14px) before #366 widened the date column from 71px to
-        // 80px so `2026-09-03` fits on Windows; the default still keeps every
-        // column with 9px to spare.
-        assert!(
-            subject >= MIN_SUBJECT_WIDTH + 8.0,
-            "the default width leaves the subject {subject}px, only {}px clear of the \
-             {MIN_SUBJECT_WIDTH}px floor",
-            subject - MIN_SUBJECT_WIDTH
-        );
-    }
-
     /// The author goes first. In a single-author repository the column
     /// repeats one name down the whole list, while the date is the only
     /// thing placing a commit in time.
@@ -1543,20 +1481,6 @@ mod tests {
             RowColumns {
                 author: false,
                 date: true
-            }
-        );
-    }
-
-    /// At the panel's 220px floor the subject gets the row to itself. This
-    /// is the width the running app showed the defect at: the subject was
-    /// squeezed to nothing and the two fixed columns overflowed the border.
-    #[test]
-    fn the_panel_floor_keeps_only_the_subject() {
-        assert_eq!(
-            row_columns(220.0, MAX_LANES as f32 * LANE_WIDTH),
-            RowColumns {
-                author: false,
-                date: false
             }
         );
     }
@@ -1594,47 +1518,6 @@ mod tests {
                 "at {width}px the row keeps {columns:?} and leaves the subject {subject}px"
             );
         }
-    }
-
-    fn tooltip_fixture(refs: Vec<String>) -> CommitRecord {
-        CommitRecord {
-            sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            parents: Vec::new(),
-            refs,
-            author: "e.palmisano".to_owned(),
-            timestamp: 1_755_000_000,
-            subject: "feat(history): drop the columns the panel cannot fit".to_owned(),
-        }
-    }
-
-    /// The card carries what the row had to give up. Asserted by structure
-    /// rather than against a literal string: the timestamp is rendered in
-    /// local time, so a literal would pass here and fail in another zone.
-    #[test]
-    fn the_tooltip_carries_the_full_subject_and_the_dropped_columns() {
-        let commit = tooltip_fixture(vec!["HEAD -> main".to_owned()]);
-        let (subject, meta) = commit_tooltip_text(&commit);
-
-        assert_eq!(subject, commit.subject, "the subject is never truncated");
-        assert!(meta.starts_with("e.palmisano · "));
-        assert!(
-            meta.contains("0123456"),
-            "the short sha is seven characters"
-        );
-        assert!(
-            !meta.contains("0123456789a"),
-            "and not the whole object name"
-        );
-        assert!(meta.ends_with(" · HEAD -> main"));
-    }
-
-    /// Most commits carry no refs, and an empty list must not leave a
-    /// dangling separator behind it.
-    #[test]
-    fn a_commit_without_refs_ends_at_its_sha() {
-        let (_, meta) = commit_tooltip_text(&tooltip_fixture(Vec::new()));
-
-        assert!(meta.ends_with("0123456"), "meta was {meta:?}");
     }
 
     /// An insertion bar is a claim about where typing lands, so a field

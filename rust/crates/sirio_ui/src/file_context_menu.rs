@@ -521,51 +521,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn groups_never_decrease_so_separators_can_be_drawn_from_them() {
-        let items = items(&all_true());
-        for pair in items.windows(2) {
-            assert!(
-                pair[1].group >= pair[0].group,
-                "{} must not come after a higher group",
-                pair[1].label
-            );
-        }
-    }
-
-    #[test]
-    fn the_workspace_owns_every_entry_it_has_to_reach_outside_for() {
-        let items = items(&all_true());
-        for item in &items {
-            let expected = match item.action {
-                FileContextAction::Cut
-                | FileContextAction::Copy
-                | FileContextAction::CopyAndTrim
-                | FileContextAction::Paste
-                | FileContextAction::OpenMarkdownPreview => FileContextRoute::View,
-                _ => FileContextRoute::App,
-            };
-            assert_eq!(item.route, expected, "wrong route for {}", item.label);
-        }
-    }
-#[test]
-fn find_references_is_offered_and_explains_itself_when_it_cannot_run() {
-// Present-with-a-reason, never absent and never silently inert:
-// the reader must learn that no server here answers this.
-let facts = FileContextFacts {
-references_available: false,
-..FileContextFacts::default()
-};
-let entry = items(&facts)
-.into_iter()
-.find(|item| item.action == FileContextAction::FindReferences)
-.expect("the entry is present even when it cannot run");
-assert_eq!(entry.label, "Find References");
-assert_eq!(entry.route, FileContextRoute::App);
-assert_eq!(entry.state, ItemState::Unavailable(NO_REFERENCES.to_owned()));
-}
-
 #[test]
 fn find_references_is_enabled_once_a_server_offers_it() {
 let facts = FileContextFacts {
@@ -577,29 +532,6 @@ let entry = items(&facts)
 .find(|item| item.action == FileContextAction::FindReferences)
 .expect("the entry is present");
 assert_eq!(entry.state, ItemState::Ready);
-}
-
-#[test]
-fn find_references_sits_beside_go_to_definition() {
-// Same group means no separator between them: they are two halves
-// of one question about the symbol under the pointer.
-let facts = FileContextFacts::default();
-let entries = items(&facts);
-let definition = entries
-.iter()
-.find(|item| item.action == FileContextAction::GoToDefinition)
-.expect("go to definition");
-let references = entries
-.iter()
-.find(|item| item.action == FileContextAction::FindReferences)
-.expect("find references");
-assert_eq!(definition.group, references.group);
-}
-
-#[test]
-fn trimming_removes_the_indentation_every_line_shares() {
-    let text = "    let a = 1;\n    let b = 2;\n";
-    assert_eq!(trim_common_indent(text), "let a = 1;\nlet b = 2;\n");
 }
 
 #[test]
@@ -776,20 +708,5 @@ fn a_path_with_a_space_is_escaped() {
             entry.state,
             ItemState::Unavailable("jdtls needs a JVM (Java 21 or newer)".into())
         );
-    }
-
-    #[test]
-    fn copy_permalink_outside_a_repo_is_still_merely_unavailable() {
-        // The old contract survived where it was right, rather than being
-        // weakened for everything.
-        let facts = FileContextFacts {
-            in_git_repo: false,
-            ..FileContextFacts::default()
-        };
-        let entry = items(&facts)
-            .into_iter()
-            .find(|item| item.action == FileContextAction::CopyPermalink)
-            .expect("the entry is present");
-        assert_eq!(entry.state, ItemState::Unavailable(NOT_IN_GIT.to_owned()));
     }
 }

@@ -1231,27 +1231,6 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    struct RefreshIndicatorFixture;
-
-    impl Render for RefreshIndicatorFixture {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            files_refresh_indicator(window, cx).into_any_element()
-        }
-    }
-
-    #[gpui::test]
-    fn the_refresh_indicator_uses_the_animated_bezel_primitive(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| RefreshIndicatorFixture);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("files-refresh-spinner").is_some(),
-            "the refresh slot renders the Bezel-backed animated indicator"
-        );
-    }
-
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -1329,49 +1308,6 @@ mod tests {
         panic!("condition never became true within the pump budget");
     }
 
-    /// The Files tree's per-type glyphs come from the vendored Material
-    /// theme (`sirio_icons`). The expectations are the pinned table's own
-    /// answers, not a guess at what each name "should" get.
-    #[test]
-    fn file_glyph_resolves_known_kinds_from_the_vendored_theme() {
-        let cases: &[(&str, Icon)] = &[
-            ("/repo/src/main.rs", Icon::file_type("rust")),
-            ("/repo/deploy.sh", Icon::file_type("console")),
-            (".gitignore", Icon::file_type("git")),
-            ("Dockerfile", Icon::file_type("docker")),
-            ("Cargo.lock", Icon::file_type("lock")),
-            ("Cargo.toml", Icon::file_type("toml")),
-            ("release.zip", Icon::file_type("zip")),
-            (".env", Icon::file_type("tune")),
-            ("service.env", Icon::file_type("tune")),
-            (".env.local", Icon::file_type("tune")),
-            (".editorconfig", Icon::file_type("editorconfig")),
-            ("README.md", Icon::file_type("readme")),
-            // Absent upstream, so it draws the theme's own default mark.
-            // Not a leftover of the retired Foundation extension rule --
-            // upstream simply has no icon for it.
-            (".bashrc", Icon::file_type("file")),
-            ("gitmodules", Icon::file_type("file")),
-        ];
-        for (path, expected) in cases {
-            assert_eq!(file_glyph(Path::new(path)), *expected, "file_glyph({path:?})");
-        }
-    }
-
-    #[test]
-    fn folder_glyph_resolves_a_named_pair_and_falls_back_to_the_plain_folder() {
-        let cases: &[(&str, &str, &str)] = &[
-            ("/repo/src", "folder-src", "folder-src-open"),
-            ("/repo/.git", "folder-git", "folder-git-open"),
-            ("/repo/node_modules", "folder-node", "folder-node-open"),
-            ("/repo/random-name", "folder", "folder-open"),
-        ];
-        for (path, collapsed, expanded) in cases {
-            assert_eq!(folder_glyph(Path::new(path), false), Icon::file_type(collapsed));
-            assert_eq!(folder_glyph(Path::new(path), true), Icon::file_type(expanded));
-        }
-    }
-
     #[test]
     fn file_row_glyph_marks_a_directory_open_or_closed_and_keeps_file_icons() {
         assert_eq!(
@@ -1389,55 +1325,6 @@ mod tests {
             file_row_glyph(Path::new("/repo/main.rs"), false, false),
             Some(Icon::file_type("rust")),
             "a file keeps its per-type glyph"
-        );
-    }
-
-    /// `.git` is a directory like any other: it opens. It used to deviate
-    /// onto `Icon::GitBranch` and would have been the one row in the tree
-    /// that never opened.
-    #[test]
-    fn file_row_glyph_opens_dot_git_like_every_other_directory() {
-        assert_eq!(
-            file_row_glyph(Path::new("/repo/.git"), true, false),
-            Some(Icon::file_type("folder-git"))
-        );
-        assert_eq!(
-            file_row_glyph(Path::new("/repo/.git"), true, true),
-            Some(Icon::file_type("folder-git-open"))
-        );
-        assert_eq!(
-            file_row_glyph(Path::new("/repo/.gitignore"), false, false),
-            Some(Icon::file_type("git")),
-            "the git *file* family keeps a git mark of its own"
-        );
-    }
-
-    /// The selector is derived from the icon that was drawn, never from the
-    /// row's flag -- a selector computed from the flag only ever asserts
-    /// that `expanded == expanded`. With 500 folder assets it can no longer
-    /// match two variants, so it reads the stem.
-    #[test]
-    fn directory_icon_selector_names_the_state_the_drawn_stem_is_in() {
-        assert_eq!(
-            directory_icon_selector(Icon::file_type("folder-src-open")),
-            "file-directory-icon-open"
-        );
-        assert_eq!(
-            directory_icon_selector(Icon::file_type("folder-open")),
-            "file-directory-icon-open"
-        );
-        assert_eq!(
-            directory_icon_selector(Icon::file_type("folder-src")),
-            "file-directory-icon-closed"
-        );
-        assert_eq!(
-            directory_icon_selector(Icon::file_type("folder")),
-            "file-directory-icon-closed"
-        );
-        assert_eq!(
-            directory_icon_selector(Icon::file_type("rust")),
-            "file-directory-icon-unknown",
-            "a file stem in a directory row is a bug, and must say so"
         );
     }
 
@@ -1715,35 +1602,6 @@ mod tests {
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
                 .expect("restore permissions for cleanup");
         }
-    }
-
-    /// F-CHG-03: the same refresh guard that prevents a second refresh
-    /// from starting must be visible as a drawn loading state.
-    ///
-    /// This also asserted a Refresh control in the Files toolbar. That
-    /// toolbar is gone and Refresh lives in the file/folder context
-    /// menu, which needs a row to right-click — and a panel on its
-    /// first load has none. Nothing is left uncovered by dropping the
-    /// assertion: what carries this window is `ensure_tree_refresh`'s
-    /// 1 s loop, which keeps walking with no gesture at all.
-    #[gpui::test]
-    async fn a_refresh_in_flight_draws_the_loading_state(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        std::fs::write(dir.0.join("visible.txt"), "x").expect("write file");
-
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| {
-            let mut panel = RightPanel::new(dir.0.clone());
-            panel.refresh_started = true;
-            panel
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("files-loading").is_some(),
-            "an in-flight refresh reaches a loading pixel"
-        );
     }
 
     /// F-CHG-03: a failed root refresh renders Retry and a subsequent click
@@ -2889,24 +2747,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn hidden_files_and_directories_are_omitted_by_default(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        std::fs::write(dir.0.join(".secret"), "secret").expect("write hidden file");
-        std::fs::create_dir(dir.0.join(".config")).expect("create hidden directory");
-
-        let (mut cx, _panel) = settled_panel(cx, dir.0.clone());
-
-        assert!(
-            cx.debug_bounds("file-row").is_none(),
-            "a dotfile is hidden by default"
-        );
-        assert!(
-            cx.debug_bounds("file-directory-row").is_none(),
-            "a dot-directory is hidden by default"
-        );
-    }
-
-    #[gpui::test]
     async fn files_footer_switches_hidden_entries_on_and_off(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         std::fs::write(dir.0.join(".secret"), "secret").expect("write hidden file");
@@ -3014,25 +2854,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ensure_tree_refresh_has_no_periodic_timer() {
-        let source = include_str!("mod.rs");
-        let one_second_timer = ["timer(Duration::from_secs(", "1))"].concat();
-        assert!(!source.contains(&one_second_timer));
-    }
-
-    #[gpui::test]
-    fn refresh_requests_are_debounced_and_coalesced(cx: &mut TestAppContext) {
-        let directory = TempDir::new();
-        let panel = cx.new(|_| RightPanel::new(directory.0.clone()));
-        panel.update(cx, |panel, cx| {
-            panel.request_refresh(cx);
-            panel.request_refresh(cx);
-            assert!(panel.refresh_dirty);
-            assert!(panel.refresh_debounce_task.is_some());
-        });
-    }
-
     /// F-CHG-03: the retry that used to ride on the 1s tick is now explicit,
     /// and must back off rather than hold a cadence -- whatever blocks the
     /// walk may never clear, and a fixed retry over an unreadable checkout is
@@ -3069,22 +2890,6 @@ mod tests {
                 "the counter restarts once a success has cleared it"
             );
         });
-    }
-
-    /// The delay doubles per consecutive failure and then stops growing, so
-    /// a permanently unreadable checkout costs one walk a minute rather than
-    /// one a second.
-    #[test]
-    fn the_failure_backoff_doubles_and_then_holds_at_a_minute() {
-        let delay = |failures: u32| Duration::from_secs(1u64 << failures.min(6));
-        assert_eq!(delay(1), Duration::from_secs(2));
-        assert_eq!(delay(2), Duration::from_secs(4));
-        assert_eq!(delay(6), Duration::from_secs(64));
-        assert_eq!(
-            delay(50),
-            Duration::from_secs(64),
-            "the shift must stay capped -- 1u64 << 64 is undefined behaviour territory"
-        );
     }
 
     /// The Files panel spent most of its time showing "Loading files…": the

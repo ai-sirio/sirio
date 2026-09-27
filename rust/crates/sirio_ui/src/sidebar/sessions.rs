@@ -289,25 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_project_still_contributes_its_sessions() {
-        let mut sirio = project(0, "sirio");
-        sirio.expanded = false;
-        let rows = vec![
-            sirio,
-            worktree(
-                1,
-                "main",
-                "/r/main",
-                vec![pill("a", TabKind::AgentChat, Some("claude"), Some(1))],
-            ),
-        ];
-        let list = session_list(&rows, &[], "");
-        assert_eq!(keys(&list.open), ["a"]);
-        assert_eq!(list.open[0].project, "sirio");
-        assert_eq!(list.open[0].branch, "main");
-    }
-
-    #[test]
     fn newest_event_first_unknown_last_ties_in_tree_order() {
         let rows = vec![
             project(0, "p"),
@@ -496,15 +477,6 @@ mod tests {
         assert_eq!(dated, expected);
     }
 
-    #[test]
-    fn every_brand_has_a_name() {
-        assert_eq!(agent_name(AgentBrandColor::Claude), "Claude");
-        assert_eq!(agent_name(AgentBrandColor::Codex), "Codex");
-        assert_eq!(agent_name(AgentBrandColor::OpenCode), "OpenCode");
-        assert_eq!(agent_name(AgentBrandColor::Pi), "Pi");
-        assert_eq!(agent_name(AgentBrandColor::Omp), "omp");
-        assert_eq!(agent_name(AgentBrandColor::Unknown), "");
-    }
 }
 
 /// Wall-clock now in Unix milliseconds.

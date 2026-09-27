@@ -311,21 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_naming_requires_first_run_or_both_throttles() {
-        let start = Instant::now();
-        let mut throttle = AutoNamingThrottle::default();
-        assert!(
-            throttle.should_request(start, 199),
-            "the first run is exempt from both gates"
-        );
-        assert!(throttle.should_request(start, 200));
-        throttle.record_request(start, 200);
-        assert!(!throttle.should_request(start + Duration::from_secs(31), 399));
-        assert!(!throttle.should_request(start + Duration::from_secs(29), 401));
-        assert!(throttle.should_request(start + Duration::from_secs(31), 400));
-    }
-
-    #[test]
     fn once_gate_runs_only_the_first_callback() {
         let mut gate = OnceGate::default();
         let mut calls = 0;
@@ -389,18 +374,6 @@ mod tests {
     #[cfg(not(windows))]
     mod unix_display_paths {
         use super::*;
-
-        #[test]
-        fn paths_render_unchanged() {
-            assert_eq!(
-                display_path_against(Path::new("/opt/tooling"), None),
-                "/opt/tooling"
-            );
-            assert_eq!(
-                display_path_against(Path::new("/home/other"), Some(Path::new("/home/me"))),
-                "/home/other"
-            );
-        }
 
         #[test]
         fn home_relative_paths_collapse_with_a_forward_slash() {

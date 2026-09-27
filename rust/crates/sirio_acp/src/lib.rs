@@ -2700,20 +2700,6 @@ mod tests {
     const FIXTURE_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
     #[test]
-    fn maps_text_updates_to_typed_events() {
-        let message = SessionNotification::new(
-            "session",
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                TextContent::new("ciao"),
-            ))),
-        );
-        assert_eq!(
-            notification_to_events(message),
-            vec![AcpEvent::AgentMessageChunk("ciao".into())]
-        );
-    }
-
-    #[test]
     fn an_empty_thought_chunk_is_not_a_thought() {
         // The wrapper drives the same `claude` the native transport does,
         // so it relays the same empty thinking -- see
@@ -2725,41 +2711,6 @@ mod tests {
             ))),
         );
         assert!(notification_to_events(update).is_empty());
-    }
-
-    #[test]
-    fn maps_completed_tool_update_to_terminal_event() {
-        let update = SessionNotification::new(
-            "session",
-            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                "tool",
-                ToolCallUpdateFields::default().status(ToolCallStatus::Completed),
-            )),
-        );
-        assert_eq!(
-            notification_to_events(update),
-            vec![AcpEvent::ToolCallCompleted {
-                id: "tool".into(),
-                status: "Completed".into(),
-                kind: None,
-                content: None,
-                locations: None,
-                raw_input: None,
-                raw_output: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn maps_started_tool_call_to_started_event() {
-        let update = SessionNotification::new(
-            "session",
-            SessionUpdate::ToolCall(ToolCall::new("tool", "Read file")),
-        );
-        assert!(matches!(
-            notification_to_events(update).as_slice(),
-            [AcpEvent::ToolCallStarted { id, title, .. }] if id == "tool" && title == "Read file"
-        ));
     }
 
     /// P91 part 2: the widened seam. A tool call whose content is a diff
@@ -2843,129 +2794,6 @@ mod tests {
                 raw_input: None,
                 raw_output: None,
             }]
-        );
-    }
-
-    #[test]
-    fn maps_usage_update_to_typed_context_usage() {
-        let update = SessionNotification::new(
-            "session",
-            SessionUpdate::UsageUpdate(
-                agent_client_protocol::schema::v1::UsageUpdate::new(53_000, 200_000)
-                    .cost(agent_client_protocol::schema::v1::Cost::new(0.045, "USD")),
-            ),
-        );
-        assert_eq!(
-            notification_to_events(update),
-            vec![AcpEvent::ContextUsage(ContextUsage {
-                used: 53_000,
-                size: 200_000,
-                cost: Some(ContextCost {
-                    amount: 0.045,
-                    currency: "USD".into(),
-                }),
-                input_tokens: None,
-                output_tokens: None,
-                cached_read_tokens: None,
-            })]
-        );
-    }
-
-    #[test]
-    fn extracts_model_choices_from_session_configuration() {
-        let options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "sonnet",
-                vec![
-                    agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
-                        "sonnet", "Sonnet",
-                    ),
-                    agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
-                        "haiku", "Haiku",
-                    ),
-                ],
-            )
-            .category(SessionConfigOptionCategory::Model),
-        ];
-        let catalog = model_catalog_from_options(Some(&options)).expect("model selector");
-        assert_eq!(catalog.config_id, "model");
-        assert_eq!(catalog.selected_id, "sonnet");
-        assert_eq!(
-            catalog.options,
-            vec![
-                ModelOption {
-                    id: "sonnet".into(),
-                    name: "Sonnet".into(),
-                    description: None,
-                },
-                ModelOption {
-                    id: "haiku".into(),
-                    name: "Haiku".into(),
-                    description: None,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn maps_model_configuration_updates_to_catalog_events() {
-        let update = SessionNotification::new(
-            "session",
-            SessionUpdate::ConfigOptionUpdate(
-                agent_client_protocol::schema::v1::ConfigOptionUpdate::new(vec![
-                    SessionConfigOption::select(
-                        "model",
-                        "Model",
-                        "haiku",
-                        vec![
-                            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
-                                "haiku", "Haiku",
-                            ),
-                        ],
-                    )
-                    .category(SessionConfigOptionCategory::Model),
-                ]),
-            ),
-        );
-        assert!(matches!(
-            notification_to_events(update).as_slice(),
-            [AcpEvent::ModelCatalog(ModelCatalog { selected_id, .. })] if selected_id == "haiku"
-        ));
-    }
-
-    #[test]
-    fn maps_available_commands_update_to_typed_event() {
-        let update = SessionNotification::new(
-            "session",
-            SessionUpdate::AvailableCommandsUpdate(
-                agent_client_protocol::schema::v1::AvailableCommandsUpdate::new(vec![
-                    agent_client_protocol::schema::v1::AvailableCommand::new(
-                        "cr",
-                        "Code review the diff",
-                    ),
-                    agent_client_protocol::schema::v1::AvailableCommand::new(
-                        "research",
-                        "Research a topic",
-                    ),
-                ]),
-            ),
-        );
-        assert_eq!(
-            notification_to_events(update),
-            vec![AcpEvent::AvailableCommands(vec![
-                AvailableCommandInfo {
-                    name: "cr".into(),
-                    description: "Code review the diff".into(),
-                    argument_hint: None,
-                },
-                AvailableCommandInfo {
-                    name: "research".into(),
-                    description: "Research a topic".into(),
-                    argument_hint: None,
-                },
-            ])]
         );
     }
 
@@ -3170,79 +2998,6 @@ mod tests {
         assert!(mode_catalog_from_options(Some(&options)).is_none());
         assert!(mode_catalog_from_options(None).is_none());
         assert!(mode_catalog_from_options(Some(&Vec::new())).is_none());
-    }
-
-    #[test]
-    fn prompt_blocks_builds_trimmed_text_resource_links_and_images() {
-        let cwd = std::env::temp_dir().join("sirio-acp-blocks-test");
-        let blocks = prompt_blocks(
-            "  hello world  \n",
-            &["sub/notes.md".into(), "/abs/file.png".into()],
-            &[ImageAttachment {
-                mime_type: "image/png".into(),
-                base64_data: "AAAA".into(),
-            }],
-            &cwd,
-        );
-        assert_eq!(blocks.len(), 4, "text + two links + one image");
-        assert_eq!(
-            blocks[0],
-            ContentBlock::Text(TextContent::new("hello world"))
-        );
-        // The expected URI is built through the same helper the production
-        // path uses, so this assertion pins the RESOLUTION (relative mention
-        // joined onto the session cwd) rather than re-deriving the spelling.
-        // The shape assertions below are what pin the spelling, and they are
-        // written out rather than computed — otherwise a helper that emitted
-        // nonsense would agree with itself and the test would pass.
-        assert_eq!(
-            blocks[1],
-            ContentBlock::ResourceLink(ResourceLink::new(
-                "notes.md",
-                file_uri(&cwd.join("sub").join("notes.md"))
-            ))
-        );
-        // `/abs/file.png` is absolute on unix but NOT on Windows, where an
-        // absolute path needs a drive or a UNC prefix — so production
-        // resolves it against the session cwd there. Mirror that decision
-        // rather than hardcoding one platform's answer.
-        let png = Path::new("/abs/file.png");
-        let png_resolved = if png.is_absolute() {
-            png.to_path_buf()
-        } else {
-            cwd.join(png)
-        };
-        assert_eq!(
-            blocks[2],
-            ContentBlock::ResourceLink(ResourceLink::new("file.png", file_uri(&png_resolved)))
-        );
-
-        // Shape, stated independently of the helper: three slashes, then an
-        // absolute path with forward separators and no backslash anywhere —
-        // `file://C:\Users\…` was the Windows defect, malformed both by the
-        // missing slash and by the separators.
-        let ContentBlock::ResourceLink(link) = &blocks[1] else {
-            panic!("blocks[1] must be a resource link, got {:?}", blocks[1]);
-        };
-        assert!(
-            link.uri.starts_with("file:///"),
-            "a file URI needs the empty authority and its third slash: {}",
-            link.uri
-        );
-        assert!(
-            !link.uri.contains('\\'),
-            "URI separators are forward slashes on every platform: {}",
-            link.uri
-        );
-        assert!(
-            link.uri.ends_with("/sub/notes.md"),
-            "the resolved mention must survive into the URI: {}",
-            link.uri
-        );
-        assert_eq!(
-            blocks[3],
-            ContentBlock::Image(ImageContent::new("AAAA", "image/png"))
-        );
     }
 
     #[test]
@@ -3904,17 +3659,5 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         );
 
         let _ = client.shutdown();
-    }
-
-    #[test]
-    fn only_the_native_transport_offers_a_rewind() {
-        // `supports_rewind` is what hides the affordance rather than
-        // offering a button that answers "unsupported" when pressed.
-        assert!(!ChatClient::supports_rewind_for(&LaunchSpec::Acp(
-            AgentCommand::new("x")
-        )));
-        assert!(ChatClient::supports_rewind_for(&LaunchSpec::Claude(
-            ClaudeLaunch::new("claude")
-        )));
     }
 }

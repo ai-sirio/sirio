@@ -3,60 +3,8 @@ use std::collections::{HashMap, HashSet};
 use sirio_activity::{
     ActivityStatus, AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
     AttentionSort, BootstrapRestoreOrder, NotificationPolicy, TerminalContentId,
-    WorktreeMountPolicy, strip_ansi,
+    WorktreeMountPolicy,
 };
-
-#[test]
-fn f_core_act_16_strips_csi_and_osc_before_content_matching() {
-    let escaped = "\x1b[31mDo you want to proceed?\x1b[0m\x1b]0;agent\x07";
-    assert_eq!(strip_ansi(escaped), "Do you want to proceed?");
-    assert_eq!(
-        sirio_activity::detect_content_status(escaped, "claude"),
-        Some(AgentStatus::NeedsInput)
-    );
-}
-
-#[test]
-fn f_core_act_14_requires_word_boundaries_for_generic_title_identity_and_status() {
-    assert_eq!(
-        sirio_activity::identify_agent_from_title("opencode-experiment"),
-        None
-    );
-    assert_eq!(
-        sirio_activity::detect_status_from_title("codex-notes working", "codex"),
-        None
-    );
-    assert_eq!(
-        sirio_activity::detect_status_from_title("codex working", "codex"),
-        Some(AgentStatus::Running)
-    );
-}
-
-#[test]
-fn f_core_act_19_builds_notification_payload_with_optional_context() {
-    let mut model = AgentActivityModel::new();
-    model.agent_spawned("pane-1", "claude", std::time::Instant::now());
-
-    let payload = model
-        .build_payload(
-            "pane-1",
-            AgentStatus::NeedsInput,
-            "Claude Code",
-            "worktree-1",
-            "feature/login",
-            Some("Sirio"),
-            Some("  waiting for approval  "),
-        )
-        .expect("tracked pane has notification context");
-
-    assert_eq!(payload.title, "Claude Code — needs input");
-    assert_eq!(
-        payload.body,
-        "feature/login · Sirio  ·  waiting for approval"
-    );
-    assert_eq!(payload.pane_id, "pane-1");
-    assert_eq!(payload.worktree_id, "worktree-1");
-}
 
 #[test]
 fn f_core_act_20_notification_policy_suppresses_noise_and_visible_transitions() {

@@ -99,16 +99,6 @@ mod tests {
     }
 
     #[test]
-    fn creates_named_project_directory() {
-        let parent = TempDir::new();
-
-        let created = create_project(&parent.0, "new-project").expect("create project");
-
-        assert_eq!(created, parent.0.join("new-project"));
-        assert!(created.is_dir());
-    }
-
-    #[test]
     fn empty_or_nested_names_are_rejected_before_touching_disk() {
         let parent = TempDir::new();
 

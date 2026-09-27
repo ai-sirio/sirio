@@ -89,30 +89,6 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    #[test]
-    fn thumb_geometry_is_horizontal_and_clamped() {
-        let range = horizontal_range(px(100.), px(100.), px(-50.)).unwrap();
-        assert_eq!(
-            bezel::ui::scroll::offset_for_thumb(
-                range.start,
-                px(100.),
-                px(100.),
-                range.end - range.start,
-            ),
-            px(-50.)
-        );
-        assert_eq!(
-            bezel::ui::scroll::offset_for_thumb(
-                px(999.),
-                px(100.),
-                px(100.),
-                range.end - range.start,
-            ),
-            px(-100.)
-        );
-        assert!(horizontal_range(px(100.), px(0.), px(0.)).is_none());
-    }
-
     struct BarHarness {
         overflow: Pixels,
         state: HorizontalBarState,

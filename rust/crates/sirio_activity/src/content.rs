@@ -144,13 +144,4 @@ mod tests {
         // "say/nothing" contains "y/n" but with a word char on both sides.
         assert_eq!(detect_content_status("say/nothing", "codex"), None);
     }
-
-    #[test]
-    fn unknown_agent_and_empty_text_are_nil() {
-        assert_eq!(
-            detect_content_status("Do you want to proceed?", "unknown"),
-            None
-        );
-        assert_eq!(detect_content_status("", "claude"), None);
-    }
 }

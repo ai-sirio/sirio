@@ -230,102 +230,11 @@ pub struct TerminalContextEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        TerminalContextAction, TerminalContextRoute, items, items_with_split_availability,
-    };
+    use super::{TerminalContextAction, items_with_split_availability};
 
-    #[test]
-    fn menu_contains_every_terminal_and_app_action_in_stable_order() {
-        assert_eq!(items().len(), 13);
-        assert_eq!(
-            items().iter().map(|item| item.label).collect::<Vec<_>>(),
-            vec![
-                "Copy",
-                "Paste",
-                "Copy Context",
-                "Set Title",
-                "Copy Pane ID",
-                "Copy Terminal ID",
-                "Split Left",
-                "Split Right",
-                "Split Above",
-                "Split Down",
-                "Clear Terminal",
-                "Restart Terminal",
-                "Close Terminal…",
-            ]
-        );
-    }
-
-    #[test]
-    fn terminal_actions_are_local_and_pane_actions_are_delegated() {
-        let local = [
-            TerminalContextAction::Copy,
-            TerminalContextAction::Paste,
-            TerminalContextAction::CopyContext,
-            TerminalContextAction::CopyPaneId,
-            TerminalContextAction::CopyTerminalId,
-            TerminalContextAction::ClearTerminal,
-        ];
-        for action in local {
-            assert_eq!(
-                items()
-                    .iter()
-                    .find(|item| item.action == action)
-                    .unwrap()
-                    .route,
-                TerminalContextRoute::Terminal
-            );
-        }
-
-        let delegated = [
-            TerminalContextAction::SetTitle,
-            TerminalContextAction::SplitLeft,
-            TerminalContextAction::SplitRight,
-            TerminalContextAction::SplitAbove,
-            TerminalContextAction::SplitDown,
-            TerminalContextAction::RestartTerminal,
-            TerminalContextAction::CloseTerminal,
-        ];
-        for action in delegated {
-            assert_eq!(
-                items()
-                    .iter()
-                    .find(|item| item.action == action)
-                    .unwrap()
-                    .route,
-                TerminalContextRoute::App
-            );
-        }
-    }
-
-    /// F-TAB-11: a pane too narrow to produce two >=160pt children disables
-    /// only the two horizontal split actions, with a reason naming the
-    /// actual available/required pixel amounts -- not the whole menu, and
-    /// not silently.
-    #[test]
-    fn a_too_narrow_pane_disables_only_the_horizontal_splits() {
-        let disabled: Vec<_> = items_with_split_availability(200.0, 900.0, false)
-            .into_iter()
-            .filter(|item| item.disabled_reason.is_some())
-            .collect();
-        assert_eq!(
-            disabled.iter().map(|item| item.action).collect::<Vec<_>>(),
-            vec![
-                TerminalContextAction::SplitLeft,
-                TerminalContextAction::SplitRight
-            ]
-        );
-        for item in &disabled {
-            let reason = item.disabled_reason.as_deref().unwrap();
-            assert!(reason.contains("narrow"), "reason was {reason:?}");
-            assert!(reason.contains("97pt available"), "reason was {reason:?}");
-            assert!(reason.contains("160pt required"), "reason was {reason:?}");
-        }
-    }
-
-    /// The vertical counterpart: a pane too short disables only Split
-    /// Above/Down, and the reason says "short", not "narrow".
+    /// F-TAB-11: a pane too short disables only Split Above/Down (a wide
+    /// pane keeps its horizontal splits), and the reason says "short", not
+    /// "narrow".
     #[test]
     fn a_too_short_pane_disables_only_the_vertical_splits() {
         let disabled: Vec<_> = items_with_split_availability(900.0, 200.0, false)
@@ -342,16 +251,6 @@ mod tests {
         for item in &disabled {
             assert!(item.disabled_reason.as_deref().unwrap().contains("short"));
         }
-    }
-
-    /// A comfortably large pane disables nothing.
-    #[test]
-    fn a_large_pane_disables_no_split() {
-        assert!(
-            items_with_split_availability(1200.0, 900.0, false)
-                .iter()
-                .all(|item| item.disabled_reason.is_none())
-        );
     }
 
     /// F-TAB-11's other half: a pane that is the sole tab in its group

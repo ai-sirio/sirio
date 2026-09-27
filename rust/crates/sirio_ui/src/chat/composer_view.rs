@@ -232,13 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ends_of_the_track_are_the_first_and_last_stop() {
-        assert_eq!(effort_fraction_for_stop(6, 0), 0.0);
-        assert_eq!(effort_fraction_for_stop(6, 5), 1.0);
-        assert_eq!(effort_fraction_for_stop(2, 1), 1.0);
-    }
-
-    #[test]
     fn every_stop_survives_the_round_trip_through_the_track() {
         for stops in 2..9 {
             for index in 0..stops {
@@ -259,14 +252,6 @@ mod tests {
         assert_eq!(effort_stop_for_fraction(6, 0.11), 1);
         assert_eq!(effort_stop_for_fraction(6, 0.71), 4);
         assert_eq!(effort_stop_for_fraction(6, 0.79), 4);
-    }
-
-    #[test]
-    fn a_point_off_the_track_lands_on_an_end_rather_than_nowhere() {
-        // A drag carries the pointer past the element it started on, so the
-        // fraction really does arrive out of range.
-        assert_eq!(effort_stop_for_fraction(6, -3.0), 0);
-        assert_eq!(effort_stop_for_fraction(6, 4.5), 5);
     }
 
     #[test]

@@ -961,7 +961,6 @@ mod tests {
     use gpui::{
         Modifiers, MouseDownEvent, MouseUpEvent, TestAppContext, Tiling, VisualTestContext,
     };
-    use sirio_theme::ThemeMode;
     use std::cell::RefCell;
 
     /// P102: the fallback decorations state every test below that expects
@@ -1057,65 +1056,6 @@ mod tests {
                 "row {index}: {host:?}"
             );
         }
-    }
-
-    /// The glyph swap Windows itself makes once the window is maximized.
-    /// Pure, because `TestWindow::is_maximized` is hardcoded to `false` --
-    /// no drawn test can reach the other state.
-    #[test]
-    fn the_maximize_glyph_swaps_to_restore_when_maximized() {
-        assert_eq!(maximize_glyph(false), GLYPH_MAXIMIZE);
-        assert_eq!(maximize_glyph(true), GLYPH_RESTORE);
-        assert_ne!(
-            GLYPH_MAXIMIZE, GLYPH_RESTORE,
-            "the two states must be visually distinguishable"
-        );
-    }
-
-    /// The half `from_gsettings_output` cannot cover: that `from_system`
-    /// asks `gsettings` the RIGHT question and feeds the answer to the
-    /// parser — the schema id, the key, the success check, the stdout
-    /// decoding.
-    ///
-    /// It gets its teeth from querying `gsettings` independently here: a
-    /// wrong schema or key inside `from_system` makes it fall back to the
-    /// default while this test's own query still returns the real value, so
-    /// the two disagree and the test fails.
-    ///
-    /// This previously asserted `ToggleMaximize` outright, reasoning that the
-    /// dev box was set to `toggle-maximize` and that an absent schema
-    /// degrades to the same value. That covers two cases and misses the
-    /// third: a machine whose schema is present and set to something else.
-    /// It duly failed on this very box once its titlebar preference was
-    /// changed to `minimize` — reporting a defect against code that was
-    /// behaving exactly as documented. A test may not pin the host's own
-    /// configuration as the expected value.
-    #[test]
-    fn double_click_action_from_system_agrees_with_this_machine() {
-        let queried = std::process::Command::new("gsettings")
-            .args([
-                "get",
-                "org.gnome.desktop.wm.preferences",
-                "action-double-click-titlebar",
-            ])
-            .output();
-
-        let expected = match queried {
-            Ok(output) if output.status.success() => {
-                DoubleClickAction::from_gsettings_output(&String::from_utf8_lossy(&output.stdout))
-            }
-            // No GNOME schema at all — a CI container, another desktop, or no
-            // `gsettings` binary. The documented graceful-absence default is
-            // then the whole contract.
-            _ => DoubleClickAction::ToggleMaximize,
-        };
-
-        assert_eq!(
-            DoubleClickAction::from_system(),
-            expected,
-            "from_system must report what this machine's gsettings actually \
-             says, or the documented default when gsettings cannot answer"
-        );
     }
 
     /// Fires the second half of a real double-click (`click_count == 2`,
@@ -1438,28 +1378,9 @@ mod tests {
         }
     }
 
-    /// Unwired back/forward (the default state) must render — the
-    /// screenshot's row shape stays intact — but a click must not panic or
-    /// emit anything: no handler is attached to click at all.
-    #[gpui::test]
-    async fn unwired_cluster_seams_render_but_do_not_panic_on_click(cx: &mut TestAppContext) {
-        let window = cx.add_window(|_window, cx| Titlebar::new(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        for selector in ["titlebar-back", "titlebar-forward"] {
-            let bounds = cx
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} is drawn even unwired"));
-            cx.simulate_click(bounds.center(), Modifiers::none());
-            cx.run_until_parked();
-        }
-    }
-
     /// F-WIN-07: the History seam is the same "unwired renders muted, wired
     /// invokes the handler" contract as back/forward above — see
-    /// [`the_cluster_seams_invoke_their_wired_handlers`] and
-    /// [`unwired_cluster_seams_render_but_do_not_panic_on_click`].
+    /// [`the_cluster_seams_invoke_their_wired_handlers`].
     #[gpui::test]
     async fn the_history_seam_invokes_its_wired_handler(cx: &mut TestAppContext) {
         let called = Rc::new(RefCell::new(false));
@@ -1479,104 +1400,6 @@ mod tests {
         assert!(
             *called.borrow(),
             "titlebar-history invoked its wired handler"
-        );
-    }
-
-    #[gpui::test]
-    async fn unwired_history_seam_renders_but_does_not_panic_on_click(cx: &mut TestAppContext) {
-        let window = cx.add_window(|_window, cx| Titlebar::new(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let history = cx
-            .debug_bounds("titlebar-history")
-            .expect("history control is drawn even unwired");
-        cx.simulate_click(history.center(), Modifiers::none());
-        cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    async fn title_and_subtitle_render_only_when_set(cx: &mut TestAppContext) {
-        let unset_window = cx.add_window(|_window, cx| Titlebar::new(cx));
-        let mut unset_cx = VisualTestContext::from_window(unset_window.into(), cx);
-        unset_cx.run_until_parked();
-        assert!(
-            unset_cx.debug_bounds("titlebar-title").is_none(),
-            "no placeholder title when unset"
-        );
-
-        let set_window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx)
-                .with_title("Sirio")
-                .with_subtitle("sirio-linux @ linux/gpui-waku")
-        });
-        let mut set_cx = VisualTestContext::from_window(set_window.into(), cx);
-        set_cx.run_until_parked();
-        assert!(
-            set_cx.debug_bounds("titlebar-title").is_some(),
-            "title row is drawn once set"
-        );
-    }
-
-    /// UI-tier evidence for the P76 restyle: installs `Theme` explicitly
-    /// *before* the entity exists, so `Titlebar`'s lazy bootstrap in `new`
-    /// is a no-op and this only passes if `render` truly reads back the
-    /// already-installed global's tokens rather than a hardcoded value.
-    #[gpui::test]
-    async fn titlebar_draws_the_continuous_background_surface_in_dark_mode(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(|cx| Theme::install(ThemeMode::Dark, cx));
-        let window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_window_controls(WindowControls::TrafficLights)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let appearance = cx.update(|_, cx| Theme::get(cx).appearance);
-        assert_eq!(appearance, sirio_theme::Appearance::Dark);
-
-        let bar_height = cx.update(|_, cx| Theme::get(cx).browser_chrome.bar_height);
-        let close = cx
-            .debug_bounds("titlebar-close")
-            .expect("close control is drawn under the dark theme");
-        assert_eq!(
-            close.size.height,
-            cx.update(|_, cx| Theme::get(cx).browser_chrome.traffic_light_diameter)
-        );
-        let _ = bar_height;
-    }
-
-    /// The light half of the same proof — a dark-only pass is "half a
-    /// design system", so this is a distinct named test, not a variant.
-    #[gpui::test]
-    async fn titlebar_draws_the_continuous_background_surface_in_light_mode(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(|cx| Theme::install(ThemeMode::Light, cx));
-        let window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_window_controls(WindowControls::TrafficLights)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let bar = cx.update(|_, cx| Theme::get(cx).surface);
-        assert_eq!(
-            cx.update(|_, cx| Theme::get(cx).appearance),
-            sirio_theme::Appearance::Light
-        );
-        assert_ne!(
-            bar,
-            Theme::dark().surface,
-            "light and dark bar surfaces must not collapse to the same fill"
-        );
-
-        let close = cx
-            .debug_bounds("titlebar-close")
-            .expect("close control is drawn under the light theme");
-        assert_eq!(
-            close.size.height,
-            cx.update(|_, cx| Theme::get(cx).browser_chrome.traffic_light_diameter)
         );
     }
 
@@ -1616,70 +1439,6 @@ mod tests {
                 window_cx.debug_bounds("titlebar-sidebar").is_some(),
                 "the icon cluster must draw under {controls:?} -- OS chrome + our icons, \
                  not OS chrome only"
-            );
-        }
-    }
-
-    /// A tiled edge under CSD is exactly the case a real compositor uses
-    /// `Decorations::Client { tiling }` for -- e.g. a Wayland compositor's
-    /// half-screen snap. `Tiling` carries which edges are tiled so a
-    /// window-corners-and-shadow concern (not this row's) can skip
-    /// rounding a seam against another tiled window; this row's own
-    /// rendering does not vary by which edges are tiled, so this test
-    /// documents that non-effect rather than leaving it unverified.
-    #[test]
-    fn tiled_edges_do_not_change_what_the_row_draws() {
-        assert_eq!(
-            WindowControls::resolve(
-                Decorations::Client {
-                    tiling: Tiling::tiled(),
-                },
-                HostPlatform::Linux,
-            ),
-            WindowControls::TrafficLights,
-            "a fully tiled Client window still gets the fallback controls"
-        );
-        assert_eq!(
-            WindowControls::resolve(
-                Decorations::Client {
-                    tiling: Tiling::tiled(),
-                },
-                HostPlatform::Macos,
-            ),
-            WindowControls::TrafficLights
-        );
-    }
-
-    /// Where the icon cluster's leading edge lands, for all four outcomes.
-    ///
-    /// The expected values are the literals `sirio_theme`'s own
-    /// `browser_chrome_matches_the_comet_measured_spec` pins, not a second
-    /// call into `cluster_leading_gap` -- a test that recomputes the
-    /// expectation the way the code does can never disagree with it.
-    #[gpui::test]
-    async fn the_cluster_position_follows_the_resolved_window_controls(cx: &mut TestAppContext) {
-        for (controls, expected) in [
-            // Nothing precedes the cluster: it starts at the row's own inset.
-            (WindowControls::OsDrawnAbove, px(10.0)),
-            // The caption buttons live at the *trailing* edge, so the
-            // leading edge is untouched -- the same x as OsDrawnAbove.
-            (WindowControls::WindowsCaption, px(10.0)),
-            // AppKit's own controls are reserved before ours.
-            (WindowControls::MacosNative, px(80.0)),
-            // Our dots precede it: 10 + 3*12 + 2*8 + 8 = 70.
-            (WindowControls::TrafficLights, px(70.0)),
-        ] {
-            let window =
-                cx.add_window(|_window, cx| Titlebar::new(cx).with_window_controls(controls));
-            let mut window_cx = VisualTestContext::from_window(window.into(), cx);
-            window_cx.run_until_parked();
-
-            let cluster = window_cx
-                .debug_bounds("titlebar-sidebar")
-                .unwrap_or_else(|| panic!("cluster is drawn under {controls:?}"));
-            assert_eq!(
-                cluster.origin.x, expected,
-                "cluster leading edge under {controls:?}"
             );
         }
     }

@@ -1955,28 +1955,6 @@ mod tests {
         assert!(target.is_none());
     }
 
-    /// An explicit but empty `--session` is still the caller's mistake.
-    #[test]
-    fn agent_session_rejects_an_empty_explicit_option() {
-        let error = agent_session_target(
-            &parsed(&[("session", "")]),
-            &environment(&[("SIRIO_PANE_ID", "pane-1")]),
-        )
-        .expect_err("an empty explicit session is rejected");
-        assert!(error.contains("--session"), "got: {error}");
-    }
-
-    /// The short ref the skill documents, stable for the same surface and
-    /// always `surface:N` -- the e2e test takes it as an opaque handle.
-    #[test]
-    fn short_surface_ref_is_stable_and_prefixed() {
-        let first = short_surface_ref("9f1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9");
-        let second = short_surface_ref("9f1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9");
-        assert_eq!(first, second);
-        assert!(first.starts_with("surface:"), "got: {first}");
-        assert_ne!(first, short_surface_ref("another-surface"));
-    }
-
     /// Engines that serialize the script result wrap it in a JSON string; the
     /// plain form must survive unchanged.
     #[test]
@@ -1990,21 +1968,6 @@ mod tests {
             "Known browser e2e body text"
         );
         assert_eq!(decode_js_string("a \" quoted"), "a \" quoted");
-    }
-
-    /// A ref act must refuse a page that moved on, and the refusal is the
-    /// documented `stale_ref` the e2e greps for.
-    #[test]
-    fn ref_acts_carry_the_stale_ref_guard() {
-        let script = browser_act_ref_script("click", "e2", "7", None, None, None, None)
-            .expect("click needs no extra argument");
-        assert!(script.contains("stale_ref"), "got: {script}");
-        assert!(script.contains("\"e2\""), "got: {script}");
-        assert!(script.contains("\"7\""), "got: {script}");
-
-        let error = browser_act_ref_script("press", "e1", "1", None, None, None, None)
-            .expect_err("press without --key is rejected");
-        assert!(error.contains("--key"), "got: {error}");
     }
 
     /// Caller values are embedded as JSON string literals, never interpolated

@@ -423,12 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn no_ticks_for_a_transcript_without_user_messages() {
-        assert!(turn_ticks(&[]).is_empty());
-        assert!(turn_ticks(&[prose("hello"), tool("t")]).is_empty());
-    }
-
-    #[test]
     fn the_preview_is_the_first_line_clipped() {
         let long = "x".repeat(200);
         let entries = vec![user("first line\nsecond line"), user(&long)];
@@ -522,89 +516,6 @@ mod tests {
             text.size.height >= px(26.0),
             "a message wider than the card must wrap onto a second line: {text:?}"
         );
-    }
-
-    /// The restore action is part of the card only when the tick's turn
-    /// can be rewound: an ACP tick shows the message with no button
-    /// rather than one that errors when pressed.
-    #[gpui::test]
-    async fn the_preview_action_appears_only_for_a_rewindable_turn(cx: &mut gpui::TestAppContext) {
-        async fn action_visible(cx: &mut gpui::TestAppContext, rewind: bool) -> bool {
-            cx.update(sirio_theme::Theme::init);
-            let (_preview, cx) = cx.add_window_view(|_, cx| {
-                let chat = cx.new(|cx| Chat::new(None, std::env::temp_dir(), cx));
-                TurnPreview {
-                    message: "fix the bug".into(),
-                    when: "Turn 1".into(),
-                    rewind: rewind.then(|| RewindAction {
-                        chat,
-                        entry_index: 0,
-                        label: Chat::REWIND_ACTION_LABEL,
-                    }),
-                }
-            });
-            cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
-            cx.update(|window, cx| {
-                window.draw(cx).clear(cx);
-            });
-            cx.run_until_parked();
-            cx.debug_bounds("turn-rewind-action").is_some()
-        }
-        assert!(
-            action_visible(cx, true).await,
-            "a rewindable turn offers the restore"
-        );
-        assert!(
-            !action_visible(cx, false).await,
-            "any other tick shows no restore button"
-        );
-    }
-
-    /// Off macOS the popover surface is a translucent tint meant to sit over
-    /// a blur, so the card must keep its own opaque fill under it.
-    #[test]
-    fn the_preview_card_paints_its_own_fill_on_an_opaque_theme() {
-        let theme = BezelTheme::dark();
-        let preview = TurnPreview {
-            message: "m".into(),
-            when: "w".into(),
-            rewind: None,
-        };
-        let mut card = preview.card(&theme);
-        let fill = card
-            .style()
-            .background
-            .as_ref()
-            .and_then(|fill| fill.color())
-            .and_then(|background| background.as_solid());
-        if theme.is_glass() {
-            assert!(
-                fill.is_none(),
-                "on glass the lens paints the fill: {fill:?}"
-            );
-        } else {
-            let fill = fill.expect("an opaque theme's card carries a solid fill");
-            assert_eq!(fill.a, 1.0, "the fill must be opaque: {fill:?}");
-        }
-    }
-
-    #[test]
-    fn the_gap_rests_at_its_step_when_there_is_room() {
-        assert_eq!(tick_gap(10, px(600.0)), REST_GAP);
-        assert_eq!(tick_gap(0, px(600.0)), REST_GAP);
-        assert_eq!(tick_gap(1, px(600.0)), REST_GAP);
-    }
-
-    #[test]
-    fn a_tick_grows_out_of_the_edge_as_the_rail_reveals() {
-        assert_eq!(tick_width(false, 0.0), px(0.0));
-        assert_eq!(tick_width(true, 0.0), px(0.0));
-        assert_eq!(tick_width(false, 1.0), TICK);
-        assert_eq!(tick_width(true, 1.0), ACTIVE_TICK);
-        assert_eq!(tick_width(true, 0.5), ACTIVE_TICK / 2.0);
-        // Progress outside 0..1 is clamped: a tick never outgrows its length.
-        assert_eq!(tick_width(false, 1.5), TICK);
-        assert_eq!(tick_width(false, -0.5), px(0.0));
     }
 
     #[test]

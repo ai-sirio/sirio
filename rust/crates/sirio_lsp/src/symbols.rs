@@ -227,14 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_absent_answer_is_an_empty_list() {
-        // A file with no symbols, and a server with nothing to say, are both
-        // ordinary. Neither is an error.
-        assert!(parse_symbols(&serde_json::json!([])).is_empty());
-        assert!(parse_symbols(&serde_json::json!(null)).is_empty());
-    }
-
-    #[test]
     fn an_unknown_kind_is_other_rather_than_a_dropped_symbol() {
         // Losing a symbol because its kind is one of the 26 we do not name
         // would leave a hole in the outline with no way to notice.

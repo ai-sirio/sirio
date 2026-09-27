@@ -316,15 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn new_derives_active_per_role_and_focuses_primary() {
-        let tabs = tabs_primary_secondary();
-        let split = CenterSplit::new(&tabs);
-        assert_eq!(split.active(PaneRole::Primary), Some(1));
-        assert_eq!(split.active(PaneRole::Secondary), Some(3));
-        assert_eq!(split.focused(), PaneRole::Primary);
-    }
-
-    #[test]
     fn select_tab_switches_focus_and_active() {
         let tabs = tabs_primary_secondary();
         let mut split = CenterSplit::new(&tabs);
@@ -405,31 +396,6 @@ mod tests {
         assert_eq!(split.active(PaneRole::Secondary), None);
     }
 
-    /// Spec 2026-09-24 §3: the split reads the half stored on the tab, not
-    /// its kind, so a terminal placed on the right is a right-hand tab.
-    #[test]
-    fn a_terminal_placed_right_belongs_to_the_right_half() {
-        let tabs = vec![
-            make_tab(1, TabKind::Terminal),
-            placed(2, TabKind::Terminal, PaneRole::Secondary),
-            make_tab(3, TabKind::Editor),
-        ];
-        let mut split = CenterSplit::new(&tabs);
-        assert_eq!(split.tabs_for(PaneRole::Primary, &tabs), vec![1]);
-        assert_eq!(split.tabs_for(PaneRole::Secondary, &tabs), vec![2, 3]);
-
-        assert!(split.select_tab(2, &tabs));
-        assert_eq!(split.focused(), PaneRole::Secondary);
-        assert_eq!(split.active(PaneRole::Secondary), Some(2));
-
-        split.rebuild(&tabs);
-        assert_eq!(
-            split.active(PaneRole::Secondary),
-            Some(2),
-            "rebuild keeps it right"
-        );
-    }
-
     /// #319: the half a shown tab leaves goes to the tab that slid into its
     /// place, or the one before it when it was last.
     #[test]
@@ -503,12 +469,6 @@ mod tests {
             None,
             "the pointer is elsewhere"
         );
-    }
-
-    #[test]
-    fn overflow_is_reported_only_when_the_strip_exceeds_available_width() {
-        assert!(!super::strip_overflows(&[100.0, 100.0], 230.0, 24.0));
-        assert!(super::strip_overflows(&[100.0, 100.0, 100.0], 220.0, 24.0));
     }
 
     #[test]

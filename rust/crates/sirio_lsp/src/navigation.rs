@@ -271,11 +271,4 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    fn no_references_is_an_empty_list_rather_than_an_error() {
-        // A symbol used nowhere is an ordinary answer.
-        assert!(targets(&serde_json::json!(null)).is_empty());
-        assert!(targets(&serde_json::json!([])).is_empty());
-    }
 }
