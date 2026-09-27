@@ -79,7 +79,7 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
     ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
-sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram
+sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram, sirio_forge
                                 (leaves — no local deps beyond sirio_perf;
                                  sirio_theme and sirio_ui take the external
                                  `bezel` crate, pinned `=0.1.4`, and
@@ -89,7 +89,7 @@ sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram
                                  stdio protocol as types and pure functions —
                                  no process, no channels — which is what lets
                                  sirio_agents, sirio_acp and sirio_usage all
-                                 take it without inverting the graph)
+                                  take it without inverting the graph; sirio_forge is GitHub and GitLab change requests over GraphQL, with the token handed in by its caller)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
