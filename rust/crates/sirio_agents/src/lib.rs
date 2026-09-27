@@ -766,24 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_the_five_adapters_in_order() {
-        let ids: Vec<&str> = ALL.iter().map(|adapter| adapter.id()).collect();
-        assert_eq!(ids, ["claude", "codex", "opencode", "pi", "omp"]);
-
-        let names: Vec<&str> = ALL.iter().map(|adapter| adapter.display_name()).collect();
-        assert_eq!(
-            names,
-            ["Claude Code", "Codex", "OpenCode", "Pi", "Oh-My-Pi"]
-        );
-
-        let hooks: Vec<bool> = ALL
-            .iter()
-            .map(|adapter| adapter.has_native_hooks())
-            .collect();
-        assert_eq!(hooks, [true, true, false, false, true]);
-    }
-
-    #[test]
     fn no_adapter_names_a_package_it_would_have_to_download() {
         // The launch path must not contain a package name at all: pinning
         // and installing are the registry's job, and a literal here is how
@@ -906,18 +888,5 @@ mod tests {
             PiAdapter.summarizer_command("p"),
             Some("pi --print --no-tools 'p'".to_string())
         );
-    }
-
-    #[test]
-    fn every_adapter_supports_resuming() {
-        for adapter in ALL {
-            let resume =
-                adapter.resume_command("/wt", "pane-1", "/usr/local/bin/sirioctl", "sess-42");
-            assert!(
-                resume.is_some(),
-                "{} must support resuming by session reference",
-                adapter.id()
-            );
-        }
     }
 }

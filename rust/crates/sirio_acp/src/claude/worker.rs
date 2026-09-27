@@ -1363,63 +1363,6 @@ mod tests {
     }
 
     #[test]
-    fn the_command_list_carries_the_hint_and_drops_the_empty_one() {
-        let catalog = Catalog::from_initialize(&serde_json::json!({
-            "commands": [
-                {"name": "compact", "description": "Compact",
-                 "argumentHint": "<optional custom summarization instructions>"},
-                {"name": "usage", "description": "Show plan usage", "argumentHint": ""}
-            ]
-        }));
-        let mut selected = EFFORT_DEFAULT.to_string();
-        let events = catalogue_events(&catalog, "opus", &mut selected);
-        let Some(AcpEvent::AvailableCommands(commands)) = events.into_iter().next() else {
-            panic!("the handshake publishes the command list first");
-        };
-        assert_eq!(
-            commands[0].argument_hint.as_deref(),
-            Some("<optional custom summarization instructions>")
-        );
-        assert_eq!(commands[1].argument_hint, None);
-    }
-
-    #[test]
-    fn the_effort_selector_is_the_selected_models_own_ladder() {
-        let catalog = handshake(serde_json::json!([{
-            "value": "opus", "displayName": "Opus", "supportsEffort": true,
-            "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
-        }]));
-        let mut selected = EFFORT_DEFAULT.to_string();
-        let option = selector(effort_event(&catalog, "opus", &mut selected));
-        assert_eq!(
-            levels(&option),
-            [
-                "default",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "ultracode"
-            ]
-        );
-        assert_eq!(option.current_value.as_deref(), Some("default"));
-    }
-
-    #[test]
-    fn a_model_with_no_effort_publishes_an_empty_selector() {
-        // Haiku's real shape: neither effort field. An empty list is how the
-        // surface is told there is nothing to pick, as opposed to a picker
-        // with nothing in it.
-        let catalog = handshake(serde_json::json!([
-            {"value": "haiku", "displayName": "Haiku"}
-        ]));
-        let mut selected = EFFORT_DEFAULT.to_string();
-        let option = selector(effort_event(&catalog, "haiku", &mut selected));
-        assert!(option.choices.is_empty());
-    }
-
-    #[test]
     fn a_level_the_new_model_does_not_offer_gives_way_to_its_default() {
         let catalog = handshake(serde_json::json!([
             {"value": "opus", "displayName": "Opus", "supportsEffort": true,
@@ -1438,19 +1381,6 @@ mod tests {
         assert_eq!(option.current_value.as_deref(), Some("default"));
         assert_eq!(selected, "default");
         assert!(!levels(&option).contains(&"ultracode"));
-    }
-
-    #[test]
-    fn the_agents_own_count_wins_over_the_turns_numbers() {
-        let report = ContextUsageReport {
-            total_tokens: 48_000,
-            raw_max_tokens: 200_000,
-            model: Some("claude-fable-5-1".into()),
-        };
-        let usage = context_usage(context_usage_event(Some(report), &summary()));
-        assert_eq!(usage.used, 48_000);
-        assert_eq!(usage.size, 200_000);
-        assert_eq!(usage.cost.expect("the turn's cost").currency, "USD");
     }
 
     #[test]

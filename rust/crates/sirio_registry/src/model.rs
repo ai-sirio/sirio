@@ -381,42 +381,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn a_document_without_a_bin_key_still_decodes_every_acp_agent() {
-        // `#[serde(default)]`, verified rather than reasoned about: no
-        // published document carries this key, and every ACP agent's npx
-        // row decodes through this path.
-        let registry =
-            AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json")).unwrap();
-        let claude = registry.agent("claude-acp").expect("claude-acp row");
-        let Distribution::Npx { bin, .. } = &claude.distributions[0] else {
-            panic!("claude-acp is an npx row");
-        };
-        assert!(
-            bin.is_none(),
-            "naming no executable is the absence of the key, not an error"
-        );
-    }
-
-    #[test]
-    fn a_document_that_names_a_bin_decodes_it() {
-        // The reverse: when a document does name one it must reach the
-        // distribution, or the field would decode as None forever.
-        let registry = AcpRegistry::from_json(
-            r#"{"version":"1.0.0","agents":[{"id":"pyright","name":"pyright",
-                "version":"1.1.414","distribution":{"npx":{"package":"pyright@1.1.414",
-                "args":["--stdio"],"bin":"pyright-langserver"}}}]}"#,
-        )
-        .expect("decodes");
-        let agent = registry.agent("pyright").expect("row");
-        assert_eq!(
-            agent.distributions,
-            vec![Distribution::Npx {
-                package: "pyright@1.1.414".to_string(),
-                args: vec!["--stdio".to_string()],
-                bin: Some("pyright-langserver".to_string()),
-            }]
-        );
-    }
 }

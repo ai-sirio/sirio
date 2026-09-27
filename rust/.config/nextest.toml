@@ -42,8 +42,7 @@ retries = 2
 # That is exactly right as a development check -- it is how those claims get
 # settled at all, and the reason they are trustworthy -- and exactly wrong in
 # a gate that decides whether a release exists, where it would let a `brew
-# install` on one Mac stop one. The other two tests in that file are hermetic
-# and still run here.
+# install` on one Mac stop one.
 #
 # `claude_answers_the_native_handshake_it_claims` joins them for the same
 # reason and one more: it drives whatever `claude` the machine happens to

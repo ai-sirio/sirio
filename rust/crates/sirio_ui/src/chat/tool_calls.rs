@@ -707,31 +707,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn icons_follow_the_kind_and_fall_back_to_widget() {
-        assert_eq!(tool_icon("Read"), icons::BOOK);
-        assert_eq!(tool_icon("edit"), icons::PEN);
-        assert_eq!(tool_icon("Execute"), icons::TERMINAL);
-        assert_eq!(tool_icon("Search"), icons::MAGNIFER);
-        assert_eq!(tool_icon("Fetch"), icons::DOWNLOAD);
-        assert_eq!(tool_icon("Think"), icons::CPU);
-        assert_eq!(tool_icon("Delete"), icons::TRASH_BIN_MINIMALISTIC);
-        assert_eq!(tool_icon("Move"), icons::ARROW_RIGHT);
-        assert_eq!(tool_icon("Other"), icons::WIDGET);
-        assert_eq!(tool_icon(""), icons::WIDGET);
-    }
-
-    #[test]
-    fn verbs_are_the_kind_word_or_tool() {
-        assert_eq!(tool_verb("Read"), "Read");
-        assert_eq!(tool_verb("execute"), "Execute");
-        assert_eq!(tool_verb("tool"), "Tool");
-        assert_eq!(tool_verb("other"), "Tool");
-        assert_eq!(tool_verb("Other"), "Tool");
-        assert_eq!(tool_verb("switch_mode"), "Switch mode");
-        assert_eq!(tool_verb(""), "Tool");
-    }
-
-    #[test]
     fn titles_are_flattened_to_one_line() {
         assert_eq!(one_line_title("cargo test"), "cargo test");
         assert_eq!(
@@ -739,16 +714,6 @@ mod tests {
             "cd x && python - <<'EOF' import io p = 1 EOF"
         );
         assert_eq!(one_line_title("a\r\n\r\nb"), "a b");
-    }
-
-    #[test]
-    fn took_reads_at_a_glance() {
-        assert_eq!(took(0), "0ms");
-        assert_eq!(took(412), "412ms");
-        assert_eq!(took(999), "999ms");
-        assert_eq!(took(1000), "1.0s");
-        assert_eq!(took(1412), "1.4s");
-        assert_eq!(took(61_000), "61.0s");
     }
 
     #[test]

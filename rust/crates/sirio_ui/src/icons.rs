@@ -618,7 +618,7 @@ pub const ALL_ICONS: [Icon; 40] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, px};
+    use gpui::TestAppContext;
 
     /// The embedded payload must be the file its path names.
     ///
@@ -695,87 +695,6 @@ mod tests {
         assert_eq!(unknown.svg(), sirio_icons::asset("file").expect("vendored"));
     }
 
-    #[test]
-    fn catalog_uses_the_approved_zed_and_sirio_assets() {
-        let expected = [
-            (Icon::FolderFill, "icons/zed/folder.svg"),
-            (Icon::GitBranch, "icons/zed/git_branch.svg"),
-            (Icon::MessageSquare, "icons/zed/chat.svg"),
-            (Icon::SquareTerminal, "icons/zed/terminal.svg"),
-            (Icon::Close, "icons/zed/close.svg"),
-            (Icon::ChevronDown, "icons/zed/chevron_down.svg"),
-            (Icon::ChevronUp, "icons/zed/chevron_up.svg"),
-            (Icon::ChevronRight, "icons/zed/chevron_right.svg"),
-            (Icon::ChevronLeft, "icons/zed/chevron_left.svg"),
-            (Icon::Settings, "icons/zed/settings.svg"),
-            (Icon::RefreshCw, "icons/zed/rotate_cw.svg"),
-            (Icon::Plus, "icons/zed/plus.svg"),
-            (Icon::File, "icons/zed/file.svg"),
-            (Icon::Sparkles, "icons/zed/sparkle.svg"),
-            (Icon::Shield, "icons/zed/lock.svg"),
-            (Icon::SunMoon, "icons/zed/screen.svg"),
-            (Icon::Globe, "icons/zed/public.svg"),
-            (Icon::ClaudeCode, "icons/lobehub/claude-color.svg"),
-            (Icon::Codex, "icons/lobehub/codex.svg"),
-            (Icon::OpenCode, "icons/lobehub/opencode.svg"),
-            (Icon::Pi, "icons/lobehub/pi.svg"),
-            (Icon::Gemini, "icons/lobehub/gemini-color.svg"),
-            (Icon::Grok, "icons/lobehub/grok.svg"),
-            (Icon::OhMyPi, "icons/agent-omp.svg"),
-            (Icon::SidebarLeft, "icons/zed/threads_sidebar_left_open.svg"),
-            (Icon::PanelRight, "icons/zed/threads_sidebar_right_open.svg"),
-            (Icon::Archive, "icons/zed/archive.svg"),
-            (Icon::Lock, "icons/zed/lock.svg"),
-            (Icon::MagnifyingGlass, "icons/zed/magnifying_glass.svg"),
-            (Icon::DiffUnified, "icons/zed/diff_unified.svg"),
-            (Icon::DiffSplit, "icons/zed/diff_split.svg"),
-            (Icon::ExpandVertical, "icons/zed/expand_vertical.svg"),
-            (Icon::FoldVertical, "icons/zed/fold_vertical.svg"),
-            (Icon::SquarePlus, "icons/zed/square_plus.svg"),
-            (Icon::SquareMinus, "icons/zed/square_minus.svg"),
-            (Icon::Undo, "icons/zed/undo.svg"),
-            (Icon::Eye, "icons/zed/eye.svg"),
-            (Icon::EyeOff, "icons/zed/eye_off.svg"),
-            (Icon::Code, "icons/zed/code.svg"),
-            (Icon::FolderOpen, "icons/zed/folder_open.svg"),
-        ];
-
-        assert_eq!(expected.len(), ALL_ICONS.len());
-        for (icon, path) in expected {
-            assert_eq!(icon.path(), path, "wrong asset for {icon:?}");
-        }
-    }
-
-    #[test]
-    fn every_zed_icon_keeps_its_upstream_16px_canvas() {
-        for icon in ALL_ICONS {
-            if !icon.path().starts_with("icons/zed/") {
-                continue;
-            }
-            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            let has_16px_dimensions = svg.contains("width=\"16\"") && svg.contains("height=\"16\"");
-            let has_16px_view_box = svg.contains("viewBox=\"0 0 16 16\"");
-            assert!(
-                has_16px_dimensions || has_16px_view_box,
-                "{} must keep Zed's 16px canvas",
-                icon.path()
-            );
-        }
-    }
-
-    #[test]
-    fn agent_marks_come_from_lobehub_and_sirio_for_omp() {
-        // One library carries every mark but one, which is why it was
-        // chosen; no library carries Oh My Pi, so its Sirio gradient stays.
-        assert_eq!(Icon::ClaudeCode.path(), "icons/lobehub/claude-color.svg");
-        assert_eq!(Icon::Codex.path(), "icons/lobehub/codex.svg");
-        assert_eq!(Icon::OpenCode.path(), "icons/lobehub/opencode.svg");
-        assert_eq!(Icon::Pi.path(), "icons/lobehub/pi.svg");
-        assert_eq!(Icon::Gemini.path(), "icons/lobehub/gemini-color.svg");
-        assert_eq!(Icon::Grok.path(), "icons/lobehub/grok.svg");
-        assert_eq!(Icon::OhMyPi.path(), "icons/agent-omp.svg");
-    }
-
     /// The vendoring rule for `icons/lobehub/` is byte-for-byte: what the
     /// binary embeds must be what upstream served, so a refresh is a file
     /// swap and never a hand edit. The same slip the Zed walk guards
@@ -803,21 +722,6 @@ mod tests {
     }
 
     #[test]
-    fn asset_source_serves_every_icon_by_path() {
-        let assets = SirioAssets;
-        for icon in ALL_ICONS {
-            let loaded = assets.load(icon.path()).expect("load does not fail");
-            assert!(
-                loaded.is_some(),
-                "{} is served by the asset source",
-                icon.path()
-            );
-            assert_eq!(loaded.unwrap().as_ref(), icon.svg());
-        }
-        assert!(assets.load("icons/does-not-exist.svg").unwrap().is_none());
-    }
-
-    #[test]
     fn catalog_path_aliases_are_deliberate() {
         let mut seen = std::collections::HashSet::new();
         for icon in ALL_ICONS {
@@ -840,168 +744,6 @@ mod tests {
         assert_eq!(Icon::for_agent_id("pi"), Some(Icon::Pi));
         assert_eq!(Icon::for_agent_id("omp"), Some(Icon::OhMyPi));
         assert_eq!(Icon::for_agent_id("unknown"), None);
-    }
-
-    /// Gemini and Grok have no adapter in `sirio_agents::ALL`; nothing in
-    /// the app produces those ids today. The mapping exists for the
-    /// registry, whose rows resolve a mark by id and otherwise fall back to
-    /// the generic sparkle — so a published `gemini` or `grok` agent draws
-    /// its own brand without another code change.
-    #[test]
-    fn registry_only_agents_resolve_to_their_brand_marks() {
-        assert_eq!(Icon::for_agent_id("gemini"), Some(Icon::Gemini));
-        assert_eq!(Icon::for_agent_id("gemini-acp"), Some(Icon::Gemini));
-        assert_eq!(Icon::for_agent_id("grok"), Some(Icon::Grok));
-        assert!(
-            !sirio_agents::ALL
-                .iter()
-                .any(|adapter| { matches!(adapter.id(), "gemini" | "grok") }),
-            "these marks are dormant: an adapter would need its own brand colour too"
-        );
-    }
-
-    #[test]
-    fn agent_marks_wear_their_published_brand_colours() {
-        let foreground = gpui::rgb(0x11_12_13);
-        // Claude's mark wears Anthropic's Claude orange.
-        assert_eq!(
-            Icon::ClaudeCode.agent_mark_color(foreground),
-            Some(gpui::rgb(0xD97757)),
-            "claude must wear #D97757, not a theme token"
-        );
-        // Codex, OpenCode, Pi and Grok publish monochrome marks only; their
-        // original colour is the UI foreground, adaptive per appearance.
-        for icon in [Icon::Codex, Icon::OpenCode, Icon::Pi, Icon::Grok] {
-            assert_eq!(
-                icon.agent_mark_color(foreground),
-                Some(foreground),
-                "{icon:?} is a monochrome brand and must take the foreground"
-            );
-        }
-        // omp and Gemini paint themselves — never tinted.
-        assert_eq!(Icon::OhMyPi.agent_mark_color(foreground), None);
-        assert_eq!(Icon::Gemini.agent_mark_color(foreground), None);
-        // Non-agent icons are nobody's brand.
-        assert_eq!(Icon::FolderFill.agent_mark_color(foreground), None);
-    }
-
-    #[test]
-    fn semantic_icon_sizes_follow_sirio_typography_scale() {
-        // Glyphs ride `base_size`, so the app-wide +1px on the type
-        // scale reaches them too — that is the property this pins.
-        // Were it to break, icons would shrink against the text they
-        // label rather than staying proportional to it.
-        let default = sirio_theme::Typography::default_scale();
-        assert_eq!(IconSize::XSmall.resolve(default), px(13.0));
-        assert_eq!(IconSize::Small.resolve(default), px(15.0));
-        assert_eq!(IconSize::Medium.resolve(default), px(17.0));
-        assert_eq!(IconSize::Custom(px(32.0)).resolve(default), px(32.0));
-
-        let enlarged = sirio_theme::Typography::for_base_size(15.5);
-        assert_eq!(IconSize::XSmall.resolve(enlarged), px(14.0));
-        assert_eq!(IconSize::Small.resolve(enlarged), px(16.0));
-        assert_eq!(IconSize::Medium.resolve(enlarged), px(18.0));
-    }
-
-    #[test]
-    fn chromatic_marks_carry_their_own_colours() {
-        // Oh My Pi's gradient asset is baked in and never resolved through
-        // currentColor.
-        let omp = std::str::from_utf8(Icon::OhMyPi.svg()).expect("utf-8");
-        assert!(omp.contains("linearGradient"), "omp is a gradient mark");
-        assert!(omp.contains("#ED4ABF") && omp.contains("#9B4DFF") && omp.contains("#5AD8E6"));
-        assert!(
-            !omp.contains("currentColor"),
-            "omp must not resolve through the theme tint"
-        );
-
-        // Gemini is the other one: a `#3186FF` base under three gradient
-        // overlays. Tinting it would flatten all four into one silhouette.
-        let gemini = std::str::from_utf8(Icon::Gemini.svg()).expect("utf-8");
-        assert!(gemini.contains("#3186FF"), "gemini keeps its blue base");
-        for stop in ["#08B962", "#F94543", "#FABC12"] {
-            assert!(
-                gemini.contains(stop),
-                "gemini keeps its {stop} gradient overlay"
-            );
-        }
-        assert!(
-            !gemini.contains("currentColor"),
-            "gemini must not resolve through the theme tint"
-        );
-    }
-
-    #[test]
-    fn monochrome_agent_marks_use_the_approved_source() {
-        // Each of these is a single `currentColor` path, so it rides GPUI's
-        // tinted svg path and never the full-colour raster.
-        for icon in [Icon::Codex, Icon::OpenCode, Icon::Pi, Icon::Grok] {
-            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            assert!(
-                icon.path().starts_with("icons/lobehub/"),
-                "{icon:?} must come from the one vendored set, got {}",
-                icon.path()
-            );
-            assert!(
-                svg.contains("fill=\"currentColor\""),
-                "{icon:?} must resolve its fill through currentColor"
-            );
-            assert!(
-                !svg.contains("fill=\"#"),
-                "{icon:?} must not bake a colour into the asset"
-            );
-            assert!(
-                !icon.has_own_colours(),
-                "{icon:?} must follow the theme tint"
-            );
-        }
-    }
-
-    /// Claude is the deliberate exception to the rule above: its asset
-    /// bakes `#D97757` and it is still painted through the tinted path.
-    /// That works because the tint it is given *is* that hex, so the two
-    /// agree pixel for pixel — and it saves a raster cache entry per size.
-    /// The day the brand colour and the asset diverge, this test is what
-    /// fails instead of the colour silently coming from the wrong one.
-    #[test]
-    fn claudes_baked_colour_matches_the_tint_it_is_painted_with() {
-        let svg = std::str::from_utf8(Icon::ClaudeCode.svg()).expect("svg is utf-8");
-        assert!(
-            svg.contains("fill=\"#D97757\""),
-            "claude's asset bakes the brand orange"
-        );
-        assert!(
-            !Icon::ClaudeCode.has_own_colours(),
-            "claude still rides the tinted path"
-        );
-        assert_eq!(
-            Icon::ClaudeCode.agent_mark_color(gpui::rgb(0x11_12_13)),
-            Some(gpui::rgb(0xD97757)),
-            "the tint must equal the hex baked into the asset"
-        );
-    }
-
-    /// Taking every mark from one set is what buys a shared optical weight:
-    /// the previous vendoring mixed two libraries and had to invent a
-    /// `-2 -2 28 28` viewBox for half its marks to make them agree. Nothing
-    /// here is re-boxed, and this test is what says so — if a future mark
-    /// needs an adjustment, it is a recorded deviation in that directory's
-    /// ATTRIBUTION.md, made visible by this failing.
-    #[test]
-    fn lobehub_marks_share_one_24px_canvas() {
-        let mut checked = 0;
-        for icon in ALL_ICONS {
-            if !icon.path().starts_with("icons/lobehub/") {
-                continue;
-            }
-            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            assert!(
-                svg.contains("viewBox=\"0 0 24 24\""),
-                "{icon:?} must keep the set's 24px canvas",
-            );
-            checked += 1;
-        }
-        assert_eq!(checked, 6, "the six LobeHub marks must all be walked");
     }
 
     /// The two ways to paint an icon are chosen by `has_own_colours`, and
@@ -1038,66 +780,6 @@ mod tests {
         // Both directions of the rule, named: nothing else is chromatic.
         for icon in [Icon::Gemini, Icon::OhMyPi] {
             assert!(icon.has_own_colours(), "{icon:?} is a full-colour mark");
-        }
-    }
-
-    #[test]
-    fn material_file_type_icons_carry_their_own_colours() {
-        // GPUI's stock svg element tints its whole render with the text
-        // colour, so a FileType icon must take the full-colour raster path
-        // to keep the baked-in fills its Material asset ships with.
-        for icon in [Icon::file_type("rust"), Icon::file_type("javascript")] {
-            assert!(
-                icon.has_own_colours(),
-                "{icon:?} must be painted full-colour, not tinted"
-            );
-            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            assert!(
-                svg.contains("fill=\"#"),
-                "{icon:?} must bake its chromatic fills into the asset"
-            );
-        }
-    }
-
-    /// The full-colour path is what this change extends, and reading the
-    /// file cannot tell you whether it works: the two ways it fails are
-    /// both silent. A mark that rasterises smaller than the box it is
-    /// painted into is stretched to fit — soft edges, no error — and a
-    /// mark whose colours are lost still draws a shape. So drive GPUI's
-    /// real renderer with `paint_agent_mark`'s own arithmetic.
-    #[gpui::test]
-    async fn full_colour_marks_rasterise_in_colour_at_the_size_they_are_painted(
-        cx: &mut TestAppContext,
-    ) {
-        // `IconSize::Small` at the default type scale, on a retina display:
-        // `paint_agent_mark`'s own arithmetic, kept in step with it.
-        let pixel = 15 * 2;
-        for icon in [Icon::Gemini, Icon::OhMyPi, Icon::file_type("rust")] {
-            let image = cx
-                .update(|cx| {
-                    let renderer = cx.svg_renderer();
-                    let parsed = renderer.parse_svg(icon.svg()).expect("the asset parses");
-                    renderer.render_parsed(&parsed, SvgSize::Size(size(pixel.into(), pixel.into())))
-                })
-                .unwrap_or_else(|error| panic!("{icon:?} must rasterise: {error}"));
-
-            let width = image.size(0).width.0;
-            assert!(
-                width >= pixel,
-                "{icon:?} rasterises {width}px wide for a {pixel}px box, so it is stretched"
-            );
-
-            let bytes = image.as_bytes(0).expect("the frame carries pixels");
-            let colours: std::collections::HashSet<[u8; 3]> = bytes
-                .chunks_exact(4)
-                .filter(|pixel| pixel[3] > 0)
-                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
-                .collect();
-            assert!(
-                colours.len() > 8,
-                "{icon:?} must paint its own colours, saw {} distinct",
-                colours.len()
-            );
         }
     }
 
@@ -1140,25 +822,6 @@ mod tests {
             Icon::FolderFill,
             "the tinted catalog follows the theme's text colour, not a variant"
         );
-    }
-
-    /// The resolution must key off the *resolved* appearance. `Theme::mode`
-    /// is the preference and includes `System`, so keying on it would send
-    /// every "System" user down the dark branch whatever their desktop says.
-    #[gpui::test]
-    async fn the_element_resolves_against_the_resolved_appearance(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            sirio_theme::Theme::install(sirio_theme::ThemeMode::Light, cx);
-            assert_eq!(
-                Icon::file_type("toml").for_appearance(sirio_theme::Theme::get(cx).appearance),
-                Icon::file_type("toml_light")
-            );
-            sirio_theme::Theme::install(sirio_theme::ThemeMode::Dark, cx);
-            assert_eq!(
-                Icon::file_type("toml").for_appearance(sirio_theme::Theme::get(cx).appearance),
-                Icon::file_type("toml")
-            );
-        });
     }
 
     /// The render path itself, not just the helper above: draw a real

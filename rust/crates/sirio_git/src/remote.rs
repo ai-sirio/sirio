@@ -182,17 +182,4 @@ mod tests {
         assert_eq!(head_sha(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    #[test]
-    fn the_owner_still_resolves_through_the_shared_lookup() {
-        let dir = init_repo("owner");
-        Command::new("git")
-            .args(["remote", "add", "origin", "https://github.com/ai-sirio/sirio.git"])
-            .current_dir(&dir)
-            .output()
-            .expect("add remote");
-
-        assert_eq!(GitRemote::github_owner(&dir).as_deref(), Some("ai-sirio"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

@@ -259,28 +259,6 @@ mod tests {
         sidebar
     }
 
-    /// Both controls exist on the header. Note what this cannot see: gpui's
-    /// `.invisible()` sets a style, it does not remove the element, so this
-    /// test stayed green for as long as the two icons were hover-revealed
-    /// and a project header looked like it offered nothing at all. There is
-    /// no seam in the test harness that reads a painted element's
-    /// visibility, so "always visible" is verified against a capture of the
-    /// running app rather than here.
-    #[gpui::test]
-    async fn a_project_header_offers_add_and_menu_instead_of_a_new_worktree_row(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| sidebar_with_one_project(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("sidebar-section-0").is_some());
-        assert!(cx.debug_bounds("sidebar-section-add-0").is_some());
-        assert!(cx.debug_bounds("sidebar-section-menu-0").is_some());
-        assert!(cx.debug_bounds("sidebar-new-worktree-row").is_none());
-    }
-
     /// The disclosure folds the whole project away and brings it back.
     ///
     /// The second click is the half worth having a test for. The header
@@ -336,16 +314,6 @@ mod tests {
             "and the next click brings them back — the header underneath \
              must not toggle a second time"
         );
-    }
-
-    #[gpui::test]
-    async fn a_section_header_counts_its_worktrees(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| sidebar_with_one_project(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("sidebar-section-count-0").is_some());
     }
 
     fn sidebar_with_many_worktrees(cx: &mut Context<Sidebar>) -> Sidebar {

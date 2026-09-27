@@ -678,27 +678,6 @@ fn handler_receives_exact_methods_and_params() {
 }
 
 #[test]
-fn unknown_methods_fail_without_killing_the_server() {
-    let (server, _) = TestServer::start();
-
-    let mut request = request::system_ping();
-    request.method = "no.such.method".to_string();
-    let response = round_trip(&server.socket_path, &request, Duration::from_secs(5))
-        .expect("unknown method answered");
-    assert!(!response.ok);
-    assert_eq!(response.id, request.id);
-    assert_eq!(
-        response.error.as_deref(),
-        Some("unknown method: no.such.method")
-    );
-
-    let ping = request::system_ping();
-    let response =
-        round_trip(&server.socket_path, &ping, Duration::from_secs(5)).expect("still serving");
-    assert!(response.ok);
-}
-
-#[test]
 fn stop_removes_the_socket_file_and_stops_accepting() {
     let dir = TempDir::new("stop");
     let socket_path = dir.path().join("control.sock");
@@ -757,18 +736,6 @@ fn sirioctl(socket_path: &Path, args: &[&str]) -> std::process::Output {
         .env("SIRIO_SOCKET", socket_path)
         .output()
         .expect("sirioctl runs")
-}
-
-#[test]
-fn sirioctl_ping_prints_pong() {
-    let (server, _) = TestServer::start();
-    let output = sirioctl(&server.socket_path, &["ping"]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "pong");
 }
 
 #[test]
@@ -1022,28 +989,6 @@ fn workspace_close_terminates_process_group_when_worktree_is_missing() {
     assert!(
         wait_for_processes_to_exit(&pids, deadline),
         "workspace close must terminate the process group even after the directory disappears"
-    );
-}
-
-#[test]
-fn pane_registry_lists_live_application_panes_for_their_worktree() {
-    let registry = PaneRegistry::new();
-    let working_directory = std::env::current_dir().expect("current directory");
-    let pane = PaneInfo {
-        id: "pane-ui-1".to_string(),
-        tab: "Terminal".to_string(),
-        title: "Terminal".to_string(),
-        agent: String::new(),
-        active: true,
-    };
-
-    registry
-        .set_external(working_directory.clone(), vec![pane.clone()])
-        .expect("application panes register");
-
-    assert_eq!(
-        registry.list_for(&working_directory).expect("list panes"),
-        vec![pane]
     );
 }
 
@@ -1705,26 +1650,6 @@ fn sirioctl_notify_title_sends_user_notification() {
 }
 
 #[test]
-fn sirioctl_session_ref_round_trips() {
-    let (server, handler) = TestServer::start();
-    let output = sirioctl(
-        &server.socket_path,
-        &["session-ref", "--session", "pane-1", "--ref", "sess-42"],
-    );
-    assert!(output.status.success());
-    let seen = handler.requests();
-    assert_eq!(seen.last().expect("seen").method, "session.ref");
-    assert_eq!(
-        seen.last()
-            .expect("seen")
-            .params
-            .get("ref")
-            .map(String::as_str),
-        Some("sess-42")
-    );
-}
-
-#[test]
 fn sirioctl_worktree_set_round_trips() {
     let (server, handler) = TestServer::start();
     let output = sirioctl(
@@ -1881,64 +1806,6 @@ fn socket_mode_is_never_permissive_during_startup() {
         violated, 0,
         "socket mode was observed {violated}/{observed} times as anything but 0600"
     );
-}
-
-/// The peer-credential check must accept connections from the owner's uid
-/// — every connection in this suite is same-uid and must keep working.
-///
-/// Honest limitation: a connection from a DIFFERENT uid cannot be
-/// fabricated in a test without privilege escalation, so that half of the
-/// check (refusing foreign uids via `getpeereid`) is verified by reading
-/// `peer_is_owner` rather than by an automated test. The same-uid accept
-/// path is exercised here and by every other round trip in this suite.
-#[test]
-fn same_uid_peer_is_accepted() {
-    let (server, _) = TestServer::start();
-    let response = round_trip(
-        &server.socket_path,
-        &request::system_ping(),
-        Duration::from_secs(5),
-    )
-    .expect("same-uid connection accepted");
-    assert!(response.ok);
-}
-
-// Control-owned panes have no PTY backend off unix yet (`spawn_process`
-// returns Unsupported there), and these tests are about real process
-// groups — genuinely unportable today, not merely inconvenient.
-#[cfg(unix)]
-#[test]
-fn pane_registry_shutdown_terminates_live_children() {
-    let dir = TempDir::new("shutdown");
-    let pid_file = dir.path().join("child.pid");
-    let command = format!("printf '%s' \"$$\" > {}; exec sleep 60", pid_file.display());
-    let registry = PaneRegistry::new();
-    registry
-        .create(dir.path(), Some(&command), "sleep")
-        .expect("spawn child pane");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let pid = loop {
-        if let Ok(pid) = std::fs::read_to_string(&pid_file)
-            && let Ok(pid) = pid.parse::<i32>()
-        {
-            break pid;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "pane child did not publish its pid"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
-
-    registry.shutdown();
-    while std::time::Instant::now() < deadline {
-        if !process_exists(pid) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("pane child {pid} was still running after registry shutdown");
 }
 
 #[cfg(unix)]

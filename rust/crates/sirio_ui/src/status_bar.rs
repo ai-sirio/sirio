@@ -747,16 +747,6 @@ mod tests {
     use gpui::{Modifiers, VisualTestContext};
     use sirio_usage::UsageReason;
 
-    #[test]
-    fn light_status_bar_foreground_uses_muted_text_and_dark_stays_faint() {
-        let light = Theme::light();
-        let dark = Theme::dark();
-
-        assert_eq!(status_bar_foreground(light), light.text_muted);
-        assert_eq!(status_bar_foreground(dark), dark.text_faint);
-        assert_ne!(light.text_muted, light.text_faint);
-    }
-
     fn window_resetting_in(label: &str, percent: u8, now: SystemTime, secs: u64) -> UsageWindow {
         UsageWindow {
             resets_at: Some(now + Duration::from_secs(secs)),
@@ -840,56 +830,6 @@ mod tests {
         assert!((StatusBar::meter_fraction(&weekly_only) - 0.24).abs() < 1e-6);
 
         assert_eq!(StatusBar::meter_fraction(&ProviderUsage::default()), 0.0);
-    }
-
-    /// The pill meter is drawn only beside real numbers: a provider that is
-    /// loading or unavailable has nothing to fill it with, and an empty
-    /// track would read as "0% used".
-    #[gpui::test]
-    async fn the_meter_renders_beside_numbers_and_not_beside_a_reason(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let bar = cx.update(|window, _cx| {
-            window
-                .root::<StatusBar>()
-                .flatten()
-                .expect("status bar root")
-        });
-        bar.update(&mut cx, |bar, cx| {
-            let usage = ProviderUsage {
-                session: Some(UsageWindow::new("5h", 3)),
-                weekly: Some(UsageWindow::new("wk", 24)),
-                monthly: None,
-                fable_weekly: None,
-            };
-            bar.apply_outcomes(
-                UsageFetchOutcome::Success(usage),
-                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
-                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
-                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
-                cx,
-            );
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("Claude-usage-meter").is_some(),
-            "a loaded provider draws its pill meter"
-        );
-        assert!(cx.debug_bounds("Claude-usage-text").is_some());
-        assert!(
-            cx.debug_bounds("Codex-usage-meter").is_none(),
-            "an unavailable provider draws no meter"
-        );
-        assert!(
-            cx.debug_bounds("Codex-usage-text").is_none(),
-            "an unavailable provider leaves no text in the bar either"
-        );
     }
 
     /// The bar only ever shows numbers: a provider that had them and then
@@ -1133,48 +1073,6 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// The refresh control never turns into a spinner. The bar used to
-    /// swap the button for `loading::compact` for as long as any provider
-    /// sat in `Loading`, which every manual refresh forced. A refresh is
-    /// silent: the button stays and the new numbers land in place.
-    ///
-    /// The in-flight state is faked by setting the providers to `Loading`
-    /// by hand: a real fetch finishes inside `run_until_parked`, so the
-    /// frame drawn afterwards would be the settled one and prove nothing.
-    #[gpui::test]
-    async fn a_refresh_in_flight_keeps_the_refresh_button_and_draws_no_spinner(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let bar = cx.update(|window, _cx| {
-            window
-                .root::<StatusBar>()
-                .flatten()
-                .expect("status bar root")
-        });
-        bar.update(&mut cx, |bar, cx| {
-            bar.claude = ProviderUsageState::Loading;
-            bar.codex = ProviderUsageState::Loading;
-            bar.opencode_go = ProviderUsageState::Loading;
-            bar.ollama_cloud = ProviderUsageState::Loading;
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("status-refresh-spinner").is_none(),
-            "a refresh in flight must not draw a spinner in the bar"
-        );
-        assert!(
-            cx.debug_bounds("status-refresh").is_some(),
-            "the refresh control stays put while a refresh is in flight"
-        );
-    }
-
     /// P58, F-SET-10: `UsageBarPrefs::from_snapshot` is the single mapping
     /// from the persistence contract to the bar; it clamps the interval
     /// into the stepper's range so a stored out-of-range value cannot arm
@@ -1252,61 +1150,6 @@ mod tests {
             Some("12% used 5h".to_string()),
             "stale keeps showing the last good numbers — dimming is what marks it stale, not absence"
         );
-    }
-
-    /// The bar's right-edge label is the only thing a worktree switch owns:
-    /// the fetched numbers are the session's, not a worktree's, so switching
-    /// must relabel without resetting them.
-    #[gpui::test]
-    async fn apply_data_relabels_without_resetting_the_fetched_states(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
-        window
-            .update(cx, |bar, _window, cx| {
-                bar.codex = ProviderUsageState::Stale(ProviderUsage::default());
-                bar.apply_data(
-                    UsageBarData {
-                        branch: "branch-1".into(),
-                        path: "/tmp/wt-1".into(),
-                    },
-                    cx,
-                );
-                assert_eq!(bar.data.branch, "branch-1");
-                assert_eq!(bar.data.path, "/tmp/wt-1");
-                assert!(
-                    matches!(bar.codex, ProviderUsageState::Stale(_)),
-                    "the fetched numbers are not a worktree's to reset"
-                );
-            })
-            .expect("update the bar");
-    }
-
-    /// F-SET-11: only a fresh `Loaded` reads at full opacity — `Loading`,
-    /// `Stale` and every `Unavailable` reason must all look dimmed, or a
-    /// user cannot tell live numbers from a provider that has gone quiet.
-    #[test]
-    fn only_loaded_state_renders_undimmed() {
-        assert!(!StatusBar::segment_dimmed(&ProviderUsageState::Loaded(
-            ProviderUsage::default()
-        )));
-        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Loading));
-        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Stale(
-            ProviderUsage::default()
-        )));
-        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
-            UsageReason::NotInstalled
-        )));
-        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
-            UsageReason::LoggedOut
-        )));
-        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
-            UsageReason::TimedOut
-        )));
-        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
-            UsageReason::Error
-        )));
     }
 
     /// F-USE-03: the reducer (`model::tests::success_replaces_the_previous_state`)

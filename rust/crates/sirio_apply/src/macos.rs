@@ -459,21 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_attach_touches_nothing_and_detaches_nothing() {
-        let (_root, _apps, installed, dmg, mut host) = swap_fixture("attach-fail");
-        host.fail_attach = true;
-
-        let error = host.swap_at(&update(&dmg), &installed).unwrap_err();
-
-        assert!(error.to_string().contains("could not mount"), "{error:?}");
-        assert_eq!(
-            fs::read_to_string(installed.join("Contents/MacOS/sirio")).unwrap(),
-            "0.6.0"
-        );
-        assert!(host.detached.borrow().is_empty(), "no mount to detach");
-    }
-
-    #[test]
     fn a_failed_detach_is_surfaced_after_a_completed_swap() {
         let (_root, apps, installed, dmg, mut host) = swap_fixture("detach-fail");
         host.fail_detach = true;

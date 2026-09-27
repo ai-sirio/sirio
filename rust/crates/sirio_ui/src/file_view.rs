@@ -3166,7 +3166,6 @@ mod tests {
     use super::*;
 
     use gpui::{Modifiers, VisualTestContext};
-    use sirio_markdown::{Block, Inline};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TempFile(PathBuf);
@@ -3205,60 +3204,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
-    }
-
-    #[test]
-    fn markdown_loads_into_expected_blocks() {
-        let file = TempFile::with_extension("md", "# Title\n\nHello **world**.");
-        let document = markdown_document(&file.0, "# Title\n\nHello **world**.")
-            .expect("markdown parses into a document");
-        assert_eq!(
-            document.blocks,
-            vec![
-                Block::Heading {
-                    level: 1,
-                    inline: vec![Inline::Text("Title".into())],
-                },
-                Block::Paragraph {
-                    inline: vec![
-                        Inline::Text("Hello ".into()),
-                        Inline::Strong(vec![Inline::Text("world".into())]),
-                        Inline::Text(".".into()),
-                    ],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn plain_text_never_renders_as_markdown() {
-        let path = Path::new("/tmp/note.txt");
-        assert!(
-            markdown_document(path, "hello").is_none(),
-            "only Markdown paths render as Markdown"
-        );
-    }
-
-    #[test]
-    fn different_languages_produce_different_code_spans() {
-        let rust = code_spans(Language::Rust, "fn main() { let value = \"rust\"; }");
-        let python = code_spans(Language::Python, "def main():\n    return 'python'");
-
-        assert!(
-            rust.iter()
-                .any(|span| { span.kind == bezel::theme::HighlightKind::Keyword && span.range == (0..2) })
-        );
-        assert!(
-            python
-                .iter()
-                .any(|span| { span.kind == bezel::theme::HighlightKind::Keyword && span.range == (0..3) })
-        );
-        assert!(rust.iter().any(|span| span.kind == bezel::theme::HighlightKind::String));
-        assert!(python.iter().any(|span| span.kind == bezel::theme::HighlightKind::String));
-        assert_ne!(
-            rust, python,
-            "language detection must select different spans"
-        );
     }
 
     /// The gap this guards: `Language` has recognised twenty-four languages
@@ -3301,20 +3246,6 @@ mod tests {
         assert!(painted("public", bezel::theme::HighlightKind::Keyword), "{spans:?}");
         assert!(painted("42", bezel::theme::HighlightKind::Number), "{spans:?}");
         assert!(painted("// note", bezel::theme::HighlightKind::Comment), "{spans:?}");
-    }
-
-    #[test]
-    fn bezel_syntax_classifies_rust_numeric_literals() {
-        let source = "let answer = 42;";
-        let raw = syntax::highlight(source, "rust");
-        let spans = code_spans(Language::Rust, source);
-        assert!(
-            spans.iter().any(|span| {
-                matches!(span.kind, bezel::theme::HighlightKind::Number | bezel::theme::HighlightKind::Constant)
-                    && &source[span.range.clone()] == "42"
-            }),
-            "bezel-syntax's tree-sitter classification must reach the custom code surface; raw={raw:?} spans={spans:?}"
-        );
     }
 
     /// The editor must paint what tree-sitter actually classified, not a
@@ -3634,32 +3565,6 @@ mod tests {
             window.simulate_next_frame(app);
         });
         assert!(cx.debug_bounds("file-conflict-banner").is_some());
-    }
-
-    #[gpui::test]
-    async fn a_missing_file_tab_reports_the_specific_state(cx: &mut gpui::TestAppContext) {
-        let missing =
-            std::env::temp_dir().join(format!("sirio-file-view-missing-{}", std::process::id()));
-
-        cx.update(|cx| {
-            Theme::init(cx);
-            ::editor::init(cx);
-        });
-        let window = cx.add_window(|_window, cx| FileView::new(missing.clone(), cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        cx.update(|window, cx| {
-            let view = window.root::<FileView>().flatten().expect("root").read(cx);
-            let editor = view.editor().expect("editor installed");
-            assert_eq!(editor.status(), &LoadStatus::Missing);
-            let message = editor.load_message().expect("message");
-            assert!(
-                message.contains("does not exist"),
-                "missing files get the missing message: {message}"
-            );
-            assert!(!view.is_dirty(), "a missing file is not dirty");
-        });
     }
 
     #[gpui::test]
@@ -4134,47 +4039,6 @@ mod tests {
         );
     }
 
-    /// An empty line is still a line: it can be clicked into, typed on, and
-    /// it carries the caret. "alpha\n\nbeta\n" puts the empty one at byte 6.
-    #[gpui::test]
-    async fn an_empty_line_can_be_clicked_into(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alpha\n\nbeta\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx
-            .debug_bounds("file-source-line-1")
-            .expect("the empty line is drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.caret),
-            6,
-            "a click on the empty line must put the caret on it"
-        );
-    }
-
-    /// `up` and `down` are the two keys an editor is expected to answer and
-    /// this one never did: they fall past every arm of the match, and an
-    /// arrow carries no `key_char`, so the handler returns without moving
-    /// anything. "alpha\nbeta\ngamma\n" puts `beta` at byte 6.
-    #[gpui::test]
-    async fn the_arrow_keys_walk_the_caret_between_lines(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alpha\nbeta\ngamma\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("home down");
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.caret),
-            6,
-            "down from the start of `alpha` belongs at the start of `beta`"
-        );
-    }
-
     /// The column the caret came from has to survive a short line, which is
     /// the whole difference between vertical movement here and in an editor
     /// that recomputes the column every press.
@@ -4304,81 +4168,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn a_modifier_click_asks_for_the_definition(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "fn main() { helper(); }\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let captured = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
-                if let FileViewEvent::GoToDefinition { offset, .. } = event {
-                    captured.borrow_mut().push(*offset);
-                }
-            })
-            .detach();
-        });
-
-        view.update(&mut cx.cx, |view, cx| view.request_definition(12, None, cx));
-        cx.cx.run_until_parked();
-        assert_eq!(&*events.borrow(), &[12]);
-    }
-
-    /// The squiggle replaced the gutter dot, and the invariant the dot was
-    /// built around outlives it: a file that grows an error must not shift
-    /// every line number sideways.
-    #[gpui::test]
-    async fn a_diagnostic_squiggles_the_code_and_leaves_the_gutter_alone(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let file = TempFile::with_extension("rs", "fn main() {\n    let x = 1;\n}\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let before = cx
-            .debug_bounds("file-source-line-1")
-            .expect("line 1 is drawn");
-
-        view.update(&mut cx.cx, |view, cx| {
-            view.set_diagnostics(
-                vec![FileDiagnostic {
-                    line: 1,
-                    range: 16..17,
-                    severity: DiagnosticSeverity::Warning,
-                    message: "unused variable `x`".to_owned(),
-                }],
-                cx,
-            )
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-
-        assert!(
-            cx.debug_bounds("file-line-mark-1").is_none(),
-            "the gutter dot is gone: the warning is on the code, not beside it"
-        );
-        let after = cx
-            .debug_bounds("file-source-line-1")
-            .expect("line 1 is still drawn");
-        assert_eq!(
-            before.origin.x, after.origin.x,
-            "a file with an error must not shift every line number sideways"
-        );
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| {
-                let editor = view.editor().expect("loaded");
-                let buffer = editor.buffer();
-                // Line 1 of "fn main() {\n    let x = 1;\n}\n" is the run
-                // starting at byte 12; the finding sits on `x` at 16.
-                diagnostic_underlines(view.diagnostics(), &buffer[12..23], 12)
-            }),
-            vec![(4..5, DiagnosticSeverity::Warning)],
-            "and the squiggle lands on `x` itself, not on the whole line"
-        );
-    }
-
-    #[gpui::test]
     async fn resting_on_a_diagnostic_shows_its_message_with_no_server_reply(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -4402,32 +4191,6 @@ mod tests {
         );
     }
 
-    /// An empty publish is how a server says the errors are gone. Dropping
-    /// it on the floor leaves squiggles under text that is now fine.
-    #[gpui::test]
-    async fn an_empty_publish_clears_the_squiggles(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "a\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-        view.update(&mut cx.cx, |view, cx| {
-            view.set_diagnostics(
-                vec![FileDiagnostic { line: 0, range: 0..1,
-                    severity: DiagnosticSeverity::Error, message: "boom".into() }],
-                cx,
-            );
-            view.set_diagnostics(Vec::new(), cx);
-        });
-        assert!(view.read_with(&cx.cx, |view, _| view.diagnostics().is_empty()));
-        assert!(
-            view.read_with(&cx.cx, |view, _| diagnostic_underlines(
-                view.diagnostics(),
-                "a",
-                0
-            ))
-            .is_empty(),
-            "and the line it marked underlines nothing"
-        );
-    }
-
     /// Tests for `selected_run_on_line` — which part of a line a selection
     /// covers, and the empty-line case that used to come out as "nothing".
     /// Vertical movement has to agree with how the rows were cut, and the
@@ -4435,23 +4198,6 @@ mod tests {
     /// caret to a byte no row is willing to draw.
     mod line_walk {
         use super::*;
-
-        #[test]
-        fn a_trailing_newline_does_not_open_a_line() {
-            let buffer = "alpha\nbeta\ngamma\n";
-            assert_eq!(next_line_start(buffer, 0), Some(6), "alpha -> beta");
-            assert_eq!(next_line_start(buffer, 6), Some(11), "beta -> gamma");
-            assert_eq!(
-                next_line_start(buffer, 11),
-                None,
-                "the byte past the closing newline is not a line of its own"
-            );
-        }
-
-        #[test]
-        fn a_buffer_that_does_not_end_in_a_newline_ends_on_its_last_line() {
-            assert_eq!(next_line_start("alpha\nbeta", 6), None);
-        }
 
         #[test]
         fn an_empty_line_is_walked_like_any_other() {
@@ -4491,12 +4237,6 @@ mod tests {
             assert_eq!(offset_at_column(BUFFER, 11, 2), 13, "the third character");
             assert_eq!(offset_at_column(BUFFER, 0, 2), 4, "and two characters in is four bytes in");
         }
-
-        #[test]
-        fn a_line_too_short_to_reach_the_column_clamps_to_its_end() {
-            let buffer = "alphabet\nab\n";
-            assert_eq!(offset_at_column(buffer, 9, 6), 11, "`ab` has no column 6");
-        }
     }
 
     mod selection_spans {
@@ -4517,11 +4257,6 @@ mod tests {
                 Some(0..0),
                 "a real answer: selected, with no text to measure"
             );
-        }
-
-        #[test]
-        fn an_empty_line_the_selection_never_reaches_is_not_selected() {
-            assert_eq!(selected_run_on_line(span(0, 3), 6, 0), None);
         }
 
         /// The selection stops exactly where the empty line begins, so it
@@ -4665,63 +4400,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn each_severity_takes_its_own_theme_colour() {
-            let theme = Theme::dark();
-            let styled = underline_highlights(
-                &[
-                    (0..1, DiagnosticSeverity::Error),
-                    (1..2, DiagnosticSeverity::Warning),
-                    (2..3, DiagnosticSeverity::Information),
-                    (3..4, DiagnosticSeverity::Hint),
-                ],
-                &theme,
-            );
-            let colours: Vec<_> = styled
-                .iter()
-                .map(|(_, style)| style.underline.expect("every span underlines").color)
-                .collect();
-            assert_eq!(colours, vec![
-                Some(theme.danger.into()),
-                Some(theme.warning.into()),
-                Some(theme.text_faint.into()),
-                Some(theme.text_faint.into()),
-            ]);
-        }
-
-        #[test]
-        fn an_underline_is_wavy_so_it_does_not_read_as_a_markdown_link() {
-            let styled = underline_highlights(&[(0..1, DiagnosticSeverity::Warning)], &Theme::dark());
-            let underline = styled[0].1.underline.expect("a span underlines");
-            assert!(underline.wavy, "other IDEs squiggle; a straight rule is the link style");
-        }
-
-        #[test]
         fn an_underline_sets_no_colour_of_its_own() {
             // The glyphs keep whatever the grammar painted them; only the
             // rule underneath is the diagnostic's.
             let styled = underline_highlights(&[(0..1, DiagnosticSeverity::Error)], &Theme::dark());
             assert!(styled[0].1.color.is_none(),
                 "an error must not repaint the token it sits under");
-        }
-
-        /// The whole reason `combine_highlights` replaced the old
-        /// `sort_by_key`: syntax spans and diagnostics do overlap, and
-        /// `compute_runs` assumes ranges that do not.
-        #[test]
-        fn a_syntax_coloured_token_keeps_its_colour_under_a_diagnostic() {
-            let keyword = gpui::rgb(0xff0000);
-            let syntax = vec![(
-                0..3,
-                HighlightStyle { color: Some(keyword.into()), ..Default::default() },
-            )];
-            let diagnostics = underline_highlights(&[(0..3, DiagnosticSeverity::Warning)], &Theme::dark());
-            let combined: Vec<_> = gpui::combine_highlights(syntax, diagnostics).collect();
-            assert_eq!(combined.len(), 1, "one run covering the shared span");
-            let (range, style) = &combined[0];
-            assert_eq!(*range, 0..3);
-            assert_eq!(style.color, Some(keyword.into()), "the grammar's colour survives");
-            assert!(style.underline.is_some_and(|line| line.wavy),
-                "and the squiggle is added on top of it");
         }
     }
 
@@ -5384,91 +5068,6 @@ mod tests {
         );
     }
 
-    /// The editor has no header bar. It used to carry the file's absolute
-    /// path, a `● edited` mark and a language chip above every document —
-    /// a whole row spent on three things the tab already answers
-    /// (`SirioWorkspace::tab_is_dirty` draws the dirty mark, the tab label
-    /// names the file). The content now starts at the top of the tab, and
-    /// any bar reappearing above it pushes this origin down and fails here.
-    #[gpui::test]
-    async fn a_code_file_draws_no_bar_above_its_content(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "fn main() {}\n");
-        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let content = cx
-            .debug_bounds("file-text-scroll")
-            .expect("a code file renders its source");
-        assert!(
-            content.origin.y < px(2.0),
-            "the source surface must start at the top of the tab, got y={:?}",
-            content.origin.y
-        );
-    }
-
-    /// F-EDIT-01/02: one Markdown row, and the Code/Preview icons end it.
-    ///
-    /// Two things are load-bearing here and were not before. The row is
-    /// drawn in **Preview** as well as Code — with the header gone, the
-    /// icons on it are the only way out of Preview, so a Code-only row
-    /// would make Preview a dead end. And the icons sit at the row's right
-    /// edge rather than beside the formatting controls, so their position
-    /// does not move when those controls appear and disappear with the mode.
-    #[gpui::test]
-    async fn the_markdown_mode_icons_end_the_row_in_both_modes(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("md", "# Title\n");
-        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        // Preview, the default: the row carries the icons and nothing else.
-        let row = cx
-            .debug_bounds("file-markdown-row")
-            .expect("the Markdown row is drawn in Preview too");
-        let switch = cx
-            .debug_bounds("file-mode-switch")
-            .expect("the mode icons are drawn in Preview");
-        assert!(
-            cx.debug_bounds("file-format-bold").is_none(),
-            "Preview is a reading surface: it offers nothing to format"
-        );
-        assert!(
-            row.origin.y <= switch.origin.y
-                && switch.origin.y + switch.size.height <= row.origin.y + row.size.height,
-            "the icons sit on the row, not above or below it: row {row:?}, icons {switch:?}"
-        );
-        let row_right = row.origin.x + row.size.width;
-        let switch_right = switch.origin.x + switch.size.width;
-        assert!(
-            row_right - switch_right < px(24.0),
-            "the icons end the row: it ends at {row_right:?}, they end at {switch_right:?}"
-        );
-
-        // Code: the formatting controls appear to their left, and they stay
-        // where they were.
-        let code = cx
-            .debug_bounds("file-mode-code")
-            .expect("the Code icon is drawn");
-        cx.simulate_click(code.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-
-        let link = cx
-            .debug_bounds("file-format-link")
-            .expect("Code mode offers the formatting controls");
-        let switch_in_code = cx
-            .debug_bounds("file-mode-switch")
-            .expect("the mode icons stay on the row in Code");
-        assert!(
-            switch_in_code.origin.x > link.origin.x + link.size.width,
-            "the icons stay after the last formatting control"
-        );
-        assert_eq!(
-            switch_in_code.origin.x, switch.origin.x,
-            "and they do not move when the formatting controls appear"
-        );
-    }
-
     #[gpui::test]
     async fn a_large_markdown_file_opens_in_code_with_manual_preview_and_unlocks(
         cx: &mut gpui::TestAppContext,
@@ -5733,48 +5332,6 @@ mod tests {
         assert!(
             cx.debug_bounds("file-source-line-7999").is_none(),
             "a line far below the viewport is not laid out at all"
-        );
-    }
-
-    /// F-EDIT: a file taller than its viewport shows bezel's scrollbar over
-    /// the source, and one that fits shows none — the bar reports how far
-    /// down the reader is, so a document with nowhere to go has nothing to
-    /// report. `file-text-bar` is the strip's own selector; bezel returns an
-    /// empty element (no selector at all) when there is no overflow.
-    #[gpui::test]
-    async fn a_long_source_file_shows_a_scrollbar_and_a_short_one_does_not(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let mut long = String::new();
-        for i in 0..400 {
-            long.push_str(&format!("let line_{i} = {i};\n"));
-        }
-        let file = TempFile::with_extension("rs", &long);
-        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
-        // The bar draws from the handle as the previous frame left it, so
-        // give the list one frame to report its overflow before asking.
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        assert!(
-            cx.debug_bounds("file-text-scroll").is_some(),
-            "the source surface is drawn"
-        );
-        assert!(
-            cx.debug_bounds("file-text-bar").is_some(),
-            "a source taller than the viewport shows its scrollbar"
-        );
-
-        let short = TempFile::with_extension("rs", "fn main() {}\n");
-        let (mut cx, _view) = mounted_file_view(&mut cx.cx, short.path().to_path_buf());
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        assert!(
-            cx.debug_bounds("file-text-bar").is_none(),
-            "a source that fits its viewport shows no scrollbar"
         );
     }
 

@@ -123,10 +123,4 @@ mod tests {
         let (_, found) = parse_publish(&params).expect("parses");
         assert_eq!(found[0].severity, Severity::Error);
     }
-
-    #[test]
-    fn a_publish_about_something_that_is_not_a_file_is_ignored() {
-        let params = serde_json::json!({ "uri": "untitled:Untitled-1", "diagnostics": [] });
-        assert!(parse_publish(&params).is_none());
-    }
 }

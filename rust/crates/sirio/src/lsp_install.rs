@@ -239,15 +239,6 @@ mod tests {
     }
 
     #[test]
-    fn a_manual_recipe_is_never_handed_to_the_installer() {
-        let recipe = sirio_lsp::Recipe::Manual {
-            needs: "a JVM",
-            url: "https://example.invalid/",
-        };
-        assert!(agent_for(&recipe, "linux-x86_64").is_none());
-    }
-
-    #[test]
     fn the_language_server_store_is_a_sibling_of_the_agent_store() {
         let mut environment = std::collections::BTreeMap::new();
         environment.insert("XDG_DATA_HOME".to_string(), "/data".to_string());

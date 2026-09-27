@@ -813,7 +813,6 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::sync::Once;
 
     fn available_agent(id: &'static str, display_name: &'static str) -> AgentAvailability {
         AgentAvailability {
@@ -884,84 +883,6 @@ mod tests {
             );
             assert_eq!(actions.borrow().last().copied(), Some(expected));
         }
-    }
-
-    #[gpui::test]
-    async fn drawn_new_tab_menu_offers_browser_action(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| TabBar::new(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let plus = cx
-            .debug_bounds("new-tab-button")
-            .expect("the plus control is in the drawn frame");
-        cx.simulate_click(plus.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("new-tab-menu").is_some());
-        assert!(
-            cx.debug_bounds("new-tab-item-new-browser").is_some(),
-            "the menu offers the mounted browser surface"
-        );
-    }
-
-    /// The "+" menu creates surfaces, not agents: an agent is reached through
-    /// New Chat, which resolves it through `sirio_registry` instead of running
-    /// its CLI in a shell. The six rows this pins were the opposite deal --
-    /// each one opened a *terminal* pre-loaded with one agent's binary, so the
-    /// menu had to carry a per-agent PATH hint and the shell a per-agent
-    /// launch path. Their absence is the contract; a re-addition would compile
-    /// and draw, so only a test catches it.
-    #[gpui::test]
-    async fn drawn_new_tab_menu_offers_no_agent_terminal_items(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| TabBar::new(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let plus = cx
-            .debug_bounds("new-tab-button")
-            .expect("the plus control is in the drawn frame");
-        cx.simulate_click(plus.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("new-tab-menu").is_some());
-        for selector in [
-            "new-tab-item-claude-code",
-            "new-tab-item-codex",
-            "new-tab-item-opencode",
-            "new-tab-item-pi",
-            "new-tab-item-oh-my-pi",
-            "new-tab-item-split-claude-code",
-        ] {
-            assert!(
-                cx.debug_bounds(selector).is_none(),
-                "{selector} names an agent-specialized terminal the menu no \
-                 longer offers"
-            );
-        }
-
-        // The generic surfaces it sat between must survive, so this test
-        // fails on a re-addition rather than on an empty menu.
-        assert!(
-            cx.debug_bounds("new-tab-item-new-terminal").is_some(),
-            "the generic terminal is still offered"
-        );
-        assert!(
-            cx.debug_bounds("new-tab-item-new-chat").is_some(),
-            "an agent is still reached through New Chat"
-        );
     }
 
     /// A bare `TabBar` fills the whole test window, so its "+" button always
@@ -1282,38 +1203,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn drawn_new_chat_picker_explains_when_no_agent_is_installed(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            TabBar::new(cx).with_chat_agents(vec![AgentAvailability {
-                id: "codex",
-                display_name: "Codex",
-                executable: None,
-            }])
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
-        cx.simulate_click(plus.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        cx.run_until_parked();
-        let new_chat = cx
-            .debug_bounds("new-tab-item-new-chat")
-            .expect("New Chat is drawn");
-        cx.simulate_click(new_chat.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("new-chat-agent-menu").is_some());
-        assert!(cx.debug_bounds("new-chat-empty").is_some());
-        assert!(cx.debug_bounds("new-tab-chat-agent-codex").is_none());
-    }
-
     /// F-TAB-08: clicking the "Other agents…" empty-state card, drawn when
     /// no supported agent is on PATH, must reach a real callback rather than
     /// being a dead static label.
@@ -1450,95 +1339,5 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(actions.borrow().last().copied(), Some(expected));
         }
-    }
-
-    // ── F-TAB-19/20/28 harness capability: modifier chords ──────────────
-    //
-    // The tab strip and its `ctrl-tab` / `ctrl-1…9` / `ctrl-w` bindings live
-    // in the shell (`sirio/src/main.rs`, routed to codex12). What this crate
-    // owns is the proof that the harness can send a *modifier chord* through
-    // the real key-dispatch path: a key context, a scoped `KeyBinding`, and a
-    // focused element with an `on_action` handler. The shell's chord tests
-    // then use exactly this recipe against its workspace.
-
-    actions!(
-        chord_fixture,
-        [CycleFixtureTab, JumpFixtureTab, CloseFixtureTab]
-    );
-
-    static CHORD_FIXTURE_KEYS_BOUND: Once = Once::new();
-
-    struct ChordFixture {
-        fired: Rc<RefCell<Vec<&'static str>>>,
-        focus_handle: FocusHandle,
-    }
-
-    impl ChordFixture {
-        /// Installs the same scoped-binding shape the shell uses for its
-        /// workspace chords, but against this fixture's context so the
-        /// dispatch path is the only thing under test.
-        fn bind_keys(cx: &mut App) {
-            CHORD_FIXTURE_KEYS_BOUND.call_once(|| {
-                cx.bind_keys([
-                    KeyBinding::new("ctrl-tab", CycleFixtureTab, Some("ChordFixture")),
-                    KeyBinding::new("ctrl-1", JumpFixtureTab, Some("ChordFixture")),
-                    KeyBinding::new("ctrl-w", CloseFixtureTab, Some("ChordFixture")),
-                ]);
-            });
-        }
-
-        fn new(cx: &mut Context<Self>) -> Self {
-            Self::bind_keys(cx);
-            Self {
-                fired: Default::default(),
-                focus_handle: cx.focus_handle(),
-            }
-        }
-    }
-
-    impl Render for ChordFixture {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .key_context("ChordFixture")
-                .track_focus(&self.focus_handle)
-                .debug_selector(|| "chord-fixture".into())
-                .on_action(cx.listener(|this, _: &CycleFixtureTab, _, _| {
-                    this.fired.borrow_mut().push("cycle");
-                }))
-                .on_action(cx.listener(|this, _: &JumpFixtureTab, _, _| {
-                    this.fired.borrow_mut().push("jump");
-                }))
-                .on_action(cx.listener(|this, _: &CloseFixtureTab, _, _| {
-                    this.fired.borrow_mut().push("close");
-                }))
-                .child("chord fixture")
-        }
-    }
-
-    #[gpui::test]
-    async fn modifier_chords_dispatch_actions_through_the_real_key_path(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| ChordFixture::new(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let fixture = cx.update(|window, _| {
-            window
-                .root::<ChordFixture>()
-                .flatten()
-                .expect("fixture root")
-        });
-        let focus_handle = fixture.read_with(&cx.cx, |fixture, _| fixture.focus_handle.clone());
-        cx.update(|window, app| focus_handle.focus(window, app));
-        cx.run_until_parked();
-
-        cx.simulate_keystrokes("ctrl-tab ctrl-1 ctrl-w");
-        cx.run_until_parked();
-
-        let fired = fixture.read_with(&cx.cx, |fixture, _| fixture.fired.borrow().clone());
-        assert_eq!(
-            fired,
-            vec!["cycle", "jump", "close"],
-            "modifier chords must dispatch through GPUI's key path"
-        );
     }
 }

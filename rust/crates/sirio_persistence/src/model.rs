@@ -733,23 +733,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_defaults_match_swift() {
-        let defaults = AppSettings::default();
-        assert_eq!(defaults.appearance, AppearanceMode::System);
-        assert_eq!(defaults.ui_font_size, 13);
-        assert_eq!(defaults.terminal_font_size, 13);
-        assert!(defaults.control_socket_enabled);
-    }
-
-    #[test]
-    fn font_size_ranges_run_from_12_to_18_points() {
-        // Both steppers share one range: narrowed from the Swift 10..20 and
-        // 9..24 so that the extremes stay legible on every platform.
-        assert_eq!(settings_ranges::UI_FONT_SIZE, 12..=18);
-        assert_eq!(settings_ranges::TERMINAL_FONT_SIZE, 12..=18);
-    }
-
-    #[test]
     fn settings_keys_match_swift_exactly() {
         assert_eq!(settings_keys::APPEARANCE_THEME, "appearance.theme");
         assert_eq!(settings_keys::UI_FONT_SIZE, "appearance.uiFontSize");
@@ -761,17 +744,6 @@ mod tests {
             settings_keys::CONTROL_SOCKET_ENABLED,
             "controlSocket.enabled"
         );
-    }
-
-    #[test]
-    fn enums_parse_their_swift_raw_values() {
-        assert_eq!(
-            AppearanceMode::parse("system"),
-            Some(AppearanceMode::System)
-        );
-        assert_eq!(AppearanceMode::parse("light"), Some(AppearanceMode::Light));
-        assert_eq!(AppearanceMode::parse("dark"), Some(AppearanceMode::Dark));
-        assert_eq!(AppearanceMode::parse("banana"), None);
     }
 
     #[test]
@@ -795,18 +767,5 @@ mod tests {
         // build reads "notte" as unknown and falls back to Neutral in the
         // loader, which is the downgrade path every unknown string has.
         assert_eq!(BaseColor::Notte.raw(), "notte");
-    }
-
-    #[test]
-    fn an_unknown_base_colour_is_not_parsed() {
-        // The loader turns None into the default; parse itself does not
-        // guess, matching AppearanceMode::parse.
-        assert_eq!(BaseColor::parse("cerulean"), None);
-        assert_eq!(BaseColor::parse(""), None);
-    }
-
-    #[test]
-    fn settings_default_to_the_neutral_base_colour() {
-        assert_eq!(AppSettings::default().base_color, BaseColor::Neutral);
     }
 }

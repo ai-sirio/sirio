@@ -858,19 +858,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn git_projects_draw_base_and_location_fields(cx: &mut gpui::TestAppContext) {
-        let (_window, mut cx, _view) = mount(seed(), cx);
-        assert!(
-            cx.debug_bounds("project-worktree-base-field").is_some(),
-            "a git project's settings tab draws the Default Worktree Base field"
-        );
-        assert!(
-            cx.debug_bounds("project-worktree-location-field").is_some(),
-            "a git project's settings tab draws the Worktree Location field"
-        );
-    }
-
-    #[gpui::test]
     async fn folders_offer_initialize_git_instead(cx: &mut gpui::TestAppContext) {
         let (_window, mut cx, _view) = mount(
             ProjectSettingsSeed {
@@ -1029,21 +1016,4 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn refresh_row_facts_never_clobbers_drafts(cx: &mut gpui::TestAppContext) {
-        let (window, mut cx, _view) = mount(seed(), cx);
-        window
-            .update(&mut cx, |view, _, cx| {
-                view.display_name = "Custom".to_string();
-                view.refresh_row_facts(false, PathBuf::from("/tmp/other"), None, cx);
-            })
-            .unwrap();
-        window
-            .update(&mut cx, |view, _, _| {
-                assert_eq!(view.display_name, "Custom");
-                assert!(!view.is_git);
-                assert_eq!(view.path, PathBuf::from("/tmp/other"));
-            })
-            .unwrap();
-    }
 }

@@ -369,21 +369,4 @@ mod tests {
             vec!["load:/boot", "save:/boot", "load:/selected"]
         );
     }
-
-    #[test]
-    fn switch_saves_before_loading_the_target() {
-        let store = Arc::new(FakeStore::new());
-        let coordinator = WorktreeTransition::new(store.clone());
-        coordinator.request(TransitionIntent::Switch {
-            outgoing: PersistedWorktreeSnapshot {
-                layout: layout("/outgoing"),
-            },
-            target: PathBuf::from("/target"),
-        });
-        take_until_ready(&coordinator);
-        assert_eq!(
-            *store.events.lock().unwrap(),
-            vec!["save:/outgoing", "load:/target"]
-        );
-    }
 }

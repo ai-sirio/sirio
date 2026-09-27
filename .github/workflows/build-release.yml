@@ -232,8 +232,7 @@ jobs:
       # settling an adapter's ACP claim against the real binary is the point;
       # they do not belong in a gate that decides whether a release exists,
       # because a `brew install`/`npm i -g` on this Mac would then be able to
-      # stop one. Every other test still runs, including the two hermetic ones
-      # in the same file.
+      # stop one. Every other test still runs.
       #
       # And it retries a failed test twice before calling it a failure. Every
       # red this gate has produced so far has been a test measuring real time

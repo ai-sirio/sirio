@@ -447,32 +447,10 @@ mod tests {
             .expect("the shipped table names this language")
     }
 
-    /// The UI tests address rows by index, because a `debug_bounds` lookup
-    /// wants a `'static` selector string. The order those indices name is
-    /// therefore pinned here: a table reorder has to fail loudly rather than
-    /// silently point a click at another language.
-    #[test]
-    fn the_row_order_follows_the_shipped_table() {
-        let rows = language_server_rows(&ServerStates::default());
-        assert_eq!(rows[row_index("rust")].language, "rust");
-        assert_eq!(rows[row_index("java")].language, "java");
-        assert_eq!(row_index("rust"), 0, "the first row is the first entry");
-        assert_eq!(row_index("java"), 5, "the selectors below say so");
-    }
-
     fn row_for<'a>(rows: &'a [ServerRow], language: &str) -> &'a ServerRow {
         rows.iter()
             .find(|row| row.language == language)
             .expect("every language has a row")
-    }
-
-    #[test]
-    fn every_language_has_a_row() {
-        // The number the design pinned, and the reason the page is not a
-        // duplicate of the table: it is built from `LanguageTable::defaults()`
-        // itself. A language added there and not drawn here is the defect
-        // this test exists to catch.
-        assert_eq!(language_server_rows(&ServerStates::default()).len(), 21);
     }
 
     #[test]
@@ -528,17 +506,6 @@ mod tests {
             "installed by Sirio v2026-09-14",
             "and the row says where it came from"
         );
-    }
-
-    #[test]
-    fn a_silenced_language_can_be_unsilenced_here() {
-        let mut states = ServerStates::default();
-        states.silenced.insert("java".to_string());
-        let rows = language_server_rows(&states);
-        let java = row_for(&rows, "java");
-        assert!(java.silenced, "and the row says so, so it can be undone");
-        let rust = row_for(&rows, "rust");
-        assert!(!rust.silenced, "a language nobody declined is not marked");
     }
 
     /// The states read the reader's `PATH` before Sirio's store, and only

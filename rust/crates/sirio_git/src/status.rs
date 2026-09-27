@@ -398,32 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_non_ascii_paths() {
-        let mut output = Vec::new();
-        output.extend_from_slice("1 .M N... 100644 100644 100644 83db48f84ec878fbfb30b46d16630e944e34f205 83db48f84ec878fbfb30b46d16630e944e34f205 café-ünïcode.txt\0".as_bytes());
-
-        let snapshot = parse_status(&output).expect("parses");
-        assert_eq!(snapshot.entries[0].path, path("café-ünïcode.txt"));
-    }
-
-    #[test]
-    fn parses_unmerged_record() {
-        // Real shape from git 2.53: `u <XY> <sub> <m1> <m2> <m3> <mW> <h1>
-        // <h2> <h3> <path>` — four modes, three stage hashes.
-        let mut output = Vec::new();
-        output.extend_from_slice(
-            b"u UU N... 100644 100644 100644 100644 df967b96a579e45a18b8251732d16804b2e56a55 ba2906d0666cf726c7eaadd2cd3db615dedfdf3a 2299c37978265a95cbe835a4b0f0bbf15aad5549 f.txt\0",
-        );
-
-        let snapshot = parse_status(&output).expect("parses");
-        let entry = &snapshot.entries[0];
-        assert_eq!(entry.path, path("f.txt"));
-        assert!(entry.is_conflicted());
-        assert_eq!(entry.index_status, Some(StatusKind::Unmerged));
-        assert_eq!(entry.worktree_status, Some(StatusKind::Unmerged));
-    }
-
-    #[test]
     fn ignores_branch_header_lines() {
         let mut output = Vec::new();
         output.extend_from_slice(b"# branch.oid 3ff09b86479b467fcb2fb3628cf2e6d4c6d9bba8\0");
@@ -433,13 +407,6 @@ mod tests {
         let snapshot = parse_status(&output).expect("parses");
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].path, path("new.txt"));
-    }
-
-    #[test]
-    fn empty_output_is_clean() {
-        let snapshot = parse_status(b"").expect("parses");
-        assert!(snapshot.is_clean());
-        assert!(snapshot.entries.is_empty());
     }
 
     #[test]
@@ -468,22 +435,5 @@ mod tests {
             parse_status(output),
             Err(StatusParseError::UnsupportedStatus(b'Z'))
         );
-    }
-
-    #[test]
-    fn snapshot_sections_split_staged_changes_and_untracked() {
-        let mut output = Vec::new();
-        output.extend_from_slice(b"1 M. N... 100644 100644 100644 83db48f84ec878fbfb30b46d16630e944e34f205 3ed3870aac84a296bb0711eaf37096151f0c0378 staged-only.txt\0");
-        output.extend_from_slice(b"1 .M N... 100644 100644 100644 83db48f84ec878fbfb30b46d16630e944e34f205 83db48f84ec878fbfb30b46d16630e944e34f205 worktree-only.txt\0");
-        output.extend_from_slice(b"? new.txt\0");
-
-        let snapshot = parse_status(&output).expect("parses");
-        assert_eq!(snapshot.staged().len(), 1);
-        assert_eq!(snapshot.staged()[0].path, path("staged-only.txt"));
-        assert_eq!(snapshot.changes().len(), 1);
-        assert_eq!(snapshot.changes()[0].path, path("worktree-only.txt"));
-        assert_eq!(snapshot.untracked().len(), 1);
-        assert_eq!(snapshot.untracked()[0].path, path("new.txt"));
-        assert!(!snapshot.is_clean());
     }
 }

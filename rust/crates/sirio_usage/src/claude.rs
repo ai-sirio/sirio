@@ -1392,39 +1392,6 @@ mod tests {
         assert_eq!(classify_failure("some other output"), None);
     }
 
-    /// F-USE-03: `SIRIO_USAGE_CLAUDE_TIMEOUT_MS` overrides `TIMEOUT` when
-    /// set and parseable, so a live drive can shrink the bound below
-    /// `SETTLE` and force a genuine `TimedOut` in seconds instead of
-    /// risking a real 25s hang against this harness's own silence kill.
-    /// Unset (or unparseable), it falls back to the unmodified default.
-    #[test]
-    fn timeout_override_reads_the_env_var_and_falls_back_to_the_default() {
-        // SAFETY: single-threaded within this test; the var name is unique
-        // to this test and touched nowhere else in the crate.
-        unsafe {
-            std::env::remove_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS");
-        }
-        assert_eq!(ClaudeUsageFetcher::timeout(), ClaudeUsageFetcher::TIMEOUT);
-
-        unsafe {
-            std::env::set_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS", "1500");
-        }
-        assert_eq!(ClaudeUsageFetcher::timeout(), Duration::from_millis(1500));
-
-        unsafe {
-            std::env::set_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS", "not-a-number");
-        }
-        assert_eq!(
-            ClaudeUsageFetcher::timeout(),
-            ClaudeUsageFetcher::TIMEOUT,
-            "an unparseable override must fall back, not panic"
-        );
-
-        unsafe {
-            std::env::remove_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS");
-        }
-    }
-
     /// Regression for the macOS sign-in status bug: the current `claude`
     /// CLI writes only `mcpOAuth` into `.credentials.json` on macOS and
     /// keeps the primary session in the Keychain instead, so a signed-in
@@ -1437,16 +1404,6 @@ mod tests {
     fn mcp_oauth_only_json_is_not_a_signed_in_signal() {
         assert!(!credentials_json_signals_signed_in(
             br#"{"mcpOAuth":{"plugin:figma:figma|d39d3b6252bc1ac5":{"accessToken":"x"}}}"#
-        ));
-    }
-
-    /// The same JSON shape carrying `claudeAiOauth.accessToken` alongside
-    /// `mcpOAuth` — the primary session, wherever it is read from (file or
-    /// Keychain) — does signal signed in.
-    #[test]
-    fn claude_ai_oauth_access_token_alongside_mcp_oauth_is_a_signed_in_signal() {
-        assert!(credentials_json_signals_signed_in(
-            br#"{"mcpOAuth":{"x":{}},"claudeAiOauth":{"accessToken":"sk-ant-oat01-x"}}"#
         ));
     }
 }

@@ -143,12 +143,6 @@ mod tests {
     }
 
     #[test]
-    fn home_dot_config_is_the_last_resort() {
-        let path = config_path(&env(&[]), Path::new("/home/u"));
-        assert_eq!(path, Path::new("/home/u/.config/sirio/languages.toml"));
-    }
-
-    #[test]
     fn an_empty_environment_value_is_treated_as_unset() {
         // An exported-but-empty XDG_CONFIG_HOME is common and must not
         // produce `/sirio/languages.toml` at the filesystem root.

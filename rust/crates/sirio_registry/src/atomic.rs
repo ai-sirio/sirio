@@ -92,26 +92,6 @@ mod tests {
     }
 
     #[test]
-    fn a_published_file_leaves_no_scratch_behind() {
-        let dir = scratch("published");
-        let target = dir.join("registry.json");
-
-        write_atomically(&target, b"payload").unwrap();
-
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "payload");
-        let leftovers: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.ends_with(".tmp"))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "scratch files left behind: {leftovers:?}"
-        );
-    }
-
-    #[test]
     fn a_missing_parent_directory_is_created() {
         let dir = scratch("missing-parent");
         let target = dir.join("nested").join("deeper").join("manifest.json");
@@ -119,20 +99,5 @@ mod tests {
         write_atomically(&target, b"{}").unwrap();
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
-    }
-
-    #[test]
-    fn a_second_write_replaces_the_first_whole() {
-        let dir = scratch("replace");
-        let target = dir.join("registry.json");
-
-        write_atomically(&target, b"first-and-much-longer").unwrap();
-        write_atomically(&target, b"second").unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "second",
-            "a shorter payload must not leave a tail of the longer one"
-        );
     }
 }

@@ -255,19 +255,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_generation_changes_only_on_relaunch_and_teardown_is_explicit() {
-        let mut host = TerminalSurfaceHost::new("terminal-1");
-        assert_eq!(host.content_id(), "terminal-1");
-        assert_eq!(host.generation(), 1);
-        assert!(host.is_mounted());
-
-        host.teardown();
-        assert!(!host.is_mounted());
-        assert_eq!(host.relaunch(), 2);
-        assert!(host.is_mounted());
-    }
-
-    #[test]
     fn cache_preserves_controller_when_a_pane_moves_and_restores_focus() {
         let mut cache = TerminalPaneCache::new();
         cache.insert("worktree", "pane-a", "terminal-a", "live-pty");

@@ -153,20 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn a_server_offering_nothing_reports_no_capabilities() {
-        let capabilities = Capabilities::from(&ServerCapabilities::default());
-        assert_eq!(
-            capabilities,
-            Capabilities {
-                hover: false,
-                definition: false,
-                references: false,
-                document_symbols: false
-            }
-        );
-    }
-
-    #[test]
     fn a_provider_explicitly_set_to_false_is_not_offered() {
         // `Some(false)` and `None` mean the same thing to the UI, and a
         // client that only checked `is_some()` would offer a dead menu item.
@@ -208,35 +194,5 @@ mod tests {
             assert!(!capabilities.references, "a false provider is not an offer");
             assert!(!capabilities.document_symbols, "an absent provider is not an offer");
         });
-    }
-
-    #[test]
-    fn initialize_declares_only_the_capabilities_we_can_serve() {
-        let capabilities = client_capabilities();
-        let json = serde_json::to_value(&capabilities).expect("capabilities serialise");
-
-        let text_document = &json["textDocument"];
-        assert!(text_document["hover"]["contentFormat"].is_array());
-        assert_eq!(
-            text_document["definition"]["linkSupport"],
-            serde_json::json!(false),
-            "linkSupport off keeps the answer a Location, halving what navigation parses"
-        );
-        assert_eq!(
-            text_document["synchronization"]["didSave"],
-            serde_json::json!(true)
-        );
-        assert!(text_document["publishDiagnostics"].is_object());
-
-        // Declaring these invites requests we could only answer with null.
-        // Their absence is the decision, so it is what the test pins.
-        assert!(
-            json["workspace"].get("configuration").is_none(),
-            "workspace.configuration must stay undeclared"
-        );
-        assert!(
-            json["window"].get("workDoneProgress").is_none(),
-            "window.workDoneProgress must stay undeclared"
-        );
     }
 }

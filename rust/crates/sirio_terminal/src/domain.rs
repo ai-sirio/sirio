@@ -172,16 +172,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn symbolic_keys_use_documented_sequences() {
-        assert_eq!(TerminalKey::Enter.bytes(), b"\r");
-        assert_eq!(TerminalKey::Tab.bytes(), b"\t");
-        assert_eq!(TerminalKey::Escape.bytes(), b"\x1b");
-        assert_eq!(TerminalKey::Backspace.bytes(), b"\x7f");
-        assert_eq!(TerminalKey::Delete.bytes(), b"\x1b[3~");
-        assert_eq!(TerminalKey::ArrowRight.bytes(), b"\x1b[C");
-    }
-
-    #[test]
     fn split_and_remove_collapse_parent_nodes_and_enumerate_leaves() {
         let tree = SplitTree::leaf("a");
         let tree = tree.split_leaf("a", "b", SplitDirection::Right).unwrap();

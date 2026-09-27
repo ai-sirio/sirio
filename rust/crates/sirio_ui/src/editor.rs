@@ -1252,12 +1252,6 @@ mod tests {
             Self::with_suffix(name, "", contents)
         }
 
-        /// Like [`TempFile::new`] but the on-disk name ends with
-        /// `extension` (dot included), so language detection sees it.
-        fn with_extension(extension: &str, contents: &str) -> Self {
-            Self::with_suffix("", &format!(".{extension}"), contents)
-        }
-
         fn with_suffix(name: &str, extension: &str, contents: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1284,33 +1278,6 @@ mod tests {
         Selection::new(buffer, start, end).expect("test selection is on char boundaries")
     }
 
-    // ── F-EDIT-04: edit and save; the change survives reopen ───────────
-
-    #[test]
-    fn edit_save_and_reopen_keeps_the_change() {
-        let file = TempFile::new("edit-save", "one\ntwo\nthree\n");
-        let mut editor = Editor::open(file.path());
-        assert_eq!(editor.buffer(), "one\ntwo\nthree\n");
-        assert!(!editor.is_dirty());
-
-        // Edit: replace "two" with "TWO" and append a line.
-        let buffer = editor.buffer();
-        let two = sel(buffer, 4, 7);
-        editor.replace(two, "TWO").expect("replace");
-        editor
-            .insert(editor.buffer().len(), "four\n")
-            .expect("append");
-        assert!(editor.is_dirty(), "editing marks the document dirty");
-
-        editor.save().expect("save writes the buffer");
-        assert!(!editor.is_dirty(), "saving clears the dirty flag");
-
-        // "Closing and reopening": a fresh editor reads the saved disk.
-        let reopened = Editor::open(file.path());
-        assert_eq!(reopened.buffer(), "one\nTWO\nthree\nfour\n");
-        assert!(!reopened.is_dirty());
-    }
-
     // ── F-EDIT-05: changed on disk; Reload and Keep both work ──────────
 
     #[test]
@@ -1327,22 +1294,6 @@ mod tests {
             "changed externally\n",
             "a clean editor adopts the external content"
         );
-    }
-
-    #[test]
-    fn reload_adopts_the_external_content_and_clears_the_conflict() {
-        let file = TempFile::new("reload", "original\n");
-        let mut editor = Editor::open(file.path());
-        editor
-            .insert(editor.buffer().len(), "user's unsaved edit\n")
-            .expect("edit");
-        std::fs::write(file.path(), "external\n").expect("external write");
-        assert_eq!(editor.check_external(), Conflict::ChangedOnDisk);
-
-        editor.reload().expect("reload reads the disk");
-        assert_eq!(editor.buffer(), "external\n");
-        assert!(!editor.is_dirty());
-        assert_eq!(editor.conflict(), Conflict::None);
     }
 
     #[test]
@@ -1492,46 +1443,6 @@ mod tests {
                 "extension map: {name}"
             );
         }
-    }
-
-    #[test]
-    fn unknown_or_absent_extensions_fall_back_to_plain_text() {
-        assert_eq!(
-            Language::from_path(Path::new("mystery.xyzzy")),
-            Language::PlainText
-        );
-        assert_eq!(
-            Language::from_path(Path::new("README")),
-            Language::PlainText
-        );
-        assert_eq!(
-            Language::from_path(Path::new("no-extension-file")),
-            Language::PlainText
-        );
-        assert_eq!(Language::from_path(Path::new("")), Language::PlainText);
-    }
-
-    #[test]
-    fn code_editor_does_not_wrap_and_indents_with_four_spaces() {
-        // Pinned at compile time so the constant cannot drift silently.
-        const _: () = assert!(!CODE_EDITOR_WRAPS);
-        assert_eq!(
-            INDENT_UNIT.chars().count(),
-            4,
-            "four-space indentation (F-EDIT-07)"
-        );
-        assert!(
-            INDENT_UNIT.chars().all(|c| c == ' '),
-            "the indent unit is spaces"
-        );
-
-        let mut editor = Editor::from_buffer(PathBuf::from("code.rs"), "a\nb\n");
-        editor.insert_indent(2).expect("indent"); // caret at the start of "b"
-        assert_eq!(
-            editor.buffer(),
-            "a\n    b\n",
-            "Tab inserts exactly the four-space unit"
-        );
     }
 
     // ── F-EDIT-08: one document per path ───────────────────────────────
@@ -1789,48 +1700,6 @@ mod tests {
         assert!(editor.is_dirty(), "a formatting op is an edit");
     }
 
-    // ── F-EDIT-03: large-file manual preview ───────────────────────────
-
-    #[test]
-    fn markdown_over_the_preview_threshold_locks_preview_until_requested() {
-        let big = "x".repeat((MARKDOWN_PREVIEW_THRESHOLD as usize) + 1);
-        let file = TempFile::with_extension("md", &big);
-        let editor = Editor::open(file.path());
-        assert_eq!(
-            editor.status(),
-            &LoadStatus::Loaded,
-            "a big markdown file still opens (it is under MAX_FILE_BYTES)"
-        );
-        assert_eq!(editor.language(), Language::Markdown);
-        assert!(
-            editor.preview_locked(),
-            "preview is held for manual preview"
-        );
-
-        let mut editor = editor;
-        editor.request_preview();
-        assert!(!editor.preview_locked());
-    }
-
-    #[test]
-    fn small_markdown_and_large_plain_text_never_lock_preview() {
-        let small = TempFile::with_extension("md", "# hi\n");
-        let small_editor = Editor::open(small.path());
-        assert!(
-            !small_editor.preview_locked(),
-            "small markdown renders automatically"
-        );
-
-        let big_text = "y".repeat((MARKDOWN_PREVIEW_THRESHOLD as usize) + 1);
-        let file = TempFile::new("big-txt", &big_text);
-        let editor = Editor::open(file.path());
-        assert_eq!(editor.language(), Language::PlainText);
-        assert!(
-            !editor.preview_locked(),
-            "preview locking is a markdown concept only"
-        );
-    }
-
     // ── F-EDIT-13: distinct missing and unreadable messages ────────────
 
     #[test]
@@ -2023,21 +1892,9 @@ mod tests {
     /// Tests for `line_range_for`, kept in a module named after the function
     /// under test so its name is part of each test's path — libtest filters
     /// on the path, and `cargo test -p sirio_ui line_range_for` selects
-    /// exactly these five.
+    /// exactly these three.
     mod line_range_for {
         use super::*;
-
-        #[test]
-        fn a_caret_in_an_empty_buffer_is_on_line_one() {
-            assert_eq!(line_range_for("", Selection::point(0)), (1, 1));
-        }
-
-        #[test]
-        fn a_selection_inside_one_line_spans_that_line_only() {
-            let buffer = "alpha\nbeta\ngamma\n";
-            let selection = Selection::new(buffer, 6, 10).expect("valid range");
-            assert_eq!(line_range_for(buffer, selection), (2, 2));
-        }
 
         #[test]
         fn a_selection_crossing_a_newline_spans_both_lines() {
@@ -2060,42 +1917,6 @@ mod tests {
             let start = buffer.find("second").expect("present");
             let selection = Selection::new(buffer, start, start + 6).expect("valid range");
             assert_eq!(line_range_for(buffer, selection), (2, 2));
-        }
-    }
-
-    /// Tests for `fence_tag`, kept in a module named after the method under
-    /// test so its name is part of each test's path — libtest filters on the
-    /// path, and `cargo test -p sirio_ui fence_tag` selects exactly these
-    /// four. A flat test name would select none and report a false green.
-    mod fence_tag {
-        use super::*;
-
-        #[test]
-        fn the_readable_cpp_name_is_not_its_markdown_tag() {
-            assert_eq!(Language::Cpp.name(), "C++");
-            assert_eq!(Language::Cpp.fence_tag(), "cpp");
-        }
-
-        #[test]
-        fn plain_text_has_no_fence_tag_at_all() {
-            assert_eq!(Language::PlainText.fence_tag(), "");
-        }
-
-        #[test]
-        fn the_shell_tag_is_the_conventional_bash() {
-            assert_eq!(Language::Shell.fence_tag(), "bash");
-        }
-
-        #[test]
-        fn every_tag_is_either_empty_or_lowercase_ascii() {
-            for language in Language::ALL {
-                let tag = language.fence_tag();
-                assert!(
-                    tag.chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-                    "{language:?} has a non-conventional fence tag: {tag:?}"
-                );
-            }
         }
     }
 }

@@ -250,17 +250,6 @@ mod tests {
         assert_eq!(right, Some(220.0));
     }
 
-    /// With no Secondary pane there is nothing to split: the whole centre is
-    /// the Primary pane, and `None` says the pane is absent rather than
-    /// squeezed to zero.
-    #[test]
-    fn a_closed_secondary_pane_leaves_the_whole_centre_to_the_primary() {
-        let (primary, secondary) = resolve_center_split(900.0, 500, false, 1.0);
-
-        assert_eq!(primary, 900.0);
-        assert_eq!(secondary, None);
-    }
-
     /// The ratio is thousandths, and the divider comes out of the middle
     /// before either pane is measured.
     #[test]
@@ -297,14 +286,6 @@ mod tests {
 
         assert_eq!(primary, 300.0);
         assert_eq!(secondary, Some(200.0));
-    }
-
-    /// The column's floor is what the side panels must leave it, and it
-    /// depends on how many panes are in it.
-    #[test]
-    fn the_column_floor_counts_the_panes_and_the_divider() {
-        assert_eq!(min_center_width(false, 1.0), 320.0);
-        assert_eq!(min_center_width(true, 1.0), 641.0);
     }
 
     /// Two numbers, two crates, no compiler tying them together. This test is

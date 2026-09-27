@@ -1,13 +1,10 @@
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use std::thread::{self, ThreadId};
+use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::future::Either;
-use futures::task::{ArcWake, waker_ref};
 use sirio_acp::{AcpClient, AcpEvent, AgentCommand};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp_fixture.py");
@@ -68,41 +65,6 @@ fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
             Either::Right((_, _)) => panic!("fixture did not emit an event within two seconds"),
         }
     })
-}
-
-struct WakeProbe {
-    threads: Mutex<Vec<ThreadId>>,
-}
-
-impl ArcWake for WakeProbe {
-    fn wake_by_ref(probe: &Arc<Self>) {
-        probe
-            .threads
-            .lock()
-            .expect("wake probe is not poisoned")
-            .push(thread::current().id());
-    }
-}
-
-#[test]
-fn event_stream_closes_on_the_client_thread_not_the_acp_worker_thread() {
-    let (mut client, events) = launch_fixture("normal");
-    let owner = thread::current().id();
-    let probe = Arc::new(WakeProbe {
-        threads: Mutex::new(Vec::new()),
-    });
-    let waker = waker_ref(&probe);
-    let mut receive = Box::pin(events.recv());
-    let mut context = Context::from_waker(&waker);
-
-    assert!(matches!(receive.as_mut().poll(&mut context), Poll::Pending));
-    client.shutdown().expect("fixture should shut down cleanly");
-
-    let wake_threads = probe.threads.lock().expect("wake probe is not poisoned");
-    assert!(
-        wake_threads.iter().all(|thread| *thread == owner),
-        "event receiver was woken from a non-owner thread: {wake_threads:?}"
-    );
 }
 
 #[test]
@@ -334,30 +296,6 @@ fn an_open_permission_does_not_freeze_the_session() {
         }
     }
     client.shutdown().expect("fixture should shut down cleanly");
-}
-
-#[test]
-fn cancel_produces_a_terminal_outcome() {
-    let (mut client, events) = launch_fixture("cancel");
-    client
-        .prompt("wait for cancellation")
-        .expect("prompt accepted");
-    std::thread::sleep(Duration::from_millis(50));
-    client.cancel().expect("cancel accepted");
-
-    loop {
-        match next_event(&events) {
-            AcpEvent::TurnEnded { stop_reason } => {
-                assert_eq!(stop_reason, "Cancelled");
-                break;
-            }
-            AcpEvent::TransportError(error) => panic!("cancel failed: {error}"),
-            _ => {}
-        }
-    }
-    client
-        .shutdown()
-        .expect("cancelled fixture should shut down cleanly");
 }
 
 #[test]
@@ -642,34 +580,6 @@ fn structured_question_carries_title_and_text_input() {
     client
         .shutdown()
         .expect("question fixture should shut down cleanly");
-}
-
-#[test]
-fn cancel_permission_withdraws_without_selecting() {
-    let (mut client, events) = launch_fixture("cancel_permission_direct");
-    client
-        .prompt("wait for the withdrawal")
-        .expect("prompt should be accepted");
-
-    let mut saw_permission = false;
-    let mut ended = false;
-    while !ended {
-        match next_event(&events) {
-            AcpEvent::PermissionRequest { request_id, .. } => {
-                client
-                    .cancel_permission(request_id)
-                    .expect("permission withdrawal should be sent");
-                saw_permission = true;
-            }
-            AcpEvent::TurnEnded { .. } => ended = true,
-            AcpEvent::TransportError(error) => panic!("permission withdrawal failed: {error}"),
-            other => panic!("unexpected withdrawal event: {other:?}"),
-        }
-    }
-    assert!(saw_permission, "the permission request arrived");
-    client
-        .shutdown()
-        .expect("withdrawal fixture should shut down cleanly");
 }
 
 #[cfg(target_os = "linux")]

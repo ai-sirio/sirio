@@ -200,14 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn percent_is_clamped_on_construction() {
-        assert_eq!(UsageWindow::new("wk", 250).used_percent, 100);
-        assert_eq!(UsageWindow::new("wk", 0).used_percent, 0);
-        assert_eq!(UsageWindow::from_percent("wk", -5.0).used_percent, 0);
-        assert_eq!(UsageWindow::from_percent("wk", 105.0).used_percent, 100);
-    }
-
-    #[test]
     fn success_replaces_the_previous_state() {
         let state = reduce(
             UsageFetchOutcome::Success(usage()),

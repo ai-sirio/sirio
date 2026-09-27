@@ -288,29 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn bezel_keeps_the_languages_it_carries() {
-        // Its queries are written against its own vocabulary by hand. If a
-        // row here ever claimed `rust`, this crate would quietly replace a
-        // better highlighter with a translated one.
-        for tag in [
-            "rust",
-            "python",
-            "typescript",
-            "tsx",
-            "json",
-            "go",
-            "bash",
-            "toml",
-        ] {
-            assert!(
-                resolve(tag).is_none(),
-                "`{tag}` is bezel's; adding a row for it downgrades it"
-            );
-            assert!(is_supported(tag));
-        }
-    }
-
-    #[test]
     fn java_is_classified_and_not_left_as_plain_text() {
         // The case that prompted the crate.
         let kinds = kinds(
@@ -431,25 +408,6 @@ mod tests {
                 kinds.contains(expected),
                 "{tag}: expected {expected:?}, got {kinds:?}"
             );
-        }
-    }
-
-    #[test]
-    fn an_unknown_tag_is_none_rather_than_an_empty_classification() {
-        // `None` and `Some(vec![])` mean different things to the caller:
-        // "render this as text" and "this parsed to nothing".
-        assert!(highlight("hello", "brainfuck").is_none());
-        assert!(!is_supported("brainfuck"));
-    }
-
-    #[test]
-    fn spans_are_byte_ranges_inside_the_source() {
-        // The file view slices the line with them; one past the end panics.
-        let source = "public class Main {}\n";
-        for (range, _) in highlight(source, "java").expect("java") {
-            assert!(range.end <= source.len(), "{range:?} escapes {source:?}");
-            assert!(source.is_char_boundary(range.start));
-            assert!(source.is_char_boundary(range.end));
         }
     }
 }

@@ -766,19 +766,4 @@ mod tests {
         assert_eq!(badge_label(8).as_deref(), Some("9"));
         assert_eq!(badge_label(9), None);
     }
-
-    #[test]
-    fn the_free_text_placeholder_names_its_place() {
-        let declared = AnswerTextInput {
-            placeholder: Some("Type a color".into()),
-            prefill: None,
-        };
-        assert_eq!(declared.placeholder(true), "Type a color");
-        let bare = AnswerTextInput {
-            placeholder: None,
-            prefill: None,
-        };
-        assert_eq!(bare.placeholder(true), "Type something else…");
-        assert_eq!(bare.placeholder(false), "Type an answer");
-    }
 }

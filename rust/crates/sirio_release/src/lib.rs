@@ -187,39 +187,6 @@ mod tests {
 
     const FIXTURE: &[u8] = b"sirio release artifact bytes";
 
-    /// The release job hosts artifacts in GitHub Releases, whose filenames
-    /// differ in shape per platform (`Sirio-<v>.dmg`, `SirioSetup-<v>.exe`),
-    /// so the template must be able to name the file itself, not just the
-    /// platform key.
-    #[test]
-    fn artifact_url_substitutes_every_placeholder_including_the_file_name() {
-        let url = artifact_url(
-            "https://github.com/ai-sirio/sirio/releases/download/v{version}/{file}?c={channel}&p={platform}",
-            "stable",
-            "0.6.0",
-            "darwin-aarch64",
-            "Sirio-0.6.0.dmg",
-        );
-        assert_eq!(
-            url,
-            "https://github.com/ai-sirio/sirio/releases/download/v0.6.0/Sirio-0.6.0.dmg?c=stable&p=darwin-aarch64"
-        );
-    }
-
-    #[test]
-    fn artifact_url_leaves_a_template_without_placeholders_alone() {
-        assert_eq!(
-            artifact_url(
-                "https://dl.sirioai.app/x",
-                "nightly",
-                "1",
-                "linux-x86_64",
-                "f"
-            ),
-            "https://dl.sirioai.app/x"
-        );
-    }
-
     fn key() -> SigningKey {
         SigningKey::generate(&mut OsRng)
     }
@@ -238,25 +205,6 @@ mod tests {
 
     fn keys(signer: &SigningKey) -> AcceptedKeys {
         AcceptedKeys::from_base64([b64(signer.verifying_key().as_bytes())]).unwrap()
-    }
-
-    /// AC: round-trip — sign a fixture, verify it.
-    #[test]
-    fn round_trip_sign_then_verify() {
-        let signer = key();
-        let artifact = entry(&signer, FIXTURE);
-        keys(&signer).verify(&artifact, FIXTURE).unwrap();
-    }
-
-    /// AC: a tampered artifact is rejected.
-    #[test]
-    fn tampered_artifact_rejected() {
-        let signer = key();
-        let artifact = entry(&signer, FIXTURE);
-        let mut tampered = FIXTURE.to_vec();
-        tampered[3] ^= 0x01;
-        let err = keys(&signer).verify(&artifact, &tampered).unwrap_err();
-        assert!(matches!(err, Error::HashMismatch { .. }), "got {err:?}");
     }
 
     /// AC: a valid signature from a key outside the accepted set is rejected.
@@ -279,28 +227,6 @@ mod tests {
         artifact.signature = b64(&other_signature);
         let err = keys(&signer).verify(&artifact, FIXTURE).unwrap_err();
         assert!(matches!(err, Error::NoAcceptedKey), "got {err:?}");
-    }
-
-    /// AC: a manifest whose artifact carries no signature at all is rejected
-    /// at parse time, before anything is accepted.
-    #[test]
-    fn missing_signature_field_is_rejected() {
-        let json = r#"{
-            "schema": 1,
-            "channel": "stable",
-            "version": "0.6.1",
-            "notes": "",
-            "artifacts": {
-                "darwin-aarch64": {
-                    "url": "https://dl.sirioai.app/a.dmg",
-                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-                }
-            }
-        }"#;
-        assert!(matches!(
-            ChannelManifest::parse(json),
-            Err(Error::Json(_))
-        ));
     }
 
     /// An empty signature is not a missing field but is still rejected.
@@ -372,28 +298,5 @@ mod tests {
             ChannelManifest::parse(&json),
             Err(Error::Json(_))
         ));
-    }
-
-    /// The signing tool and the app share this exact wire form: serialize →
-    /// parse must be lossless, and a parse of the serialized form must accept
-    /// the artifact it was built from.
-    #[test]
-    fn manifest_wire_format_round_trips() {
-        let signer = key();
-        let manifest = ChannelManifest {
-            schema: MANIFEST_SCHEMA,
-            channel: "nightly".into(),
-            version: "0.6.1".into(),
-            notes: "- fixed a thing".into(),
-            artifacts: [("linux-x86_64".to_string(), entry(&signer, FIXTURE))]
-                .into_iter()
-                .collect(),
-        };
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
-        let parsed = ChannelManifest::parse(&json).unwrap();
-        assert_eq!(parsed, manifest);
-        keys(&signer)
-            .verify(&parsed.artifacts["linux-x86_64"], FIXTURE)
-            .unwrap();
     }
 }

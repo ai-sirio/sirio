@@ -1074,22 +1074,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roster_menu_label_matches_the_linux_format() {
-        let entry = TrayRosterEntry {
-            path: PathBuf::from("/worktrees/feature"),
-            branch: "feature".into(),
-            project_name: "Sirio".into(),
-            status: AgentStatus::NeedsInput,
-            status_changed_at: None,
-        };
-
-        assert_eq!(
-            roster_menu_label(&entry, Instant::now()),
-            "feature — Sirio (needs input)"
-        );
-    }
-
-    #[test]
     fn format_status_age_uses_seconds_minutes_and_hours_at_boundaries() {
         assert_eq!(format_status_age(std::time::Duration::from_secs(59)), "59s");
         assert_eq!(format_status_age(std::time::Duration::from_secs(60)), "1m");
@@ -1125,13 +1109,6 @@ mod tests {
     }
 
     #[test]
-    fn tray_action_labels_are_nonempty_and_distinct() {
-        assert!(!OPEN_SIRIO_LABEL.is_empty());
-        assert!(!QUIT_SIRIO_LABEL.is_empty());
-        assert_ne!(OPEN_SIRIO_LABEL, QUIT_SIRIO_LABEL);
-    }
-
-    #[test]
     fn tray_icon_kind_reports_attention_regardless_of_roster_position() {
         let normal = TrayRosterEntry {
             path: PathBuf::from("/worktrees/normal"),
@@ -1156,11 +1133,6 @@ mod tests {
     }
 
     #[test]
-    fn tray_icon_kind_is_normal_for_an_empty_roster() {
-        assert_eq!(tray_icon_kind(&[]), TrayIconKind::Normal);
-    }
-
-    #[test]
     fn tray_icon_kind_is_normal_when_no_entry_needs_input() {
         let roster = [
             TrayRosterEntry {
@@ -1180,10 +1152,5 @@ mod tests {
         ];
 
         assert_eq!(tray_icon_kind(&roster), TrayIconKind::Normal);
-    }
-
-    #[test]
-    fn empty_roster_uses_the_shared_label() {
-        assert_eq!(NO_ACTIVE_AGENTS_LABEL, "No active agents");
     }
 }

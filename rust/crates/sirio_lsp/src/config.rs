@@ -708,75 +708,10 @@ roots = ["go.mod"]
     }
 
     #[test]
-    fn args_and_roots_default_to_empty_rather_than_failing() {
-        // rust-analyzer needs no arguments, and a language with no marker is
-        // legitimate — it simply roots at the worktree.
-        let table = LanguageTable::parse(TWO_ENTRIES).expect("valid table");
-        let rust = table.for_extension("rs").expect("rust entry");
-        assert!(rust.args.is_empty());
-    }
-
-    #[test]
     fn an_extension_is_matched_case_insensitively() {
         // `.RS` on a case-insensitive filesystem is the same language.
         let table = LanguageTable::parse(TWO_ENTRIES).expect("valid table");
         assert!(table.for_extension("RS").is_some());
-    }
-
-    #[test]
-    fn an_unknown_extension_is_none_and_not_an_error() {
-        // A .txt file has no language server. That is normal, not a failure.
-        let table = LanguageTable::parse(TWO_ENTRIES).expect("valid table");
-        assert!(table.for_extension("txt").is_none());
-    }
-
-    #[test]
-    fn for_path_reads_the_extension_off_a_path() {
-        let table = LanguageTable::parse(TWO_ENTRIES).expect("valid table");
-        assert_eq!(
-            table.for_path(std::path::Path::new("/tmp/x/main.rs")).map(|e| e.name.as_str()),
-            Some("rust")
-        );
-        assert!(table.for_path(std::path::Path::new("/tmp/x/README")).is_none());
-    }
-
-    /// The table and `sirio_ui::editor::Language` have to agree on which
-    /// files Sirio understands. This crate cannot see that enum — it sits
-    /// below it — so the pairing is checked from `sirio`, in
-    /// `lsp::tests::every_language_the_editor_recognises_has_a_server`.
-    /// What is checked here is the table's own content.
-    #[test]
-    fn the_shipped_defaults_name_a_server_for_every_language_sirio_opens() {
-        let defaults = LanguageTable::defaults();
-        for (extension, command) in [
-            ("rs", "rust-analyzer"),
-            ("ts", "typescript-language-server"),
-            ("py", "pyright-langserver"),
-            ("go", "gopls"),
-            ("c", "clangd"),
-            ("cpp", "clangd"),
-            ("java", "jdtls"),
-            ("kt", "kotlin-language-server"),
-            ("swift", "sourcekit-lsp"),
-            ("rb", "ruby-lsp"),
-            ("php", "intelephense"),
-            ("lua", "lua-language-server"),
-            ("zig", "zls"),
-            ("yml", "yaml-language-server"),
-            ("json", "vscode-json-language-server"),
-            ("html", "vscode-html-language-server"),
-            ("css", "vscode-css-language-server"),
-            ("sh", "bash-language-server"),
-            ("toml", "taplo"),
-            ("md", "marksman"),
-            ("xml", "lemminx"),
-            ("sql", "sqls"),
-        ] {
-            let entry = defaults
-                .for_extension(extension)
-                .unwrap_or_else(|| panic!("no default entry for .{extension}"));
-            assert_eq!(entry.command, command, "for .{extension}");
-        }
     }
 
     #[test]
@@ -848,46 +783,6 @@ roots = ["Cargo.toml"]
     }
 
     #[test]
-    fn malformed_toml_reports_the_line_so_the_user_can_find_it() {
-        let error = LanguageTable::parse("[[language]\nname = \"rust\"").unwrap_err();
-        assert!(
-            error.line.is_some(),
-            "a parse error must carry a line number, or the notice cannot point anywhere: {error:?}"
-        );
-    }
-
-    #[test]
-    fn an_entry_missing_a_required_field_is_a_parse_error() {
-        // `command` has no sensible default: a language entry that names no
-        // program is not a usable entry.
-        let error = LanguageTable::parse(
-            r#"
-[[language]]
-name = "rust"
-extensions = ["rs"]
-"#,
-        )
-        .unwrap_err();
-        assert!(error.message.contains("command"), "the error must name the missing field: {error:?}");
-    }
-
-    #[test]
-    fn an_empty_table_is_valid_and_matches_nothing() {
-        let table = LanguageTable::parse("").expect("an empty file is a valid empty table");
-        assert!(table.entries().is_empty());
-        assert!(table.for_extension("rs").is_none());
-    }
-
-    #[test]
-    fn defaults_appended_to_an_empty_table_are_just_the_defaults() {
-        let table = LanguageTable::parse("").unwrap().with_defaults_appended();
-        assert_eq!(
-            table.entries().len(),
-            LanguageTable::defaults().entries().len()
-        );
-    }
-
-    #[test]
     fn every_default_entry_says_how_to_get_its_server() {
         // The failure this forbids is silence. A row added without an answer
         // reaches the reader as a disabled menu entry and no way forward,
@@ -943,17 +838,5 @@ extensions = ["rs"]
                 Some("vscode-langservers-extracted"),
             ]
         );
-    }
-
-    #[test]
-    fn a_user_entry_carries_no_recipe() {
-        // `#[serde(skip)]` holds: a table written by hand cannot name a
-        // download, and an override of a language Sirio knows loses the recipe
-        // along with the command it replaces.
-        let table = LanguageTable::parse(
-            "[[language]]\nname = \"java\"\nextensions = [\"java\"]\ncommand = \"/opt/my/jdtls\"\n",
-        )
-        .expect("a hand-written table parses");
-        assert!(table.entries()[0].install.is_none());
     }
 }

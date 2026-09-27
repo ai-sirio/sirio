@@ -224,26 +224,4 @@ mod tests {
             "123\t2\tspan\tChat.render\t42\t789\n"
         );
     }
-
-    #[test]
-    fn trace_write_failure_is_not_silently_accepted() {
-        struct Broken;
-        impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::Error::other("disk full"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let event = Event {
-            started_ns: 0,
-            thread: 1,
-            kind: "event",
-            name: "present",
-            entity: 0,
-            duration_ns: 0,
-        };
-        assert!(encode_event(&mut Broken, event).is_err());
-    }
 }

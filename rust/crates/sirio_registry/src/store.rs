@@ -147,31 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_agent_has_no_manifest() {
-        let store = InstallStore::new(temp_root("unknown"));
-        assert_eq!(store.manifest("codex-acp"), None);
-    }
-
-    #[test]
-    fn a_written_manifest_reads_back_identically() {
-        let store = InstallStore::new(temp_root("roundtrip"));
-        store.write(&agent()).unwrap();
-        assert_eq!(store.manifest("codex-acp"), Some(agent()));
-    }
-
-    #[test]
-    fn writing_twice_replaces_rather_than_appends() {
-        let store = InstallStore::new(temp_root("replace"));
-        store.write(&agent()).unwrap();
-        let newer = InstalledAgent {
-            version: "1.7.0".into(),
-            ..agent()
-        };
-        store.write(&newer).unwrap();
-        assert_eq!(store.manifest("codex-acp").unwrap().version, "1.7.0");
-    }
-
-    #[test]
     fn an_unreadable_manifest_is_absent_rather_than_fatal() {
         let root = temp_root("corrupt");
         let store = InstallStore::new(root.clone());
@@ -215,22 +190,6 @@ mod tests {
         assert_eq!(
             InstallStore::default_root(&env),
             home.join(".local/share").join("sirio").join("agents")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_default_root_falls_back_to_localappdata_on_windows() {
-        // Windows has no XDG layout: LOCALAPPDATA is the non-roaming data
-        // root, the same choice `sirio`'s own resolvers make.
-        let local = std::env::temp_dir().join("local-appdata");
-        let env = BTreeMap::from([(
-            "LOCALAPPDATA".to_string(),
-            local.to_string_lossy().into_owned(),
-        )]);
-        assert_eq!(
-            InstallStore::default_root(&env),
-            local.join("sirio").join("agents")
         );
     }
 

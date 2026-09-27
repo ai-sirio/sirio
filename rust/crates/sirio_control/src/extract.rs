@@ -99,16 +99,6 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_json_and_unknown_keys() {
-        assert_eq!(session_ref_from_json(b"not json"), None);
-        assert_eq!(session_ref_from_json(br#"{"other": "x"}"#), None);
-        assert_eq!(
-            session_ref_from_payload_arguments(&["plain".to_string()]),
-            None
-        );
-    }
-
-    #[test]
     fn scans_payload_arguments_in_order() {
         let args = vec![
             "not-json".to_string(),

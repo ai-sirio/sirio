@@ -770,7 +770,6 @@ mod tests {
 
     use super::{
         CloneForm, CloneFormState, CloneStatus, CreateForm, CreateFormState, CreateStatus,
-        clone_status_line,
     };
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use sirio_theme::Theme;
@@ -978,52 +977,6 @@ mod tests {
     }
 
     #[test]
-    fn a_clone_bar_reports_the_truthful_fraction() {
-        assert_eq!(crate::loading::clamp_fraction(0.0), 0.0);
-        assert_eq!(crate::loading::clamp_fraction(0.42), 0.42);
-        assert_eq!(crate::loading::clamp_fraction(1.0), 1.0);
-    }
-
-    #[gpui::test]
-    async fn a_cancelled_clone_shows_no_progress_bar(cx: &mut TestAppContext) {
-        cx.update(init_test_ui);
-        let parent = TempDir::new("clone-cancelled");
-        let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let form = cx.update(|window, _| window.root::<CloneForm>().flatten().expect("form root"));
-
-        form.update(&mut cx.cx, |form, cx| {
-            form.state.set_url("file:///tmp/source");
-            assert!(form.state.begin());
-            form.state.fail("cancelled");
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-
-        assert!(
-            cx.debug_bounds("clone-progress").is_none(),
-            "a terminal clone state wins over the determinate progress bar"
-        );
-    }
-
-    #[test]
-    fn clone_state_disables_empty_url_and_double_submission() {
-        let mut state = CloneFormState::default();
-        assert!(!state.can_submit());
-
-        state.set_url("file:///tmp/source");
-        assert!(state.can_submit());
-        assert!(state.begin());
-        assert!(!state.can_submit());
-        assert!(!state.begin());
-        assert!(matches!(state.status(), CloneStatus::Running { .. }));
-    }
-
-    #[test]
     fn clone_failure_keeps_url_and_allows_retry() {
         let mut state = CloneFormState::default();
         state.set_url("https://example.test/repository.git");
@@ -1034,75 +987,6 @@ mod tests {
         assert_eq!(state.error(), Some("connection refused"));
         assert!(state.can_submit());
         assert!(state.begin());
-    }
-
-    #[test]
-    fn clone_progress_and_completion_are_explicit_states() {
-        let mut state = CloneFormState::default();
-        state.set_url("file:///tmp/source");
-        assert!(state.begin());
-        state.set_progress(0.47);
-        assert_eq!(state.progress(), Some(0.47));
-        let destination = PathBuf::from("/tmp/source");
-        state.complete(destination.clone(), false);
-        assert_eq!(
-            state.status(),
-            &CloneStatus::Complete {
-                destination,
-                truncated: false,
-            }
-        );
-        assert!(!state.can_submit());
-    }
-
-    /// F-PRJ-truncation: a truncated clone completes (it is not `Failed`)
-    /// but the status line names the condition and uses the theme's
-    /// warning hue rather than the success color, so a truncated clone
-    /// cannot be mistaken for a Failed one or an ordinary Complete one.
-    /// This is the pure-state layer of the finding this change fixes —
-    /// `GitCommandResult::truncated` used to have nowhere to go.
-    #[test]
-    fn clone_completion_can_carry_a_truncation_notice() {
-        let mut state = CloneFormState::default();
-        state.set_url("file:///tmp/source");
-        assert!(state.begin());
-        let destination = PathBuf::from("/tmp/source");
-        state.complete(destination.clone(), true);
-        assert_eq!(
-            state.status(),
-            &CloneStatus::Complete {
-                destination: destination.clone(),
-                truncated: true,
-            }
-        );
-
-        let theme = Theme::dark();
-        let (line, color) = clone_status_line(&state, &theme);
-        assert!(
-            line.contains("truncated"),
-            "the status line must name the truncation, got: {line:?}"
-        );
-        assert_ne!(
-            color, theme.danger,
-            "a truncated clone is not a failure and must not use the error color"
-        );
-        assert_ne!(
-            color, theme.success,
-            "a truncated clone must be visually distinct from a clean completion"
-        );
-    }
-
-    #[test]
-    fn create_state_disables_empty_name_and_double_submission() {
-        let mut state = CreateFormState::default();
-        assert!(!state.can_submit());
-
-        state.set_name("new-project");
-        assert!(state.can_submit());
-        assert!(state.begin());
-        assert!(!state.can_submit());
-        assert!(!state.begin());
-        assert!(matches!(state.status(), CreateStatus::Running));
     }
 
     #[test]

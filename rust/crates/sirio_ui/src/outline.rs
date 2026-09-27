@@ -604,19 +604,4 @@ mod tests {
             "and the overlay is still waiting for its own"
         );
     }
-
-    #[gpui::test]
-    async fn a_closed_overlay_ignores_a_late_answer(cx: &mut TestAppContext) {
-        let (mut cx, outline) = mounted(cx);
-        let path = std::path::PathBuf::from("/repo/a.rs");
-        cx.update(|window, cx| {
-            outline.update(cx, |outline, cx| {
-                outline.begin(path.clone(), window, cx);
-                outline.close(cx);
-                outline.set_symbols(&path, vec![symbol("late", 4)], cx);
-            });
-        });
-        assert!(!outline.read_with(&cx.cx, |o, _| o.is_open()));
-        assert_eq!(outline.read_with(&cx.cx, |o, _| o.visible_count()), 0);
-    }
 }

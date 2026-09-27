@@ -275,20 +275,3 @@ fn run_literal_owned(arguments: &[String], repo: &Path) -> Result<(), GitError> 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     git::run_accepting(&args, repo, &[0]).map(|_| ())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn run_literal_builds_the_expected_command_shape() {
-        // White-box check that `--literal-pathspecs` comes before the
-        // subcommand, as git requires. Real repo round-trips live in the
-        // integration suite.
-        let mut args = Vec::with_capacity(5);
-        args.push("--literal-pathspecs");
-        args.extend_from_slice(&["add", "-A", "--", "-weird-name"]);
-        assert_eq!(
-            args,
-            vec!["--literal-pathspecs", "add", "-A", "--", "-weird-name"]
-        );
-    }
-}

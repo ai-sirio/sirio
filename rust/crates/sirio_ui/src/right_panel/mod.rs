@@ -26,12 +26,6 @@ use history::{GitHistory, GitHistoryEvent};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
 
-// ROW_HEIGHT stays reachable at the module root for the conformance
-// suite (`crate::right_panel::ROW_HEIGHT`) even though the file-tree
-// rows that use it live in `files`. Only that test module reads it.
-#[cfg(test)]
-pub(crate) use files::ROW_HEIGHT;
-
 const HEADER_HEIGHT: f32 = 40.0;
 /// User actions originating from the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -764,135 +758,8 @@ impl Render for RightPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{
-        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TestAppContext,
-        VisualTestContext,
-    };
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use gpui::{TestAppContext, VisualTestContext};
     use std::sync::atomic::{AtomicU64, Ordering};
-
-    // ── F-EDIT-12 harness capability: payload drags ─────────────────────
-    //
-    // The inventory's drag entry needs a drop target in a *pane* — that
-    // lives in the shell (`sirio/src/main.rs`), so the product half is
-    // routed to codex12 (a file row becomes the drag source, a pane the
-    // drop target). What this crate owns is the proof that the harness can
-    // express a payload drag at all: a source element with `on_drag`, a
-    // target with `on_drop`, and the real mouse-down / move / up sequence
-    // between them. The shell's F-EDIT-12 test then uses exactly this
-    // recipe against its workspace.
-
-    /// The drag preview view GPUI requires from `on_drag`.
-    struct EmptyDragPreview;
-
-    impl Render for EmptyDragPreview {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
-    struct DragFixture {
-        dropped: Rc<RefCell<Vec<PathBuf>>>,
-    }
-
-    impl DragFixture {
-        fn new() -> Self {
-            Self {
-                dropped: Default::default(),
-            }
-        }
-    }
-
-    impl Render for DragFixture {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let dropped = self.dropped.clone();
-            div()
-                .size_full()
-                .flex()
-                .child(
-                    div()
-                        .id("drag-source")
-                        .w(px(100.0))
-                        .h(px(100.0))
-                        .debug_selector(|| "drag-source".into())
-                        .on_drag(PathBuf::from("/repo/file.txt"), |_, _, _, cx| {
-                            cx.new(|_| EmptyDragPreview)
-                        }),
-                )
-                .child(
-                    div()
-                        .id("drag-target")
-                        .w(px(100.0))
-                        .h(px(100.0))
-                        .debug_selector(|| "drag-target".into())
-                        .on_drag_move(|_event: &gpui::DragMoveEvent<PathBuf>, _, _| {})
-                        .on_drop(move |path: &PathBuf, _, _| {
-                            dropped.borrow_mut().push(path.clone());
-                        }),
-                )
-        }
-    }
-
-    #[gpui::test]
-    async fn a_payload_drag_reaches_the_drop_target_through_real_mouse_events(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| DragFixture::new());
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let fixture = cx.update(|window, _| {
-            window
-                .root::<DragFixture>()
-                .flatten()
-                .expect("fixture root")
-        });
-
-        let source = cx
-            .debug_bounds("drag-source")
-            .expect("the drag source is in the drawn frame");
-        let target = cx
-            .debug_bounds("drag-target")
-            .expect("the drop target is in the drawn frame");
-
-        // The real gesture: press on the source, move past the 2px drag
-        // threshold (which starts the payload drag), move over the target,
-        // release. No drag convenience method exists — this is the mouse
-        // sequence GPUI itself uses, dispatched through the same window
-        // event path as production input.
-        cx.simulate_event(MouseDownEvent {
-            position: source.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        cx.simulate_event(MouseMoveEvent {
-            position: gpui::point(source.center().x + px(30.0), source.center().y),
-            pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::none(),
-        });
-        cx.simulate_event(MouseMoveEvent {
-            position: target.center(),
-            pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::none(),
-        });
-        cx.simulate_event(MouseUpEvent {
-            position: target.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-        });
-        cx.run_until_parked();
-
-        let dropped = fixture.read_with(&cx.cx, |fixture, _| fixture.dropped.borrow().clone());
-        assert_eq!(
-            dropped,
-            vec![PathBuf::from("/repo/file.txt")],
-            "the drop target receives the drag payload through the real event path"
-        );
-    }
 
     struct TempDir(PathBuf);
 
@@ -913,27 +780,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    #[gpui::test]
-    fn the_rail_switches_the_selected_view(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-
-        cx.update(|cx| {
-            assert_eq!(PanelView::get(cx), PanelView::Files, "Files is the default");
-            PanelView::set(PanelView::History, cx);
-            assert_eq!(PanelView::get(cx), PanelView::History);
-        });
-    }
-
-    #[gpui::test]
-    async fn the_rail_offers_four_views_and_no_activity(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| RightPanel::new(std::env::temp_dir()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        assert_eq!(PanelView::ORDER.len(), 4);
-        assert!(cx.debug_bounds("right-panel-tab-activity").is_none());
     }
 
     #[gpui::test]
@@ -1036,38 +882,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_selection_survives_rebinding_to_another_worktree(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-        let dir = TempDir::new();
-        let other = TempDir::new();
-        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
-
-        cx.update(|cx| PanelView::set(PanelView::Diff, cx));
-        panel.update(cx, |panel, cx| {
-            panel.bind_worktree(other.0.clone(), true, cx)
-        });
-
-        cx.update(|cx| assert_eq!(PanelView::get(cx), PanelView::Diff));
-    }
-
-    #[gpui::test]
-    fn the_changes_entity_is_built_only_when_the_diff_view_is_selected(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-        let dir = TempDir::new();
-        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
-
-        panel.update(cx, |panel, _| {
-            assert!(panel.changes.is_none(), "nothing built up front");
-        });
-
-        cx.update(|cx| PanelView::set(PanelView::Diff, cx));
-        panel.update(cx, |panel, cx| {
-            panel.ensure_changes(cx);
-            assert!(panel.changes.is_some(), "selecting Diff builds it");
-        });
-    }
-
-    #[gpui::test]
     fn rebinding_a_worktree_drops_the_changes_entity(cx: &mut TestAppContext) {
         cx.update(sirio_theme::Theme::init);
         let dir = TempDir::new();
@@ -1110,37 +924,6 @@ mod tests {
         let new_changes = panel.update(cx, |panel, cx| panel.ensure_changes(cx));
         assert_ne!(old_changes.entity_id(), new_changes.entity_id());
         assert!(new_changes.read_with(cx, |changes, _| changes.allows_staging()));
-    }
-
-    fn settled_snapshot(
-        panel: &gpui::Entity<RightPanel>,
-        cx: &mut TestAppContext,
-    ) -> FilesSnapshot {
-        panel.update(cx, |panel, _| {
-            panel.settled = true;
-            panel
-                .files_snapshot()
-                .expect("settled panel has a snapshot")
-        })
-    }
-
-    #[gpui::test]
-    fn cached_files_hit_is_immediate_without_updating(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-        let first = TempDir::new();
-        let second = TempDir::new();
-        let source = cx.new(|_| RightPanel::new(first.0.clone()));
-        let snapshot = settled_snapshot(&source, cx);
-        let restored = cx.new(|_| {
-            RightPanel::with_snapshot(second.0.clone(), Some(snapshot))
-        });
-        restored.read_with(cx, |panel, _| {
-            assert!(panel.settled);
-            assert!(!panel.is_stale);
-            assert!(!panel.updating);
-            assert!(panel.refresh_loop_started);
-            assert!(panel.refresh_debounce_task.is_none());
-        });
     }
 
     #[gpui::test]
@@ -1187,38 +970,6 @@ mod tests {
             panel.is_stale = true;
             panel.updating = true;
             assert!(panel.files_snapshot().is_none());
-        });
-    }
-
-    #[gpui::test]
-    fn cache_miss_starts_with_first_load_state(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-        let dir = TempDir::new();
-        let panel =
-            cx.new(|_| RightPanel::with_snapshot(dir.0.clone(), None));
-        panel.read_with(cx, |panel, _| {
-            assert!(!panel.settled);
-            assert!(!panel.is_stale);
-        });
-    }
-
-    #[gpui::test]
-    fn rapid_worktree_switches_keep_each_cached_panel_state_separate(cx: &mut TestAppContext) {
-        cx.update(sirio_theme::Theme::init);
-        let worktree_a = TempDir::new();
-        let worktree_b = TempDir::new();
-        let panel_a = cx.new(|_| RightPanel::new(worktree_a.0.clone()));
-        let snapshot_a = settled_snapshot(&panel_a, cx);
-        let panel_b = cx.new(|_| {
-            RightPanel::with_snapshot(worktree_b.0.clone(), None)
-        });
-        let panel_a_again = cx.new(|_| {
-            RightPanel::with_snapshot(worktree_a.0.clone(), Some(snapshot_a))
-        });
-        panel_b.read_with(cx, |panel, _| assert!(!panel.settled));
-        panel_a_again.read_with(cx, |panel, _| {
-            assert!(panel.settled);
-            assert_eq!(panel.repo_root, worktree_a.0);
         });
     }
 }

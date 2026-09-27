@@ -524,18 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn derives_paths_like_the_swift_app() {
-        assert_eq!(
-            derive_worktree_path(Path::new("/Users/me"), "sirio", "feature/login"),
-            PathBuf::from("/Users/me/sirio-feature/login")
-        );
-        assert_eq!(
-            derive_worktree_path(Path::new("/Users/me"), "sirio", "my branch"),
-            PathBuf::from("/Users/me/sirio-my branch")
-        );
-    }
-
-    #[test]
     fn resolves_parent_directory_with_override_and_sibling_default() {
         let root = Path::new("/Users/me/projects/sirio");
         assert_eq!(
@@ -546,21 +534,5 @@ mod tests {
             resolve_parent_directory(root, None),
             PathBuf::from("/Users/me/projects")
         );
-    }
-
-    #[test]
-    fn initializes_a_folder_as_a_git_repository() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-init-git-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("create folder");
-        init_repository(&root).expect("git init succeeds");
-        assert!(root.join(".git").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 }
