@@ -200,10 +200,10 @@ access to pull requests, checks and metadata on GitHub.
 | `ReviewState` | `Approved { count }`, `ChangesRequested`, `ReviewRequired`, `None`, plus `requested_from_me: bool` |
 | `ChangeSummary` | ref, title, author, state, CI, review, comment count, source → target branch, updated at, web URL. One list row. |
 | `ChangeHeader` | summary plus description (Markdown) and reviewers |
-| `TimelineItem` | `Comment`, `Review { outcome, body }`, `LineComment { path, line, body }`, `Event` (commits pushed, review requested, merged, closed); unknown kinds become a neutral `Event` |
+| `TimelineItem` | `Comment`, `Review { outcome, body }`, `LineComment { path, line, body }`, `Event` (commits pushed, review requested, merged, closed); unknown kinds become a neutral `Event`. The newest 100 items are read (`last: 100`); older ones are left to the forge, and the tab says so |
 | `CommitSummary` | sha, title, author, date |
 | `Check` | name, status (`Queued`, `Running`, `Passed`, `Failed`, `Canceled`, `Skipped`, `Neutral`), duration, URL, stage (GitLab) |
-| `FileChange` | path, previous path, kind (added, modified, deleted, renamed), additions, deletions |
+| `FileChange` | path, kind (added, modified, deleted, renamed, copied; `None` on GitLab, whose `diffStats` does not say), additions, deletions — neither forge's GraphQL gives a previous path |
 
 Unknown enum values from either API map to the neutral member; they are never
 an error (§10).
@@ -295,8 +295,10 @@ pre-filled creation page in the browser — a URL, not an API write.
 - `PanelView::ChangeRequests`, element id `right-panel-tab-change-requests`,
   glyph `pull_request`. Shown only when the project is a git repository.
 - Header: the forge mark (from dashboardicons, Apache-2.0, vendored with
-  attribution beside `lobehub/`; GitHub's mark rides the tinted path as a
-  `currentColor` path, GitLab's keeps its own colours like Gemini and omp),
+  attribution beside `lobehub/`, byte for byte: GitHub's mark rides the
+  tinted path — GPUI draws a monochrome SVG as an alpha mask in the caller's
+  colour, so its baked fill never shows — and GitLab's keeps its own colours
+  like Gemini and omp),
   the project (`owner/repo`, or `host/group/project` off the public hosts),
   refresh.
 - Filters: underlined tabs of icons; the active one adds its label; all have
