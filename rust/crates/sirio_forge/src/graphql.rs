@@ -4,7 +4,6 @@
 //! pointer rather than into fixed structs, so a missing or `null` field
 //! degrades to its default instead of failing a whole list (spec §10).
 // Some readers are first used by Tasks 6-7; Task 7, Step 7 deletes this.
-#![allow(dead_code)]
 
 use serde_json::{Value, json};
 

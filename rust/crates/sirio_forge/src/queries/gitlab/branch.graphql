@@ -1,0 +1,7 @@
+query MergeRequestForBranch($fullPath: ID!, $branch: String!) {
+  project(fullPath: $fullPath) {
+    mergeRequests(state: all, sourceBranches: [$branch], first: 10, sort: UPDATED_DESC) {
+      nodes { ...MergeRequestSummary }
+    }
+  }
+}

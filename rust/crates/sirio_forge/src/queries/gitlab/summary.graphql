@@ -1,0 +1,20 @@
+fragment MergeRequestSummary on MergeRequest {
+  iid
+  title
+  webUrl
+  draft
+  state
+  updatedAt
+  author { username }
+  sourceBranch
+  targetBranch
+  sourceProject { fullPath }
+  userNotesCount
+  approvedBy { nodes { username } }
+  reviewers { nodes { username mergeRequestInteraction { reviewState } } }
+  headPipeline {
+    status
+    jobs { count }
+    finished: jobs(statuses: [SUCCESS, FAILED, CANCELED, SKIPPED, MANUAL]) { count }
+  }
+}

@@ -1,0 +1,6 @@
+{"data": {"project": {"mergeRequest": {"headPipeline": {"jobs": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [
+  {"name": "build", "status": "SUCCESS", "stage": {"name": "build"}, "duration": 240, "webPath": "/team/app/-/jobs/1"},
+  {"name": "rspec", "status": "FAILED", "stage": {"name": "test"}, "duration": 600, "webPath": "/team/app/-/jobs/2"},
+  {"name": "lint", "status": "RUNNING", "stage": {"name": "test"}, "duration": null, "webPath": "/team/app/-/jobs/3"},
+  {"name": "deploy", "status": "MANUAL", "stage": {"name": "deploy"}, "duration": null, "webPath": "/team/app/-/jobs/4"}
+]}}}}}}

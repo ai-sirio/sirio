@@ -1,0 +1,6 @@
+{"data": {"project": {"mergeRequests": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+    {"iid": "203", "title": "Fix report time zones", "webUrl": "https://gitlab.test/team/app/-/merge_requests/203", "draft": false, "state": "opened", "updatedAt": "2026-09-26T12:00:00Z", "author": {"username": "dave"}, "sourceBranch": "fix/tz", "targetBranch": "main", "sourceProject": null, "userNotesCount": 2, "approvedBy": {"nodes": [{"username": "erin"}]}, "reviewers": {"nodes": [{"username": "erin", "mergeRequestInteraction": {"reviewState": "APPROVED"}}]}, "headPipeline": {"status": "SUCCESS", "jobs": {"count": 5}, "finished": {"count": 5}}}
+  ]
+}}}}

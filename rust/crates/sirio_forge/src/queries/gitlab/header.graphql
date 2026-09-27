@@ -1,0 +1,14 @@
+query MergeRequestHeader($fullPath: ID!, $iid: String!) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) {
+      ...MergeRequestSummary
+      description
+      diffStatsSummary { additions deletions fileCount }
+      commitCount
+      notes(last: 100) {
+        pageInfo { hasPreviousPage }
+        nodes { author { username } body createdAt system position { filePath newLine oldLine } }
+      }
+    }
+  }
+}

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Pure translations from each forge's vocabulary into the model's. Every
 //! unknown value lands on a neutral member: a forge adding a state must
 //! never make a list fail to draw.

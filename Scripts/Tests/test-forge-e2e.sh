@@ -301,6 +301,81 @@ if command -v gh >/dev/null; then
   expect_rows "#101,#102"
 fi
 
+echo "case 6: GitLab reads -- the same questions, and an older server answered by the baseline"
+GL=("$PROBE" "${GL_TOKEN_ARGS[@]}" --token good)
+probe "${GL[@]}" list all-open --more
+expect_code 0 "gitlab all open"
+expect_line "PAGE 1 rows=2 next=yes"
+expect_line "ROW !201 state=open ci=running:3/7 review=changes me=yes comments=7 source=feat/export owner=team/app author=alice title=Add CSV export"
+expect_line "ROW !202 state=draft ci=none review=none me=no comments=0 source=feat/settings owner=team/app author=bob title=Draft: new settings page"
+expect_line "PAGE 2 rows=1 next=no"
+expect_line "ROW !203 state=open ci=passed review=approved:1 me=no comments=2 source=fix/tz owner=- author=dave title=Fix report time zones"
+expect_rows "!201,!202,!203"
+expect_log gitlab '"after": "g1"'
+probe "${GL[@]}" list to-review
+expect_log gitlab '"reviewer": "fake-user"'
+probe "${GL[@]}" list all-open --search export
+expect_log gitlab '"search": "export"'
+probe "${GL[@]}" list mine
+expect_code 0 "gitlab mine"
+expect_line "PAGE 1 rows=3 next=no"
+expect_rows "!204,!201,!205"
+expect_line "ROW !204 state=open ci=failed review=none me=no comments=1 source=perf/import owner=team/app author=fake-user title=Speed up the importer"
+expect_line "ROW !205 state=open ci=canceled review=approved:2 me=no comments=0 source=docs/api owner=team/app author=carol title=Document the API"
+expect_log gitlab '"aAuthor": "fake-user"'
+expect_log gitlab '"bAssignee": "fake-user"'
+probe "${GL[@]}" list closed
+expect_log gitlab '"aState": "merged"'
+expect_log gitlab '"bState": "closed"'
+probe "${GL[@]}" count
+expect_line "COUNT 3"
+expect_log gitlab 'MergeRequestCount interaction=no vars={"fullPath": "team/app", "reviewer": "fake-user"}'
+probe "${GL[@]}" branch feat/export
+expect_line "BRANCH !212 open"
+probe "${GL[@]}" branch feat/export --owner team/app
+expect_line "BRANCH !211 open"
+probe "${GL[@]}" header 201
+expect_code 0 "gitlab header"
+expect_line "HEADER !201 state=open additions=40 deletions=2 files=2 commits=3 truncated=yes"
+expect_line "BODY ## Why"
+expect_line "REVIEWER fake-user requested"
+expect_line "REVIEWER carol changes"
+timeline=$(echo "$PROBE_OUT" | grep -E '^(COMMENT|REVIEW|LINE|EVENT) ' | paste -sd'|' -)
+[ "$timeline" = "EVENT commits:3|COMMENT alice|EVENT review-requested:fake-user|LINE carol app/models/order.rb:12|REVIEW dave approved lines=0|EVENT ready|EVENT other:mentioned in issue #3" ] ||
+  { dump; fail "gitlab timeline was '$timeline'"; }
+probe "${GL[@]}" commits 201
+expect_line "COMMIT abc1234 alice Add CSV export"
+expect_line "COMMIT def5678 Ghost Writer Stream the rows"
+probe "${GL[@]}" checks 201
+expect_line "CHECK passed build build 240"
+expect_line "CHECK failed test rspec 600"
+expect_line "CHECK running test lint -"
+expect_line "CHECK neutral deploy deploy -"
+probe "${GL[@]}" files 201
+expect_line "FILE - +30 -2 app/models/order.rb"
+expect_line "FILE - +10 -0 app/exports/csv.rb"
+probe "${GL[@]}" header 404
+expect_code 20 "a merge request that does not exist"
+expect_line "ERR NotFound"
+probe "${GL[@]}" create-url feat/export
+expect_line "CREATE https://gitlab.test/team/app/-/merge_requests/new?merge_request%5Bsource_branch%5D=feat%2Fexport"
+
+full_before=$(log_count gitlab "MergeRequestList interaction=yes")
+probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old list all-open --more
+expect_code 0 "an older GitLab"
+expect_line "ROW !201 state=open ci=running review=required me=yes comments=7 source=feat/export owner=team/app author=alice title=Add CSV export"
+expect_line "PAGE 2 rows=1 next=no"
+[ "$(log_count gitlab "MergeRequestList interaction=yes")" = "$((full_before + 1))" ] ||
+  fail "an older GitLab must see exactly one full query, then only the baseline"
+probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old header 201
+expect_line "HEADER !201 state=open additions=- deletions=- files=- commits=- truncated=yes"
+expect_line "REVIEWER carol requested"
+if command -v glab >/dev/null; then
+  probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" "${GL_CLI_ARGS[@]}" list all-open
+  expect_code 0 "gitlab reads through glab"
+  expect_rows "!201,!202"
+fi
+
 # Later cases are added above this line.
 
 echo "artifact: $OUT_DIR"
