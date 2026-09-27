@@ -3,7 +3,6 @@
 //! small readers the forge modules parse with. Parsing reads JSON by
 //! pointer rather than into fixed structs, so a missing or `null` field
 //! degrades to its default instead of failing a whole list (spec §10).
-// Some readers are first used by Tasks 6-7; Task 7, Step 7 deletes this.
 
 use serde_json::{Value, json};
 

@@ -176,11 +176,11 @@ impl ForgeClient {
 pub(crate) fn page(mut items: Vec<ChangeSummary>, slots: Vec<Option<String>>) -> ChangePage {
     let mut seen = std::collections::HashSet::new();
     items.retain(|item| seen.insert(item.reference.number));
-    items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    items.sort_by_key(|left| std::cmp::Reverse(left.updated_at));
     let next = slots
         .iter()
         .any(Option::is_some)
-        .then(|| PageCursor { slots });
+        .then_some(PageCursor { slots });
     ChangePage { items, next }
 }
 
