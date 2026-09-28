@@ -5547,8 +5547,9 @@ impl SirioWorkspace {
         // The other half of the `restored_files` collection above: subscribe
         // the restored file views, push their shell facts and start their
         // language servers, now that there is a workspace to do it with.
+        let restored_worktree = workspace.working_directory.clone();
         for (path, view) in restored_files {
-            workspace.adopt_file_view(&path, &view, cx);
+            workspace.adopt_file_view(&path, &view, &restored_worktree, cx);
         }
         // Spec §6.4: at startup, once the session is restored, the refs no
         // tab holds go (a crash or a kill never closed their last tab).
@@ -6639,7 +6640,10 @@ impl SirioWorkspace {
                     match event {
                         FileViewEvent::RetrySnapshot => {
                             view.update(cx, |view, cx| view.restart_snapshot(cx));
-                            workspace.begin_snapshot_load(&view, cx);
+                            // Only a shown tab draws a Retry, and every
+                            // shown tab belongs to the current worktree.
+                            let worktree = workspace.working_directory.clone();
+                            workspace.begin_snapshot_load(&view, &worktree, cx);
                         }
                         FileViewEvent::OpenLocalCopy(path) => workspace.add_file_tab(path.clone(), cx),
                         // Everything else names a real path — reveal, terminal,
@@ -7209,12 +7213,20 @@ impl SirioWorkspace {
     }
 
     /// Subscribes a file view and pushes what only the workspace knows: the
-    /// context-menu facts and the language server start.
-    fn adopt_file_view(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+    /// context-menu facts and the language server start. `worktree` is the
+    /// one the view's tab belongs to — on a switch, not yet
+    /// `self.working_directory` — which a snapshot reads its bytes from.
+    fn adopt_file_view(
+        &mut self,
+        path: &Path,
+        view: &Entity<FileView>,
+        worktree: &Path,
+        cx: &mut Context<Self>,
+    ) {
         Self::subscribe_file_view(view, cx);
         if view.read(cx).is_snapshot() {
             // No shell facts and no language server for a file at a revision.
-            self.begin_snapshot_load(view, cx);
+            self.begin_snapshot_load(view, worktree, cx);
             return;
         }
         let facts = self.file_context_facts(path);
@@ -7229,9 +7241,9 @@ impl SirioWorkspace {
     /// the same reason, its shell facts would stay at their defaults (so
     /// "Copy Permalink" and "View File History" disable with a false
     /// reason) and its language server would never start.
-    fn bind_file_tabs(&mut self, tabs: &[OpenTab], cx: &mut Context<Self>) {
+    fn bind_file_tabs(&mut self, tabs: &[OpenTab], worktree: &Path, cx: &mut Context<Self>) {
         for (path, view) in Self::open_file_views(tabs, cx) {
-            self.adopt_file_view(&path, &view, cx);
+            self.adopt_file_view(&path, &view, worktree, cx);
         }
     }
 
@@ -9662,7 +9674,7 @@ impl SirioWorkspace {
             }
             Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
-            self.bind_file_tabs(&new_tabs, cx);
+            self.bind_file_tabs(&new_tabs, &selected_path, cx);
             Self::bind_change_request_tabs(&new_tabs, cx);
             for tab in &new_tabs {
                 tab.panes.for_each(&mut |_, content| {
@@ -10088,7 +10100,8 @@ impl SirioWorkspace {
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             Self::bind_terminal_tabs(&tabs, cx);
-            self.bind_file_tabs(&tabs, cx);
+            let worktree = self.working_directory.clone();
+            self.bind_file_tabs(&tabs, &worktree, cx);
             Self::bind_change_request_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
@@ -13471,7 +13484,13 @@ impl SirioWorkspace {
 
     /// Reads a snapshot's bytes on the background executor — making its commit
     /// local first when a restored tab finds it gone — and hands them to the view.
-    fn begin_snapshot_load(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
+    /// `worktree` is the one the view's tab belongs to.
+    fn begin_snapshot_load(
+        &mut self,
+        view: &Entity<FileView>,
+        worktree: &Path,
+        cx: &mut Context<Self>,
+    ) {
         if view.read(cx).editor().is_some() {
             return;
         }
@@ -13479,7 +13498,7 @@ impl SirioWorkspace {
             return;
         };
         let source = sirio_ui::forge_source::source(cx);
-        let worktree = self.working_directory.clone();
+        let worktree = worktree.to_path_buf();
         let view = view.downgrade();
         cx.spawn(async move |_, cx| {
             let result = cx
@@ -20232,18 +20251,11 @@ fn restore_tabs_with_terminal_cache(
                 TabContent::Browser(browser)
             }
             Some(TabKind::Editor) => {
-                if let Some(snapshot) = tab_state.snapshot.clone() {
+                if let Some(snapshot) = &tab_state.snapshot {
                     // A file at a revision, not on disk: it reads its bytes
                     // again once a workspace adopts it (`adopt_file_view`).
-                    let local = working_directory.join(&snapshot.path);
-                    let origin = SnapshotOrigin {
-                        reference: snapshot.change_request,
-                        sha: snapshot.sha,
-                        relative_path: PathBuf::from(&snapshot.path),
-                        local_copy: local.is_file().then_some(local),
-                    };
                     TabContent::File {
-                        view: cx.new(|cx| FileView::snapshot_pending(origin, cx)),
+                        view: restored_snapshot_view(snapshot, working_directory, cx),
                     }
                 } else {
                     // #323: an Editor tab comes back only when its file still
@@ -20413,6 +20425,51 @@ fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The view a restored snapshot tab comes back as: pending, so it reads its
+/// bytes again once a workspace adopts it (`adopt_file_view`). Both restore
+/// paths go through here. The path came from disk, so one that is not plainly
+/// repository-relative is never joined onto anything — not the worktree for
+/// its local copy, not the view's virtual path — and the tab shows why instead.
+fn restored_snapshot_view(
+    snapshot: &session::PersistedSnapshot,
+    working_directory: &Path,
+    cx: &mut App,
+) -> Entity<FileView> {
+    let relative_path = PathBuf::from(&snapshot.path);
+    if !snapshot_path_is_repository_relative(&relative_path) {
+        let origin = SnapshotOrigin {
+            reference: snapshot.change_request.clone(),
+            sha: snapshot.sha.clone(),
+            relative_path: PathBuf::new(),
+            local_copy: None,
+        };
+        return cx.new(|cx| {
+            let mut view = FileView::snapshot_pending(origin, cx);
+            view.finish_snapshot(Err(INVALID_SNAPSHOT_PATH.to_string()), cx);
+            view
+        });
+    }
+    let local = working_directory.join(&relative_path);
+    let origin = SnapshotOrigin {
+        reference: snapshot.change_request.clone(),
+        sha: snapshot.sha.clone(),
+        relative_path,
+        local_copy: local.is_file().then_some(local),
+    };
+    cx.new(|cx| FileView::snapshot_pending(origin, cx))
+}
+
+const INVALID_SNAPSHOT_PATH: &str = "The saved file path is not valid.";
+
+/// Whether `path` is one a repository tree can hold: at least one component,
+/// each a plain name — no root, no prefix, no `.` or `..`.
+fn snapshot_path_is_repository_relative(path: &Path) -> bool {
+    path.components().next().is_some()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
 /// A snapshot's bytes: its commit made local if a restored tab finds it gone
 /// (the head ref only — a restored tab knows just its sha), then the blob.
 /// The sha of a restored tab came from disk, so it is checked here before a
@@ -20424,6 +20481,11 @@ fn read_snapshot(
 ) -> Result<Vec<u8>, String> {
     if !sirio_git::is_commit_id(&origin.sha) {
         return Err("The saved revision is not a valid commit id.".to_string());
+    }
+    // A restored tab whose saved path was refused carries none; its Retry
+    // must say so again rather than read the tree.
+    if !snapshot_path_is_repository_relative(&origin.relative_path) {
+        return Err(INVALID_SNAPSHOT_PATH.to_string());
     }
     if !sirio_git::object_exists(worktree, &origin.sha) {
         let source = source.ok_or_else(|| "Change requests are unavailable in this build.".to_string())?;
@@ -20669,18 +20731,11 @@ fn restore_tabs_in_workspace(
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
             }
             Some(TabKind::Editor) => {
-                if let Some(snapshot) = tab_state.snapshot.clone() {
+                if let Some(snapshot) = &tab_state.snapshot {
                     // As in `restore_tabs`: the bytes are read once a
                     // workspace adopts the view (`adopt_file_view`).
-                    let local = working_directory.join(&snapshot.path);
-                    let origin = SnapshotOrigin {
-                        reference: snapshot.change_request,
-                        sha: snapshot.sha,
-                        relative_path: PathBuf::from(&snapshot.path),
-                        local_copy: local.is_file().then_some(local),
-                    };
                     TabContent::File {
-                        view: cx.new(|cx| FileView::snapshot_pending(origin, cx)),
+                        view: restored_snapshot_view(snapshot, working_directory, cx),
                     }
                 } else {
                     // #323: see the matching arm in `restore_tabs`.
@@ -23465,7 +23520,7 @@ done
                 .expect("workspace root")
         });
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.bind_file_tabs(&tabs, cx);
+            workspace.bind_file_tabs(&tabs, &repo, cx);
         });
         cx.run_until_parked();
         let dead = workspace.update(&mut cx, |workspace, _| {
@@ -23541,7 +23596,7 @@ done
                 window,
                 cx,
             );
-            workspace.bind_file_tabs(&tabs, cx);
+            workspace.bind_file_tabs(&tabs, &repo, cx);
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -25994,6 +26049,130 @@ done
             cx.debug_bounds(static_pill_selector(1, 0)).is_none(),
             "the selected worktree shows only live tabs, never its persisted strip"
         );
+    }
+
+    /// A snapshot tab a switch restores reads its bytes from the worktree it
+    /// belongs to — the one being switched to — not from the one being left,
+    /// which in another project does not even hold the commit.
+    #[gpui::test]
+    async fn a_snapshot_restored_by_a_switch_reads_from_its_own_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let first = committed_test_repo("snapshot-switch-first");
+        let second = committed_test_repo("snapshot-switch-second");
+        std::fs::write(second.join("only.rs"), "fn only_in_second() {}\n")
+            .expect("write the second project's file");
+        git_test(&second, &["add", "only.rs"]);
+        git_test(
+            &second,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "second"],
+        );
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&second)
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf-8 sha")
+        .trim()
+        .to_owned();
+        let (first_for_window, second_for_window) = (first.clone(), second.clone());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+            let project = |id: &str, root: &Path| session::CatalogProject {
+                id: id.into(),
+                name: id.into(),
+                root_path: root.to_path_buf(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: root.to_path_buf(),
+                    is_primary: true,
+                }],
+            };
+            let project_catalog = ProjectCatalog::from_projects(vec![
+                project("snapshot-first", &first_for_window),
+                project("snapshot-second", &second_for_window),
+            ]);
+            workspace.working_directory = first_for_window.clone();
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &project_catalog,
+                &first_for_window,
+            )));
+            workspace.project_catalog = project_catalog;
+            workspace.refresh_sidebar(cx);
+            workspace
+                .session
+                .schedule_catalog(&workspace.project_catalog);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.session.save_layout_now(&SessionLayout {
+                working_directory: second.clone(),
+                branch: "main".into(),
+                tabs: vec![SessionTab {
+                    id: "snapshot".into(),
+                    title: "only.rs @ #578".into(),
+                    kind: "file".into(),
+                    agent_id: None,
+                    agent_session_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState {
+                    root_id: Some(0),
+                    snapshot: Some(session::PersistedSnapshot {
+                        change_request: sirio_forge::ChangeRef {
+                            forge: sirio_forge::Forge::GitHub,
+                            host: "github.com".into(),
+                            project: "acme/widgets".into(),
+                            number: 578,
+                        },
+                        sha: sha.clone(),
+                        path: "only.rs".into(),
+                    }),
+                    ..SessionTabState::default()
+                }],
+            });
+            workspace
+                .select_worktree(second.clone(), None, cx)
+                .expect("select the second project");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            let mut snapshots = Vec::new();
+            for tab in &workspace.tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::File { view } = content
+                        && view.read(cx).is_snapshot()
+                    {
+                        snapshots.push(view.clone());
+                    }
+                });
+            }
+            assert_eq!(snapshots.len(), 1, "the switch restores the snapshot tab");
+            let view = snapshots[0].read(cx);
+            assert_eq!(view.snapshot_error(), None, "the read did not fail");
+            assert_eq!(
+                view.editor().map(|editor| editor.buffer()),
+                Some("fn only_in_second() {}\n"),
+                "the bytes come from the second project's commit"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     /// The user's own case: switch away from a worktree with open tabs, and
@@ -38438,6 +38617,35 @@ browser  profile  "
             "a path that resolves to a directory is not a document"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A restored snapshot's path came from disk: only a plain
+    /// repository-relative path may be joined onto the worktree or handed
+    /// to git.
+    #[test]
+    fn a_restored_snapshot_path_must_be_plainly_repository_relative() {
+        assert!(snapshot_path_is_repository_relative(Path::new("src/lib.rs")));
+        assert!(snapshot_path_is_repository_relative(Path::new("README.md")));
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("/etc/passwd")),
+            "an absolute path would replace the worktree it is joined onto"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("../outside.rs")),
+            "a leading `..` leaves the worktree"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("src/../../outside.rs")),
+            "a `..` anywhere can leave the worktree"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("./src/lib.rs")),
+            "a leading `.` is not how a repository path is written"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("")),
+            "an empty path names the tree, not a file"
+        );
     }
 
     #[gpui::test]
