@@ -2260,6 +2260,7 @@ impl Sidebar {
                             | TabKind::Diff
                             | TabKind::Browser
                             | TabKind::ProjectSettings => Icon::File,
+                            TabKind::ChangeRequest => Icon::PullRequest,
                             TabKind::AgentChat => Icon::MessageSquare,
                         },
                         |agent| agent.icon,

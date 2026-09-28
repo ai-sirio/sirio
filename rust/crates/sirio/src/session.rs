@@ -129,6 +129,14 @@ pub struct SessionTabState {
     /// failing to decode the whole tab — see `placement_for`.
     #[serde(default)]
     pub pane: String,
+    /// A change request tab's identity (spec 2026-09-27 §8). `None` for every
+    /// other tab and for sessions written before the field existed.
+    #[serde(default)]
+    pub change_request: Option<sirio_forge::ChangeRef>,
+    /// A change request tab's inner tab (`InnerTab::as_str`); empty opens
+    /// on the conversation.
+    #[serde(default)]
+    pub change_request_tab: String,
 }
 
 impl SessionTabState {
@@ -161,6 +169,8 @@ impl SessionTabState {
             changes_focus: self.changes_focus.clone(),
             settings_project_id: self.settings_project_id.clone(),
             pane: self.pane.clone(),
+            change_request: self.change_request.clone(),
+            change_request_tab: self.change_request_tab.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -485,6 +495,7 @@ pub fn persisted_kind(kind: TabKind) -> &'static str {
         TabKind::Editor => "file",
         TabKind::Diff => "diff",
         TabKind::ProjectSettings => "settings",
+        TabKind::ChangeRequest => "change_request",
     }
 }
 
@@ -499,6 +510,7 @@ pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
         "file" => TabKind::Editor,
         "diff" => TabKind::Diff,
         "settings" => TabKind::ProjectSettings,
+        "change_request" => TabKind::ChangeRequest,
         _ => return None,
     };
     Some(kind)
@@ -2624,6 +2636,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_change_request_tabs_identity_survives_the_round_trip_to_disk() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("change-request-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let reference = sirio_forge::ChangeRef {
+            forge: sirio_forge::Forge::GitLab,
+            host: "git.corp".into(),
+            project: "team/sub/app".into(),
+            number: 231,
+        };
+        let state = SessionTabState {
+            root_id: Some(0),
+            change_request: Some(reference.clone()),
+            change_request_tab: "checks".into(),
+            ..SessionTabState::default()
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "change-request".into(),
+                title: "!231 Add CSV export".into(),
+                kind: "change_request".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![state],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/tmp"));
+        assert_eq!(restored.tabs[0].kind, "change_request", "the kind is restorable, not skipped");
+        assert_eq!(restored.tab_states[0].change_request.as_ref(), Some(&reference));
+        assert_eq!(restored.tab_states[0].change_request_tab, "checks");
+    }
+
     /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
     /// compile until it is listed here too — and then the round trip below
     /// covers it.
@@ -2635,6 +2689,7 @@ mod tests {
             TabKind::Editor,
             TabKind::Diff,
             TabKind::ProjectSettings,
+            TabKind::ChangeRequest,
         ];
         for kind in &all {
             match kind {
@@ -2643,7 +2698,8 @@ mod tests {
                 | TabKind::Browser
                 | TabKind::Editor
                 | TabKind::Diff
-                | TabKind::ProjectSettings => {}
+                | TabKind::ProjectSettings
+                | TabKind::ChangeRequest => {}
             }
         }
         all

@@ -569,6 +569,9 @@ pub(crate) enum PaneContent {
     /// A project's settings form: a Secondary look-at surface like the
     /// file/changes/browser ones above.
     ProjectSettings(Entity<ProjectSettingsView>),
+    /// A change request, read-only (spec 2026-09-27): a Secondary look-at
+    /// surface like the ones above.
+    ChangeRequest(Entity<sirio_ui::change_request_tab::ChangeRequestTab>),
 }
 
 impl PaneContent {
@@ -579,7 +582,8 @@ impl PaneContent {
             | Self::File { .. }
             | Self::Changes(_)
             | Self::Browser(_)
-            | Self::ProjectSettings(_) => None,
+            | Self::ProjectSettings(_)
+            | Self::ChangeRequest(_) => None,
         }
     }
 }

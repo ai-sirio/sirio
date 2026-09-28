@@ -67,6 +67,7 @@ use sirio_ui::{
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
+use sirio_ui::change_request_tab::{ChangeRequestTab, ChangeRequestTabEvent, InnerTab};
 use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -3898,6 +3899,7 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
         TabKind::Browser => Icon::Globe,
         TabKind::Diff => Icon::File,
         TabKind::ProjectSettings => Icon::Settings,
+        TabKind::ChangeRequest => Icon::PullRequest,
     }
 }
 
@@ -5199,6 +5201,7 @@ impl SirioWorkspace {
                 }
             });
         }
+        Self::bind_change_request_tabs(&tabs, cx);
         for tab in &tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::Chat(chat) = content {
@@ -5884,6 +5887,11 @@ impl SirioWorkspace {
                             TabContent::ProjectSettings(view) => {
                                 state.settings_project_id = view.read(cx).project_id().to_string();
                             }
+                            TabContent::ChangeRequest(view) => {
+                                let view = view.read(cx);
+                                state.change_request = Some(view.reference().clone());
+                                state.change_request_tab = view.inner_tab().as_str().to_string();
+                            }
                         }
                     });
                     state
@@ -6454,6 +6462,9 @@ impl SirioWorkspace {
                 RightPanelActionEvent::OpenCommit(sha) => workspace.add_commit_tab(sha.clone(), cx),
                 RightPanelActionEvent::OpenAtLine { path, line } => {
                     workspace.open_at_line(path.clone(), *line, cx)
+                }
+                RightPanelActionEvent::OpenChangeRequest { reference, title } => {
+                    workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
             },
         )
@@ -8472,7 +8483,8 @@ impl SirioWorkspace {
             TabContent::File { .. }
             | TabContent::Changes(_)
             | TabContent::Browser(_)
-            | TabContent::ProjectSettings(_) => None,
+            | TabContent::ProjectSettings(_)
+            | TabContent::ChangeRequest(_) => None,
         }
     }
 
@@ -8542,7 +8554,8 @@ impl SirioWorkspace {
                 TabContent::File { .. }
                 | TabContent::Changes(_)
                 | TabContent::Browser(_)
-                | TabContent::ProjectSettings(_) => return,
+                | TabContent::ProjectSettings(_)
+                | TabContent::ChangeRequest(_) => return,
                 _ => self.pane_status(tab, pane_id),
             };
             if status.is_none_or(|current| activity_rank(candidate) < activity_rank(current)) {
@@ -8613,7 +8626,8 @@ impl SirioWorkspace {
                 TabContent::File { .. }
                 | TabContent::Changes(_)
                 | TabContent::Browser(_)
-                | TabContent::ProjectSettings(_) => ActivityStatus::Idle,
+                | TabContent::ProjectSettings(_)
+                | TabContent::ChangeRequest(_) => ActivityStatus::Idle,
                 _ => self.pane_status(tab, pane_id),
             };
         });
@@ -9108,7 +9122,8 @@ impl SirioWorkspace {
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
-                    | TabContent::ProjectSettings(_) => (
+                    | TabContent::ProjectSettings(_)
+                    | TabContent::ChangeRequest(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
@@ -9400,6 +9415,7 @@ impl SirioWorkspace {
             Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
             self.bind_file_tabs(&new_tabs, cx);
+            Self::bind_change_request_tabs(&new_tabs, cx);
             for tab in &new_tabs {
                 tab.panes.for_each(&mut |_, content| {
                     if let TabContent::Chat(chat) = content
@@ -9819,6 +9835,7 @@ impl SirioWorkspace {
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             Self::bind_terminal_tabs(&tabs, cx);
             self.bind_file_tabs(&tabs, cx);
+            Self::bind_change_request_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
             // tabs need the same binding or a restored session's Edit-tool file
@@ -10496,7 +10513,7 @@ impl SirioWorkspace {
 
     fn tab_width(kind: TabKind) -> f32 {
         match kind {
-            TabKind::AgentChat | TabKind::Editor | TabKind::Diff | TabKind::ProjectSettings => {
+            TabKind::AgentChat | TabKind::Editor | TabKind::Diff | TabKind::ProjectSettings | TabKind::ChangeRequest => {
                 CHAT_TAB_MIN_WIDTH
             }
             TabKind::Terminal => TERMINAL_TAB_MIN_WIDTH,
@@ -12916,6 +12933,131 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// Opens `reference` in the Secondary half, or focuses the tab that
+    /// already shows it: one tab per change request per worktree (spec §8).
+    fn add_change_request_tab(&mut self, reference: sirio_forge::ChangeRef, title: String, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            let mut shows_it = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::ChangeRequest(view) = content {
+                    shows_it |= *view.read(cx).reference() == reference;
+                }
+            });
+            shows_it
+        }) {
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
+            return;
+        }
+        let tab_title = ChangeRequestTab::tab_title(&reference, &title);
+        let view = cx.new(|cx| ChangeRequestTab::new(reference, title, cx));
+        Self::subscribe_change_request_tab(&view, cx);
+        let tab_id = self.next_tab_id;
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            title: tab_title.clone(),
+            kind: TabKind::ChangeRequest,
+            pane: TabKind::ChangeRequest.default_pane(),
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(self.next_pane_id),
+            panes: PaneNode::leaf(self.next_pane_id, TabContent::ChangeRequest(view)),
+            focused_pane: self.next_pane_id,
+            // The forge names it; the summarizer must not.
+            title_is_auto_named: false,
+        });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.open_secondary_pane();
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &tab_title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    fn subscribe_change_request_tab(view: &Entity<ChangeRequestTab>, cx: &mut Context<Self>) {
+        cx.subscribe(
+            view,
+            |workspace, emitter, event: &ChangeRequestTabEvent, cx| {
+                let hosted: Vec<usize> = workspace
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| {
+                        let mut hosted = false;
+                        tab.panes.for_each(&mut |_, content| {
+                            if let TabContent::ChangeRequest(view) = content
+                                && view.entity_id() == emitter.entity_id()
+                            {
+                                hosted = true;
+                            }
+                        });
+                        hosted.then_some(tab.id)
+                    })
+                    .collect();
+                match event {
+                    ChangeRequestTabEvent::TitleChanged(title) => {
+                        let reference = emitter.read(cx).reference().clone();
+                        let tab_title = ChangeRequestTab::tab_title(&reference, title);
+                        for tab in workspace.tabs.iter_mut().filter(|tab| hosted.contains(&tab.id)) {
+                            tab.title = tab_title.clone();
+                        }
+                        workspace.schedule_save(cx);
+                        cx.notify();
+                    }
+                    ChangeRequestTabEvent::OpenCommit { sha, web_url } => {
+                        workspace.open_change_request_commit(sha.clone(), web_url.clone(), cx)
+                    }
+                    ChangeRequestTabEvent::Close => {
+                        for tab_id in hosted {
+                            workspace.close_tab_by_id(tab_id, None, cx);
+                        }
+                    }
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Restored change request tabs are built by free functions with no
+    /// workspace to subscribe from; each restore site calls this after.
+    fn bind_change_request_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
+        for tab in tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::ChangeRequest(view) = content {
+                    Self::subscribe_change_request_tab(view, cx);
+                }
+            });
+        }
+    }
+
+    /// A commit in a change request: the Changes tab when the object is in
+    /// this repository, the forge otherwise. `cat-file` runs off the UI
+    /// thread; nothing is fetched (spec §7.2).
+    fn open_change_request_commit(&mut self, sha: String, web_url: String, cx: &mut Context<Self>) {
+        let repo = self.working_directory.clone();
+        let probe = sha.clone();
+        cx.spawn(async move |this, cx| {
+            let local = cx
+                .background_spawn(async move { sirio_git::object_exists(&repo, &probe) })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if local {
+                    workspace.add_commit_tab(sha, cx);
+                } else {
+                    cx.open_url(&web_url);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn add_browser_tab(
         &mut self,
         initial_url: impl Into<String>,
@@ -14251,7 +14393,8 @@ impl SirioWorkspace {
                         TabContent::File { .. }
                         | TabContent::Changes(_)
                         | TabContent::Browser(_)
-                        | TabContent::ProjectSettings(_) => None,
+                        | TabContent::ProjectSettings(_)
+                        | TabContent::ChangeRequest(_) => None,
                     };
                 }
             });
@@ -14508,7 +14651,8 @@ impl SirioWorkspace {
                             TabContent::File { .. }
                             | TabContent::Changes(_)
                             | TabContent::Browser(_)
-                            | TabContent::ProjectSettings(_) => None,
+                            | TabContent::ProjectSettings(_)
+                            | TabContent::ChangeRequest(_) => None,
                         };
                     }
                 });
@@ -14537,7 +14681,8 @@ impl SirioWorkspace {
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
-                    | TabContent::ProjectSettings(_) => None,
+                    | TabContent::ProjectSettings(_)
+                    | TabContent::ChangeRequest(_) => None,
                 };
             }
         });
@@ -14575,7 +14720,8 @@ impl SirioWorkspace {
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
-                    | TabContent::ProjectSettings(_) => None,
+                    | TabContent::ProjectSettings(_)
+                    | TabContent::ChangeRequest(_) => None,
                 };
             }
         });
@@ -14675,6 +14821,10 @@ impl SirioWorkspace {
                         .child(self.child_view(view.clone()))
                         .into_any_element(),
                     TabContent::ProjectSettings(view) => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    TabContent::ChangeRequest(view) => div()
                         .size_full()
                         .child(self.child_view(view.clone()))
                         .into_any_element(),
@@ -15595,7 +15745,8 @@ impl SirioWorkspace {
                 TabContent::Chat(chat) => chat.read(cx).is_streaming(),
                 TabContent::Changes(_)
                 | TabContent::Browser(_)
-                | TabContent::ProjectSettings(_) => false,
+                | TabContent::ProjectSettings(_)
+                | TabContent::ChangeRequest(_) => false,
             };
         });
         dirty
@@ -16186,7 +16337,8 @@ impl SirioWorkspace {
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
-                    | TabContent::ProjectSettings(_) => None,
+                    | TabContent::ProjectSettings(_)
+                    | TabContent::ChangeRequest(_) => None,
                 };
             }
         });
@@ -19438,6 +19590,18 @@ fn restore_tabs_with_terminal_cache(
                 let view = cx.new(|cx| FileView::new(path, cx));
                 TabContent::File { view }
             }
+            // Spec §8: back under its saved title, loading when shown. A tab
+            // whose identity was never saved has nothing to come back as.
+            Some(TabKind::ChangeRequest) => {
+                let Some(reference) = tab_state.change_request.clone() else {
+                    continue;
+                };
+                let title = ChangeRequestTab::title_from_tab(&reference, &tab.title);
+                let inner = InnerTab::parse(&tab_state.change_request_tab);
+                TabContent::ChangeRequest(
+                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, cx)),
+                )
+            }
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
             Some(TabKind::ProjectSettings) => continue,
@@ -19809,6 +19973,18 @@ fn restore_tabs_in_workspace(
                 // the view once it reaches one.
                 let view = cx.new(|cx| FileView::new(path, cx));
                 TabContent::File { view }
+            }
+            // Spec §8: back under its saved title, loading when shown. A tab
+            // whose identity was never saved has nothing to come back as.
+            Some(TabKind::ChangeRequest) => {
+                let Some(reference) = tab_state.change_request.clone() else {
+                    continue;
+                };
+                let title = ChangeRequestTab::title_from_tab(&reference, &tab.title);
+                let inner = InnerTab::parse(&tab_state.change_request_tab);
+                TabContent::ChangeRequest(
+                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, cx)),
+                )
             }
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
@@ -35562,6 +35738,7 @@ done
                     TabContent::Changes(_) => {}
                     TabContent::Browser(_) => {}
                     TabContent::ProjectSettings(_) => {}
+                    TabContent::ChangeRequest(_) => {}
                 });
             }
             (failed, live)
@@ -35850,6 +36027,93 @@ done
                 "exactly one settings tab survives the frame"
             );
         });
+    }
+
+    fn change_request_reference() -> sirio_forge::ChangeRef {
+        sirio_forge::ChangeRef {
+            forge: sirio_forge::Forge::GitHub,
+            host: "ghe.test".into(),
+            project: "acme/widgets".into(),
+            number: 101,
+        }
+    }
+
+    #[gpui::test]
+    fn opening_a_change_request_twice_focuses_its_one_tab(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            let repo = test_repo("change-request-tab");
+            let mut workspace = test_workspace_for_repo(cx, repo, false);
+            let before = workspace.tabs.len();
+            workspace.add_change_request_tab(change_request_reference(), "Fix the login redirect".into(), cx);
+            assert_eq!(workspace.tabs.len(), before + 1, "opening adds exactly one tab");
+            let index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::ChangeRequest)
+                .expect("the change request tab is present");
+            assert_eq!(workspace.tabs[index].title, "#101 Fix the login redirect");
+            assert_eq!(workspace.tabs[index].pane, PaneRole::Secondary, "it lives in the Secondary half");
+            assert!(workspace.secondary_pane_visible(), "opening it reveals the Secondary half");
+
+            workspace.add_change_request_tab(change_request_reference(), "Fix the login redirect".into(), cx);
+            assert_eq!(workspace.tabs.len(), before + 1, "the same change request focuses its tab");
+            assert_eq!(workspace.active_tab, index);
+            workspace
+        });
+    }
+
+    #[gpui::test]
+    async fn a_change_request_tab_survives_a_restart(cx: &mut TestAppContext) {
+        let repo = test_repo("change-request-restart");
+        let workspace = cx.new(|cx| {
+            let mut workspace = test_workspace_for_repo(cx, repo.clone(), false);
+            workspace.add_change_request_tab(change_request_reference(), "Fix the login redirect".into(), cx);
+            workspace
+        });
+        let layout = workspace.update(cx, |workspace, cx| workspace.layout(cx));
+        let saved = layout
+            .tabs
+            .iter()
+            .position(|tab| tab.kind == "change_request")
+            .expect("the change request tab is saved");
+        assert_eq!(layout.tab_states[saved].change_request, Some(change_request_reference()));
+
+        let restored = RestoredSession {
+            working_directory: layout.working_directory.clone(),
+            tabs: layout.tabs.clone(),
+            tab_states: layout.tab_states.clone(),
+            diagnostics: Vec::new(),
+        };
+        let window = cx.add_window(|window, cx| {
+            let workspace = test_workspace_for_repo(cx, repo.clone(), false);
+            let mut activity = AgentActivityModel::new();
+            let (tabs, _) = restore_tabs_in_workspace(
+                &restored,
+                &repo,
+                true,
+                1000,
+                2000,
+                &mut activity,
+                &BTreeMap::new(),
+                false,
+                window,
+                cx,
+            );
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.kind == TabKind::ChangeRequest)
+                .expect("the change request tab is back");
+            assert_eq!(tab.title, "#101 Fix the login redirect", "under its saved title");
+            let mut reference = None;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::ChangeRequest(view) = content {
+                    reference = Some(view.read(cx).reference().clone());
+                }
+            });
+            assert_eq!(reference, Some(change_request_reference()));
+            workspace
+        });
+        let _ = window;
     }
 
     #[gpui::test]

@@ -47,6 +47,12 @@ pub enum RightPanelActionEvent {
     /// Open a file at a line — a references result. The panel names the
     /// place; the app owns the tab.
     OpenAtLine { path: PathBuf, line: usize },
+    /// Open a change request in a host tab. The title rides along so the
+    /// tab is named before its first load.
+    OpenChangeRequest {
+        reference: sirio_forge::ChangeRef,
+        title: String,
+    },
 }
 
 /// Which view the right panel is showing.

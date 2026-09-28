@@ -135,7 +135,7 @@ pub struct TabRecord {
     pub worktree_id: String,
     /// The tab's title.
     pub title: String,
-    /// Surface kind: "terminal" | "chat" | "browser" | "editor" | "diff".
+    /// Surface kind: "terminal" | "chat" | "browser" | "file" | "diff" | "settings" | "change_request".
     pub kind: String,
     /// Stable agent identity for chat tabs, when one has been recorded.
     //
