@@ -7,6 +7,7 @@
 //! delegated to `sirio_git`; the host application can later replace the
 //! refresh callbacks with its project store without changing the row layout.
 
+mod change_requests;
 mod files;
 mod history;
 mod history_toolbar;
@@ -21,8 +22,10 @@ use std::time::{Duration, SystemTime};
 
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use change_requests::{ChangeRequestList, ChangeRequestListEvent};
 use history::{GitHistory, GitHistoryEvent};
 
+pub use change_requests::{filter_word, parse_filter};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
 
@@ -63,6 +66,7 @@ pub enum PanelView {
     Diff,
     History,
     References,
+    ChangeRequests,
 }
 
 /// A settled Files tree, handed to the host on the way out of a worktree so
@@ -156,11 +160,12 @@ impl ShowHiddenFilesSetting {
 
 impl PanelView {
     /// Rail order, left to right.
-    const ORDER: [PanelView; 4] = [
+    const ORDER: [PanelView; 5] = [
         PanelView::Files,
         PanelView::Diff,
         PanelView::History,
         PanelView::References,
+        PanelView::ChangeRequests,
     ];
 
     fn icon(self) -> Icon {
@@ -169,6 +174,7 @@ impl PanelView {
             PanelView::Diff => Icon::Diff,
             PanelView::History => Icon::GitGraph,
             PanelView::References => Icon::MagnifyingGlass,
+            PanelView::ChangeRequests => Icon::PullRequest,
         }
     }
 
@@ -178,6 +184,7 @@ impl PanelView {
             PanelView::Diff => "right-panel-tab-diff",
             PanelView::History => "right-panel-tab-history",
             PanelView::References => "right-panel-tab-references",
+            PanelView::ChangeRequests => "right-panel-tab-change-requests",
         }
     }
 
@@ -270,6 +277,11 @@ pub struct RightPanel {
     /// changes. A user who never asks for references never pays for it.
     references: Option<gpui::Entity<ReferencesList>>,
     references_subscription: Option<gpui::Subscription>,
+    /// Built the first time the change request view is shown, dropped when
+    /// the checkout changes — which also cancels its in-flight loads, so a
+    /// late answer can never paint another worktree's rows.
+    change_requests: Option<gpui::Entity<ChangeRequestList>>,
+    change_requests_subscription: Option<gpui::Subscription>,
     /// The resolved right-panel width, pushed in by the host every render.
     /// The History toolbar shapes itself from it; see [`GitHistory::panel_width`].
     panel_width: f32,
@@ -312,6 +324,8 @@ impl RightPanel {
             history_subscription: None,
             references: None,
             references_subscription: None,
+            change_requests: None,
+            change_requests_subscription: None,
             panel_width: 405.0,
             is_stale: false,
             updating: false,
@@ -391,6 +405,7 @@ impl RightPanel {
             return;
         }
         self.panel_width = width;
+        self.sync_change_requests_visibility(cx);
         cx.notify();
     }
 
@@ -424,6 +439,8 @@ impl RightPanel {
         self.history_subscription = None;
         self.references = None;
         self.references_subscription = None;
+        self.change_requests = None;
+        self.change_requests_subscription = None;
         self.is_stale = false;
         self.updating = false;
         self.refresh_started = false;
@@ -490,6 +507,8 @@ impl RightPanel {
         self.history_subscription = None;
         self.references = None;
         self.references_subscription = None;
+        self.change_requests = None;
+        self.change_requests_subscription = None;
         self.updating = false;
         self.refresh_started = false;
         self.refresh_task = None;
@@ -523,7 +542,7 @@ impl RightPanel {
             .gap(px(4.0))
             .border_b_1()
             .border_color(theme.border)
-            .children(PanelView::ORDER.map(|view| {
+            .children(PanelView::ORDER.into_iter().filter(|view| *view != PanelView::ChangeRequests || self.project_is_git).map(|view| {
                 let is_active = view == active;
                 div()
                     .id(view.element_id())
@@ -685,6 +704,76 @@ impl RightPanel {
         div().flex_1().min_h(px(0.0)).flex().flex_col().child(list)
     }
 
+    fn ensure_change_requests(&mut self, cx: &mut Context<Self>) -> gpui::Entity<ChangeRequestList> {
+        if let Some(list) = self.change_requests.clone() {
+            return list;
+        }
+        let list = cx.new(|cx| ChangeRequestList::new(self.repo_root.clone(), cx));
+        self.change_requests_subscription = Some(cx.subscribe(
+            &list,
+            |_, _, event: &ChangeRequestListEvent, cx| match event {
+                ChangeRequestListEvent::Open { reference, title } => {
+                    cx.emit(RightPanelActionEvent::OpenChangeRequest {
+                        reference: reference.clone(),
+                        title: title.clone(),
+                    })
+                }
+            },
+        ));
+        self.change_requests = Some(list.clone());
+        list
+    }
+
+    fn render_change_requests(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let list = self.ensure_change_requests(cx);
+        div().flex_1().min_h(px(0.0)).flex().flex_col().child(list)
+    }
+
+    /// On screen: the panel is drawn (the host pushes a width of 0 when it
+    /// hides it), a worktree is selected, and the view is chosen.
+    fn sync_change_requests_visibility(&mut self, cx: &mut Context<Self>) {
+        let visible = self.panel_width > 0.0
+            && self.worktree_selected
+            && self.project_is_git
+            && PanelView::get(cx) == PanelView::ChangeRequests;
+        if let Some(list) = self.change_requests.clone() {
+            list.update(cx, |list, cx| list.set_visible(visible, cx));
+        }
+    }
+
+    /// Selects the view and makes it load now, drawn or not: the socket's
+    /// `show` verb calls this, and a headless instance draws no frame for
+    /// `sync_change_requests_visibility` to run in. A later frame with the
+    /// panel hidden still hides it.
+    pub fn show_change_requests(&mut self, cx: &mut Context<Self>) {
+        PanelView::set(PanelView::ChangeRequests, cx);
+        let list = self.ensure_change_requests(cx);
+        list.update(cx, |list, cx| list.set_visible(true, cx));
+        cx.notify();
+    }
+
+    pub fn change_requests_report(&self, cx: &App) -> Option<Vec<(String, String)>> {
+        self.change_requests.as_ref().map(|list| list.read(cx).report(cx))
+    }
+
+    pub fn set_change_request_filter(&mut self, filter: sirio_forge::Filter, cx: &mut Context<Self>) -> bool {
+        let Some(list) = self.change_requests.clone() else {
+            return false;
+        };
+        list.update(cx, |list, cx| list.set_filter(filter, cx));
+        true
+    }
+
+    pub fn change_request_for(&self, number: u64, cx: &App) -> Option<(sirio_forge::ChangeRef, String)> {
+        self.change_requests.as_ref().and_then(|list| list.read(cx).reference_for(number))
+    }
+
+    pub fn reconnect_change_requests(&mut self, cx: &mut Context<Self>) {
+        if let Some(list) = self.change_requests.clone() {
+            list.update(cx, |list, cx| list.reconnect(cx));
+        }
+    }
+
     /// The host's way in. Building the list if it does not exist yet is
     /// deliberate: the answer can arrive before the user has ever looked at
     /// this surface, and dropping it then would lose the search they asked
@@ -732,6 +821,23 @@ impl Render for RightPanel {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
         }
         let entity = cx.entity();
+        let body = if !self.worktree_selected {
+            self.render_no_worktree(theme).into_any_element()
+        } else {
+            match PanelView::get(cx) {
+                PanelView::Files => self
+                    .render_files(entity.clone(), theme, window, cx)
+                    .into_any_element(),
+                PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
+                PanelView::History => self.render_history(theme, cx).into_any_element(),
+                PanelView::References => self.render_references(theme, cx).into_any_element(),
+                PanelView::ChangeRequests if self.project_is_git => {
+                    self.render_change_requests(cx).into_any_element()
+                }
+                PanelView::ChangeRequests => self.render_files(entity.clone(), theme, window, cx).into_any_element(),
+            }
+        };
+        self.sync_change_requests_visibility(cx);
         div()
             .relative()
             .flex()
@@ -741,18 +847,7 @@ impl Render for RightPanel {
             .overflow_hidden()
             .bg(theme.surface)
             .child(self.render_header(entity.clone(), theme, cx))
-            .child(if !self.worktree_selected {
-                self.render_no_worktree(theme).into_any_element()
-            } else {
-                match PanelView::get(cx) {
-                    PanelView::Files => self
-                        .render_files(entity.clone(), theme, window, cx)
-                        .into_any_element(),
-                    PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
-                    PanelView::History => self.render_history(theme, cx).into_any_element(),
-                    PanelView::References => self.render_references(theme, cx).into_any_element(),
-                }
-            })
+            .child(body)
             .when(self.worktree_selected, |this| {
                 this.when_some(self.file_context_menu.clone(), |this, menu| {
                     this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
