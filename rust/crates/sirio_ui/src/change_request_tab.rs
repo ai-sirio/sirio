@@ -1429,7 +1429,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
     use sirio_forge::Forge;
     use sirio_theme::Theme;
 

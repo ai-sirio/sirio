@@ -371,7 +371,7 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
     use sirio_forge::{Forge, ForgeError};
 
     use super::*;

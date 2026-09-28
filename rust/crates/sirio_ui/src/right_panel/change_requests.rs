@@ -1458,7 +1458,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
     use sirio_forge::{Filter, Forge, ForgeError};
     use sirio_theme::Theme;
 
