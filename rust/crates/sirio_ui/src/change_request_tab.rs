@@ -155,7 +155,23 @@ pub(crate) enum RangeState {
 }
 
 fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(7)]
+    forge_source::short_sha(sha)
+}
+
+/// One sentence to add under a failed fetch when git could not sign in:
+/// the fetch runs with git's own credentials, and a token given to Sirio
+/// does not reach it — the first thing a token-means user on a private
+/// https remote hits. `None` for every other failure.
+pub(crate) fn error_hint(error: &RevisionError) -> Option<&'static str> {
+    let RevisionError::FetchFailed { detail } = error else {
+        return None;
+    };
+    let could_not_sign_in = ["terminal prompts disabled", "could not read Username", "Permission denied (publickey)"]
+        .iter()
+        .any(|mark| detail.contains(mark));
+    could_not_sign_in.then_some(
+        "Sirio fetches with git's own credentials (a credential helper or an ssh key), not with the token — for GitHub, `gh auth setup-git` sets one up.",
+    )
 }
 
 pub struct ChangeRequestTab {
@@ -519,7 +535,15 @@ impl ChangeRequestTab {
             return;
         };
         let Some(revisions) = header.revisions.clone() else {
-            self.range = RangeState::NoRevisions;
+            // A diff already shown stays: a header that transiently reports
+            // no revisions is not a reason to take it away. A fetch still
+            // running has nothing to show for it, so it is cancelled.
+            if matches!(self.range, RangeState::Fetching) {
+                self.range_task = None;
+            }
+            if !matches!(self.range, RangeState::Ready { .. }) {
+                self.range = RangeState::NoRevisions;
+            }
             cx.notify();
             return;
         };
@@ -540,6 +564,20 @@ impl ChangeRequestTab {
             RangeState::Ready { changes, .. } => (changes.read(cx).expanded_paths(), true),
             _ => (Vec::new(), false),
         };
+        self.start_range_fetch(revisions, target_branch, carried, was_ready, cx);
+    }
+
+    /// Makes `revisions` local on the background executor and hands the
+    /// answer to `range_ready`; `carried` are the files to reopen in the
+    /// rebuilt diff.
+    fn start_range_fetch(
+        &mut self,
+        revisions: Revisions,
+        target_branch: String,
+        carried: Vec<PathBuf>,
+        was_ready: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(source) = forge_source::source(cx) else {
             self.range = RangeState::Failed {
                 error: RevisionError::Git {
@@ -575,6 +613,22 @@ impl ChangeRequestTab {
         result: Result<(), RevisionError>,
         cx: &mut Context<Self>,
     ) {
+        // The header may have moved while this fetch ran (a new push landed
+        // in a refresh): what completed is then not what Files should show.
+        // The completion is dropped and the header's own revisions fetched,
+        // with the opened files carried across as they would be otherwise.
+        let wanted = self.header.value().and_then(|header| header.revisions.clone());
+        if wanted.as_ref() != Some(&revisions) {
+            self.range = RangeState::Idle;
+            match (wanted, self.header.value().map(|header| header.summary.target_branch.clone())) {
+                (Some(current), Some(target_branch)) if self.inner == InnerTab::Files => {
+                    self.start_range_fetch(current, target_branch, carried, was_ready, cx);
+                }
+                _ => self.ensure_range(cx),
+            }
+            cx.notify();
+            return;
+        }
         match result {
             Ok(()) => {
                 let (worktree, base, head) = (
@@ -1464,6 +1518,7 @@ impl ChangeRequestTab {
             .flex()
             .flex_col()
             .when_some(self.commit_error.clone(), |this, (error, web_url)| {
+                let hint = error_hint(&error);
                 this.child(
                     div()
                         .flex()
@@ -1482,6 +1537,16 @@ impl ChangeRequestTab {
                             move |cx| cx.open_url(&web_url),
                         )),
                 )
+                .when_some(hint, |this, hint| {
+                    this.child(
+                        div()
+                            .px(px(6.0))
+                            .pb(px(6.0))
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.text_muted)
+                            .child(hint),
+                    )
+                })
             })
             .children(listing.items.iter().enumerate().map(|(index, commit)| {
                 let entity = entity.clone();
@@ -1817,6 +1882,7 @@ impl ChangeRequestTab {
                                 ))
                             }),
                     )
+                    .when_some(error_hint(error), |this, hint| this.child(note(hint.to_string())))
                     .child(list(self))
                     .into_any_element()
             }
@@ -2413,6 +2479,73 @@ mod tests {
                 _ => false,
             })
         });
+    }
+
+    #[test]
+    fn a_fetch_that_could_not_sign_in_gets_the_credentials_hint_and_nothing_else_does() {
+        for detail in [
+            "fatal: could not read Username for 'https://ghe.test': terminal prompts disabled",
+            "remote: Repository not found.\nfatal: Authentication failed for 'https://x/'\nterminal prompts disabled",
+            "git@ghe.test: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+        ] {
+            let hint = error_hint(&RevisionError::FetchFailed { detail: detail.to_string() })
+                .unwrap_or_else(|| panic!("{detail:?} is a sign-in failure"));
+            assert!(hint.contains("git's own credentials") && hint.contains("gh auth setup-git"), "{hint}");
+        }
+        for error in [
+            RevisionError::FetchFailed { detail: "fatal: couldn't find remote ref refs/pull/9/head".to_string() },
+            RevisionError::FetchTimedOut,
+            RevisionError::NoMatchingRemote { expected: "ghe.test/acme/widgets".to_string() },
+            RevisionError::RevisionGone { sha: "0123456".to_string() },
+            RevisionError::Git { detail: "terminal prompts disabled".to_string() },
+        ] {
+            assert_eq!(error_hint(&error), None, "{error:?} is not a sign-in failure");
+        }
+    }
+
+    /// The header moves (a new push) while Files is still fetching the old
+    /// revisions: what completes is not what Files should show. The header
+    /// is landed through `apply_header` from the notify that starts the
+    /// fetch, because the test scheduler orders the two background tasks by
+    /// its seed and cannot be told which finishes first.
+    #[gpui::test]
+    async fn a_header_that_moves_while_files_is_fetching_ends_on_the_new_head(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        let client = testing::github_client(forge.clone());
+        let source = FakeSource::ready(client.clone(), None);
+        let tab = open_tab(cx, source.clone(), &repo, InnerTab::Conversation);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "state") == "loaded"));
+        let newer = push_another(&repo.0);
+
+        let moved = Rc::new(RefCell::new(false));
+        let flag = moved.clone();
+        let (base_now, newer_now, forge_now) = (base.clone(), newer.clone(), forge.clone());
+        cx.update(|cx| {
+            cx.observe(&tab, move |tab, cx| {
+                let fetching = matches!(tab.read(cx).range, RangeState::Fetching);
+                if fetching && !*flag.borrow() {
+                    *flag.borrow_mut() = true;
+                    forge_now.answer(
+                        "ChangeRequestHeader",
+                        testing::header_with_revisions(101, "Fix the login redirect", "## What", &base_now, &newer_now),
+                    );
+                    let header = client.header(101);
+                    tab.update(cx, |tab, cx| tab.apply_header(header, cx));
+                }
+            })
+            .detach();
+        });
+        tab.update(cx, |tab, cx| tab.select_inner(InnerTab::Files, cx));
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "files_mode") != "fetching"));
+        assert!(*moved.borrow(), "the header landed while the fetch ran");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "head") == newer[..7] && report_value(tab, cx, "files_mode") == "diff"
+            })
+        });
+        let ensured: Vec<String> = source.ensured.lock().unwrap().iter().map(|(_, r, _)| r.head_sha.clone()).collect();
+        assert_eq!(ensured, vec![head.clone(), newer.clone()], "the old head's fetch, then the new one's");
     }
 
     #[gpui::test]

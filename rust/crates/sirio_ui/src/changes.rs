@@ -682,7 +682,9 @@ impl ChangesTab {
         paths
     }
 
-    /// Whether the diff deletes `path`.
+    /// Whether the diff deletes `path`. Read from the index column, which is
+    /// where a commit or a range surface reports every entry (each reads as
+    /// staged); on the working tree a deletion not yet staged answers false.
     pub fn is_deleted(&self, path: &Path) -> bool {
         self.entries
             .iter()
@@ -1635,23 +1637,18 @@ impl ChangesTab {
                 }
             }
         }
-        if let Some((path, line)) = self.reveal_line.clone()
-            && self.diffs.contains_key(&path)
-        {
-            self.reveal_line = None;
-            let target = rows
-                .iter()
-                .position(|row| {
-                    matches!(row, ListRow::Change(ChangeRow::Line { path: row_path, line: row_line, .. })
-                        if *row_path == path && row_line.new_line_number == Some(line))
-                })
-                .or_else(|| {
-                    rows.iter().position(|row| {
-                        matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
-                    })
-                });
-            if let Some(index) = target {
-                self.list_state.scroll_to_reveal_item(index);
+        if let Some((path, line)) = self.reveal_line.clone() {
+            // The line's row exists once the diff is here. A diff that
+            // failed, or a path the surface does not list, will never bring
+            // it: the reveal is spent on the file's row instead of being
+            // held for a frame that never comes.
+            let listed = self.entries.iter().any(|entry| entry.path == path);
+            let settled = self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) || !listed;
+            if settled {
+                self.reveal_line = None;
+                if let Some(index) = reveal_target(&rows, &path, line) {
+                    self.list_state.scroll_to_reveal_item(index);
+                }
             }
         }
         Rc::new(rows)
@@ -2424,6 +2421,29 @@ impl ChangesTab {
 
 impl EventEmitter<ChangesTabEvent> for ChangesTab {}
 impl EventEmitter<ChangesTabActionEvent> for ChangesTab {}
+
+/// The row a reveal of `path`:`line` scrolls to: the row showing that new
+/// line, or the file's own row when the line is in no hunk (an outdated
+/// comment).
+fn reveal_target(rows: &[ListRow], path: &Path, line: usize) -> Option<usize> {
+    rows.iter()
+        .position(|row| match row {
+            ListRow::Change(ChangeRow::Line { path: row_path, line: row_line, .. }) => {
+                row_path == path && row_line.new_line_number == Some(line)
+            }
+            // Split mode: the new line is on the row's right side.
+            ListRow::Change(ChangeRow::SplitLine { path: row_path, row, .. }) => {
+                row_path == path
+                    && row.right.as_ref().and_then(|side| side.new_line_number) == Some(line)
+            }
+            _ => false,
+        })
+        .or_else(|| {
+            rows.iter().position(|row| {
+                matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
+            })
+        })
+}
 
 /// Appends one contiguous run of unified diff lines in the requested view
 /// mode.
@@ -3734,15 +3754,137 @@ mod tests {
         (cx, tab)
     }
 
+    /// A range surface over one file whose diff is at hand, as the tests
+    /// below need it: no window, no git.
+    fn range_tab_with_one_diff(expanded: bool) -> ChangesTab {
+        let path = PathBuf::from("x.rs");
+        let context = |n: usize| DiffLine {
+            origin: DiffOrigin::Context,
+            old_line_number: Some(n),
+            new_line_number: Some(n),
+            content: format!("line {n}"),
+        };
+        let diff = FileDiff {
+            path: path.clone(),
+            hunks: vec![sirio_git::Hunk {
+                header: "@@ -1,4 +1,4 @@".to_string(),
+                old_start: 1,
+                old_lines: 4,
+                new_start: 1,
+                new_lines: 4,
+                lines: vec![
+                    context(1),
+                    context(2),
+                    DiffLine {
+                        origin: DiffOrigin::Deletion,
+                        old_line_number: Some(3),
+                        new_line_number: None,
+                        content: "old".to_string(),
+                    },
+                    DiffLine {
+                        origin: DiffOrigin::Addition,
+                        old_line_number: None,
+                        new_line_number: Some(3),
+                        content: "new".to_string(),
+                    },
+                    context(4),
+                ],
+            }],
+            additions: 1,
+            deletions: 1,
+            is_binary: false,
+            is_submodule: false,
+        };
+        let mut tab = settled_changes_tab_without_git(PathBuf::from("/tmp"));
+        tab.source = ChangesSource::Range {
+            base: "0".repeat(40),
+            head: "1".repeat(40),
+        };
+        tab.entries = vec![StatusEntry {
+            path: path.clone(),
+            original_path: None,
+            index_status: Some(StatusKind::Modified),
+            worktree_status: None,
+        }];
+        tab.diffs = HashMap::from([(path.clone(), diff)]);
+        if expanded {
+            tab.expanded_changes.insert((ChangeSection::Staged, path));
+        }
+        tab
+    }
+
+    /// In Split mode a changed line lives in a `SplitLine` row, on its right
+    /// side; a reveal must land on that row, not on the file's.
+    #[test]
+    fn a_revealed_line_is_found_on_the_right_side_of_a_split_row() {
+        let mut tab = range_tab_with_one_diff(true);
+        let path = PathBuf::from("x.rs");
+        let unified = tab.section_rows(DiffViewMode::Unified);
+        let unified = tab.sync_list_rows(unified);
+        let file_row = unified
+            .iter()
+            .position(|row| matches!(row, ListRow::Change(ChangeRow::File { .. })))
+            .expect("the file row");
+        let in_unified = reveal_target(&unified, &path, 3).expect("line 3 is in the hunk");
+        assert!(
+            matches!(&unified[in_unified], ListRow::Change(ChangeRow::Line { line, .. }) if line.new_line_number == Some(3)),
+            "unified: the line's own row"
+        );
+
+        let split = tab.section_rows(DiffViewMode::Split);
+        let split = tab.sync_list_rows(split);
+        let in_split = reveal_target(&split, &path, 3).expect("line 3 is in the hunk");
+        assert_ne!(in_split, file_row, "split: not the file row");
+        assert!(
+            matches!(&split[in_split], ListRow::Change(ChangeRow::SplitLine { row, .. })
+                if row.right.as_ref().and_then(|side| side.new_line_number) == Some(3)),
+            "split: the row whose right side is new line 3"
+        );
+        assert_eq!(reveal_target(&split, &path, 99), Some(file_row), "a line in no hunk reveals the file");
+    }
+
+    /// A reveal for a file whose diff failed, or for a path the range does
+    /// not touch, can never be satisfied: it is dropped at the file's row
+    /// rather than held for a diff that will not come.
+    #[test]
+    fn a_reveal_that_cannot_be_satisfied_is_cleared_at_the_file_row() {
+        let mut tab = range_tab_with_one_diff(true);
+        tab.diffs.clear();
+        tab.diff_errors.insert(PathBuf::from("x.rs"), "fatal: bad object".to_string());
+        tab.reveal_line = Some((PathBuf::from("x.rs"), 3));
+        let rows = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(rows);
+        assert_eq!(tab.reveal_line, None, "a failed diff will not bring the line");
+
+        let mut tab = range_tab_with_one_diff(false);
+        tab.reveal_line = Some((PathBuf::from("not-in-the-range.rs"), 1));
+        let rows = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(rows);
+        assert_eq!(tab.reveal_line, None, "a path outside the range has no row to wait for");
+
+        let mut tab = range_tab_with_one_diff(false);
+        tab.diffs.clear();
+        tab.reveal_line = Some((PathBuf::from("x.rs"), 3));
+        let rows = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(rows);
+        assert_eq!(tab.reveal_line, Some((PathBuf::from("x.rs"), 3)), "a diff still loading keeps the reveal");
+    }
+
     fn settled_changes_tab(repo_root: PathBuf) -> ChangesTab {
         let entries = status(&repo_root)
             .expect("status for settled Changes tab")
             .entries;
+        let mut tab = settled_changes_tab_without_git(repo_root);
+        tab.entries = entries;
+        tab
+    }
+
+    fn settled_changes_tab_without_git(repo_root: PathBuf) -> ChangesTab {
         ChangesTab {
             repo_root,
             is_git: true,
             source: ChangesSource::WorkingTree,
-            entries,
+            entries: Vec::new(),
             diffs: HashMap::new(),
             stats: HashMap::new(),
             expanded_changes: HashSet::new(),

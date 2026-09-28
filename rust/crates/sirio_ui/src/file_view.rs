@@ -129,17 +129,28 @@ pub struct SnapshotOrigin {
 }
 
 impl SnapshotOrigin {
-    /// `#578 at a1b2c3d`.
+    /// `#578 at a1b2c3d` — or `#578` alone for a restored origin whose saved
+    /// sha was refused and left empty.
     pub fn label(&self) -> String {
-        format!("{} at {}", self.reference.label(), &self.sha[..self.sha.len().min(7)])
+        if self.sha.is_empty() {
+            return self.reference.label();
+        }
+        format!("{} at {}", self.reference.label(), crate::forge_source::short_sha(&self.sha))
     }
 
     /// The view's `path()`. Never a real path — the workspace matches open
     /// documents by path, and a snapshot must not be mistaken for (or steal
     /// the tab of) the file it was taken from; the extension still picks the
-    /// language.
+    /// language. Built from plain name components only, so a relative path
+    /// that is absolute or climbs (`..`) — one from a corrupt session row —
+    /// cannot replace the prefix or leave it.
     pub fn virtual_path(&self) -> PathBuf {
-        Path::new("sirio-snapshot").join(&self.sha).join(&self.relative_path)
+        let mut path = Path::new("sirio-snapshot").join(&self.sha);
+        path.extend(self.relative_path.components().filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        }));
+        path
     }
 }
 
@@ -491,14 +502,23 @@ impl FileView {
                 self.state = ViewState::Ready(editor);
                 self.snapshot_error = None;
                 self.message = None;
+                // A line asked for while the read was pending (or failed
+                // and retried) has its lines now.
+                self.apply_pending_reveal(cx);
                 cx.emit(FileViewEvent::Loaded(self.path.clone()));
             }
             Err(reason) => {
-                self.snapshot_error = Some(format!(
-                    "Could not read {} at {}: {reason}",
-                    origin.relative_path.display(),
-                    origin.label()
-                ));
+                // A restore whose saved path was refused carries no path:
+                // there is no file name to put in the sentence.
+                self.snapshot_error = Some(if origin.relative_path.as_os_str().is_empty() {
+                    format!("Could not restore the saved snapshot of {}: {reason}", origin.label())
+                } else {
+                    format!(
+                        "Could not read {} at {}: {reason}",
+                        origin.relative_path.display(),
+                        origin.label()
+                    )
+                });
             }
         }
         cx.notify();
@@ -1981,7 +2001,17 @@ fn render_snapshot_failure(
         .gap(theme.spacing.card_gap)
         .p(px(24.0))
         .text_color(theme.text_muted)
-        .child(reason.to_owned())
+        // The reason may be a git stderr tail: bounded and wrapped, the
+        // way the hover card bounds a server's answer, so it never runs
+        // off the tab sideways.
+        .child(
+            div()
+                .max_w(px(520.0))
+                .w_full()
+                .whitespace_normal()
+                .text_center()
+                .child(reason.to_owned()),
+        )
         .child(
             div()
                 .id("file-snapshot-retry")
@@ -6033,6 +6063,85 @@ mod tests {
             assert_ne!(view.path(), origin.relative_path.as_path());
             assert!(view.path().to_string_lossy().ends_with("src/lib.rs"), "the extension still picks the language");
         });
+    }
+
+    /// The origin is rebuilt from the session store on restore, so its path
+    /// and sha are shown before they are trusted: a non-ASCII sha must not
+    /// panic the bar, and no relative path may turn the virtual path real.
+    #[test]
+    fn a_snapshots_origin_survives_a_corrupt_sha_and_never_yields_a_real_path() {
+        let mut origin = snapshot_origin_for_tests();
+        origin.sha = "abcdef€ghij".to_string();
+        assert_eq!(origin.label(), "#578 at abcdef€");
+        origin.sha = String::new();
+        assert_eq!(origin.label(), "#578", "a refused sha is not shown as ` at `");
+
+        let sha = snapshot_origin_for_tests().sha;
+        for (saved, expected) in [
+            ("/etc/passwd", "etc/passwd"),
+            ("../x/../../y.rs", "x/y.rs"),
+            ("./src/lib.rs", "src/lib.rs"),
+            ("src/lib.rs", "src/lib.rs"),
+        ] {
+            let mut origin = snapshot_origin_for_tests();
+            origin.relative_path = PathBuf::from(saved);
+            let virtual_path = origin.virtual_path();
+            assert!(!virtual_path.is_absolute(), "{saved}: {}", virtual_path.display());
+            assert_eq!(
+                virtual_path,
+                Path::new("sirio-snapshot").join(&sha).join(expected),
+                "{saved}"
+            );
+        }
+    }
+
+    /// A restore whose saved path was refused has no file name to say: the
+    /// sentence must still read as one.
+    #[gpui::test]
+    async fn a_refused_restore_reads_as_a_sentence_without_a_file_name(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let mut origin = snapshot_origin_for_tests();
+        origin.relative_path = PathBuf::new();
+        let view = cx.new(|cx| FileView::snapshot_pending(origin, cx));
+        view.update(cx, |view, cx| {
+            view.finish_snapshot(Err("The saved file path is not valid.".to_string()), cx);
+            assert_eq!(
+                view.snapshot_error(),
+                Some("Could not restore the saved snapshot of #578 at a1b2c3d: The saved file path is not valid.")
+            );
+        });
+    }
+
+    /// A snapshot opened with a line whose first read failed: the reveal
+    /// is held through the failure and applied when the Retry succeeds.
+    #[gpui::test]
+    async fn a_reveal_asked_before_a_snapshots_retry_succeeded_still_happens(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| {
+            let mut view = FileView::snapshot_pending(snapshot_origin_for_tests(), cx);
+            view.reveal_at(350, cx);
+            view.finish_snapshot(Err("boom".to_string()), cx);
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("root"));
+        let body = (0..400).map(|n| format!("line {n}\n")).collect::<String>();
+        view.update(&mut cx.cx, |view, cx| {
+            view.restart_snapshot(cx);
+            view.finish_snapshot(Ok(body.into_bytes()), cx);
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-source-line-350").is_some(),
+            "the held reveal scrolls the line into view once the retry lands"
+        );
     }
 
     #[gpui::test]

@@ -70,6 +70,13 @@ pub enum RevisionError {
     Git { detail: String },
 }
 
+/// The first seven characters of `sha` — the abbreviation every surface
+/// shows. Characters, not bytes: a sha Sirio wrote is hex, but a restored one
+/// came from disk and is shown before it is trusted.
+pub(crate) fn short_sha(sha: &str) -> &str {
+    sha.char_indices().nth(7).map_or(sha, |(end, _)| &sha[..end])
+}
+
 impl std::fmt::Display for RevisionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -77,7 +84,7 @@ impl std::fmt::Display for RevisionError {
             Self::FetchFailed { detail } => write!(formatter, "Fetching the commits failed: {detail}"),
             Self::FetchTimedOut => formatter.write_str("git fetch did not answer in time."),
             Self::RevisionGone { sha } => {
-                write!(formatter, "The forge no longer has commit {}.", &sha[..sha.len().min(7)])
+                write!(formatter, "The forge no longer has commit {}.", short_sha(sha))
             }
             Self::Git { detail } => write!(formatter, "git failed: {detail}"),
         }
@@ -412,5 +419,22 @@ pub(crate) mod testing {
         fn release_revisions(&self, _worktree: &Path, live: &[ChangeRef]) {
             self.released.lock().unwrap().push(live.to_vec());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sha from a corrupt session row need not be hex: cutting it inside
+    /// a multi-byte character would panic the surface that shows it.
+    #[test]
+    fn a_short_sha_never_cuts_inside_a_character() {
+        assert_eq!(short_sha("abcdef€ghij"), "abcdef€");
+        assert_eq!(short_sha("a1b2c3d4e5f6"), "a1b2c3d");
+        assert_eq!(short_sha("abc"), "abc");
+        assert_eq!(short_sha(""), "");
+        let shown = RevisionError::RevisionGone { sha: "abcdef€ghij".to_string() }.to_string();
+        assert!(shown.contains("abcdef€"), "{shown}");
     }
 }
