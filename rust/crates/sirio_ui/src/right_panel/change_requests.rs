@@ -106,6 +106,9 @@ pub(crate) struct ChangeRequestList {
     pub(crate) settled: bool,
     pub(crate) list_error: Option<ForgeError>,
     pub(crate) card: Card,
+    /// The branch the card is about. `connect` reads it once and the panel
+    /// stays open across `git switch`, so every card load reads it again.
+    pub(crate) card_branch: Option<String>,
     to_review: Option<u32>,
     /// A rate limit's reset: no request before it (spec §9).
     paused_until: Option<i64>,
@@ -149,6 +152,7 @@ impl ChangeRequestList {
             settled: false,
             list_error: None,
             card: Card::Hidden,
+            card_branch: None,
             to_review: None,
             paused_until: None,
             search,
@@ -215,6 +219,9 @@ impl ChangeRequestList {
 
     fn settle(&mut self, connection: Connection, cx: &mut Context<Self>) {
         let ready = matches!(connection, Connection::Ready(_));
+        if let Connection::Ready(connected) = &connection {
+            self.card_branch = connected.branch.clone();
+        }
         self.link = Link::Settled(connection);
         if ready {
             self.refresh(cx);
@@ -380,8 +387,7 @@ impl ChangeRequestList {
         if self.rate_paused() {
             return;
         }
-        let Some(branch) = ready.branch.clone() else {
-            self.card = Card::Hidden;
+        let Some(source) = forge_source::source(cx) else {
             return;
         };
         if !matches!(self.card, Card::Found(_)) {
@@ -389,14 +395,19 @@ impl ChangeRequestList {
         }
         let client = ready.client;
         let owner = ready.source_owner;
+        let worktree = self.worktree.clone();
         let generation = self.generation;
         self.card_task = Some(cx.spawn(async move |this, cx| {
-            let lookup = branch.clone();
+            // The branch is read here, not taken from `ready`: `connect`
+            // read it once, and the worktree may have switched since.
             let result = cx
                 .background_spawn(async move {
+                    let Some(branch) = source.current_branch(&worktree) else {
+                        return Ok(None);
+                    };
                     client
-                        .for_branch(&lookup, owner.as_deref())
-                        .map(|found| (found, client.creation_url(&lookup)))
+                        .for_branch(&branch, owner.as_deref())
+                        .map(|found| Some((found, client.creation_url(&branch), branch)))
                 })
                 .await;
             let _ = this.update(cx, |list, cx| {
@@ -407,8 +418,17 @@ impl ChangeRequestList {
                     list.note_rate_limited(error);
                 }
                 list.card = match result {
-                    Ok((Some(found), _)) => Card::Found(found),
-                    Ok((None, create_url)) => Card::Missing { branch, create_url },
+                    Ok(None) => {
+                        list.card_branch = None;
+                        Card::Hidden
+                    }
+                    Ok(Some((found, create_url, branch))) => {
+                        list.card_branch = Some(branch.clone());
+                        match found {
+                            Some(found) => Card::Found(found),
+                            None => Card::Missing { branch, create_url },
+                        }
+                    }
                     Err(error) => Card::Failed(error),
                 };
                 cx.notify();
@@ -844,7 +864,7 @@ impl ChangeRequestList {
         theme: &Theme,
         entity: &Entity<Self>,
     ) -> Option<AnyElement> {
-        let branch = ready.branch.clone()?;
+        let branch = self.card_branch.clone()?;
         let noun = ready.client.forge().change_noun();
         let body: AnyElement = match &self.card {
             Card::Found(found) => div()
@@ -871,11 +891,12 @@ impl ChangeRequestList {
                     .gap(px(8.0))
                     .text_color(theme.text_muted)
                     .child(format!("No {noun} for {branch}"))
-                    .child(text_button(
+                    .child(icon_button(
                         "change-requests-create",
-                        "Create on the forge".to_string(),
+                        Icon::Plus,
+                        "Create on the forge",
                         theme,
-                        move |cx| cx.open_url(&url),
+                        move |_, cx| cx.open_url(&url),
                     ))
                     .into_any_element()
             }
@@ -1534,6 +1555,34 @@ mod tests {
         pump_until(cx, || list.read_with(cx, |list, _| list.settled));
         assert_eq!(labels(&list, cx), vec!["#101", "#102"]);
         list.read_with(cx, |list, _| assert!(matches!(list.card, Card::Found(_))));
+    }
+
+    #[gpui::test]
+    fn the_card_follows_the_branch_after_a_switch(cx: &mut TestAppContext) {
+        let canned = forge();
+        canned.answer("ChangeRequestForBranch", testing::branch(vec![]));
+        let source = FakeSource::ready(testing::github_client(canned.clone()), Some("main"));
+        let list = shown(cx, source.clone());
+        pump_until(cx, || {
+            list.read_with(cx, |list, _| matches!(list.card, Card::Missing { .. }))
+        });
+        list.read_with(cx, |list, _| {
+            assert_eq!(list.card_branch.as_deref(), Some("main"));
+        });
+
+        source.switch_to("feat/103");
+        canned.answer(
+            "ChangeRequestForBranch",
+            testing::branch(vec![testing::summary(103, "This branch")]),
+        );
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || {
+            list.read_with(cx, |list, _| matches!(list.card, Card::Found(_)))
+        });
+
+        list.read_with(cx, |list, _| {
+            assert_eq!(list.card_branch.as_deref(), Some("feat/103"));
+        });
     }
 
     #[gpui::test]
