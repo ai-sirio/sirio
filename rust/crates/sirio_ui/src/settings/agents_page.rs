@@ -4,6 +4,7 @@
 //! and its tests live here. State, events, `provider_row` and
 //! `installed_integrity_note` stay in `settings.rs`.
 
+use crate::text_selection::selectable_text;
 use super::*;
 use bezel::ui::icons;
 use bezel::ui::tooltip::Tooltip;
@@ -120,10 +121,10 @@ impl Settings {
                         .debug_selector(move || format!("settings-agent-description-{index}"))
                         .min_w_0()
                         .overflow_hidden()
-                        .child(text!(
-                            id = ("settings-agent-description", index),
-                            format!("Install the {} CLI to use it", row.name)
-                        ))
+                        .child(
+                            selectable_text(format!("Install the {} CLI to use it", row.name))
+                                .id(("settings-agent-description", index)),
+                        )
                         .into_any_element(),
                 );
             }
@@ -131,13 +132,13 @@ impl Settings {
                 fragments.push(
                     div()
                         .debug_selector(move || format!("settings-agent-version-{index}"))
-                        .child(text!(
-                            id = ("settings-agent-version", index),
-                            // #197: name the subject. This is the
-                            // ACP server package's version, from
-                            // `sirio_registry` — never the CLI binary's.
-                            format!("ACP v{version}")
-                        ))
+                        // #197: name the subject. This is the ACP server
+                        // package's version, from `sirio_registry` — never
+                        // the CLI binary's.
+                        .child(
+                            selectable_text(format!("ACP v{version}"))
+                                .id(("settings-agent-version", index)),
+                        )
                         .into_any_element(),
                 );
             }
@@ -145,7 +146,7 @@ impl Settings {
                 fragments.push(
                     div()
                         .debug_selector(move || format!("settings-agent-transport-{index}"))
-                        .child(text!(note.as_str()))
+                        .child(selectable_text(note.as_str()))
                         .into_any_element(),
                 );
             }
@@ -156,7 +157,7 @@ impl Settings {
                 fragments.push(
                     div()
                         .debug_selector(move || format!("settings-agent-latest-{index}"))
-                        .child(text!(format!("v{latest} available")))
+                        .child(selectable_text(format!("v{latest} available")))
                         .into_any_element(),
                 );
             }
@@ -165,7 +166,7 @@ impl Settings {
                     div()
                         .id(("settings-agent-integrity", index))
                         .debug_selector(move || format!("settings-agent-integrity-{index}"))
-                        .child(text!(note))
+                        .child(selectable_text(note))
                         .into_any_element(),
                 );
             }
@@ -182,7 +183,7 @@ impl Settings {
                 fragments.push(
                     div()
                         .debug_selector(move || format!("settings-agent-acp-reason-{index}"))
-                        .child(text!(label))
+                        .child(selectable_text(label))
                         .into_any_element(),
                 );
             }
@@ -191,7 +192,7 @@ impl Settings {
                     div()
                         .id(("settings-agent-install-status", index))
                         .debug_selector(move || format!("settings-agent-install-status-{index}"))
-                        .child(text!("Installing… this can take up to ten minutes."))
+                        .child(selectable_text("Installing… this can take up to ten minutes."))
                         .into_any_element(),
                 );
             }
@@ -323,7 +324,7 @@ impl Settings {
                     div()
                         .text_size(px(12.0))
                         .text_color(bezel_theme.text_muted)
-                        .child(text!(availability.status_label())),
+                        .child(selectable_text(availability.status_label())),
                 );
             let mut tail = div()
                 .flex_none()
@@ -419,7 +420,7 @@ impl Settings {
                                                 .text_color(
                                                     bezel_theme.text_muted.opacity(0.7),
                                                 )
-                                                .child(text!(format!("{agent_count}"))),
+                                                .child(selectable_text(format!("{agent_count}"))),
                                         ),
                                 )
                                 .child(
@@ -473,7 +474,7 @@ impl Settings {
                                         .text_color(
                                             bezel_theme.text_muted.opacity(0.65),
                                         )
-                                        .child(text!(format!("Refreshed {stamp}"))),
+                                        .child(selectable_text(format!("Refreshed {stamp}"))),
                                 );
                             }
                             // One Update per outdated row, in row order —

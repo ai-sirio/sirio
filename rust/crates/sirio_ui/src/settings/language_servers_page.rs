@@ -10,6 +10,7 @@
 //! no window, no context, no filesystem — which is what makes the rows
 //! testable without a window.
 
+use crate::text_selection::selectable_text;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -214,7 +215,7 @@ impl Settings {
                     .debug_selector(move || format!("settings-language-server-command-{index}"))
                     .font_family(bezel_theme.font_mono.clone())
                     .text_size(px(11.0))
-                    .child(text!(row.command.clone()))
+                    .child(selectable_text(row.command.clone()))
                     .into_any_element(),
             );
             if let RowAction::OpenUrl { needs, .. } = &row.action {
@@ -222,7 +223,7 @@ impl Settings {
                 fragments.push(
                     div()
                         .debug_selector(move || format!("settings-language-server-needs-{index}"))
-                        .child(text!(format!("needs {needs}")))
+                        .child(selectable_text(format!("needs {needs}")))
                         .into_any_element(),
                 );
             }
@@ -232,7 +233,7 @@ impl Settings {
                         .debug_selector(move || {
                             format!("settings-language-server-silenced-{index}")
                         })
-                        .child(text!("Install offers off"))
+                        .child(selectable_text("Install offers off"))
                         .into_any_element(),
                 );
             }
@@ -242,7 +243,7 @@ impl Settings {
                         .debug_selector(move || {
                             format!("settings-language-server-install-status-{index}")
                         })
-                        .child(text!("Installing… this can take up to ten minutes."))
+                        .child(selectable_text("Installing… this can take up to ten minutes."))
                         .into_any_element(),
                 );
             }
@@ -278,7 +279,7 @@ impl Settings {
                     div()
                         .text_size(px(12.0))
                         .text_color(bezel_theme.text_muted)
-                        .child(text!(row.origin.label())),
+                        .child(selectable_text(row.origin.label())),
                 );
             let mut tail = div()
                 .flex_none()
@@ -412,7 +413,7 @@ impl Settings {
                                             })
                                             .text_size(px(13.0))
                                             .text_color(bezel_theme.text_muted.opacity(0.7))
-                                            .child(text!(format!("{count}"))),
+                                            .child(selectable_text(format!("{count}"))),
                                     ),
                             )
                             .child(

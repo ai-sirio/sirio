@@ -65,6 +65,7 @@ use crate::controls;
 use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 #[cfg(test)]
 mod perf_baseline;
@@ -2173,13 +2174,24 @@ impl ChangesTab {
                     .child(marker),
             )
             .child(
-                div().flex_1().min_w(px(0.0)).relative().overflow_hidden().child(
+                // `h_full`: with only an absolutely positioned child this box is
+                // zero tall (`items_start` stops it stretching), and its
+                // `overflow_hidden` then clips the code away and leaves
+                // nothing under the pointer to select. The split cells get
+                // their height from `h_full` the same way.
+                div().flex_1().min_w(px(0.0)).h_full().relative().overflow_hidden().child(
                     div()
+                        .debug_selector(|| "changes-diff-content".into())
                         .absolute()
                         .left(unified_x)
                         .whitespace_nowrap()
                         .text_color(text_color)
-                        .child(line.content),
+                        // Only the code is selectable — not the gutter
+                        // numbers or the marker — so what a reviewer copies
+                        // is the line as it reads in the file. Each row has
+                        // an id of its own, which is what keeps two identical
+                        // lines (a closing brace) from selecting together.
+                        .child(selectable_text(line.content)),
                 ),
             )
     }
@@ -2488,15 +2500,29 @@ fn split_cell(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
+                    .h_full()
                     .relative()
                     .overflow_hidden()
                     .child(
                         div()
+                            .debug_selector(move || {
+                                if old {
+                                    "changes-split-old-content".into()
+                                } else {
+                                    "changes-split-new-content".into()
+                                }
+                            })
                             .absolute()
                             .left(side_x)
                             .whitespace_nowrap()
                             .text_color(theme.text)
-                            .child(line.content),
+                            // The two sides of a context line are the same
+                            // text in the same row, so each needs its own
+                            // identity or selecting one would select both.
+                            .child(
+                                selectable_text(line.content)
+                                    .id(if old { "split-old" } else { "split-new" }),
+                            ),
                     ),
             ),
     )
@@ -5979,6 +6005,61 @@ mod tests {
             header.left() >= pane.left() && header.right() <= pane.right(),
             "the hunk header must stay inside the narrow pane: \
              pane={pane:?} header={header:?}"
+        );
+    }
+
+    /// A reviewer copies a line of code out of a diff. Both view modes drew
+    /// it as a plain string; this drags across the real drawn line — in a
+    /// real repository, through real clicks — and reads the clipboard.
+    #[gpui::test]
+    async fn a_line_of_a_diff_can_be_selected_and_copied_in_unified_and_split_view(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::text_selection::testing::copy_line;
+
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("a.txt"), "alpha\nbeta\n").expect("seed file");
+        git(&dir.0, &["add", "a.txt"]);
+        git(
+            &dir.0,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "base"],
+        );
+        std::fs::write(dir.0.join("a.txt"), "alpha\nBETA changed\n").expect("edit file");
+
+        let repo = dir.0.clone();
+        let (tab, _, cx) =
+            crate::text_selection::testing::host(cx, move |_, cx| ChangesTab::new(repo, cx));
+        wait_for_tab(cx, &tab, |tab| {
+            tab.entries.iter().any(|entry| entry.path == *"a.txt")
+        });
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Unified: the last row drawn is the added line, and only its code
+        // is taken — no gutter numbers, no "+".
+        assert_eq!(
+            copy_line(cx, "changes-diff-content").as_deref(),
+            Some("BETA changed")
+        );
+
+        let split = cx
+            .debug_bounds("changes-view-mode-1")
+            .expect("the view-mode control draws a Split segment");
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            copy_line(cx, "changes-split-new-content").as_deref(),
+            Some("BETA changed")
+        );
+        assert_eq!(
+            copy_line(cx, "changes-split-old-content").as_deref(),
+            Some("beta")
         );
     }
 

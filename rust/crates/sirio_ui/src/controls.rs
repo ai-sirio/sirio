@@ -26,6 +26,7 @@ use sirio_theme::Theme;
 use std::rc::Rc;
 
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 /// A segmented control's selection callback.
 type SegmentCallback = Rc<dyn Fn(usize, &mut App)>;
@@ -42,7 +43,7 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(text!(id = format!("settings-section-title-{title}"), title)),
+                .child(selectable_text(title).id(format!("settings-section-title-{title}"))),
         )
         .child(card)
 }
@@ -74,7 +75,7 @@ pub fn row(
         .flex_1()
         .text_size(theme.typography.headline)
         .text_color(theme.text)
-        .child(text!(id = format!("settings-row-label-{label}"), label));
+        .child(selectable_text(label).id(format!("settings-row-label-{label}")));
 
     if let Some(description) = description {
         label_view = label_view.child(
@@ -82,7 +83,7 @@ pub fn row(
                 .mt(px(BezelTheme::SPACE_XS))
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text_muted)
-                .child(description),
+                .child(selectable_text(description)),
         );
     }
 
@@ -378,19 +379,19 @@ pub fn subsection_header(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(theme.typography.headline)
                         .text_color(theme.text)
-                        .child(text!(
-                            id = format!("settings-subsection-title-{title}"),
-                            title
-                        )),
+                        .child(
+                            selectable_text(title)
+                                .id(format!("settings-subsection-title-{title}")),
+                        ),
                 )
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
                         .text_color(theme.text_muted)
-                        .child(text!(
-                            id = format!("settings-subsection-description-{title}"),
-                            description
-                        )),
+                        .child(
+                            selectable_text(description)
+                                .id(format!("settings-subsection-description-{title}")),
+                        ),
                 ),
         )
         .child(action)

@@ -80,7 +80,10 @@ pub fn init(cx: &mut App) {
     );
 }
 
-fn markdown_link_at(document: &markdown::Doc, cursor: markdown::Cursor) -> Option<String> {
+pub(crate) fn markdown_link_at(
+    document: &markdown::Doc,
+    cursor: markdown::Cursor,
+) -> Option<String> {
     let text = document.blocks.get(cursor.block)?.text_at(cursor.part)?;
     text.marks.iter().rev().find_map(|span| {
         if !span.range.contains(&cursor.offset) {
@@ -94,7 +97,7 @@ fn markdown_link_at(document: &markdown::Doc, cursor: markdown::Cursor) -> Optio
     })
 }
 
-fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<String> {
+pub(crate) fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<String> {
     match &document.blocks.get(block)?.kind {
         markdown::BlockKind::Bookmark { url, .. } | markdown::BlockKind::Image { url, .. } => {
             Some(url.clone())
@@ -108,7 +111,6 @@ fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<Stri
 /// existing source-only seam while chat entries use the same renderer.
 struct MarkdownBody {
     document: markdown::Doc,
-    link_click: Option<LinkClickOverride>,
     selection: Option<MarkdownSelection>,
     rendered: Option<AnyElement>,
 }
@@ -136,13 +138,13 @@ struct DocPart {
 /// A rendered document's plain text, and every part's place in it.
 /// Parts of one block are joined by a newline, blocks by a blank line, so
 /// a copied selection reads like the page rather than like the source.
-struct DocParts {
-    text: String,
+pub(crate) struct DocParts {
+    pub(crate) text: String,
     parts: Vec<DocPart>,
 }
 
 impl DocParts {
-    fn of(doc: &markdown::Doc) -> Self {
+    pub(crate) fn of(doc: &markdown::Doc) -> Self {
         let mut text = String::new();
         let mut parts = Vec::new();
         for (block, item) in doc.blocks.iter().enumerate() {
@@ -172,7 +174,7 @@ impl DocParts {
     /// A pointer hit as a plain-text offset. A block no caret can enter is
     /// never hit, so a missing part means a document out of step with the
     /// one that was laid out; the entry's start is the safe answer.
-    fn offset_of(&self, cursor: markdown::Cursor) -> usize {
+    pub(crate) fn offset_of(&self, cursor: markdown::Cursor) -> usize {
         self.parts
             .iter()
             .find(|part| part.block == cursor.block && part.part == cursor.part)
@@ -191,10 +193,21 @@ impl DocParts {
         ))
     }
 
+    /// The span of the part holding `offset` — a paragraph, a code line, a
+    /// list item: what a triple-click selects.
+    pub(crate) fn part_span(&self, offset: usize) -> Range<usize> {
+        self.parts
+            .iter()
+            .rev()
+            .find(|part| part.start <= offset)
+            .map(|part| part.start..part.start + part.len)
+            .unwrap_or(0..0)
+    }
+
     /// The transcript range as this document's own selection: `None` when
     /// the range lies entirely outside the entry, or touches it only at an
     /// edge.
-    fn selection_for(
+    pub(crate) fn selection_for(
         &self,
         range: Range<usize>,
         source_start: usize,
@@ -233,16 +246,6 @@ impl MarkdownBody {
     fn new(document: markdown::Doc) -> Self {
         Self {
             document,
-            link_click: None,
-            selection: None,
-            rendered: None,
-        }
-    }
-
-    fn with_link_override(document: markdown::Doc, link_click: LinkClickOverride) -> Self {
-        Self {
-            document,
-            link_click: Some(link_click),
             selection: None,
             rendered: None,
         }
@@ -257,7 +260,6 @@ impl MarkdownBody {
     ) -> Self {
         Self {
             document,
-            link_click: None,
             selection: Some(MarkdownSelection {
                 interaction,
                 source_start,
@@ -356,44 +358,7 @@ impl MarkdownBody {
         if let Some(selection) = self.selection.clone() {
             return self.build_selectable(selection, window, cx);
         }
-        let Some(link_click) = self.link_click.clone() else {
-            return markdown::render(&self.document, markdown::Caption::Shown, window, cx);
-        };
-
-        let layouts = markdown::BlockLayouts::default();
-        let rendered = markdown::render_with_selection(
-            &self.document,
-            None,
-            Some(&layouts),
-            None,
-            markdown::Caption::Shown,
-            window,
-            cx,
-        );
-        let document = self.document.clone();
-        let click_layouts = layouts.clone();
-        div()
-            .w_full()
-            .capture_any_mouse_up(move |event, window, cx| {
-                if event.button != MouseButton::Left {
-                    return;
-                }
-                let inline = click_layouts
-                    .over_text(event.position)
-                    .then(|| click_layouts.hit(event.position))
-                    .flatten()
-                    .and_then(|cursor| markdown_link_at(&document, cursor));
-                let block = click_layouts
-                    .block_at(event.position)
-                    .and_then(|block| markdown_block_link_at(&document, block));
-                if let Some(target) = inline.or(block) {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                    link_click(&target, window, cx);
-                }
-            })
-            .child(rendered)
-            .into_any_element()
+        markdown::render(&self.document, markdown::Caption::Shown, window, cx)
     }
 }
 
@@ -1684,7 +1649,7 @@ impl TranscriptSelectableText {
 /// edge, full-width for every line in between, and from the left edge to the
 /// span's end — so a selection reads as one continuous highlight however the
 /// text broke. `on_quad` sees each quad's bounds as it is painted.
-fn paint_wrapped_span(
+pub(crate) fn paint_wrapped_span(
     layout: &gpui::TextLayout,
     bounds: Bounds<Pixels>,
     span: Range<usize>,
@@ -5484,12 +5449,16 @@ impl Chat {
     /// (`markdown_preview::build`) hands it a finished `Doc`; BlockLayouts
     /// then lets the existing per-render link callback win before bezel's
     /// default external opener runs.
+    ///
+    /// The document can be selected and copied; a click that selects nothing
+    /// still follows a link.
+    #[track_caller]
     pub(crate) fn render_markdown_document_with_link_override(
         document: markdown::Doc,
         _theme: &Theme,
         link_click: LinkClickOverride,
     ) -> AnyElement {
-        MarkdownBody::with_link_override(document, link_click).into_any_element()
+        crate::selectable_markdown::selectable_markdown(document, link_click).into_any_element()
     }
     /// F-CHAT-31: a diff preview for a tool call that changed a file —
     /// removed lines then added lines at each point of divergence, capped
@@ -6315,7 +6284,13 @@ impl Chat {
                             div()
                                 .text_size(typography.footnote)
                                 .text_color(theme.text_faint)
-                                .child(text.clone()),
+                                .child(Self::render_plain_text(
+                                    text.clone(),
+                                    theme,
+                                    format!("notice-entry-{entry_index}"),
+                                    source_start,
+                                    Some(&interaction),
+                                )),
                         )
                         .child(div().h(px(1.0)).flex_1().bg(theme.border))
                         .into_any_element(),
@@ -6330,7 +6305,13 @@ impl Chat {
                         } else {
                             theme.text_faint
                         })
-                        .child(text.clone())
+                        .child(Self::render_plain_text(
+                            text.clone(),
+                            theme,
+                            format!("notice-entry-{entry_index}"),
+                            source_start,
+                            Some(&interaction),
+                        ))
                         .into_any_element(),
                 }
             }
@@ -6401,7 +6382,19 @@ impl Chat {
                     // `min_w_0()` is the standard fix (zed's own
                     // `ui::components::banner` uses the identical
                     // `.min_w_0().flex_1()` pairing for the same reason).
-                    .child(div().flex_1().min_w_0().child(message))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(move || format!("chat-error-message-{entry_index}"))
+                            .child(Self::render_plain_text(
+                                message,
+                                theme,
+                                format!("error-entry-{entry_index}"),
+                                source_start,
+                                Some(&interaction),
+                            )),
+                    )
                     .when(retryable, |this| {
                         this.child(
                             div()
@@ -10892,6 +10885,68 @@ two"
                 "scroll state was created on first draw so the wheel can be isolated"
             );
         });
+    }
+
+    /// A command's output is the text a chat is most often opened for. It
+    /// was drawn by bezel as a plain string, so a stack trace could be read
+    /// but not copied out of the well it sits in.
+    #[gpui::test]
+    async fn the_output_of_a_tool_call_can_be_selected_and_copied(cx: &mut TestAppContext) {
+        cx.update(bezel::ui::input::init);
+        let output = "error[E0308]: mismatched types\n  --> src/main.rs:4:9";
+        let (_chat, _probes, cx) = crate::text_selection::testing::host(cx, |_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::ToolCall {
+                id: "tool-1".into(),
+                title: "cargo build".into(),
+                status: "Failed".into(),
+                kind: "Execute".into(),
+                content: vec![ToolCallContentInfo::Text(output.to_string())],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: true,
+                duration_ms: Some(900),
+            });
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+
+        assert_eq!(
+            crate::text_selection::testing::copy_span(cx, "tool-output-0-0", px(11.0)).as_deref(),
+            Some(output)
+        );
+    }
+
+    /// An error card carries the one string a person needs to paste into a
+    /// bug report or a search. It joined the transcript's copy text but was
+    /// never drawn as selectable text, so Select All copied words that were
+    /// not highlighted and a drag over the card selected nothing.
+    #[gpui::test]
+    async fn the_message_of_an_error_card_can_be_selected_and_copied(cx: &mut TestAppContext) {
+        cx.update(bezel::ui::input::init);
+        let message = "connection refused (os error 111)";
+        let (_chat, _probes, cx) = crate::text_selection::testing::host(cx, |_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::Error {
+                message: message.to_string(),
+                retryable: false,
+                kind: ErrorKind::Connection,
+            });
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        // Narrow, so the message wraps and its text fills the card's width:
+        // the transcript selection only follows a drag over its own text.
+        cx.simulate_resize(gpui::size(px(230.0), px(600.0)));
+        refresh_frame(cx);
+
+        assert_eq!(
+            crate::text_selection::testing::copy_span(cx, "chat-error-message-0", px(1.0))
+                .as_deref(),
+            Some(message)
+        );
     }
 
     /// #173: a user message longer than the pane must wrap inside it. The
