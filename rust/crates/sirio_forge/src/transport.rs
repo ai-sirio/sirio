@@ -228,17 +228,7 @@ impl CliTransport {
 impl Transport for CliTransport {
     fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError> {
         let _perf = sirio_perf::span("forge.cli_request", 0);
-        let args = [
-            "api",
-            "--hostname",
-            &self.host,
-            "--include",
-            "--method",
-            "POST",
-            "graphql",
-            "--input",
-            "-",
-        ];
+        let args = graphql_args(self.program, &self.host);
         let output =
             run(self.program, &args, Some(body), CLI_TIMEOUT).map_err(|error| match error {
                 RunError::NotInstalled => ForgeError::NotInstalled {
@@ -259,6 +249,24 @@ impl Transport for CliTransport {
             })?;
         interpret_cli(self.program, &self.host, &output)
     }
+}
+
+fn graphql_args<'a>(program: CliProgram, host: &'a str) -> Vec<&'a str> {
+    let mut args = vec![
+        "api",
+        "--hostname",
+        host,
+        "--include",
+        "--method",
+        "POST",
+        "graphql",
+        "--input",
+        "-",
+    ];
+    if program == CliProgram::Glab {
+        args.extend(["-H", "Content-Type: application/json"]);
+    }
+    args
 }
 
 pub(crate) struct CliOutput {
@@ -405,4 +413,22 @@ fn first_line(stderr: &[u8]) -> String {
         .find(|line| !line.is_empty() && *line != "ERROR")
         .unwrap_or("no output")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// glab 1.119 sends `--input` bodies without a `Content-Type`, and
+    /// GitLab then reads no query at all and answers `Unexpected end of
+    /// document`. Naming the type is what makes the body count.
+    #[test]
+    fn glab_graphql_names_its_json_content_type() {
+        let args = graphql_args(CliProgram::Glab, "code.example.it");
+        let header = args.iter().position(|arg| *arg == "-H");
+        assert_eq!(
+            header.and_then(|at| args.get(at + 1)),
+            Some(&"Content-Type: application/json")
+        );
+    }
 }

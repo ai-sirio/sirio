@@ -487,6 +487,8 @@ pub enum BaseColor {
     /// Sirio's own preset: bezel's greys in a cool hue, on a lighter dark
     /// surface ladder. Not one of bezel's five, so it sits last.
     Notte,
+    /// Sirio's darkest preset: no hue, and a grey ladder from pure black.
+    Onice,
 }
 
 impl BaseColor {
@@ -498,6 +500,7 @@ impl BaseColor {
             BaseColor::Gray => "gray",
             BaseColor::Slate => "slate",
             BaseColor::Notte => "notte",
+            BaseColor::Onice => "onice",
         }
     }
 
@@ -509,6 +512,7 @@ impl BaseColor {
             "gray" => Some(BaseColor::Gray),
             "slate" => Some(BaseColor::Slate),
             "notte" => Some(BaseColor::Notte),
+            "onice" => Some(BaseColor::Onice),
             _ => None,
         }
     }
@@ -763,6 +767,7 @@ mod tests {
             BaseColor::Gray,
             BaseColor::Slate,
             BaseColor::Notte,
+            BaseColor::Onice,
         ] {
             assert_eq!(BaseColor::parse(base.raw()), Some(base), "{base:?}");
         }
@@ -771,9 +776,10 @@ mod tests {
             "neutral",
             "the raw values are lower-case, like every other enum setting"
         );
-        // The preset is stored under the same lower-case rule; an older
-        // build reads "notte" as unknown and falls back to Neutral in the
-        // loader, which is the downgrade path every unknown string has.
+        // The presets are stored under the same lower-case rule; an older
+        // build reads "notte" or "onice" as unknown and falls back to Neutral
+        // in the loader, which is the downgrade path every unknown string has.
         assert_eq!(BaseColor::Notte.raw(), "notte");
+        assert_eq!(BaseColor::Onice.raw(), "onice");
     }
 }

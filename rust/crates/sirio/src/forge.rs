@@ -347,13 +347,17 @@ impl ChangeRequestSource for ForgeHub {
                     Ok(client) => Connection::Ready(ReadyConnection {
                         client,
                         means,
-                        branch: sirio_project::current_branch(worktree).ok().flatten(),
+                        branch: self.current_branch(worktree),
                         source_owner,
                     }),
                     Err(connection) => connection,
                 }
             }
         }
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        sirio_project::current_branch(worktree).ok().flatten()
     }
 
     fn client_for(&self, reference: &ChangeRef) -> Result<Arc<ForgeClient>, Connection> {

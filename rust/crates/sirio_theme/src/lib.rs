@@ -263,8 +263,8 @@ fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::them
             Appearance::Light => bezel::theme::Appearance::Light,
         },
     );
-    if base_color == BaseColor::Neutral {
-        paint_neutral_ladder(&mut theme, appearance);
+    if let Some(ladder) = base_color.grey_ladder(appearance) {
+        paint_grey_ladder(&mut theme, ladder);
     } else if base_color == BaseColor::Notte && appearance == Appearance::Dark {
         paint_notte_ladder(&mut theme);
     }
@@ -299,27 +299,21 @@ fn paint_notte_ladder(theme: &mut bezel::theme::Theme) {
     theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
 }
 
-/// Neutral's own surface ladder, same mechanism as [`paint_notte_ladder`].
+/// The solid grey ladders of `Neutral` and `Onice`, same mechanism as
+/// [`paint_notte_ladder`]; the values are in `base_color.rs`.
 ///
-/// Approved shell values (2026-09-12): sidebars `#191919`, central panes
-/// `#141414`, chat `#232323`, composer `#313131`, hover `#363636` as a
-/// solid fill; light mirrors the same steps. The tint stays `NONE` — this
-/// moves lightness only, so bezel widgets (via `to_bezel_theme`) and Sirio
-/// tokens see one ladder by construction.
-fn paint_neutral_ladder(theme: &mut bezel::theme::Theme, appearance: Appearance) {
-    let (page, surface, raised, raised_hover, input, hover) = match appearance {
-        Appearance::Dark => (0x141414, 0x191919, 0x232323, 0x363636, 0x313131, 0x363636),
-        Appearance::Light => (0xF8F8F8, 0xE8E8E8, 0xECECEC, 0xD9D9D9, 0xFFFFFF, 0xD9D9D9),
-    };
-    theme.bg = opaque_hsla(page);
-    theme.surface = opaque_hsla(surface);
-    theme.surface_card = opaque_hsla(surface);
-    theme.surface_raised = opaque_hsla(raised);
-    theme.surface_dialog = opaque_hsla(raised);
-    theme.surface_overlay = opaque_hsla(raised);
-    theme.surface_raised_hover = opaque_hsla(raised_hover);
-    theme.input_bg = opaque_hsla(input);
-    theme.element_hover = opaque_hsla(hover);
+/// The tint stays `NONE` — this moves lightness only, so bezel widgets (via
+/// `to_bezel_theme`) and Sirio tokens see one ladder by construction.
+fn paint_grey_ladder(theme: &mut bezel::theme::Theme, ladder: base_color::GreyLadder) {
+    theme.bg = opaque_hsla(ladder.page);
+    theme.surface = opaque_hsla(ladder.surface);
+    theme.surface_card = opaque_hsla(ladder.surface);
+    theme.surface_raised = opaque_hsla(ladder.raised);
+    theme.surface_dialog = opaque_hsla(ladder.raised);
+    theme.surface_overlay = opaque_hsla(ladder.raised);
+    theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
+    theme.input_bg = opaque_hsla(ladder.input);
+    theme.element_hover = opaque_hsla(ladder.hover);
 }
 
 /// Opaque `0xRRGGBB` as the `Hsla` bezel's tokens are stored in.
@@ -567,19 +561,21 @@ impl ThemeColors {
         // survive as calls rather than as tokens of their own.
         let overlay = wash(VEIL_FAINT, appearance);
         let overlay_strong = wash(VEIL_MID, appearance);
-        // Neutral's ladder replaces two veil rules with solid fills: the
-        // terminal follows the page (central panes `#141414`), and both
-        // hovers are the approved `#363636` / `#D9D9D9` everywhere.
-        let terminal_surface = if base == BaseColor::Neutral {
+        // A grey ladder (Neutral's, Onice's) replaces two veil rules with solid
+        // fills: the terminal follows the page (Neutral's central panes are
+        // `#141414`), and both hovers are the ladder's own hover everywhere.
+        let ladder = base.grey_ladder(appearance);
+        let terminal_surface = if ladder.is_some() {
             Rgba::from(bezel.bg)
         } else {
             terminal_surface
         };
-        let (overlay, overlay_strong) = if base == BaseColor::Neutral {
-            let hover = Self::adaptive(rgb_hex(0x363636), rgb_hex(0xD9D9D9), appearance);
-            (hover, hover)
-        } else {
-            (overlay, overlay_strong)
+        let (overlay, overlay_strong) = match ladder {
+            Some(ladder) => {
+                let hover = rgb_hex(ladder.hover);
+                (hover, hover)
+            }
+            None => (overlay, overlay_strong),
         };
         // A selection wash sits under its own text, so it has two jobs at
         // once: be visible, and not swallow the glyphs. The top rung of the
@@ -2191,11 +2187,12 @@ mod tests {
         for base in BaseColor::ALL {
             let theme = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, base);
 
-            if base == BaseColor::Neutral {
-                // Neutral's central panes are their own approved plane.
+            if matches!(base, BaseColor::Neutral | BaseColor::Onice) {
+                // The grey ladders' central panes are their own plane, darker
+                // than the sidebars.
                 assert_eq!(
                     theme.terminal_surface, theme.bg,
-                    "neutral dark terminal is the central pane"
+                    "{base:?} dark terminal is the central pane"
                 );
             } else {
                 assert_eq!(
