@@ -1,4 +1,5 @@
 {"data": {"repository": {"pullRequest": {
+  "baseRefOid": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "headRefOid": "b2c3d4e5f60718293a4b5c6d7e8f901234567890",
   "number": 101, "title": "Fix the login redirect", "url": "https://ghe.test/acme/widgets/pull/101", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-27T10:00:00Z", "author": {"login": "alice"}, "headRefName": "feat/login", "baseRefName": "main", "headRepositoryOwner": {"login": "acme"}, "comments": {"totalCount": 12}, "reviewDecision": "CHANGES_REQUESTED", "approvals": {"totalCount": 0}, "reviewRequests": {"nodes": [{"requestedReviewer": {"__typename": "User", "login": "fake-user"}}]}, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"checkRunCountsByState": [{"state": "SUCCESS", "count": 5}, {"state": "FAILURE", "count": 1}, {"state": "IN_PROGRESS", "count": 1}], "statusContextCountsByState": []}}}}]},
   "body": "## What\r\n\r\nFixes the login redirect.\r\n\r\n![after](https://ghe.test/user-attachments/assets/1.png)",
   "additions": 120, "deletions": 8, "changedFiles": 3, "allCommits": {"totalCount": 2},

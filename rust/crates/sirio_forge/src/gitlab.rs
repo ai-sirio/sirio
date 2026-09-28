@@ -19,7 +19,7 @@ use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
     array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32,
-    str_at, time_at, u32_at,
+    revisions, str_at, time_at, u32_at,
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
@@ -348,6 +348,11 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         commit_count: opt_u32(node, "/commitCount"),
         timeline: timeline(&array_at(node, "/notes/nodes")),
         timeline_truncated: has_previous_page(node, "/notes"),
+        revisions: revisions(
+            opt_str(node, "/diffRefs/baseSha"),
+            opt_str(node, "/diffRefs/headSha"),
+            opt_str(node, "/diffRefs/startSha"),
+        ),
     })
 }
 

@@ -204,6 +204,14 @@ fn run(args: &Args) -> Result<(), Failure> {
                 count_word(header.commit_count),
                 yes_no(header.timeline_truncated),
             );
+            match &header.revisions {
+                Some(revisions) => println!(
+                    "REVISIONS base={} head={}",
+                    &revisions.base_sha[..7],
+                    &revisions.head_sha[..7]
+                ),
+                None => println!("REVISIONS none"),
+            }
             println!("BODY {}", header.body.lines().next().unwrap_or(""));
             for reviewer in &header.reviewers {
                 println!(

@@ -3,6 +3,7 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
     mergeRequest(iid: $iid) {
       ...MergeRequestSummary
       description
+      diffRefs { baseSha headSha startSha }
       diffStatsSummary { additions deletions fileCount }
       commitCount
       notes(last: 100) {

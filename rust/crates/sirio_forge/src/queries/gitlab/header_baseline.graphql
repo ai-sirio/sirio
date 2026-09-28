@@ -3,6 +3,7 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
     mergeRequest(iid: $iid) {
       ...MergeRequestSummary
       description
+      diffRefs { baseSha headSha startSha }
       notes(last: 100) {
         pageInfo { hasPreviousPage }
         nodes { author { username } body createdAt system position { filePath newLine oldLine } }

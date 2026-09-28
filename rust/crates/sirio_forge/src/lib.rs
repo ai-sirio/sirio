@@ -23,7 +23,7 @@ pub use error::ForgeError;
 pub use model::{
     ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckStatus, CiState,
     CommitSummary, EventKind, FileChange, FileChangeKind, Filter, Forge, LineComment, ListQuery,
-    Listing, PageCursor, Progress, ReviewOutcome, ReviewState, Reviewer, TimelineItem,
+    Listing, PageCursor, Progress, ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem,
 };
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};
 pub use target::{ForgeTarget, parse_remote_url};
