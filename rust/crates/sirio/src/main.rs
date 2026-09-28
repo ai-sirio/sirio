@@ -6683,6 +6683,8 @@ impl SirioWorkspace {
                         view.update(cx, |view, cx| view.dismiss_message(cx));
                     }
                 }
+                FileViewEvent::OpenLocalCopy(path) => workspace.add_file_tab(path.clone(), cx),
+                FileViewEvent::RetrySnapshot => {}
             },
         )
         .detach();

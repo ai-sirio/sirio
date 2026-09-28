@@ -114,6 +114,35 @@ struct TransientMessage {
     actions: Vec<MessageAction>,
 }
 
+/// Where a snapshot came from: which file, at which revision, of which
+/// change request (spec §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotOrigin {
+    pub reference: sirio_forge::ChangeRef,
+    /// The revision shown: the head, or the base for a file the change
+    /// request deletes.
+    pub sha: String,
+    /// Repository-relative.
+    pub relative_path: PathBuf,
+    /// The worktree's own copy, when it has one to offer.
+    pub local_copy: Option<PathBuf>,
+}
+
+impl SnapshotOrigin {
+    /// `#578 at a1b2c3d`.
+    pub fn label(&self) -> String {
+        format!("{} at {}", self.reference.label(), &self.sha[..self.sha.len().min(7)])
+    }
+
+    /// The view's `path()`. Never a real path — the workspace matches open
+    /// documents by path, and a snapshot must not be mistaken for (or steal
+    /// the tab of) the file it was taken from; the extension still picks the
+    /// language.
+    pub fn virtual_path(&self) -> PathBuf {
+        Path::new("sirio-snapshot").join(&self.sha).join(&self.relative_path)
+    }
+}
+
 /// A tab showing one path. The entity remains owned by the workspace while
 /// another tab is active, so switching away never reloads or loses content
 /// — and the editor's dirty/conflict state survives tab switches, which is
@@ -124,6 +153,9 @@ pub struct FileView {
     load_task: Option<Task<()>>,
     file_monitor: Option<FileSystemEventMonitor>,
     _file_monitor_task: Option<Task<()>>,
+    /// `Some` for a file shown at a revision rather than read from `path` —
+    /// read-only, no monitor, no language server.
+    snapshot: Option<SnapshotOrigin>,
     /// A message that answers something the user just did: a definition
     /// that does not exist, a save that failed, a language server that
     /// would not start. It is *about* the file, never instead of it —
@@ -294,6 +326,12 @@ pub enum FileViewEvent {
     /// the same way the install button does; silencing itself lives in the
     /// workspace and the settings, never in the view.
     SilenceLanguageServer { path: PathBuf },
+    /// A snapshot's read failed and its card's Retry was clicked: read the
+    /// revision again.
+    RetrySnapshot,
+    /// The snapshot bar's "Open local copy": open the worktree's own,
+    /// editable file.
+    OpenLocalCopy(PathBuf),
 }
 
 impl gpui::EventEmitter<FileViewEvent> for FileView {}
@@ -361,12 +399,24 @@ impl FileView {
                 }
             })
         });
+        let mut view = Self::blank(path, ViewState::Loading, cx);
+        view.load_task = Some(load_task);
+        view.file_monitor = file_monitor;
+        view._file_monitor_task = file_monitor_task;
+        view
+    }
+
+    /// Every field at rest: no load under way, no monitor, nothing the user
+    /// did yet. `new` adds the disk read and the monitor; a snapshot adds
+    /// neither.
+    fn blank(path: PathBuf, state: ViewState, cx: &mut Context<Self>) -> Self {
         Self {
             path,
-            state: ViewState::Loading,
-            load_task: Some(load_task),
-            file_monitor,
-            _file_monitor_task: file_monitor_task,
+            state,
+            load_task: None,
+            file_monitor: None,
+            _file_monitor_task: None,
+            snapshot: None,
             message: None,
             markdown_mode: MarkdownMode::Preview,
             source_selection: None,
@@ -393,6 +443,69 @@ impl FileView {
             diagrams: Diagrams::default(),
             diagram_settings: None,
             diagram_generation: 0,
+        }
+    }
+
+    /// A snapshot whose bytes are still being read (a restored tab).
+    pub fn snapshot_pending(origin: SnapshotOrigin, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::blank(origin.virtual_path(), ViewState::Loading, cx);
+        view.snapshot = Some(origin);
+        view
+    }
+
+    /// A snapshot with its bytes at hand.
+    pub fn snapshot(origin: SnapshotOrigin, bytes: Vec<u8>, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::snapshot_pending(origin, cx);
+        let editor = Editor::from_snapshot(view.path.clone(), bytes);
+        view.markdown_mode = Self::initial_markdown_mode(&editor);
+        view.state = ViewState::Ready(editor);
+        view
+    }
+
+    pub fn is_snapshot(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
+    pub fn snapshot_origin(&self) -> Option<&SnapshotOrigin> {
+        self.snapshot.as_ref()
+    }
+
+    /// The read finished: fill the view in, or say why it could not, with a
+    /// Retry the workspace answers (`FileViewEvent::RetrySnapshot`).
+    pub fn finish_snapshot(&mut self, result: Result<Vec<u8>, String>, cx: &mut Context<Self>) {
+        let Some(origin) = self.snapshot.clone() else {
+            return;
+        };
+        match result {
+            Ok(bytes) => {
+                let editor = Editor::from_snapshot(self.path.clone(), bytes);
+                self.markdown_mode = Self::initial_markdown_mode(&editor);
+                self.state = ViewState::Ready(editor);
+                self.message = None;
+                cx.emit(FileViewEvent::Loaded(self.path.clone()));
+            }
+            Err(reason) => self.offer(
+                format!(
+                    "Could not read {} at {}: {reason}",
+                    origin.relative_path.display(),
+                    origin.label()
+                ),
+                vec![MessageAction {
+                    label: "Retry".to_string(),
+                    event: FileViewEvent::RetrySnapshot,
+                }],
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Back to nothing-yet, for a retry.
+    pub fn restart_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.is_some() {
+            self.state = ViewState::Loading;
+            self.message = None;
+            cx.notify();
         }
     }
 
@@ -797,6 +910,9 @@ impl FileView {
     /// (F-EDIT-05/06). The shell calls this when a file tab is activated —
     /// "modify externally, return to Sirio" — and on window focus.
     pub fn check_external(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.is_some() {
+            return;
+        }
         if let Some(editor) = self.editor_mut() {
             editor.check_external();
             cx.notify();
@@ -834,6 +950,11 @@ impl FileView {
     /// Saves the buffer (F-EDIT-04/06), recreating a deleted file. Errors
     /// are returned and kept visible on the editor.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.snapshot.is_some() {
+            let reason = "Read-only: open the local copy to edit".to_string();
+            self.set_message(reason.clone(), cx);
+            return Err(reason);
+        }
         let result = match self.editor_mut() {
             Some(editor) => editor.save(),
             None => Err("the file is still loading".to_string()),
@@ -844,6 +965,9 @@ impl FileView {
 
     /// F-EDIT-05 "Reload": adopt the on-disk content.
     pub fn reload(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.snapshot.is_some() {
+            return Err("a snapshot has no file to reload".to_string());
+        }
         let result = match self.editor_mut() {
             Some(editor) => editor.reload(),
             None => Err("the file is still loading".to_string()),
@@ -854,6 +978,9 @@ impl FileView {
 
     /// F-EDIT-05 "Keep": dismiss the banner, keep the buffer.
     pub fn keep(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.is_some() {
+            return;
+        }
         if let Some(editor) = self.editor_mut() {
             editor.keep();
             cx.notify();
@@ -1212,6 +1339,9 @@ impl FileView {
     }
 
     fn replace_selection(&mut self, text: &str) {
+        if self.snapshot.is_some() {
+            return;
+        }
         let Some(selection) = self.editor().map(|editor| self.current_selection(editor)) else {
             return;
         };
@@ -1258,6 +1388,9 @@ impl FileView {
     }
 
     fn replace_selection_range(&mut self, selection: Selection, text: &str) {
+        if self.snapshot.is_some() {
+            return;
+        }
         let Some(editor) = self.editor_mut() else {
             return;
         };
@@ -1293,6 +1426,9 @@ impl FileView {
     }
 
     fn apply_markdown_format(&mut self, operation: MarkdownFormatOp, cx: &mut Context<Self>) {
+        if self.snapshot.is_some() {
+            return;
+        }
         let Some(selection) = self.editor().map(|editor| self.current_selection(editor)) else {
             return;
         };
@@ -1755,6 +1891,12 @@ impl Render for FileView {
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
             .when_some(message, |this, card| this.child(card))
+            .when_some(
+                self.snapshot
+                    .as_ref()
+                    .map(|origin| render_snapshot_bar(origin, theme, cx.entity())),
+                |this, bar| this.child(bar),
+            )
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
                 cx.entity(),
@@ -1765,6 +1907,44 @@ impl Render for FileView {
                 cx,
             )))
     }
+}
+
+/// The bar over a snapshot: what it is, and the way to the editable copy.
+fn render_snapshot_bar(
+    origin: &SnapshotOrigin,
+    theme: Theme,
+    entity: gpui::Entity<FileView>,
+) -> impl IntoElement {
+    let local = origin.local_copy.clone();
+    div()
+        .id("file-snapshot-bar")
+        .debug_selector(|| "file-snapshot-bar".into())
+        .w_full()
+        .px(px(20.0))
+        .py(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .bg(theme.element_hover)
+        .border_b_1()
+        .border_color(theme.border)
+        .text_size(theme.typography.footnote)
+        .text_color(theme.text)
+        .child(div().flex_1().child(format!("Read-only · {}", origin.label())))
+        .when_some(local, |this, path| {
+            this.child(
+                div()
+                    .id("file-snapshot-open-local")
+                    .debug_selector(|| "file-snapshot-open-local".into())
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .child("Open local copy")
+                    .on_click(move |_, _, cx| {
+                        let path = path.clone();
+                        entity.update(cx, |_, cx| cx.emit(FileViewEvent::OpenLocalCopy(path)));
+                    }),
+            )
+        })
 }
 
 /// F-EDIT-01: the Code/Preview switcher for Markdown files. Each option is
@@ -5751,5 +5931,89 @@ mod tests {
         let _ = std::fs::remove_file(&picture);
         assert!(is_picture);
         assert!(drawn, "the Preview was drawn");
+    }
+
+    fn snapshot_origin_for_tests() -> SnapshotOrigin {
+        SnapshotOrigin {
+            reference: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".to_string(),
+                project: "acme/widgets".to_string(),
+                number: 578,
+            },
+            sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string(),
+            relative_path: PathBuf::from("src/lib.rs"),
+            local_copy: None,
+        }
+    }
+
+    #[gpui::test]
+    async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let view = cx.new(|cx| FileView::snapshot(snapshot_origin_for_tests(), b"hello\nworld\n".to_vec(), cx));
+        view.update(cx, |view, cx| {
+            assert!(view.is_snapshot());
+            assert_eq!(view.editor().expect("loaded").buffer(), "hello\nworld\n");
+            assert_eq!(
+                view.snapshot_origin().expect("origin").label(),
+                "#578 at a1b2c3d"
+            );
+            view.replace_selection("X");
+            view.apply_markdown_format(MarkdownFormatOp::Bold, cx);
+            view.delete_backward();
+            view.delete_forward();
+            assert_eq!(view.editor().expect("loaded").buffer(), "hello\nworld\n", "nothing edits a snapshot");
+            assert!(!view.is_dirty());
+            let saved = view.save(cx);
+            assert!(saved.is_err(), "a snapshot has no file to save to");
+            assert!(view.message_text().is_some_and(|text| text.contains("Read-only")));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_snapshots_path_is_never_the_local_files_path(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let origin = snapshot_origin_for_tests();
+        let view = cx.new(|cx| FileView::snapshot(origin.clone(), b"x\n".to_vec(), cx));
+        view.read_with(cx, |view, _| {
+            assert_ne!(view.path(), origin.relative_path.as_path());
+            assert!(view.path().to_string_lossy().ends_with("src/lib.rs"), "the extension still picks the language");
+        });
+    }
+
+    #[gpui::test]
+    async fn binary_and_oversized_bytes_show_the_editors_own_state_not_a_crash(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let binary = cx.new(|cx| FileView::snapshot(snapshot_origin_for_tests(), vec![0, 1, 2, 0], cx));
+        let huge = cx.new(|cx| {
+            FileView::snapshot(snapshot_origin_for_tests(), vec![b'a'; crate::editor::MAX_FILE_BYTES as usize + 1], cx)
+        });
+        for view in [binary, huge] {
+            view.read_with(cx, |view, _| {
+                let editor = view.editor().expect("an editor in a refusing state");
+                assert!(editor.buffer().is_empty());
+                assert!(editor.load_message().is_some(), "the surface says why there is no text");
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn a_pending_snapshot_fills_in_or_offers_a_retry(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let filled = cx.new(|cx| FileView::snapshot_pending(snapshot_origin_for_tests(), cx));
+        filled.update(cx, |view, cx| {
+            assert!(view.editor().is_none(), "nothing to show yet");
+            view.finish_snapshot(Ok(b"late\n".to_vec()), cx);
+            assert_eq!(view.editor().expect("loaded").buffer(), "late\n");
+        });
+        let failed = cx.new(|cx| FileView::snapshot_pending(snapshot_origin_for_tests(), cx));
+        failed.update(cx, |view, cx| {
+            view.finish_snapshot(Err("boom".to_string()), cx);
+            assert!(view.message_text().is_some_and(|text| text.contains("boom")));
+            assert_eq!(view.message_action_labels(), vec!["Retry".to_string()]);
+            view.restart_snapshot(cx);
+            assert!(view.editor().is_none(), "a retry starts from nothing");
+            assert!(view.message_text().is_none(), "and the old failure is gone");
+        });
     }
 }
