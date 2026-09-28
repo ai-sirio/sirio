@@ -584,12 +584,13 @@ pub struct ChangesTab {
     /// It bounds staleness for anything still live and, if the surface is
     /// in fact visible, the draw that follows releases the gate properly.
     suspended_ticks: u32,
-    /// F-CHG-13: a `focus_path` request that arrived before `entries` had
+    /// F-CHG-13: the `focus_path` requests that arrived before `entries` had
     /// been populated by the first `refresh()` (the common case — `new()`
     /// starts that refresh asynchronously, so a caller that opens the tab
-    /// and asks it to focus a path in the same tick always races it).
+    /// and asks it to focus a path in the same tick always races it). Every
+    /// one is kept, so a caller reopening several files gets them all back.
     /// Replayed once the next snapshot lands, then cleared either way.
-    pending_focus: Option<PathBuf>,
+    pending_focus: Vec<PathBuf>,
     /// The file last opened through `focus_path` or a row expansion
     /// (`toggle_change`). Kept, unlike `pending_focus` — which is consumed
     /// once a snapshot lands — so the host can save it and replay it after
@@ -734,7 +735,7 @@ impl ChangesTab {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
             reveal_line: None,
             selected_change: None,
@@ -866,11 +867,11 @@ impl ChangesTab {
         self.entries = snapshot.entries;
         self.stats = snapshot.stats;
         self.unified_width_dirty = true;
-        // F-CHG-13: replay a focus_path request that raced this snapshot.
-        // Applied at most once — if the path still isn't present (e.g. it
+        // F-CHG-13: replay the focus_path requests that raced this snapshot.
+        // Applied at most once — if a path still isn't present (e.g. it
         // was reverted before the snapshot came back), there is nothing
         // further to wait for.
-        if let Some(path) = self.pending_focus.take() {
+        for path in std::mem::take(&mut self.pending_focus) {
             self.apply_focus(&path, cx);
         }
     }
@@ -1330,7 +1331,9 @@ impl ChangesTab {
         // remember the request and replay it once a snapshot lands in
         // apply_snapshot, rather than silently no-op'ing.
         if self.entries.is_empty() && self.git_task.is_some() {
-            self.pending_focus = Some(path.to_path_buf());
+            if !self.pending_focus.iter().any(|pending| pending == path) {
+                self.pending_focus.push(path.to_path_buf());
+            }
             return;
         }
         self.apply_focus(path, cx);
@@ -3757,7 +3760,7 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
             reveal_line: None,
             selected_change: None,
@@ -4312,6 +4315,30 @@ mod tests {
                 tab.is_expanded(ChangeSection::Changed, Path::new("tracked.txt")),
                 "the deferred focus_path request is replayed once the snapshot lands"
             );
+        });
+    }
+
+    /// Every path asked for before the first snapshot lands is expanded
+    /// once it does, not only the last one asked for.
+    #[gpui::test]
+    async fn several_focus_path_calls_before_the_first_refresh_all_expand(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+        std::fs::write(dir.0.join("fresh.txt"), "new\n").expect("write untracked");
+
+        let tab = cx.new(|cx| {
+            let mut tab = ChangesTab::new(dir.0.clone(), cx);
+            tab.focus_path(Path::new("tracked.txt"), cx);
+            tab.focus_path(Path::new("fresh.txt"), cx);
+            tab
+        });
+
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 2));
+
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.is_expanded(ChangeSection::Changed, Path::new("tracked.txt")));
+            assert!(tab.is_expanded(ChangeSection::Untracked, Path::new("fresh.txt")));
         });
     }
 
@@ -5273,7 +5300,7 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
             reveal_line: None,
             selected_change: None,
@@ -5357,7 +5384,7 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
             reveal_line: None,
             selected_change: None,
@@ -5633,7 +5660,7 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
             reveal_line: None,
             selected_change: None,
@@ -6097,7 +6124,7 @@ mod tests {
                 renders_at_last_tick: 0,
                 refresh_suspended: false,
                 suspended_ticks: 0,
-                pending_focus: None,
+                pending_focus: Vec::new(),
                 last_focus: None,
                 reveal_line: None,
                 selected_change: None,
@@ -6500,7 +6527,7 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
             reveal_line: None,
             selected_change: None,

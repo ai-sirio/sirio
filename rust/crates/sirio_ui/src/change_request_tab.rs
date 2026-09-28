@@ -2328,11 +2328,13 @@ mod tests {
         let source = FakeSource::ready(testing::github_client(forge.clone()), None);
         let tab = open_tab(cx, source, &repo, InnerTab::Files);
         pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "files_mode") == "diff"));
+        let opened = vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")];
         let changes = ready_changes(&tab, cx);
-        changes.update(cx, |changes, cx| changes.focus_path(Path::new("a.txt"), cx));
-        pump_until(cx, || {
-            changes.read_with(cx, |changes, _| changes.expanded_paths() == vec![PathBuf::from("a.txt")])
+        changes.update(cx, |changes, cx| {
+            changes.focus_path(Path::new("a.txt"), cx);
+            changes.focus_path(Path::new("c.txt"), cx);
         });
+        pump_until(cx, || changes.read_with(cx, |changes, _| changes.expanded_paths() == opened));
 
         let newer = push_another(&repo.0);
         forge.answer(
@@ -2348,10 +2350,65 @@ mod tests {
         tab.read_with(cx, |tab, cx| {
             assert!(report_value(tab, cx, "notice").contains("Updated to head"));
         });
+        // Both opened files come back, not only the last one carried.
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| match &tab.range {
+                RangeState::Ready { changes, .. } => changes.read(cx).expanded_paths() == opened,
+                _ => false,
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_reveal_during_a_new_heads_fetch_keeps_the_opened_files(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "files_mode") == "diff"));
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |changes, cx| {
+            changes.focus_path(Path::new("a.txt"), cx);
+            changes.focus_path(Path::new("c.txt"), cx);
+        });
+        pump_until(cx, || {
+            changes.read_with(cx, |changes, _| {
+                changes.expanded_paths() == vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]
+            })
+        });
+
+        // A line-comment click lands while the new head's revisions are
+        // fetching: it is made from the notify that starts the fetch, before
+        // the fetch can finish.
+        let revealed = Rc::new(RefCell::new(false));
+        let flag = revealed.clone();
+        cx.update(|cx| {
+            cx.observe(&tab, move |tab, cx| {
+                let fetching = matches!(tab.read(cx).range, RangeState::Fetching);
+                if fetching && !*flag.borrow() {
+                    *flag.borrow_mut() = true;
+                    tab.update(cx, |tab, cx| tab.reveal(PathBuf::from("d.txt"), Some(1), cx));
+                }
+            })
+            .detach();
+        });
+        let newer = push_another(&repo.0);
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &newer),
+        );
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "head") == newer[..7] && report_value(tab, cx, "files_mode") == "diff"
+            })
+        });
+        assert!(*revealed.borrow(), "the reveal was made while the fetch ran");
         pump_until(cx, || {
             tab.read_with(cx, |tab, cx| match &tab.range {
                 RangeState::Ready { changes, .. } => {
-                    changes.read(cx).expanded_paths() == vec![PathBuf::from("a.txt")]
+                    changes.read(cx).expanded_paths()
+                        == vec![PathBuf::from("a.txt"), PathBuf::from("c.txt"), PathBuf::from("d.txt")]
                 }
                 _ => false,
             })
