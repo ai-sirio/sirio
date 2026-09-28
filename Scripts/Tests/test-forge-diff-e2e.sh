@@ -5,10 +5,15 @@ set -euo pipefail
 # 2026-09-28-change-request-diff-design.md §10.1): a real, isolated Sirio
 # against the loopback fake forge (Scripts/Tests/fake_forge.py) and a real
 # bare git repository standing in for the forge's git side, driven over the
-# control socket. GitHub: the success path, a fetch answered 401 and a fetch
-# that hangs. GitLab: the success path. Each success path also quits Sirio
-# gracefully halfway and relaunches it on the same database: the snapshot tabs
-# come back with the same text, and the startup sweep keeps their refs.
+# control socket. GitHub: the success path (a commit click fetches first, then
+# Files; snapshot tabs alone keep the refs), a fetch answered 401 and a fetch
+# that hangs. GitLab: the success path with Files opened first, so the
+# Files-triggered fetch is the one exercised. The forge's repository carries a
+# tag and a `main` that moved on after the branch left it, so a tag that came
+# along or a base fetched by the wrong ref would show. Each success path also
+# quits Sirio gracefully halfway and relaunches it on the same database: the
+# snapshot tabs come back with the same text, and the startup sweep keeps
+# their refs.
 #
 # The artifact: --out-dir DIR (default artifacts/forge-diff-e2e-<stamp>-<pid>)
 # keeps transcript.log, one app log per launch and one fake-forge request log
@@ -44,6 +49,7 @@ if [ "$STATE_ONLY" -eq 0 ]; then
 fi
 command -v git >/dev/null || fail "git is required"
 command -v python3 >/dev/null || fail "python3 is required"
+command -v curl >/dev/null || fail "curl is required (the fake forge's readiness probe)"
 
 RUN_DIR=$(mktemp -d /tmp/sirio-diff-e2e-XXXXXX)
 APP_PID=""
@@ -66,6 +72,14 @@ echo "building sirio and sirioctl"
 ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
 reply() { "$CTL" "$@" --json; }
 field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get(sys.argv[1], ""))' "$1"; }
+# One key of one reply, for `x=$(read_field key args...)`: a sirioctl error
+# prints a FAIL line instead of aborting the script silently inside the
+# substitution (set -e does not label it).
+read_field() { # key sirioctl-args...
+  local key=$1
+  shift
+  reply "$@" | field "$key" || fail "sirioctl $* did not answer (reading $key)"
+}
 wait_for() { # key value sirioctl-args...
   local key=$1 want=$2
   shift 2
@@ -82,7 +96,7 @@ assert_contains() { # key needle sirioctl-args...
   local key=$1 needle=$2
   shift 2
   local got
-  got=$(reply "$@" | field "$key")
+  got=$(read_field "$key" "$@") || fail "assert_contains: no reply for: $*"
   case "$got" in
     *"$needle"*) echo "OK: $key contains '$needle'" ;;
     *) fail "$key was '$got', expected it to contain '$needle'" ;;
@@ -141,6 +155,11 @@ elif mode == "titled":     # the first tab of a kind with this title: tabs.py ti
         if (kind, snapshot, title) == (sys.argv[2], sys.argv[3], sys.argv[4]):
             print(position)
             break
+elif mode == "titled-any": # the first tab of a kind and snapshot flag: tabs.py titled-any <kind> <snapshot>
+    for position, (kind, snapshot, _title) in enumerate(tabs, start=1):
+        if (kind, snapshot) == (sys.argv[2], sys.argv[3]):
+            print(position)
+            break
 elif mode == "count":      # how many tabs of a kind: tabs.py count <kind> <snapshot yes|no>
     print(sum(1 for kind, snapshot, _title in tabs if (kind, snapshot) == (sys.argv[2], sys.argv[3])))
 elif mode == "closable":   # the first change request, diff or snapshot tab
@@ -180,8 +199,21 @@ wait_tab_count() { # kind snapshot(yes|no) count
   reply surface tabs read || true
   fail "never $3 $1 tab(s) (snapshot=$2)"
 }
-tab_count() { reply surface tabs read | field count; }
+tab_count() { read_field count surface tabs read || fail "tab_count: no reply"; }
 sirio_refs() { git -C "$WT" for-each-ref --format='%(refname)' refs/sirio/change-requests/; }
+assert_refs() { # number -- exactly the head and base refs of that change request, by name
+  local want got
+  want=$(printf 'refs/sirio/change-requests/origin/%s/base\nrefs/sirio/change-requests/origin/%s/head' "$1" "$1")
+  got=$(sirio_refs | sort)
+  [ "$got" = "$want" ] || { echo "refs now:"; sirio_refs; fail "expected exactly the head and base refs of $1"; }
+  echo "OK: refs are origin/$1/{base,head}"
+}
+close_kind() { # kind snapshot(yes|no) -- closes the first such tab
+  local index
+  index=$(reply surface tabs read | python3 "$RUN_DIR/tabs.py" titled-any "$1" "$2") || fail "close_kind: no reply"
+  [ -n "$index" ] || { reply surface tabs read || true; fail "no $1 tab (snapshot=$2) to close"; }
+  ctl surface tabs close "$index" >/dev/null
+}
 dump_refs() { { echo "[$SCENARIO $1]"; sirio_refs; } >> "$RUN_DIR/refs-$SCENARIO.log"; }
 
 # ---- the forge's git side and its fixtures -----------------------------------
@@ -208,7 +240,9 @@ write("gone.txt", "bye\nbye\n")
 PY
   git -C "$src" add -A
   git -C "$src" -c commit.gpgSign=false commit -q -m base
-  BASE=$(git -C "$src" rev-parse HEAD)
+  # A tag the fetch must not bring along (`git tag -l` in the worktree is
+  # meaningful only because one exists here).
+  git -C "$src" tag v1
   git -C "$src" checkout -q -b feat
   python3 - "$src" <<'PY'
 import os, sys
@@ -227,6 +261,15 @@ PY
   git -C "$src" add -A
   git -C "$src" -c commit.gpgSign=false commit -q -m "tidy the docs"
   HEAD_SHA=$(git -C "$src" rev-parse HEAD)
+  # `main` moves on after the branch left it, as a real base branch does:
+  # BASE is main's new tip, not an ancestor of HEAD, so only the base
+  # refspec can bring it in, and only `base...head` gives the change
+  # request's diff (`main-only.txt` must never appear in it).
+  git -C "$src" checkout -q main
+  printf 'later\n' > "$src/main-only.txt"
+  git -C "$src" add -A
+  git -C "$src" -c commit.gpgSign=false commit -q -m "main moves on"
+  BASE=$(git -C "$src" rev-parse HEAD)
   git clone -q --bare "$src" "$BARE"
   git -C "$BARE" update-ref "$PULL_REF" "$HEAD_SHA"
   git -C "$BARE" update-ref -d refs/heads/feat
@@ -280,10 +323,12 @@ start_forge() { # flavour
   PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
   python3 "$ROOT/Scripts/Tests/fake_forge.py" --flavor "$1" --port "$PORT" --fixtures "$FIXTURES_DIR" --log "$RUN_DIR/$SCENARIO-forge-requests.log" &
   FORGE_PID=$!
+  local ready=0
   for _ in $(seq 1 50); do
-    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/api/v3/meta" && break
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/api/v3/meta" && { ready=1; break; }
     sleep 0.2
   done
+  [ "$ready" -eq 1 ] || fail "the fake forge never answered on port $PORT"
 }
 
 make_worktree() { # dir remote-url fetch-url
@@ -338,15 +383,15 @@ connect_and_open() { # host forge number
   ctl select-workspace --workspace "$WT"
   ctl surface change-requests show
   local account
-  account=$(reply surface change-requests token --host "$1" --forge "$2" --token good | field account)
+  account=$(read_field account surface change-requests token --host "$1" --forge "$2" --token good) || fail "the token was not accepted"
   [ "$account" = "fake-user" ] || fail "the token signed in as '$account'"
   wait_for state ready surface change-requests read
   ctl surface change-request open "$3"
   wait_for state loaded surface change-request read
 }
 
-numstat_summary() { # the script's own reading of the diff: path +a -d, sorted, joined by |
-  python3 - "$WT" "$BASE" "$HEAD_SHA" <<'PY'
+numstat_summary() { # the script's own reading of the diff, from the forge's repository: path +a -d, sorted, joined by |
+  python3 - "$BARE" "$BASE" "$HEAD_SHA" <<'PY'
 import subprocess, sys
 repo, base, head = sys.argv[1:4]
 raw = subprocess.check_output(["git", "-C", repo, "-c", "core.quotePath=false", "diff", "--numstat", "-z", "-M", f"{base}...{head}"])
@@ -368,6 +413,16 @@ print("|".join(sorted(rows)))
 PY
 }
 
+assert_fetched() { # number -- what one fetch of a change request leaves, and leaves alone
+  assert_refs "$1"
+  [ ! -e "$WT/.git/FETCH_HEAD" ] || fail "FETCH_HEAD was written"
+  [ -z "$(git -C "$WT" tag -l)" ] || fail "a tag was fetched (the forge has v1)"
+  [ -z "$(git -C "$WT" branch --list --remotes)" ] || fail "a remote-tracking branch was written"
+  git -C "$WT" cat-file -e "$HEAD_SHA^{commit}" || fail "the head commit is not local"
+  git -C "$WT" cat-file -e "$BASE^{commit}" || fail "the base commit is not local"
+  echo "OK: one fetch, and no trace outside refs/sirio/"
+}
+
 close_change_request_tabs() {
   for _ in $(seq 1 15); do
     local index
@@ -379,8 +434,9 @@ close_change_request_tabs() {
   fail "the change request tabs would not close"
 }
 
-scenario_success() { # flavour host forge number label remote-url
+scenario_success() { # flavour host forge number label remote-url order(commit-first|files-first)
   SCENARIO="$1-success"
+  local order=$7
   echo "=== $SCENARIO"
   build_forge_git "$1"
   render_fixtures "$1"
@@ -399,25 +455,49 @@ scenario_success() { # flavour host forge number label remote-url
   dump_refs "after startup"
 
   connect_and_open "$2" "$3" "$4"
+  local expected
+  expected=$(numstat_summary) || fail "numstat_summary failed"
+  [ -n "$expected" ] || fail "the script's own numstat is empty"
+  case "$expected" in *main-only.txt*) fail "the script's own numstat is not the change request's diff: $expected" ;; esac
 
-  echo "step 1: a commit that is not local opens in a Changes tab, after one fetch"
-  ctl surface change-request tab commits
-  wait_for state loaded surface change-request read
-  ctl surface change-request open-commit "$C1"
-  wait_active_kind diff no
-  [ "$(sirio_refs | wc -l)" -eq 2 ] || { sirio_refs; fail "expected exactly the head and base refs"; }
-  [ ! -e "$WT/.git/FETCH_HEAD" ] || fail "FETCH_HEAD was written"
-  [ -z "$(git -C "$WT" tag -l)" ] || fail "a tag was fetched"
-  git -C "$WT" cat-file -e "$HEAD_SHA^{commit}" || fail "the head commit is not local"
-  dump_refs "after the commit fetch"
-  capture commit
+  if [ "$order" = commit-first ]; then
+    echo "step 1: a commit that is not local opens in a Changes tab, after one fetch"
+    ctl surface change-request tab commits
+    wait_for state loaded surface change-request read
+    ctl surface change-request open-commit "$C1"
+    wait_active_kind diff no
+    assert_fetched "$4"
+    dump_refs "after the commit fetch"
+    capture commit
 
-  echo "step 2: Files shows the diff the script computes itself"
-  select_kind change_request
-  ctl surface change-request tab files
-  wait_for files_mode diff surface change-request read
-  wait_for diff_summary "$(numstat_summary)" surface change-request read
+    echo "step 2: Files shows the diff the script computes itself, with nothing more to fetch"
+    select_kind change_request
+    ctl surface change-request tab files
+    wait_for files_mode diff surface change-request read
+  else
+    echo "step 1: Files, before anything else, makes the revisions local and shows the diff"
+    [ -z "$(sirio_refs)" ] || { sirio_refs; fail "refs before Files was ever shown"; }
+    ctl surface change-request tab files
+    wait_for files_mode diff surface change-request read
+    assert_fetched "$4"
+    dump_refs "after the Files fetch"
+
+    echo "step 2: a commit click opens a Changes tab without a second fetch"
+    local refs_before
+    refs_before=$(sirio_refs | sort)
+    ctl surface change-request tab commits
+    wait_for state loaded surface change-request read
+    ctl surface change-request open-commit "$C1"
+    wait_active_kind diff no
+    [ "$(sirio_refs | sort)" = "$refs_before" ] || { sirio_refs; fail "the commit click changed the refs: it fetched again"; }
+    [ ! -e "$WT/.git/FETCH_HEAD" ] || fail "FETCH_HEAD was written by the commit click"
+    echo "OK: the commit click fetched nothing"
+    capture commit
+    select_kind change_request
+  fi
+  wait_for diff_summary "$expected" surface change-request read
   wait_for head "${HEAD_SHA:0:7}" surface change-request read
+  assert_refs "$4"
   capture files-diff
 
   echo "step 3: Open in editor, with the worktree elsewhere, opens read-only snapshots"
@@ -427,7 +507,7 @@ scenario_success() { # flavour host forge number label remote-url
   wait_for read_only true surface file read
   assert_contains origin "$5 at ${HEAD_SHA:0:7}" surface file read
   local login_text gone_text
-  login_text=$(reply surface file read | field content)
+  login_text=$(read_field content surface file read) || fail "no snapshot content"
   [ "$login_text" = "$(git -C "$BARE" show "$HEAD_SHA:src/login.rs" | escape_text)" ] ||
     fail "the snapshot's text is not the file at the head"
   echo "OK: the snapshot is the file at the head, byte for byte"
@@ -437,15 +517,18 @@ scenario_success() { # flavour host forge number label remote-url
   wait_active_kind file yes
   wait_for state loaded surface file read
   assert_contains origin "$5 at ${BASE:0:7}" surface file read
-  gone_text=$(reply surface file read | field content)
+  gone_text=$(read_field content surface file read) || fail "no snapshot content"
   [ "$gone_text" = "$(git -C "$BARE" show "$BASE:gone.txt" | escape_text)" ] ||
     fail "a deleted file's snapshot is not the file at the base"
   echo "OK: a deleted file opens at the base"
   local before
   before=$(tab_count)
   select_kind change_request
+  wait_active_kind change_request no
   ctl surface change-request open-file src/login.rs 42
-  sleep 1
+  # The open finishes by selecting the tab it found or made: once the active
+  # tab is a snapshot again, the count it left is the count to compare.
+  wait_active_kind file yes
   [ "$(tab_count)" = "$before" ] || fail "opening the same snapshot again opened another tab"
   echo "OK: the same snapshot is one tab"
 
@@ -472,7 +555,7 @@ scenario_success() { # flavour host forge number label remote-url
     wait_for state loaded surface file read
     wait_for read_only true surface file read
     wait_for origin "$restored_origin" surface file read
-    [ "$(reply surface file read | field content)" = "$restored_text" ] ||
+    [ "$(read_field content surface file read)" = "$restored_text" ] ||
       fail "the restored $restored_name snapshot's text is not what it showed before the restart"
     echo "OK: the restored $restored_name snapshot is the same text, byte for byte"
   done
@@ -501,6 +584,24 @@ scenario_success() { # flavour host forge number label remote-url
   wait_for read_only false surface file read
   wait_for path "$WT/src/login.rs" surface file read
   capture local-file
+
+  if [ "$order" = commit-first ]; then
+    echo "step 6a: the snapshot tabs alone keep the refs (spec §6.4)"
+    # An orphan planted now: once the sweep that the close runs has removed
+    # it, the sweep has run, and whatever it left is what it chose to keep.
+    git -C "$WT" update-ref refs/sirio/change-requests/origin/997/head "$(git -C "$WT" rev-parse HEAD)"
+    close_kind change_request no
+    close_kind diff no
+    for _ in $(seq 1 50); do
+      sirio_refs | grep -q /997/ || break
+      sleep 0.2
+    done
+    ! sirio_refs | grep -q /997/ || fail "closing the change request tab never swept"
+    wait_tab_count change_request no 0
+    assert_refs "$4"
+    echo "OK: the snapshots alone kept the refs"
+    dump_refs "after closing the change request tab"
+  fi
 
   echo "step 6: closing the change request's tabs removes the refs"
   close_change_request_tabs
@@ -552,10 +653,10 @@ scenario_failure() { # name fetch-url expected-text bound-seconds
   stop_forge
 }
 
-scenario_success github ghe.test github 101 '#101' https://ghe.test/acme/widgets.git
+scenario_success github ghe.test github 101 '#101' https://ghe.test/acme/widgets.git commit-first
 scenario_failure 401 'http://127.0.0.1:@PORT@/acme/widgets.git' 'terminal prompts disabled' 15
 scenario_failure hang 'ssh://hang.invalid/acme/widgets.git' 'did not answer' 25
-scenario_success gitlab gitlab.test gitlab 201 '!201' https://gitlab.test/team/app.git
+scenario_success gitlab gitlab.test gitlab 201 '!201' https://gitlab.test/team/app.git files-first
 
 echo "artifact: $OUT_DIR"
 echo "FORGE DIFF E2E OK"
