@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A loopback stand-in for GitHub and GitLab, for Scripts/Tests/test-forge-e2e.sh.
+"""A loopback stand-in for GitHub and GitLab, for the three forge E2E scripts:
+Scripts/Tests/test-forge-e2e.sh, test-forge-ui-e2e.sh and test-forge-diff-e2e.sh.
 
 One process serves one flavour on one port:
 

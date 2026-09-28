@@ -207,7 +207,8 @@ in by the caller and never stored or logged by the crate. GitLab queries
 that carry a merge request summary have a baseline variant, used from the
 first `Field '…' doesn't exist` onward, because GraphQL rejects a whole
 query that names a field an older server lacks. `SIRIO_FORGE_TEST_ENDPOINTS`
-points hosts at loopback in debug builds only. `Scripts/Tests/test-forge-e2e.sh`
+points hosts at loopback in debug builds only, and `SIRIO_FORGE_FETCH_TIMEOUT_MS`
+shortens the fetch's 120 s bound the same way. `Scripts/Tests/test-forge-e2e.sh`
 proves the seam; `tests/forge_live.rs` notices the day a query stops
 matching the live schema (it SKIPs without credentials and is off both
 gates). `docs/superpowers/specs/2026-09-27-change-requests-design.md` has the
@@ -225,12 +226,17 @@ The detail tab's *Files* is the diff, read by `sirio_git::range_*` between
 the commits `sirio_forge::Revisions` names. When either is not local,
 `ForgeHub` makes them local with one non-interactive `git fetch` into
 `refs/sirio/change-requests/<remote>/<N>/{head,base}` — invisible to
-History's `--branches`, visible to an external `git log --all`. Those refs
-only anchor objects against `git gc`, and are swept whenever no tab, open or
-parked with another worktree, holds them. *Open in editor* opens the local
-file when the worktree is at the head, and a read-only snapshot tab
-otherwise. `docs/superpowers/specs/2026-09-28-change-request-diff-design.md`
-has the design; `Scripts/Tests/test-forge-diff-e2e.sh` proves it.
+History's `--branches`, visible to an external `git log --all`. The fetch
+runs with git's own credentials (a helper or an ssh key), never with the
+token Sirio holds; when the target branch is gone from the forge the head
+ref is fetched alone. Those refs only anchor objects against `git gc`, and
+are swept — at startup, on a worktree switch and when a tab that held them
+closes — of whatever no tab, open or parked with another worktree, holds.
+*Open in editor* opens the local file when the worktree is at the head, and
+a read-only snapshot tab otherwise; a persisted snapshot's sha and path are
+refused before they reach a label or a path.
+`docs/superpowers/specs/2026-09-28-change-request-diff-design.md` has the
+design; `Scripts/Tests/test-forge-diff-e2e.sh` proves it.
 
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 

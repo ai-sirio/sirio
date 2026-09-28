@@ -342,8 +342,8 @@ pub enum FileViewEvent {
     /// the same way the install button does; silencing itself lives in the
     /// workspace and the settings, never in the view.
     SilenceLanguageServer { path: PathBuf },
-    /// A snapshot's read failed and its card's Retry was clicked: read the
-    /// revision again.
+    /// A snapshot's read failed and the Retry of its failure surface was
+    /// clicked: read the revision again.
     RetrySnapshot,
     /// The snapshot bar's "Open local copy": open the worktree's own,
     /// editable file.

@@ -1,7 +1,9 @@
 # A change request's diff and files inside Sirio — design
 
 **Date:** 2026-09-28
-**Status:** proposed
+**Status:** implemented on `worktree/rapid-cloud-598e` (2026-09-29); the
+window captures (a `--display` run of the E2E) still await a look by eye —
+see §13's *Not verified*.
 **Programme:** part **B1** of the change-request programme, revised with the
 user on 2026-09-28. A (read-only list and detail tab,
 `2026-09-27-change-requests-design.md`) is merged as #578. What follows is,
@@ -366,7 +368,9 @@ End to end, per the project convention; every run ends in an artifact.
 - "Changes since my last review" and picking a commit range inside *Files*.
 - Editing a snapshot, applying a suggested change.
 
-## §12 Verified in the plan, with the fallback already decided
+## §12 Points checked before building, with the fallback already decided
+
+How each row was in fact verified is recorded in §13's *Not verified*.
 
 | Point | Fallback if the check fails |
 |---|---|
@@ -377,11 +381,11 @@ End to end, per the project convention; every run ends in an artifact.
 | An `ext::` remote can hang a fetch for the timeout stage | a fake forge HTTP endpoint that accepts and never answers |
 | Embedding a `ChangesTab` entity inside the detail tab keeps its keyboard focus and scroll working | open the Range surface as its own Changes tab beside the detail tab, keyed by `ChangeRef` |
 
-## §14 Revised during planning (2026-09-28)
+## §13 Revised during planning and execution (2026-09-28)
 
-The plan (`docs/superpowers/plans/2026-09-28-change-request-diff.md`) found
-five places where this spec could not be built as written. Each supersedes
-the sentence named.
+Planning found five places where this spec could not be built as written
+(the implementation plan is kept local, not in the repository). Each
+supersedes the sentence named.
 
 1. **Range diffs are lazy, per file.** Supersedes §4's `sirio_git` bullet
    ("`range_files(repo, base, head)` and `range_diff(repo, base, head)` … from
@@ -412,9 +416,6 @@ the sentence named.
    only, which is all a restored snapshot — which knows just its sha — can
    name. A snapshot tab is persisted with kind `file`
    (`persisted_kind(TabKind::Editor)`), not §8's `"editor"`.
-
-Known limitation: in Split mode, `focus_line` reveals the file's row rather
-than the line.
 
 ### What execution changed
 
@@ -452,3 +453,68 @@ than the line.
   whose `core.sshCommand` never answers, not §10.1's `ext::` remote, and its
   fixtures are rewritten per run with the bare repository's real shas rather
   than fixed dates.
+- The final review's fix wave (2026-09-29): `delete_ref` passes
+  `--no-deref`, so a symbolic ref inside `refs/sirio/` never costs the
+  branch it points at (§6.4 holds literally). When the target branch's fetch
+  is refused (a deleted base branch), the head ref is fetched alone and a
+  sha still missing is `RevisionGone` (§6.2). A persisted snapshot's sha is
+  refused before it reaches a label or a path (a corrupt row is an error
+  tab, not a crash at every launch); the live *Open in editor* path meets
+  the same path rule. A fetch that completed for revisions the header no
+  longer names is discarded and the header's own fetched (§5.2); a header
+  without revisions cancels a running fetch and keeps a diff already shown.
+  The sweep on a tab close runs only when the closed tab held a change
+  request or a snapshot. A failed fetch that could not sign in adds the
+  sentence under *Known limitations* below. Split mode's `focus_line`
+  reveals the line. The E2E opens *Files* first in its GitLab scenario,
+  names the refs it expects, runs against a forge repository with a tag and
+  a `main` that moved on, and proves that snapshot tabs alone keep the refs.
+
+### Not built
+
+- §7.1's right-click on a diff file (*Open on the forge*, *Copy path*): the
+  Changes surface has no context menu; the per-file `↗` button and the
+  snapshot bar cover the need. Deferred, with the reason, for B2/B3.
+- §7.2's lock glyph on a snapshot tab's icon: the `@ #N` suffix in the
+  title is the cue. Deferred.
+- §5.3's title *deleted in #578* for a deleted file's snapshot: the title
+  is `name @ #N` and the bar shows the base revision. `PersistedSnapshot`
+  does not record `deleted`, so a restored deleted-file snapshot may offer
+  *Open local copy* when the worktree has a file of that name. Deferred.
+- The diff's single section is still headed *Staged (N)*, inherited from
+  the commit view: the host's `surface.changes.read` reads that section by
+  name, so relabelling a range surface was not the few lines it looked.
+  Deferred.
+
+### Not verified
+
+- No window frame was captured on the machine this was built on (no
+  display), so the drawn diff, the snapshot bar, the snapshot failure
+  surface and the embedded `ChangesTab`'s keyboard focus and scroll (§12's
+  last row, whose fallback — the Range surface as its own Changes tab
+  beside the detail tab, keyed by `ChangeRef` — stays on the table) were
+  never seen, only their state through the E2E's report keys. The
+  scroll-to-line is untested at every level.
+- §12's other rows: `insteadOf` — real git in the E2E; `diffRefs` and
+  `baseRefOid`/`headRefOid` — live on gitlab.com and github.com on
+  2026-09-28, not on a GitLab 15.0; `--no-write-fetch-head` and
+  `SSH_ASKPASS_REQUIRE` — git 2.55 and a current OpenSSH here, the old-git
+  fallback is classified by a unit test only; the `ext::` row — replaced by
+  a `core.sshCommand` that never answers and an HTTP 401 server, both real.
+
+### Known limitations
+
+- A partial clone's promisor blob fetch on a row expand or a snapshot runs
+  through the ordinary git runner (10 s, inherited stdin), not the hardened
+  one of §6.3.
+- The fetch uses git's own credentials — a credential helper or an ssh key
+  — never the token given to Sirio (§1). A fetch that could not sign in
+  says so in one sentence under the failure, naming `gh auth setup-git`.
+- The sweep counts the tabs of one window: a linked worktree's tab in
+  another window may lose its refs (one refetch). A sweep can race a fetch
+  writing the same ref: a one-off "cannot lock ref" with *Retry*.
+- While a new head's commits are fetched, the old diff is hidden behind
+  *Fetching…*.
+- Fetches are serialised per worktree, not per repository.
+- On Windows the fetch gets the environment hardening only, no new
+  session.

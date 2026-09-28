@@ -333,7 +333,9 @@ mod tests {
     }
 
     /// What git older than 2.29 prints for `--no-write-fetch-head`: the
-    /// refusal, then its whole usage text (taken from a real `git fetch`).
+    /// first line is git's real refusal; the usage text under it is a
+    /// modern git's (`--[no-]` forms, `--refetch`), there to stand in for
+    /// the ~60 lines an old git prints below the refusal.
     const OLD_GIT_REFUSAL: &str = r#"error: unknown option `no-write-fetch-head'
 usage: git fetch [<options>] [<repository> [<refspec>...]]
    or: git fetch [<options>] <group>
