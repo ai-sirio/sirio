@@ -13186,7 +13186,7 @@ impl SirioWorkspace {
             return;
         }
         let tab_title = ChangeRequestTab::tab_title(&reference, &title);
-        let view = cx.new(|cx| ChangeRequestTab::new(reference, title, cx));
+        let view = cx.new(|cx| ChangeRequestTab::new(reference, title, self.working_directory.clone(), cx));
         Self::subscribe_change_request_tab(&view, cx);
         view.update(cx, |tab, cx| tab.on_selected(cx));
         let tab_id = self.next_tab_id;
@@ -13251,6 +13251,15 @@ impl SirioWorkspace {
                     ChangeRequestTabEvent::OpenCommit { sha, web_url } => {
                         workspace.open_change_request_commit(sha.clone(), web_url.clone(), cx)
                     }
+                    ChangeRequestTabEvent::OpenFile { path, line, revisions, deleted } => workspace
+                        .open_change_request_file(
+                            emitter.read(cx).reference().clone(),
+                            path.clone(),
+                            *line,
+                            revisions.clone(),
+                            *deleted,
+                            cx,
+                        ),
                     ChangeRequestTabEvent::Close => {
                         for tab_id in hosted {
                             workspace.close_tab_by_id(tab_id, None, cx);
@@ -13293,6 +13302,37 @@ impl SirioWorkspace {
             });
         })
         .detach();
+    }
+
+    /// *Open in editor* on a change request's file. (Task 8 chooses between the
+    /// local file and a read-only snapshot; until then the local file.)
+    fn open_change_request_file(
+        &mut self,
+        _reference: sirio_forge::ChangeRef,
+        path: PathBuf,
+        line: Option<u32>,
+        _revisions: sirio_forge::Revisions,
+        _deleted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_local_file(self.working_directory.join(path), line, cx);
+    }
+
+    /// Opens `path` in the editor and scrolls to the 1-based `line`.
+    fn open_local_file(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        self.add_file_tab(path.clone(), cx);
+        let Some(line) = line else {
+            return;
+        };
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content
+                    && paths_name_the_same_document(view.read(cx).path(), &path)
+                {
+                    view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+                }
+            });
+        }
     }
 
     fn add_browser_tab(
@@ -14506,7 +14546,7 @@ impl SirioWorkspace {
         let view = self
             .active_change_request()
             .ok_or_else(|| "the active tab is not a change request".to_string())?;
-        Ok(view.read(cx).report())
+        Ok(view.read(cx).report(cx))
     }
 
     /// F-SET-15: registers an isolated account for `provider`
@@ -20011,7 +20051,7 @@ fn restore_tabs_with_terminal_cache(
                 let title = ChangeRequestTab::title_from_tab(&reference, &tab.title);
                 let inner = InnerTab::parse(&tab_state.change_request_tab);
                 TabContent::ChangeRequest(
-                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, cx)),
+                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, working_directory.to_path_buf(), cx)),
                 )
             }
             // Built by `restore_project_settings_tabs` once a workspace
@@ -20395,7 +20435,7 @@ fn restore_tabs_in_workspace(
                 let title = ChangeRequestTab::title_from_tab(&reference, &tab.title);
                 let inner = InnerTab::parse(&tab_state.change_request_tab);
                 TabContent::ChangeRequest(
-                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, cx)),
+                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, working_directory.to_path_buf(), cx)),
                 )
             }
             // Built by `restore_project_settings_tabs` once a workspace

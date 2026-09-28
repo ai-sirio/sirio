@@ -3,7 +3,7 @@
 //! and Files. Its identity is a `ChangeRef`, which is what the host keys the
 //! tab by and what the session store keeps.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,13 +14,15 @@ use gpui::{
 };
 use sirio_forge::{
     ChangeHeader, ChangeRef, Check, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
-    FileChangeKind, Forge, ForgeClient, ForgeError, Listing, ReviewOutcome, TimelineItem,
+    FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
+    TimelineItem,
 };
 use sirio_theme::Theme;
 
 use crate::change_request_style as style;
+use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
-use crate::forge_source::{self, Connection};
+use crate::forge_source::{self, Connection, RevisionError};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// The inner tab a change request shows.
@@ -74,6 +76,15 @@ pub enum ChangeRequestTabEvent {
     /// A commit was clicked: the host opens it locally when the object is in
     /// the repository, otherwise on the forge.
     OpenCommit { sha: String, web_url: String },
+    /// *Open in editor* on a file of the diff: the host opens the local file
+    /// when the worktree is at `revisions.head_sha`, a read-only snapshot
+    /// otherwise (`deleted`: at the base, where the file still exists).
+    OpenFile {
+        path: PathBuf,
+        line: Option<u32>,
+        revisions: Revisions,
+        deleted: bool,
+    },
     /// The user closed a tab that can no longer reach its change request.
     Close,
 }
@@ -122,6 +133,31 @@ const FRESH_FOR: Duration = Duration::from_secs(10);
 /// While its CI runs, a tab refreshes on its own at this pace (spec §9).
 const CI_REFRESH: Duration = Duration::from_secs(60);
 
+/// The *Files* inner tab's diff, beside the forge's own list (spec §7.1),
+/// which stays the fallback for every state but `Ready`.
+pub(crate) enum RangeState {
+    /// Files was not shown yet, or the header is still loading.
+    Idle,
+    /// The revisions are being made local.
+    Fetching,
+    Ready {
+        revisions: Revisions,
+        changes: Entity<ChangesTab>,
+    },
+    /// `revisions` is the pair that failed: the periodic header refresh does
+    /// not retry it — only Retry does.
+    Failed {
+        error: RevisionError,
+        revisions: Option<Revisions>,
+    },
+    /// The forge did not report base and head.
+    NoRevisions,
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
 pub struct ChangeRequestTab {
     reference: ChangeRef,
     title: String,
@@ -149,11 +185,29 @@ pub struct ChangeRequestTab {
     checks_task: Option<Task<()>>,
     files_task: Option<Task<()>>,
     ci_timer: Option<Task<()>>,
+    /// The worktree the tab was opened in: where its revisions are made
+    /// local and its diff is read.
+    worktree: PathBuf,
+    pub(crate) range: RangeState,
+    range_task: Option<Task<()>>,
+    range_subscription: Option<gpui::Subscription>,
+    /// "Updated to head …" once a new head rebuilt the diff.
+    updated_notice: Option<String>,
+    /// A `reveal` asked before the diff existed.
+    pending_reveal: Option<(PathBuf, Option<u32>)>,
+    /// A commit whose revisions could not be made local, with its forge URL.
+    commit_error: Option<(RevisionError, String)>,
+    commit_task: Option<Task<()>>,
 }
 
 impl ChangeRequestTab {
-    pub fn new(reference: ChangeRef, title: String, cx: &mut Context<Self>) -> Self {
-        Self::restored(reference, title, InnerTab::Conversation, cx)
+    pub fn new(
+        reference: ChangeRef,
+        title: String,
+        worktree: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::restored(reference, title, InnerTab::Conversation, worktree, cx)
     }
 
     /// A tab brought back from the session: it shows its saved title at once
@@ -162,6 +216,7 @@ impl ChangeRequestTab {
         reference: ChangeRef,
         title: String,
         inner: InnerTab,
+        worktree: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
         let _ = cx;
@@ -188,6 +243,14 @@ impl ChangeRequestTab {
             checks_task: None,
             files_task: None,
             ci_timer: None,
+            worktree,
+            range: RangeState::Idle,
+            range_task: None,
+            range_subscription: None,
+            updated_notice: None,
+            pending_reveal: None,
+            commit_error: None,
+            commit_task: None,
         }
     }
 
@@ -340,6 +403,7 @@ impl ChangeRequestTab {
             self.note_rate_limited(error);
         }
         self.header.finish(result);
+        self.ensure_range(cx);
         cx.notify();
     }
 
@@ -371,6 +435,9 @@ impl ChangeRequestTab {
         };
         if idle {
             self.load_inner(inner, cx);
+        }
+        if inner == InnerTab::Files {
+            self.ensure_range(cx);
         }
         cx.notify();
     }
@@ -440,6 +507,218 @@ impl ChangeRequestTab {
         }
     }
 
+    /// Called whenever Files may need its diff: when it is selected, and when a
+    /// header lands. Does nothing until the header is here (it carries the
+    /// revisions), and nothing while the same revisions are fetching, ready
+    /// or already failed.
+    fn ensure_range(&mut self, cx: &mut Context<Self>) {
+        if self.inner != InnerTab::Files {
+            return;
+        }
+        let Some(header) = self.header.value() else {
+            return;
+        };
+        let Some(revisions) = header.revisions.clone() else {
+            self.range = RangeState::NoRevisions;
+            cx.notify();
+            return;
+        };
+        let target_branch = header.summary.target_branch.clone();
+        match &self.range {
+            RangeState::Fetching => return,
+            RangeState::Ready {
+                revisions: current,
+                ..
+            } if *current == revisions => return,
+            RangeState::Failed {
+                revisions: Some(failed),
+                ..
+            } if *failed == revisions => return,
+            _ => {}
+        }
+        let (carried, was_ready) = match &self.range {
+            RangeState::Ready { changes, .. } => (changes.read(cx).expanded_paths(), true),
+            _ => (Vec::new(), false),
+        };
+        let Some(source) = forge_source::source(cx) else {
+            self.range = RangeState::Failed {
+                error: RevisionError::Git {
+                    detail: "Change requests are unavailable in this build.".to_string(),
+                },
+                revisions: Some(revisions),
+            };
+            cx.notify();
+            return;
+        };
+        self.range = RangeState::Fetching;
+        let reference = self.reference.clone();
+        let worktree = self.worktree.clone();
+        let wanted = revisions.clone();
+        self.range_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    source.ensure_revisions(&worktree, &reference, &wanted, Some(&target_branch))
+                })
+                .await;
+            let _ = this.update(cx, |tab, cx| {
+                tab.range_ready(revisions, carried, was_ready, result, cx)
+            });
+        }));
+        cx.notify();
+    }
+
+    fn range_ready(
+        &mut self,
+        revisions: Revisions,
+        carried: Vec<PathBuf>,
+        was_ready: bool,
+        result: Result<(), RevisionError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(()) => {
+                let (worktree, base, head) = (
+                    self.worktree.clone(),
+                    revisions.base_sha.clone(),
+                    revisions.head_sha.clone(),
+                );
+                let changes = cx.new(|cx| ChangesTab::for_range(worktree, base, head, cx));
+                changes.update(cx, |changes, cx| {
+                    for path in &carried {
+                        changes.focus_path(path, cx);
+                    }
+                });
+                self.range_subscription = Some(cx.subscribe(
+                    &changes,
+                    |tab, _changes, event: &ChangesTabEvent, cx| match event {
+                        ChangesTabEvent::OpenFile(absolute) => {
+                            let relative = absolute
+                                .strip_prefix(&tab.worktree)
+                                .unwrap_or(absolute)
+                                .to_path_buf();
+                            let _ = tab.open_file(relative, None, cx);
+                        }
+                    },
+                ));
+                self.updated_notice = was_ready
+                    .then(|| format!("Updated to head {}", short(&revisions.head_sha)));
+                self.range = RangeState::Ready {
+                    revisions,
+                    changes: changes.clone(),
+                };
+                if let Some((path, line)) = self.pending_reveal.take() {
+                    changes.update(cx, |changes, cx| match line {
+                        Some(line) => changes.focus_line(&path, line as usize, cx),
+                        None => changes.focus_path(&path, cx),
+                    });
+                }
+            }
+            Err(error) => {
+                self.range = RangeState::Failed {
+                    error,
+                    revisions: Some(revisions),
+                };
+            }
+        }
+        cx.notify();
+    }
+
+    /// The failed diff's Retry: asks for the same revisions again, loading
+    /// the header first when there is none.
+    pub(crate) fn retry_range(&mut self, cx: &mut Context<Self>) {
+        self.range = RangeState::Idle;
+        if self.header.value().is_none() {
+            self.refresh(cx);
+        } else {
+            self.ensure_range(cx);
+        }
+    }
+
+    /// Shows `path` in Files and, given a line, opens the diff there. Before
+    /// the diff exists the request waits for it.
+    pub fn reveal(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        self.select_inner(InnerTab::Files, cx);
+        match &self.range {
+            RangeState::Ready { changes, .. } => {
+                let changes = changes.clone();
+                changes.update(cx, |changes, cx| match line {
+                    Some(line) => changes.focus_line(&path, line as usize, cx),
+                    None => changes.focus_path(&path, cx),
+                });
+            }
+            _ => self.pending_reveal = Some((path, line)),
+        }
+    }
+
+    /// *Open in editor* for a file of the diff. `Err` when there is no diff.
+    pub fn open_file(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let RangeState::Ready { revisions, changes } = &self.range else {
+            return Err("the diff is not ready".to_string());
+        };
+        let deleted = changes.read(cx).is_deleted(&path);
+        cx.emit(ChangeRequestTabEvent::OpenFile {
+            path,
+            line,
+            revisions: revisions.clone(),
+            deleted,
+        });
+        Ok(())
+    }
+
+    /// A commit of the change request: its revisions are made local first, and
+    /// then the host opens it (spec §5.4). A failure is shown above the list
+    /// with the forge as the remedy; the tab never opens the forge by itself.
+    pub fn open_commit(&mut self, sha: String, web_url: String, cx: &mut Context<Self>) {
+        self.commit_error = None;
+        let revisions = self.header.value().and_then(|header| {
+            header
+                .revisions
+                .clone()
+                .map(|revisions| (revisions, header.summary.target_branch.clone()))
+        });
+        let (Some((revisions, target_branch)), Some(source)) =
+            (revisions, forge_source::source(cx))
+        else {
+            // Nothing to fetch by: the host still opens it if it is local.
+            cx.emit(ChangeRequestTabEvent::OpenCommit { sha, web_url });
+            return;
+        };
+        let (reference, worktree) = (self.reference.clone(), self.worktree.clone());
+        self.commit_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    source.ensure_revisions(&worktree, &reference, &revisions, Some(&target_branch))
+                })
+                .await;
+            let _ = this.update(cx, |tab, cx| match result {
+                Ok(()) => cx.emit(ChangeRequestTabEvent::OpenCommit { sha, web_url }),
+                Err(error) => {
+                    tab.commit_error = Some((error, web_url));
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// `open_commit` by sha alone, for the control socket: the URL comes from
+    /// the loaded commit list.
+    pub fn open_commit_by_sha(&mut self, sha: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let url = self
+            .commits
+            .value()
+            .and_then(|listing| listing.items.iter().find(|commit| commit.sha == sha))
+            .map(|commit| commit.web_url.clone())
+            .ok_or_else(|| "that commit is not in the loaded list".to_string())?;
+        self.open_commit(sha.to_string(), url, cx);
+        Ok(())
+    }
+
     /// The strip's glyph colour, once the state is known.
     pub fn state_color(&self, theme: &Theme) -> Option<Hsla> {
         self.header
@@ -448,7 +727,7 @@ impl ChangeRequestTab {
     }
 
     /// What the control socket reports about this tab (Task 9).
-    pub fn report(&self) -> Vec<(String, String)> {
+    pub fn report(&self, cx: &App) -> Vec<(String, String)> {
         let (state, rows) = if self.unreachable.is_some() {
             ("unreachable", 0)
         } else {
@@ -466,11 +745,65 @@ impl ChangeRequestTab {
                     slot_state(&self.checks),
                     rows(self.checks.value().map(|l| l.items.len())),
                 ),
-                InnerTab::Files => (
-                    slot_state(&self.files),
-                    rows(self.files.value().map(|l| l.items.len())),
-                ),
+                InnerTab::Files => match &self.range {
+                    RangeState::Ready { changes, .. } => (
+                        "loaded",
+                        changes
+                            .read(cx)
+                            .report()
+                            .sections
+                            .iter()
+                            .map(|section| section.files.len())
+                            .sum(),
+                    ),
+                    RangeState::Fetching => ("loading", 0),
+                    RangeState::Failed { .. } => ("error", 0),
+                    _ => (
+                        slot_state(&self.files),
+                        rows(self.files.value().map(|l| l.items.len())),
+                    ),
+                },
             }
+        };
+        let (files_mode, head) = match &self.range {
+            RangeState::Idle => ("idle", String::new()),
+            RangeState::Fetching => ("fetching", String::new()),
+            RangeState::Ready { revisions, .. } => ("diff", short(&revisions.head_sha).to_string()),
+            RangeState::Failed { .. } => ("error", String::new()),
+            RangeState::NoRevisions => ("no-revisions", String::new()),
+        };
+        let (diff_files, diff_summary, files_focus) = match &self.range {
+            RangeState::Ready { changes, .. } => {
+                let changes = changes.read(cx);
+                let mut summary: Vec<String> = changes
+                    .report()
+                    .sections
+                    .iter()
+                    .flat_map(|section| section.files.iter())
+                    .map(|file| {
+                        format!(
+                            "{} +{} -{}",
+                            file.path.display(),
+                            file.additions,
+                            file.deletions
+                        )
+                    })
+                    .collect();
+                summary.sort();
+                (
+                    summary.len().to_string(),
+                    summary.join("|"),
+                    changes
+                        .focused_path()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                )
+            }
+            _ => ("0".to_string(), String::new(), String::new()),
+        };
+        let files_error = match &self.range {
+            RangeState::Failed { error, .. } => error.to_string(),
+            _ => String::new(),
         };
         vec![
             ("label".to_string(), self.reference.label()),
@@ -478,6 +811,30 @@ impl ChangeRequestTab {
             ("inner".to_string(), self.inner.as_str().to_string()),
             ("state".to_string(), state.to_string()),
             ("rows".to_string(), rows.to_string()),
+            ("files_mode".to_string(), files_mode.to_string()),
+            ("head".to_string(), head),
+            ("diff_files".to_string(), diff_files),
+            ("diff_summary".to_string(), diff_summary),
+            ("files_focus".to_string(), files_focus),
+            ("files_error".to_string(), files_error),
+            (
+                "commit_error".to_string(),
+                self.commit_error
+                    .as_ref()
+                    .map(|(error, _)| error.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "notice".to_string(),
+                self.updated_notice.clone().unwrap_or_default(),
+            ),
+            (
+                "list_rows".to_string(),
+                self.files
+                    .value()
+                    .map_or(0, |list| list.items.len())
+                    .to_string(),
+            ),
         ]
     }
 }
@@ -684,6 +1041,27 @@ fn slot_view<T>(
             .child(loaded(value))
             .into_any_element(),
     }
+}
+
+/// A `path:line` that takes the reader to that line of the diff.
+fn line_link(
+    id: (&'static str, usize),
+    text: String,
+    path: String,
+    line: Option<u32>,
+    theme: &Theme,
+    entity: Entity<ChangeRequestTab>,
+) -> AnyElement {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .text_color(theme.accent)
+        .child(text)
+        .on_click(move |_, _, cx| {
+            let path = PathBuf::from(&path);
+            entity.update(cx, |tab, cx| tab.reveal(path, line, cx));
+        })
+        .into_any_element()
 }
 
 impl EventEmitter<ChangeRequestTabEvent> for ChangeRequestTab {}
@@ -929,14 +1307,20 @@ impl ChangeRequestTab {
                     );
                 }
                 for (index, item) in header.timeline.iter().enumerate() {
-                    column = column.child(self.render_timeline_item(index, item, theme));
+                    column = column.child(self.render_timeline_item(index, item, theme, entity));
                 }
                 column.into_any_element()
             },
         )
     }
 
-    fn render_timeline_item(&self, index: usize, item: &TimelineItem, theme: &Theme) -> AnyElement {
+    fn render_timeline_item(
+        &self,
+        index: usize,
+        item: &TimelineItem,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
         let now = style::now();
         let line = |who: String, what: String, at: Option<i64>| {
             div()
@@ -997,19 +1381,28 @@ impl ChangeRequestTab {
                     .gap(px(4.0))
                     .child(line(author.clone(), verb.to_string(), *at))
                     .when_some(body, |this, body| this.child(body))
-                    .children(line_comments.iter().map(|comment| {
+                    .children(line_comments.iter().enumerate().map(|(position, comment)| {
                         div()
                             .pl(px(12.0))
+                            .flex()
+                            .gap(px(6.0))
                             .text_size(theme.typography.footnote)
                             .text_color(theme.text_muted)
-                            .child(format!(
-                                "on {}:{} — {}",
-                                comment.path,
-                                comment
-                                    .line
-                                    .map_or("?".to_string(), |line| line.to_string()),
-                                comment.body
+                            .child(line_link(
+                                ("change-request-line-comment", index * 1000 + position),
+                                format!(
+                                    "on {}:{}",
+                                    comment.path,
+                                    comment
+                                        .line
+                                        .map_or("?".to_string(), |line| line.to_string())
+                                ),
+                                comment.path.clone(),
+                                comment.line,
+                                theme,
+                                entity.clone(),
                             ))
+                            .child(format!("— {}", comment.body))
                     }))
                     .into_any_element()
             }
@@ -1017,17 +1410,26 @@ impl ChangeRequestTab {
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(line(
-                    comment.author.clone(),
-                    format!(
-                        "commented on {}:{}",
-                        comment.path,
-                        comment
-                            .line
-                            .map_or("?".to_string(), |line| line.to_string())
-                    ),
-                    comment.at,
-                ))
+                .child(line(comment.author.clone(), "commented".to_string(), comment.at))
+                .child(
+                    div()
+                        .pl(px(12.0))
+                        .text_size(theme.typography.footnote)
+                        .child(line_link(
+                            ("change-request-line-comment", index * 1000),
+                            format!(
+                                "on {}:{}",
+                                comment.path,
+                                comment
+                                    .line
+                                    .map_or("?".to_string(), |line| line.to_string())
+                            ),
+                            comment.path.clone(),
+                            comment.line,
+                            theme,
+                            entity.clone(),
+                        )),
+                )
                 .when_some(body, |this, body| this.child(body))
                 .into_any_element(),
             TimelineItem::Event { actor, kind, at } => {
@@ -1061,6 +1463,26 @@ impl ChangeRequestTab {
         div()
             .flex()
             .flex_col()
+            .when_some(self.commit_error.clone(), |this, (error, web_url)| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(6.0))
+                        .pb(px(6.0))
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.danger)
+                        .child(div().flex_1().child(error.to_string()))
+                        .child(button(
+                            "change-request-commit-forge",
+                            Icon::ArrowUpRight,
+                            Some("Open on the forge"),
+                            theme,
+                            move |cx| cx.open_url(&web_url),
+                        )),
+                )
+            })
             .children(listing.items.iter().enumerate().map(|(index, commit)| {
                 let entity = entity.clone();
                 let sha = commit.sha.clone();
@@ -1076,12 +1498,7 @@ impl ChangeRequestTab {
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
                     .on_click(move |_, _, cx| {
-                        entity.update(cx, |_, cx| {
-                            cx.emit(ChangeRequestTabEvent::OpenCommit {
-                                sha: sha.clone(),
-                                web_url: url.clone(),
-                            })
-                        })
+                        entity.update(cx, |tab, cx| tab.open_commit(sha.clone(), url.clone(), cx))
                     })
                     .child(
                         IconElement::new(Icon::GitCommit, IconSize::Small)
@@ -1311,6 +1728,111 @@ impl ChangeRequestTab {
             .into_any_element()
     }
 
+    fn render_files_tab(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
+        let list = |this: &Self| {
+            slot_view(
+                &this.files,
+                "files",
+                theme,
+                Self::retry_handle(entity),
+                None,
+                |listing| this.render_files(listing, theme),
+            )
+        };
+        let note = |text: String| {
+            div()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        match &self.range {
+            RangeState::Ready { revisions, changes } => div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.text_muted)
+                        .child(format!(
+                            "base {} … head {}",
+                            short(&revisions.base_sha),
+                            short(&revisions.head_sha)
+                        ))
+                        .when_some(self.updated_notice.clone(), |this, notice| {
+                            this.child(div().text_color(theme.text_faint).child(notice))
+                        }),
+                )
+                .child(div().flex_1().min_h(px(0.0)).child(changes.clone()))
+                .into_any_element(),
+            RangeState::Fetching => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(note(format!(
+                    "Fetching {}'s commits for the diff…",
+                    self.reference.label()
+                )))
+                .child(list(self))
+                .into_any_element(),
+            RangeState::Failed { error, .. } => {
+                let retry = entity.clone();
+                let forge_url = self
+                    .header
+                    .value()
+                    .map(|header| match self.reference.forge {
+                        Forge::GitHub => format!("{}/files", header.summary.web_url),
+                        Forge::GitLab => format!("{}/diffs", header.summary.web_url),
+                    });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_color(theme.danger)
+                            .child(div().flex_1().child(error.to_string()))
+                            .child(button(
+                                "change-request-range-retry",
+                                Icon::RefreshCw,
+                                Some("Retry"),
+                                theme,
+                                move |cx| retry.update(cx, |tab, cx| tab.retry_range(cx)),
+                            ))
+                            .when_some(forge_url, |this, url| {
+                                this.child(button(
+                                    "change-request-range-forge",
+                                    Icon::ArrowUpRight,
+                                    Some("Open on the forge"),
+                                    theme,
+                                    move |cx| cx.open_url(&url),
+                                ))
+                            }),
+                    )
+                    .child(list(self))
+                    .into_any_element()
+            }
+            RangeState::NoRevisions => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(note(
+                    "The forge does not report this change request's revisions.".to_string(),
+                ))
+                .child(list(self))
+                .into_any_element(),
+            RangeState::Idle => list(self),
+        }
+    }
+
     fn render_unreachable(
         &self,
         message: String,
@@ -1385,11 +1907,20 @@ impl Render for ChangeRequestTab {
                             self.render_checks(listing, &theme, &entity)
                         })
                     }
-                    InnerTab::Files => {
-                        slot_view(&self.files, "files", &theme, retry, None, |listing| {
-                            self.render_files(listing, &theme)
-                        })
-                    }
+                    InnerTab::Files => self.render_files_tab(&theme, &entity),
+                };
+                let embedded =
+                    self.inner == InnerTab::Files && matches!(self.range, RangeState::Ready { .. });
+                let body = div()
+                    .id("change-request-body")
+                    .debug_selector(|| "change-request-body".to_owned())
+                    .flex_1()
+                    .min_h(px(0.0));
+                // The diff scrolls itself; a scroll container around it would fight it.
+                let body = if embedded {
+                    body.overflow_hidden()
+                } else {
+                    body.overflow_y_scroll().p(px(16.0))
                 };
                 div()
                     .flex_1()
@@ -1397,16 +1928,7 @@ impl Render for ChangeRequestTab {
                     .flex()
                     .flex_col()
                     .child(self.render_inner_strip(&theme, &entity))
-                    .child(
-                        div()
-                            .id("change-request-body")
-                            .debug_selector(|| "change-request-body".to_owned())
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .overflow_y_scroll()
-                            .p(px(16.0))
-                            .child(content),
-                    )
+                    .child(body.child(content))
                     .into_any_element()
             }
         };
@@ -1426,6 +1948,7 @@ impl Render for ChangeRequestTab {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
 
@@ -1434,18 +1957,20 @@ mod tests {
     use sirio_theme::Theme;
 
     use super::*;
+    use crate::changes::ChangesTabEvent;
     use crate::forge_source::testing::{self, CannedForge, FakeSource};
-    use crate::forge_source::{self, Connection};
+    use crate::forge_source::{self, Connection, RevisionError};
 
     fn pump_until(cx: &TestAppContext, mut condition: impl FnMut() -> bool) {
         cx.executor().allow_parking();
-        for _ in 0..600 {
+        // These tests wait on real `git` processes, as `changes.rs`'s do.
+        for _ in 0..3000 {
             if condition() {
                 return;
             }
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(100));
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
             cx.run_until_parked();
         }
         panic!("condition never became true within the pump budget");
@@ -1505,7 +2030,7 @@ mod tests {
         let source = FakeSource::ready(testing::github_client(forge.clone()), None);
         cx.update(|cx| forge_source::set_source(source, cx));
         let tab =
-            cx.new(|cx| ChangeRequestTab::new(testing::reference(101), "old title".into(), cx));
+            cx.new(|cx| ChangeRequestTab::new(testing::reference(101), "old title".into(), std::env::temp_dir(), cx));
         let titles = Rc::new(RefCell::new(Vec::new()));
         let seen = titles.clone();
         cx.update(|cx| {
@@ -1536,7 +2061,7 @@ mod tests {
         let forge = forge_with_header();
         let source = FakeSource::ready(testing::github_client(forge.clone()), None);
         cx.update(|cx| forge_source::set_source(source, cx));
-        let tab = cx.new(|cx| ChangeRequestTab::new(testing::reference(101), String::new(), cx));
+        let tab = cx.new(|cx| ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx));
         tab.update(cx, |tab, cx| tab.on_selected(cx));
         pump_until(cx, || {
             tab.read_with(cx, |tab, _| tab.header.value().is_some())
@@ -1567,7 +2092,7 @@ mod tests {
         forge.fail("ChangeRequestChecks", 500);
         let source = FakeSource::ready(testing::github_client(forge), None);
         cx.update(|cx| forge_source::set_source(source, cx));
-        let tab = cx.new(|cx| ChangeRequestTab::new(testing::reference(101), String::new(), cx));
+        let tab = cx.new(|cx| ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx));
         tab.update(cx, |tab, cx| tab.on_selected(cx));
         pump_until(cx, || {
             tab.read_with(cx, |tab, _| tab.header.value().is_some())
@@ -1597,6 +2122,7 @@ mod tests {
                 testing::reference(101),
                 "Fix the login redirect".into(),
                 InnerTab::Checks,
+                std::env::temp_dir(),
                 cx,
             )
         });
@@ -1620,5 +2146,299 @@ mod tests {
             vec!["ghe.test".to_string()],
             "Retry asks the host again"
         );
+    }
+
+    struct RepoDir(PathBuf);
+
+    impl Drop for RepoDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git must be installed to run these tests");
+        assert!(
+            output.status.success(),
+            "`git {args:?}` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit_all(dir: &Path, message: &str) {
+        git(dir, &["add", "-A"]);
+        git(dir, &["-c", "commit.gpgSign=false", "commit", "-q", "-m", message]);
+    }
+
+    /// `main` → `feat`: `a.txt` edited at line 42 of 60, `c.txt` added,
+    /// `gone.txt` deleted. Returns the repository and its `(base, head)`.
+    fn range_repo() -> (RepoDir, String, String) {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sirio-crtab-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create repo dir");
+        let dir = std::fs::canonicalize(&dir).expect("canonicalize");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["config", "user.email", "tests@example.invalid"]);
+        git(&dir, &["config", "user.name", "Sirio tests"]);
+        let sixty = |changed: Option<usize>| -> String {
+            (1..=60)
+                .map(|n| if Some(n) == changed { format!("edited {n}\n") } else { format!("line {n}\n") })
+                .collect()
+        };
+        std::fs::write(dir.join("a.txt"), sixty(None)).expect("a.txt");
+        std::fs::write(dir.join("gone.txt"), "bye\n").expect("gone.txt");
+        commit_all(&dir, "base");
+        let base = git(&dir, &["rev-parse", "HEAD"]);
+        git(&dir, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(dir.join("a.txt"), sixty(Some(42))).expect("edit a.txt");
+        std::fs::write(dir.join("c.txt"), "new\n").expect("c.txt");
+        git(&dir, &["rm", "-q", "gone.txt"]);
+        commit_all(&dir, "change");
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        (RepoDir(dir), base, head)
+    }
+
+    /// One more commit on `feat`; the new head.
+    fn push_another(dir: &Path) -> String {
+        std::fs::write(dir.join("d.txt"), "later\n").expect("d.txt");
+        commit_all(dir, "later");
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn report_value(tab: &ChangeRequestTab, cx: &App, key: &str) -> String {
+        tab.report(cx)
+            .into_iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .unwrap_or_default()
+    }
+
+    fn forge_for(base: &str, head: &str) -> Arc<CannedForge> {
+        let forge = Arc::new(CannedForge::default());
+        forge.answer("Viewer", testing::viewer());
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(101, "Fix the login redirect", "## What", base, head),
+        );
+        forge.answer(
+            "ChangeRequestFiles",
+            testing::files(&[("a.txt", 1, 1, "MODIFIED"), ("c.txt", 1, 0, "ADDED"), ("gone.txt", 0, 1, "DELETED")]),
+        );
+        forge.answer("ChangeRequestCommits", testing::commits());
+        forge
+    }
+
+    fn open_tab(
+        cx: &mut TestAppContext,
+        source: Arc<FakeSource>,
+        repo: &RepoDir,
+        inner: InnerTab,
+    ) -> Entity<ChangeRequestTab> {
+        cx.update(|cx| {
+            Theme::init(cx);
+            forge_source::set_source(source.clone(), cx);
+        });
+        let tab = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), "Fix".to_string(), repo.0.clone(), cx)
+        });
+        tab.update(cx, |tab, cx| {
+            tab.on_selected(cx);
+            tab.select_inner(inner, cx);
+        });
+        tab
+    }
+
+    fn ready_changes(tab: &Entity<ChangeRequestTab>, cx: &TestAppContext) -> Entity<crate::changes::ChangesTab> {
+        tab.read_with(cx, |tab, _| match &tab.range {
+            RangeState::Ready { changes, .. } => changes.clone(),
+            _ => panic!("the diff is not ready"),
+        })
+    }
+
+    #[gpui::test]
+    async fn files_makes_the_revisions_local_then_shows_the_diff(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let source = FakeSource::ready(testing::github_client(forge_for(&base, &head)), None);
+        let tab = open_tab(cx, source.clone(), &repo, InnerTab::Files);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "files_mode") == "diff"));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "state"), "loaded");
+            assert_eq!(report_value(tab, cx, "head"), head[..7]);
+        });
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "diff_files") == "3"));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(
+                report_value(tab, cx, "diff_summary"),
+                "a.txt +1 -1|c.txt +1 -0|gone.txt +0 -1"
+            );
+        });
+        let ensured = source.ensured.lock().unwrap().clone();
+        assert_eq!(ensured.len(), 1, "one fetch for the tab");
+        let (reference, revisions, target) = &ensured[0];
+        assert_eq!(*reference, testing::reference(101));
+        assert_eq!(
+            (revisions.base_sha.as_str(), revisions.head_sha.as_str(), target.as_deref()),
+            (base.as_str(), head.as_str(), Some("main"))
+        );
+    }
+
+    #[gpui::test]
+    async fn a_failed_fetch_keeps_the_forges_list_and_says_why(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let source = FakeSource::ready(testing::github_client(forge_for(&base, &head)), None);
+        *source.revisions_answer.lock().unwrap() =
+            Err(RevisionError::FetchFailed { detail: "boom".to_string() });
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "error" && report_value(tab, cx, "list_rows") == "3"
+            })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert!(report_value(tab, cx, "files_error").contains("boom"));
+            assert_eq!(report_value(tab, cx, "state"), "error");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_forge_that_reports_no_revisions_leaves_its_own_list(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestHeader", testing::header(101, "Fix the login redirect", "## What"));
+        let source = FakeSource::ready(testing::github_client(forge), None);
+        let tab = open_tab(cx, source.clone(), &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "no-revisions" && report_value(tab, cx, "rows") == "3"
+            })
+        });
+        assert!(source.ensured.lock().unwrap().is_empty(), "nothing to fetch by");
+    }
+
+    #[gpui::test]
+    async fn a_new_head_rebuilds_the_range_and_keeps_the_opened_files(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "files_mode") == "diff"));
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |changes, cx| changes.focus_path(Path::new("a.txt"), cx));
+        pump_until(cx, || {
+            changes.read_with(cx, |changes, _| changes.expanded_paths() == vec![PathBuf::from("a.txt")])
+        });
+
+        let newer = push_another(&repo.0);
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &newer),
+        );
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "head") == newer[..7] && report_value(tab, cx, "files_mode") == "diff"
+            })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert!(report_value(tab, cx, "notice").contains("Updated to head"));
+        });
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| match &tab.range {
+                RangeState::Ready { changes, .. } => {
+                    changes.read(cx).expanded_paths() == vec![PathBuf::from("a.txt")]
+                }
+                _ => false,
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_line_comment_link_reveals_its_file_in_files(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let source = FakeSource::ready(testing::github_client(forge_for(&base, &head)), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Conversation);
+        // Before the header, hence the range, has loaded: the request waits.
+        tab.update(cx, |tab, cx| tab.reveal(PathBuf::from("a.txt"), Some(42), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "inner") == "files" && report_value(tab, cx, "files_focus") == "a.txt"
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn opening_a_file_from_the_diff_asks_the_host_with_the_revisions(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let source = FakeSource::ready(testing::github_client(forge_for(&base, &head)), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        let events: Rc<RefCell<Vec<ChangeRequestTabEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|cx| {
+            cx.subscribe(&tab, move |_, event: &ChangeRequestTabEvent, _| {
+                // The header's title arrives as an event too; only the opens matter here.
+                if matches!(event, ChangeRequestTabEvent::OpenFile { .. }) {
+                    sink.borrow_mut().push(event.clone())
+                }
+            })
+            .detach();
+        });
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "diff_files") == "3"));
+        let changes = ready_changes(&tab, cx);
+        // The same event the `↗` button of an expanded row emits.
+        changes.update(cx, |_, cx| cx.emit(ChangesTabEvent::OpenFile(repo.0.join("a.txt"))));
+        changes.update(cx, |_, cx| cx.emit(ChangesTabEvent::OpenFile(repo.0.join("gone.txt"))));
+        cx.run_until_parked();
+        let seen = events.borrow().clone();
+        assert!(
+            matches!(&seen[0], ChangeRequestTabEvent::OpenFile { path, line: None, deleted: false, revisions }
+                if path == Path::new("a.txt") && revisions.head_sha == head),
+            "{seen:?}"
+        );
+        assert!(
+            matches!(&seen[1], ChangeRequestTabEvent::OpenFile { path, deleted: true, .. }
+                if path == Path::new("gone.txt")),
+            "{seen:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_commit_click_fetches_first_and_a_failed_fetch_offers_the_forge(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let source = FakeSource::ready(testing::github_client(forge_for(&base, &head)), None);
+        let tab = open_tab(cx, source.clone(), &repo, InnerTab::Conversation);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "state") == "loaded"));
+        let events: Rc<RefCell<Vec<ChangeRequestTabEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|cx| {
+            cx.subscribe(&tab, move |_, event: &ChangeRequestTabEvent, _| {
+                sink.borrow_mut().push(event.clone())
+            })
+            .detach();
+        });
+        let sha = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let url = "https://ghe.test/acme/widgets/commit/1111111".to_string();
+
+        tab.update(cx, |tab, cx| tab.open_commit(sha.clone(), url.clone(), cx));
+        pump_until(cx, || !events.borrow().is_empty());
+        assert_eq!(
+            events.borrow()[0],
+            ChangeRequestTabEvent::OpenCommit { sha: sha.clone(), web_url: url.clone() }
+        );
+        assert_eq!(source.ensured.lock().unwrap().len(), 1, "the commit's revisions were made local first");
+
+        events.borrow_mut().clear();
+        *source.revisions_answer.lock().unwrap() =
+            Err(RevisionError::FetchFailed { detail: "boom".to_string() });
+        tab.update(cx, |tab, cx| tab.open_commit(sha, url, cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| report_value(tab, cx, "commit_error").contains("boom"))
+        });
+        assert!(events.borrow().is_empty(), "a commit that could not be fetched is not opened");
     }
 }
