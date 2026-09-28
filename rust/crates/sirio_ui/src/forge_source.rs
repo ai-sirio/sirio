@@ -61,6 +61,9 @@ pub struct HostRow {
 /// them on the background executor.
 pub trait ChangeRequestSource: Send + Sync {
     fn connect(&self, worktree: &Path) -> Connection;
+    /// The branch `worktree` has checked out now; `None` on a detached HEAD.
+    /// `connect` reads it once, so a panel that stays open asks again.
+    fn current_branch(&self, worktree: &Path) -> Option<String>;
     /// A client for a change request a tab was opened or restored with.
     fn client_for(&self, reference: &ChangeRef) -> Result<Arc<ForgeClient>, Connection>;
     /// Forget what was resolved for `host`, so the next call asks again.
@@ -267,11 +270,18 @@ pub(crate) mod testing {
         pub(crate) tokens: Mutex<Vec<(String, Forge, String)>>,
         pub(crate) token_answer: Mutex<Result<String, ForgeError>>,
         pub(crate) connects: Mutex<u32>,
+        /// What `git` says the worktree has checked out right now.
+        head: Mutex<Option<String>>,
     }
 
     impl FakeSource {
         pub(crate) fn with(connection: Connection) -> Arc<Self> {
+            let head = match &connection {
+                Connection::Ready(ready) => ready.branch.clone(),
+                _ => None,
+            };
             Arc::new(Self {
+                head: Mutex::new(head),
                 connection: Mutex::new(connection),
                 forgotten: Mutex::new(Vec::new()),
                 forges: Mutex::new(Vec::new()),
@@ -293,12 +303,21 @@ pub(crate) mod testing {
         pub(crate) fn set(&self, connection: Connection) {
             *self.connection.lock().unwrap() = connection;
         }
+
+        /// Checks another branch out, as a `git switch` would.
+        pub(crate) fn switch_to(&self, branch: &str) {
+            *self.head.lock().unwrap() = Some(branch.to_string());
+        }
     }
 
     impl ChangeRequestSource for FakeSource {
         fn connect(&self, _worktree: &Path) -> Connection {
             *self.connects.lock().unwrap() += 1;
             self.connection.lock().unwrap().clone()
+        }
+
+        fn current_branch(&self, _worktree: &Path) -> Option<String> {
+            self.head.lock().unwrap().clone()
         }
 
         fn client_for(&self, _reference: &ChangeRef) -> Result<Arc<ForgeClient>, Connection> {
