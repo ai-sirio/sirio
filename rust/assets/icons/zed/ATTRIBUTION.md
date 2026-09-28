@@ -27,3 +27,10 @@ them once Preview and Code stopped being text labels. `eye_off.svg` followed
 from that commit for the Files hidden-entry switch. `code.svg` carries
 width and height but no `viewBox`, exactly as upstream serves it — the same
 shape `public.svg`, `rotate_cw.svg` and `sparkle.svg` already have here.
+
+`pull_request.svg`, `person.svg`, `check.svg`, `x_circle.svg`, `clock.svg`,
+`circle.svg`, `dash.svg`, `user_check.svg`, `warning.svg`, `git_commit.svg`,
+`arrow_up_right.svg` and `copy.svg` were added on 2026-09-27 under the same
+rule, from that same commit: the right panel's pull/merge request view and
+its detail tab draw a change request's state, CI, reviews, commits and
+links with them.
