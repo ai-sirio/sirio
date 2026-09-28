@@ -10583,6 +10583,12 @@ impl SirioWorkspace {
     fn select_tab(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             self.active_tab = index;
+            // A change request refreshes when its tab is chosen (spec §9).
+            self.tabs[index].panes.for_each(&mut |_, content| {
+                if let TabContent::ChangeRequest(view) = content {
+                    view.update(cx, |tab, cx| tab.on_selected(cx));
+                }
+            });
             self.center_split.select_tab(id, &self.tabs);
             self.reveal_secondary_for_active_tab();
             if let Some(window) = window {
@@ -12952,6 +12958,7 @@ impl SirioWorkspace {
         let tab_title = ChangeRequestTab::tab_title(&reference, &title);
         let view = cx.new(|cx| ChangeRequestTab::new(reference, title, cx));
         Self::subscribe_change_request_tab(&view, cx);
+        view.update(cx, |tab, cx| tab.on_selected(cx));
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
@@ -15394,6 +15401,17 @@ impl SirioWorkspace {
         } else {
             theme.text_faint
         };
+        let change_request_tint = (tab.kind == TabKind::ChangeRequest)
+            .then(|| {
+                let mut tint = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::ChangeRequest(view) = content {
+                        tint = view.read(cx).state_color(&theme);
+                    }
+                });
+                tint
+            })
+            .flatten();
         let width = Self::tab_render_width(tab);
         let close_entity = entity.clone();
         let menu_entity = entity.clone();
@@ -15504,7 +15522,7 @@ impl SirioWorkspace {
                 div()
                     .w(px(14.0))
                     .flex_none()
-                    .text_color(glyph_color)
+                    .text_color(change_request_tint.unwrap_or(glyph_color.into()))
                     .child(IconElement::new(icon, IconSize::Small)),
             )
             .when(!renaming, |this| {

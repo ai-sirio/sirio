@@ -14,6 +14,7 @@ extern crate self as sirio_ui;
 
 pub mod caret;
 pub mod change_request_tab;
+mod change_request_style;
 pub mod changes;
 pub mod chat;
 pub mod controls;
