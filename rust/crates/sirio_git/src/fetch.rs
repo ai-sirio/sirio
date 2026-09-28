@@ -79,11 +79,43 @@ pub fn fetch_refs(
     match run(repo, remote, &spelled, timeout, true) {
         // `--no-write-fetch-head` needs git 2.29; an older git says so, and
         // then `FETCH_HEAD` is written — harmless, but never a failure.
-        Err(FetchError::Failed { detail }) if detail.contains("unknown option") => {
-            run(repo, remote, &spelled, timeout, false)
-        }
-        other => other,
+        Err(Failure::FlagUnknown) => run(repo, remote, &spelled, timeout, false).map_err(Failure::into_error),
+        other => other.map_err(Failure::into_error),
     }
+}
+
+/// Why one `git fetch` attempt failed.
+#[derive(Debug, PartialEq, Eq)]
+enum Failure {
+    /// git is older than 2.29 and refused `--no-write-fetch-head`.
+    FlagUnknown,
+    Fetch(FetchError),
+}
+
+impl Failure {
+    fn into_error(self) -> FetchError {
+        match self {
+            Self::FlagUnknown => FetchError::Failed {
+                detail: "git does not know --no-write-fetch-head".to_string(),
+            },
+            Self::Fetch(error) => error,
+        }
+    }
+}
+
+/// Reads a failed fetch's whole stderr: git's own refusal of
+/// `--no-write-fetch-head` comes first, above its full usage text, so it is
+/// looked for before the stderr is cut down to the tail the user sees.
+fn classify(stderr: &str) -> Failure {
+    let refused = stderr
+        .lines()
+        .any(|line| line.trim() == "error: unknown option `no-write-fetch-head'");
+    if refused {
+        return Failure::FlagUnknown;
+    }
+    Failure::Fetch(FetchError::Failed {
+        detail: tail(&redact_credentials(stderr)),
+    })
 }
 
 fn run(
@@ -92,10 +124,24 @@ fn run(
     spelled: &[String],
     timeout: Duration,
     no_write_fetch_head: bool,
-) -> Result<(), FetchError> {
+) -> Result<(), Failure> {
     // An empty `--refmap` stops the remote's configured fetch refspec from
-    // also updating `refs/remotes/<remote>/…` for a branch named here.
-    let mut args = vec!["fetch", "--no-tags", "--quiet", "--refmap="];
+    // also updating `refs/remotes/<remote>/…` for a branch named here, and
+    // `--no-recurse-submodules` keeps a moved submodule pointer from fetching
+    // inside the submodule. No auto-gc or auto-maintenance after the fetch:
+    // it could detach and outlive the timeout. Config keys, not options, so
+    // an older git ignores them instead of refusing the fetch.
+    let mut args = vec![
+        "-c",
+        "gc.auto=0",
+        "-c",
+        "maintenance.auto=false",
+        "fetch",
+        "--no-tags",
+        "--quiet",
+        "--refmap=",
+        "--no-recurse-submodules",
+    ];
     if no_write_fetch_head {
         args.push("--no-write-fetch-head");
     }
@@ -104,13 +150,14 @@ fn run(
     args.extend(spelled.iter().map(String::as_str));
     match git::run_remote(&args, repo, timeout) {
         Ok(output) if output.is_success() => Ok(()),
-        Ok(output) => Err(FetchError::Failed {
+        Ok(output) if no_write_fetch_head => Err(classify(&output.stderr)),
+        Ok(output) => Err(Failure::Fetch(FetchError::Failed {
             detail: tail(&redact_credentials(&output.stderr)),
-        }),
-        Err(GitError::TimedOut { .. }) => Err(FetchError::TimedOut),
-        Err(error) => Err(FetchError::Failed {
+        })),
+        Err(GitError::TimedOut { .. }) => Err(Failure::Fetch(FetchError::TimedOut)),
+        Err(error) => Err(Failure::Fetch(FetchError::Failed {
             detail: redact_credentials(&error.to_string()),
-        }),
+        })),
     }
 }
 
@@ -238,5 +285,88 @@ mod tests {
             );
         }
         assert!(FetchRefspec::new("refs/pull/7/head", "refs/sirio/change-requests/o/7/head").is_ok());
+    }
+
+    /// What git older than 2.29 prints for `--no-write-fetch-head`: the
+    /// refusal, then its whole usage text (taken from a real `git fetch`).
+    const OLD_GIT_REFUSAL: &str = r#"error: unknown option `no-write-fetch-head'
+usage: git fetch [<options>] [<repository> [<refspec>...]]
+   or: git fetch [<options>] <group>
+   or: git fetch --multiple [<options>] [(<repository>|<group>)...]
+   or: git fetch --all [<options>]
+
+    -v, --[no-]verbose    be more verbose
+    -q, --[no-]quiet      be more quiet
+    --[no-]all            fetch from all remotes
+    --[no-]set-upstream   set upstream for git pull/fetch
+    -a, --[no-]append     append to .git/FETCH_HEAD instead of overwriting
+    --[no-]atomic         use atomic transaction to update references
+    --[no-]upload-pack <path>
+                          path to upload pack on remote end
+    -f, --[no-]force      force overwrite of local reference
+    -m, --[no-]multiple   fetch from multiple remotes
+    -t, --[no-]tags       fetch all tags and associated objects
+    -n                    do not fetch all tags (--no-tags)
+    -j, --[no-]jobs <n>   number of submodules fetched in parallel
+    --[no-]prefetch       modify the refspec to place all refs within refs/prefetch/
+    -p, --[no-]prune      prune remote-tracking branches no longer on remote
+    -P, --[no-]prune-tags prune local tags no longer on remote and clobber changed tags
+    --[no-]recurse-submodules[=<on-demand>]
+                          control recursive fetching of submodules
+    --[no-]dry-run        dry run
+    --[no-]porcelain      machine-readable output
+    -k, --[no-]keep       keep downloaded pack
+    -u, --[no-]update-head-ok
+                          allow updating of HEAD ref
+    --[no-]progress       force progress reporting
+    --[no-]depth <depth>  deepen history of shallow clone
+    --[no-]shallow-since <time>
+                          deepen history of shallow repository based on time
+    --[no-]shallow-exclude <ref>
+                          deepen history of shallow clone, excluding ref
+    --[no-]deepen <n>     deepen history of shallow clone
+    --unshallow           convert to a complete repository
+    --refetch             re-fetch without negotiating common commits
+    --[no-]update-shallow accept refs that update .git/shallow
+    --refmap <refmap>     specify fetch refmap
+    -o, --[no-]server-option <server-specific>
+                          option to transmit
+    -4, --ipv4            use IPv4 addresses only
+    -6, --ipv6            use IPv6 addresses only
+    --[no-]negotiation-restrict <revision>
+                          report that we have only objects reachable from this object
+    --[no-]negotiation-tip <revision>
+                          alias of --negotiation-restrict
+    --[no-]negotiation-include <revision>
+                          ensure this ref is always sent as a negotiation have
+    --[no-]negotiate-only do not fetch a packfile; instead, print ancestors of negotiation tips
+    --[no-]filter <args>  object filtering
+    --[no-]auto-maintenance
+                          run 'maintenance --auto' after fetching
+    --[no-]auto-gc        run 'maintenance --auto' after fetching
+    --[no-]show-forced-updates
+                          check for forced-updates on all updated branches
+    --[no-]write-commit-graph
+                          write the commit-graph after fetching
+    --[no-]stdin          accept refspecs from stdin
+
+"#;
+
+    #[test]
+    fn an_old_git_refusing_no_write_fetch_head_is_recognised_above_its_usage_text() {
+        assert!(OLD_GIT_REFUSAL.lines().count() > 50, "the fixture is the full usage dump");
+        assert_eq!(classify(OLD_GIT_REFUSAL), Failure::FlagUnknown);
+    }
+
+    #[test]
+    fn any_other_failure_is_reported_with_the_tail_of_stderr() {
+        let other_option = OLD_GIT_REFUSAL.replacen("no-write-fetch-head", "refetch", 1);
+        assert!(matches!(classify(&other_option), Failure::Fetch(FetchError::Failed { .. })));
+        assert_eq!(
+            classify("fatal: couldn't find remote ref refs/pull/9/head\n"),
+            Failure::Fetch(FetchError::Failed {
+                detail: "fatal: couldn't find remote ref refs/pull/9/head".to_string()
+            })
+        );
     }
 }
