@@ -47,6 +47,7 @@ mod git;
 mod graph;
 mod ignored;
 mod log;
+mod range;
 mod remote;
 mod side_by_side;
 mod status;
@@ -66,6 +67,9 @@ pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
 pub use graph::{GraphRow, LayoutChunk, LayoutCursor, extend_layout, layout};
 pub use ignored::{IgnoredPaths, ignored_paths, parse_ignored};
 pub use log::{CommitRecord, GitLog, LogFilter, looks_like_hash, parse_log};
+pub use range::{
+    RangeFile, is_commit_id, range_file_diff, range_files, range_stats, show_blob,
+};
 pub use remote::{GitRemote, github_owner, head_sha, origin_url, project_name, remote_url, object_exists};
 pub use side_by_side::{
     DiffSideBySideLine, DiffSideBySideRow, GitDiffSideBySide, GitDiffSideBySideLine,
