@@ -7,19 +7,23 @@
 //! palettes were tuned against measured contrast ratios and a brand rotates
 //! that work rather than replacing it.
 //!
-//! Sirio adds a sixth, `Notte`, which is a hue *and* a surface ladder: four
-//! given dark surfaces that no tint can reach, because they are lighter than
-//! bezel's dark page. The ladder is painted in `bezel_theme_for`
-//! (`lib.rs`); this file only carries the values and the tint measured from
-//! them. See `docs/THEME-PROVENANCE.md`, "Preset ladders".
+//! Sirio adds two presets, and both are surface ladders bezel's tint cannot
+//! reach. `Notte` is a hue *and* a ladder: four given dark surfaces that are
+//! lighter than bezel's dark page. `Onice` is a ladder alone, with no hue: the
+//! same kind of solid grey ladder `Neutral` paints, started at pure black.
+//! The ladders are painted in `bezel_theme_for` (`lib.rs`); this file only
+//! carries the values and the tint measured from them. See
+//! `docs/THEME-PROVENANCE.md`, "Preset ladders".
 
 use bezel::theme::Tint;
 
-/// One of bezel's five base colours, or Sirio's own preset.
+use crate::Appearance;
+
+/// One of bezel's five base colours, or one of Sirio's own presets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BaseColor {
     /// bezel's shipped grey, carrying no hue at all. Both appearances paint
-    /// the approved surface ladder on top (see `paint_neutral_ladder`).
+    /// the approved surface ladder on top (see [`BaseColor::grey_ladder`]).
     #[default]
     Neutral,
     Stone,
@@ -30,6 +34,10 @@ pub enum BaseColor {
     /// dark the ladder itself as the surfaces. Light has no ladder and is the
     /// tint alone.
     Notte,
+    /// Sirio's darkest preset: no hue, and in dark a grey ladder that starts
+    /// at pure black ([`ONICE_DARK`]). Black has no light form, so light is
+    /// Neutral's own ladder.
+    Onice,
 }
 
 /// The four surfaces the Notte preset was given, darkest first, as
@@ -54,22 +62,91 @@ pub(crate) const NOTTE_LADDER: NotteLadder = NotteLadder {
     raised_hover: 0x313337,
 };
 
+/// The six solid rungs of a grey ladder, as `0xRRGGBB`. Solid fills rather
+/// than veils: the hover is a value of its own, not a wash over the surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GreyLadder {
+    /// Central panes, the terminal, and the window frame's fallback.
+    pub page: u32,
+    /// Sidebars, panels and cards.
+    pub surface: u32,
+    /// Chat, dialogs and overlays.
+    pub raised: u32,
+    /// A raised element under the pointer.
+    pub raised_hover: u32,
+    /// The composer and the inset wells.
+    pub input: u32,
+    /// A row under the pointer.
+    pub hover: u32,
+}
+
+/// Approved shell values (2026-09-12): sidebars `#191919`, central panes
+/// `#141414`, chat `#232323`, composer `#313131`, hover `#363636`.
+const NEUTRAL_DARK: GreyLadder = GreyLadder {
+    page: 0x141414,
+    surface: 0x191919,
+    raised: 0x232323,
+    raised_hover: 0x363636,
+    input: 0x313131,
+    hover: 0x363636,
+};
+
+/// The light steps mirror the dark ones.
+const NEUTRAL_LIGHT: GreyLadder = GreyLadder {
+    page: 0xF8F8F8,
+    surface: 0xE8E8E8,
+    raised: 0xECECEC,
+    raised_hover: 0xD9D9D9,
+    input: 0xFFFFFF,
+    hover: 0xD9D9D9,
+};
+
+/// Neutral's shape from pure black: steps of ten code values (`00`, `0A`,
+/// `14`, `1E`) and a hover of `26`, whose jump over the raised rung is the
+/// one Neutral's `#363636` makes over its own (0.077 in oklab lightness).
+/// Depth has to come from these steps alone: a shadow cannot be darker than
+/// the page, so on black it does not show.
+const ONICE_DARK: GreyLadder = GreyLadder {
+    page: 0x000000,
+    surface: 0x0A0A0A,
+    raised: 0x141414,
+    raised_hover: 0x262626,
+    input: 0x1E1E1E,
+    hover: 0x262626,
+};
+
 impl BaseColor {
     /// Every variant, in the order the picker offers them — bezel's own
-    /// order in `BASE_COLORS`, neutral first, Sirio's preset last.
-    pub const ALL: [Self; 6] = [
+    /// order in `BASE_COLORS`, neutral first, Sirio's presets last.
+    pub const ALL: [Self; 7] = [
         Self::Neutral,
         Self::Stone,
         Self::Zinc,
         Self::Gray,
         Self::Slate,
         Self::Notte,
+        Self::Onice,
     ];
+
+    /// The grey ladder this base paints in `appearance`, or `None` when its
+    /// surfaces are bezel's own (the tinted five) or Notte's.
+    ///
+    /// Having one also moves two rules in `ThemeColors::for_appearance`: the
+    /// terminal follows the page instead of the sidebar surface, and both
+    /// hovers are the ladder's solid fill instead of a veil.
+    pub(crate) fn grey_ladder(self, appearance: Appearance) -> Option<GreyLadder> {
+        match (self, appearance) {
+            (Self::Neutral, Appearance::Dark) => Some(NEUTRAL_DARK),
+            (Self::Neutral | Self::Onice, Appearance::Light) => Some(NEUTRAL_LIGHT),
+            (Self::Onice, Appearance::Dark) => Some(ONICE_DARK),
+            _ => None,
+        }
+    }
 
     /// The oklch hue and chroma this family tints the greys with.
     pub fn tint(self) -> Tint {
         match self {
-            Self::Neutral => Tint::NONE,
+            Self::Neutral | Self::Onice => Tint::NONE,
             Self::Stone => Tint::new(58.071, 0.013),
             Self::Zinc => Tint::new(285.938, 0.016),
             Self::Gray => Tint::new(264.364, 0.027),
@@ -85,7 +162,7 @@ impl BaseColor {
 
     /// The user-visible name. Tailwind's for bezel's five, because a user
     /// who has met these names anywhere else has met exactly these colours;
-    /// Sirio's own for the preset.
+    /// Sirio's own for the presets.
     pub fn title(self) -> &'static str {
         match self {
             Self::Neutral => "Neutral",
@@ -94,6 +171,7 @@ impl BaseColor {
             Self::Gray => "Gray",
             Self::Slate => "Slate",
             Self::Notte => "Notte",
+            Self::Onice => "Onice",
         }
     }
 }
