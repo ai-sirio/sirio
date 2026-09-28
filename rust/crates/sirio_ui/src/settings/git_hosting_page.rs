@@ -308,6 +308,12 @@ impl Settings {
                                 })
                             }),
                     );
+                    tail = tail.child(
+                        div()
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.text_muted)
+                            .child(format!("Needs {}", style::token_scopes(forge))),
+                    );
                 }
                 if row.has_token {
                     let entity = entity.clone();

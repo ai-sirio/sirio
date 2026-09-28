@@ -140,6 +140,8 @@ pub struct ChangeRequestTab {
     pub(crate) files: Slot<Listing<FileChange>>,
     show_settled_checks: bool,
     generation: u64,
+    /// A rate limit's reset: no request before it (spec §9).
+    paused_until: Option<i64>,
     last_refresh: Option<Instant>,
     connect_task: Option<Task<()>>,
     header_task: Option<Task<()>>,
@@ -178,6 +180,7 @@ impl ChangeRequestTab {
             files: Slot::Idle,
             show_settled_checks: false,
             generation: 0,
+            paused_until: None,
             last_refresh: None,
             connect_task: None,
             header_task: None,
@@ -263,7 +266,31 @@ impl ChangeRequestTab {
         self.connect(cx);
     }
 
+    /// While a rate limit's reset is in the future, no path asks the forge.
+    fn rate_paused(&mut self) -> bool {
+        if let Some(until) = self.paused_until {
+            if style::now() < until {
+                return true;
+            }
+            self.paused_until = None;
+        }
+        false
+    }
+
+    fn note_rate_limited(&mut self, error: &ForgeError) {
+        if let ForgeError::RateLimited {
+            reset_at: Some(reset),
+            ..
+        } = error
+        {
+            self.paused_until = Some(*reset);
+        }
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
+        }
         let Some(client) = self.client.clone() else {
             self.connect(cx);
             return;
@@ -309,6 +336,9 @@ impl ChangeRequestTab {
                 .collect();
             self.schedule_ci_refresh(header.summary.ci, cx);
         }
+        if let Err(error) = &result {
+            self.note_rate_limited(error);
+        }
         self.header.finish(result);
         cx.notify();
     }
@@ -346,6 +376,9 @@ impl ChangeRequestTab {
     }
 
     fn load_inner(&mut self, inner: InnerTab, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -361,6 +394,9 @@ impl ChangeRequestTab {
                         .await;
                     let _ = this.update(cx, |tab, cx| {
                         if tab.generation == generation {
+                            if let Err(error) = &result {
+                                tab.note_rate_limited(error);
+                            }
                             tab.commits.finish(result);
                             cx.notify();
                         }
@@ -375,6 +411,9 @@ impl ChangeRequestTab {
                         .await;
                     let _ = this.update(cx, |tab, cx| {
                         if tab.generation == generation {
+                            if let Err(error) = &result {
+                                tab.note_rate_limited(error);
+                            }
                             tab.checks.finish(result);
                             cx.notify();
                         }
@@ -389,6 +428,9 @@ impl ChangeRequestTab {
                         .await;
                     let _ = this.update(cx, |tab, cx| {
                         if tab.generation == generation {
+                            if let Err(error) = &result {
+                                tab.note_rate_limited(error);
+                            }
                             tab.files.finish(result);
                             cx.notify();
                         }
@@ -556,7 +598,12 @@ fn badge(label: &'static str, color: Hsla, theme: &Theme) -> impl IntoElement {
         .child(label)
 }
 
-fn error_panel(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> AnyElement {
+fn error_panel(
+    message: String,
+    theme: &Theme,
+    retry: Rc<dyn Fn(&mut App)>,
+    close: Option<Rc<dyn Fn(&mut App)>>,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -564,13 +611,27 @@ fn error_panel(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> A
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
         .child(div().text_color(theme.danger).child(message))
-        .child(button(
-            "change-request-retry",
-            Icon::RefreshCw,
-            Some("Retry"),
-            theme,
-            move |cx| retry(cx),
-        ))
+        .child(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(button(
+                    "change-request-retry",
+                    Icon::RefreshCw,
+                    Some("Retry"),
+                    theme,
+                    move |cx| retry(cx),
+                ))
+                .when_some(close, |this, close| {
+                    this.child(button(
+                        "change-request-close",
+                        Icon::Close,
+                        Some("Close"),
+                        theme,
+                        move |cx| close(cx),
+                    ))
+                }),
+        )
         .into_any_element()
 }
 
@@ -604,6 +665,7 @@ fn slot_view<T>(
     what: &'static str,
     theme: &Theme,
     retry: Rc<dyn Fn(&mut App)>,
+    close: Option<Rc<dyn Fn(&mut App)>>,
     loaded: impl FnOnce(&T) -> AnyElement,
 ) -> AnyElement {
     match slot {
@@ -611,7 +673,7 @@ fn slot_view<T>(
             .text_color(theme.text_faint)
             .child(format!("Loading {what}…"))
             .into_any_element(),
-        Slot::Failed(error) => error_panel(error.to_string(), theme, retry),
+        Slot::Failed(error) => error_panel(error.to_string(), theme, retry, close),
         Slot::Loaded { value, stale } => div()
             .flex()
             .flex_col()
@@ -630,6 +692,11 @@ impl ChangeRequestTab {
     fn retry_handle(entity: &Entity<Self>) -> Rc<dyn Fn(&mut App)> {
         let entity = entity.clone();
         Rc::new(move |cx| entity.update(cx, |tab, cx| tab.refresh(cx)))
+    }
+
+    fn close_handle(entity: &Entity<Self>) -> Rc<dyn Fn(&mut App)> {
+        let entity = entity.clone();
+        Rc::new(move |cx| entity.update(cx, |_, cx| cx.emit(ChangeRequestTabEvent::Close)))
     }
 
     fn render_header(&self, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
@@ -829,6 +896,7 @@ impl ChangeRequestTab {
             "the conversation",
             theme,
             Self::retry_handle(entity),
+            Some(Self::close_handle(entity)),
             |header| {
                 let mut column = div().flex().flex_col().gap(px(12.0));
                 if header.timeline_truncated {
@@ -1308,18 +1376,20 @@ impl Render for ChangeRequestTab {
                 let content = match self.inner {
                     InnerTab::Conversation => self.render_conversation(&theme, &entity),
                     InnerTab::Commits => {
-                        slot_view(&self.commits, "commits", &theme, retry, |listing| {
+                        slot_view(&self.commits, "commits", &theme, retry, None, |listing| {
                             self.render_commits(listing, &theme, &entity)
                         })
                     }
                     InnerTab::Checks => {
-                        slot_view(&self.checks, "checks", &theme, retry, |listing| {
+                        slot_view(&self.checks, "checks", &theme, retry, None, |listing| {
                             self.render_checks(listing, &theme, &entity)
                         })
                     }
-                    InnerTab::Files => slot_view(&self.files, "files", &theme, retry, |listing| {
-                        self.render_files(listing, &theme)
-                    }),
+                    InnerTab::Files => {
+                        slot_view(&self.files, "files", &theme, retry, None, |listing| {
+                            self.render_files(listing, &theme)
+                        })
+                    }
                 };
                 div()
                     .flex_1()

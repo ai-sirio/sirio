@@ -37,7 +37,6 @@ mod agents_page;
 mod git_hosting_page;
 mod language_servers_page;
 
-use git_hosting_page::GitHostStatus;
 use language_servers_page::ServerStates;
 
 /// The settings content column — the frozen 720px content column of

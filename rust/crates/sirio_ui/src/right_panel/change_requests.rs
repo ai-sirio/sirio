@@ -237,12 +237,30 @@ impl ChangeRequestList {
         }
     }
 
-    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+    /// While a rate limit's reset is in the future, no path asks the forge.
+    fn rate_paused(&mut self) -> bool {
         if let Some(until) = self.paused_until {
             if style::now() < until {
-                return;
+                return true;
             }
             self.paused_until = None;
+        }
+        false
+    }
+
+    fn note_rate_limited(&mut self, error: &ForgeError) {
+        if let ForgeError::RateLimited {
+            reset_at: Some(reset),
+            ..
+        } = error
+        {
+            self.paused_until = Some(*reset);
+        }
+    }
+
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
         }
         let Some(ready) = self.ready().cloned() else {
             return;
@@ -260,6 +278,9 @@ impl ChangeRequestList {
     }
 
     fn load_page(&mut self, ready: ReadyConnection, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
+        }
         self.generation += 1;
         let generation = self.generation;
         self.more_task = None;
@@ -279,6 +300,9 @@ impl ChangeRequestList {
     }
 
     pub(crate) fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
+        }
         let (Some(ready), Some(cursor)) = (self.ready().cloned(), self.next.clone()) else {
             return;
         };
@@ -346,13 +370,16 @@ impl ChangeRequestList {
                     });
                 }
             }
-            ForgeError::RateLimited { reset_at, .. } => self.paused_until = *reset_at,
+            ForgeError::RateLimited { .. } => self.note_rate_limited(&error),
             _ => {}
         }
         self.list_error = Some(error);
     }
 
     fn load_card(&mut self, ready: ReadyConnection, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
+        }
         let Some(branch) = ready.branch.clone() else {
             self.card = Card::Hidden;
             return;
@@ -362,6 +389,7 @@ impl ChangeRequestList {
         }
         let client = ready.client;
         let owner = ready.source_owner;
+        let generation = self.generation;
         self.card_task = Some(cx.spawn(async move |this, cx| {
             let lookup = branch.clone();
             let result = cx
@@ -372,6 +400,12 @@ impl ChangeRequestList {
                 })
                 .await;
             let _ = this.update(cx, |list, cx| {
+                if list.generation != generation {
+                    return;
+                }
+                if let Err(error) = &result {
+                    list.note_rate_limited(error);
+                }
                 list.card = match result {
                     Ok((Some(found), _)) => Card::Found(found),
                     Ok((None, create_url)) => Card::Missing { branch, create_url },
@@ -383,12 +417,22 @@ impl ChangeRequestList {
     }
 
     fn load_count(&mut self, ready: ReadyConnection, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            return;
+        }
         let client = ready.client;
+        let generation = self.generation;
         self.count_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { client.to_review_count() })
                 .await;
             let _ = this.update(cx, |list, cx| {
+                if list.generation != generation {
+                    return;
+                }
+                if let Err(error) = &result {
+                    list.note_rate_limited(error);
+                }
                 list.to_review = result.ok();
                 cx.notify();
             });
@@ -1197,10 +1241,7 @@ impl ChangeRequestList {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let command = format!("{} auth login --hostname {host}", style::cli_name(forge));
-        let scopes = match forge {
-            Forge::GitHub => "read access to pull requests, checks and metadata",
-            Forge::GitLab => "the read_api scope",
-        };
+        let scopes = style::token_scopes(forge);
         let copied = command.clone();
         let save = entity.clone();
         notice(
@@ -1560,6 +1601,64 @@ mod tests {
         );
         list.update(cx, |list, cx| list.set_visible(true, cx));
         pump_until(cx, || forge.count("ChangeRequestList") > asked);
+    }
+
+    #[gpui::test]
+    fn a_rate_limited_host_is_not_asked_until_it_resets(cx: &mut TestAppContext) {
+        let forge = Arc::new(CannedForge::default());
+        forge.answer("Viewer", testing::viewer());
+        forge.answer(
+            "ChangeRequestList",
+            testing::list(
+                vec![
+                    testing::summary(101, "Fix the login"),
+                    testing::summary(102, "Draft the README"),
+                ],
+                Some("cursor1"),
+            ),
+        );
+        forge.answer(
+            "ChangeRequestSearch",
+            testing::search(vec![testing::summary(104, "Bump the parser")]),
+        );
+        forge.answer("ChangeRequestCount", testing::count(1));
+        forge.answer(
+            "ChangeRequestForBranch",
+            testing::branch(vec![testing::summary(103, "This branch")]),
+        );
+        let list = shown(
+            cx,
+            FakeSource::ready(testing::github_client(forge.clone()), None),
+        );
+        pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+        let reset_at = crate::change_request_style::now() + 3600;
+        forge.rate_limited("ChangeRequestList", reset_at);
+        forge.rate_limited("ChangeRequestSearch", reset_at);
+        forge.rate_limited("ChangeRequestMine", reset_at);
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || {
+            list.read_with(cx, |list, _| {
+                matches!(list.list_error, Some(ForgeError::RateLimited { .. }))
+            })
+        });
+        let listed = forge.count("ChangeRequestList");
+        let searched = forge.count("ChangeRequestSearch");
+        list.update(cx, |list, cx| list.load_more(cx));
+        list.update(cx, |list, cx| list.set_filter(Filter::ClosedAndMerged, cx));
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        assert_eq!(
+            forge.count("ChangeRequestList"),
+            listed,
+            "no page is asked while paused"
+        );
+        assert_eq!(
+            forge.count("ChangeRequestSearch"),
+            searched,
+            "no search is asked while paused"
+        );
     }
 
     #[gpui::test]

@@ -110,24 +110,43 @@ pub(crate) mod testing {
     /// it would deadlock. Races are staged by queueing loads before pumping.
     #[derive(Default)]
     pub(crate) struct CannedForge {
-        answers: Mutex<HashMap<String, (u16, String)>>,
+        answers: Mutex<HashMap<String, (u16, Vec<(String, String)>, String)>>,
         seen: Mutex<Vec<String>>,
     }
 
     impl CannedForge {
         pub(crate) fn answer(&self, operation: &str, body: String) {
-            self.answers.lock().unwrap().insert(operation.to_string(), (200, body));
-        }
-
-        pub(crate) fn fail(&self, operation: &str, status: u16) {
             self.answers
                 .lock()
                 .unwrap()
-                .insert(operation.to_string(), (status, r#"{"message":"failed"}"#.to_string()));
+                .insert(operation.to_string(), (200, Vec::new(), body));
+        }
+
+        pub(crate) fn fail(&self, operation: &str, status: u16) {
+            self.answers.lock().unwrap().insert(
+                operation.to_string(),
+                (status, Vec::new(), r#"{"message":"failed"}"#.to_string()),
+            );
+        }
+
+        pub(crate) fn rate_limited(&self, operation: &str, reset_at: i64) {
+            self.answers.lock().unwrap().insert(
+                operation.to_string(),
+                (
+                    429,
+                    vec![("x-ratelimit-reset".to_string(), reset_at.to_string())],
+                    r#"{"message":"rate limited"}"#.to_string(),
+                ),
+            );
         }
 
         pub(crate) fn count(&self, operation: &str) -> usize {
-            self.seen.lock().unwrap().iter().filter(|seen| *seen == operation).count()
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| *seen == operation)
+                .count()
         }
     }
 
@@ -136,24 +155,34 @@ pub(crate) mod testing {
     impl Transport for Shared {
         fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError> {
             let request: Value = serde_json::from_slice(body).expect("a JSON request");
-            let operation = request["operationName"].as_str().unwrap_or_default().to_string();
+            let operation = request["operationName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             self.0.seen.lock().unwrap().push(operation.clone());
-            let (status, body) = self
+            let (status, headers, body) = self
                 .0
                 .answers
                 .lock()
                 .unwrap()
                 .get(&operation)
                 .cloned()
-                .unwrap_or((404, "{}".to_string()));
-            Ok(ApiResponse { status, headers: Vec::new(), body: body.into_bytes() })
+                .unwrap_or((404, Vec::new(), "{}".to_string()));
+            Ok(ApiResponse {
+                status,
+                headers,
+                body: body.into_bytes(),
+            })
         }
     }
 
     pub(crate) fn github_client(forge: Arc<CannedForge>) -> Arc<ForgeClient> {
         Arc::new(ForgeClient::new(
             Forge::GitHub,
-            ForgeTarget { host: "ghe.test".to_string(), project: "acme/widgets".to_string() },
+            ForgeTarget {
+                host: "ghe.test".to_string(),
+                project: "acme/widgets".to_string(),
+            },
             Box::new(Shared(forge)),
         ))
     }
@@ -290,7 +319,10 @@ pub(crate) mod testing {
         fn set_means(&self, _host: &str, _forge: Forge, _means: Option<Means>) {}
 
         fn save_token(&self, host: &str, forge: Forge, token: &str) -> Result<String, ForgeError> {
-            self.tokens.lock().unwrap().push((host.to_string(), forge, token.to_string()));
+            self.tokens
+                .lock()
+                .unwrap()
+                .push((host.to_string(), forge, token.to_string()));
             self.token_answer.lock().unwrap().clone()
         }
 

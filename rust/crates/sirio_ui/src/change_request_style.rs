@@ -94,6 +94,13 @@ pub(crate) fn cli_name(forge: Forge) -> &'static str {
     }
 }
 
+pub(crate) fn token_scopes(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => "read access to pull requests, checks and metadata",
+        Forge::GitLab => "the read_api scope",
+    }
+}
+
 pub(crate) fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
