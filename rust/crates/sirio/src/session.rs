@@ -137,6 +137,21 @@ pub struct SessionTabState {
     /// on the conversation.
     #[serde(default)]
     pub change_request_tab: String,
+    /// A snapshot tab's file at a revision; `None` for every other tab.
+    #[serde(default)]
+    pub snapshot: Option<PersistedSnapshot>,
+}
+
+/// A snapshot tab's identity (spec §8): which file, at which revision, of
+/// which change request. Written beside an empty `editor_path`, so a build
+/// that predates snapshots drops the tab (`restored_editor_path`) instead of
+/// opening a local path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedSnapshot {
+    pub change_request: sirio_forge::ChangeRef,
+    pub sha: String,
+    /// Repository-relative.
+    pub path: String,
 }
 
 impl SessionTabState {
@@ -171,6 +186,7 @@ impl SessionTabState {
             pane: self.pane.clone(),
             change_request: self.change_request.clone(),
             change_request_tab: self.change_request_tab.clone(),
+            snapshot: self.snapshot.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -2676,6 +2692,52 @@ mod tests {
         assert_eq!(restored.tabs[0].kind, "change_request", "the kind is restorable, not skipped");
         assert_eq!(restored.tab_states[0].change_request.as_ref(), Some(&reference));
         assert_eq!(restored.tab_states[0].change_request_tab, "checks");
+    }
+
+    #[test]
+    fn a_snapshot_tabs_identity_survives_the_round_trip_and_an_old_build_would_drop_it() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("snapshot-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let snapshot = PersistedSnapshot {
+            change_request: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".into(),
+                project: "acme/widgets".into(),
+                number: 578,
+            },
+            sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into(),
+            path: "src/lib.rs".into(),
+        };
+        let state = SessionTabState {
+            root_id: Some(0),
+            snapshot: Some(snapshot.clone()),
+            ..SessionTabState::default()
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "snapshot".into(),
+                title: "lib.rs @ #578".into(),
+                kind: "file".into(),
+                agent_id: None,
+                agent_session_id: None,
+                active: true,
+            }],
+            tab_states: vec![state],
+        };
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/tmp"));
+        assert_eq!(restored.tab_states[0].snapshot.as_ref(), Some(&snapshot));
+        assert_eq!(
+            restored.tab_states[0].editor_path, "",
+            "no editor path: a build that predates snapshots drops the tab instead of opening a local file"
+        );
     }
 
     /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
