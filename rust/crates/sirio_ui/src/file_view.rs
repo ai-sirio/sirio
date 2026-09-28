@@ -129,8 +129,8 @@ pub struct SnapshotOrigin {
 }
 
 impl SnapshotOrigin {
-    /// `#578 at a1b2c3d` — or `#578` alone for a restored origin whose saved
-    /// sha was refused and left empty.
+    /// `#578 at a1b2c3d` — or `#578` alone for a refused origin whose sha
+    /// was invalid and left empty.
     pub fn label(&self) -> String {
         if self.sha.is_empty() {
             return self.reference.label();
@@ -508,10 +508,11 @@ impl FileView {
                 cx.emit(FileViewEvent::Loaded(self.path.clone()));
             }
             Err(reason) => {
-                // A restore whose saved path was refused carries no path:
-                // there is no file name to put in the sentence.
+                // A snapshot whose path was refused (a saved one, or a
+                // clicked one) carries no path: there is no file name to
+                // put in the sentence.
                 self.snapshot_error = Some(if origin.relative_path.as_os_str().is_empty() {
-                    format!("Could not restore the saved snapshot of {}: {reason}", origin.label())
+                    format!("Could not open the snapshot of {}: {reason}", origin.label())
                 } else {
                     format!(
                         "Could not read {} at {}: {reason}",
@@ -6095,10 +6096,11 @@ mod tests {
         }
     }
 
-    /// A restore whose saved path was refused has no file name to say: the
-    /// sentence must still read as one.
+    /// A snapshot whose path was refused (saved, or clicked live) has no file
+    /// name to say: the sentence must still read as one, and must not claim a
+    /// restore that never happened.
     #[gpui::test]
-    async fn a_refused_restore_reads_as_a_sentence_without_a_file_name(cx: &mut gpui::TestAppContext) {
+    async fn a_refused_snapshot_reads_as_a_sentence_without_a_file_name(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let mut origin = snapshot_origin_for_tests();
         origin.relative_path = PathBuf::new();
@@ -6107,7 +6109,7 @@ mod tests {
             view.finish_snapshot(Err("The saved file path is not valid.".to_string()), cx);
             assert_eq!(
                 view.snapshot_error(),
-                Some("Could not restore the saved snapshot of #578 at a1b2c3d: The saved file path is not valid.")
+                Some("Could not open the snapshot of #578 at a1b2c3d: The saved file path is not valid.")
             );
         });
     }

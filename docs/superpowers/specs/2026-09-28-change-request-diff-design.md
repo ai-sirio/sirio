@@ -494,7 +494,8 @@ supersedes the sentence named.
   last row, whose fallback — the Range surface as its own Changes tab
   beside the detail tab, keyed by `ChangeRef` — stays on the table) were
   never seen, only their state through the E2E's report keys. The
-  scroll-to-line is untested at every level.
+  diff's scroll to a revealed line is asserted only as a row index (and
+  the E2E only as `files_focus`), never as a drawn frame.
 - §12's other rows: `insteadOf` — real git in the E2E; `diffRefs` and
   `baseRefOid`/`headRefOid` — live on gitlab.com and github.com on
   2026-09-28, not on a GitLab 15.0; `--no-write-fetch-head` and
@@ -510,9 +511,10 @@ supersedes the sentence named.
 - The fetch uses git's own credentials — a credential helper or an ssh key
   — never the token given to Sirio (§1). A fetch that could not sign in
   says so in one sentence under the failure, naming `gh auth setup-git`.
-- The sweep counts the tabs of one window: a linked worktree's tab in
-  another window may lose its refs (one refetch). A sweep can race a fetch
-  writing the same ref: a one-off "cannot lock ref" with *Retry*.
+- The sweep counts this session's open and parked tabs: a ref held by a
+  tab of a worktree not restored yet is deleted (one refetch, §13.2). A
+  sweep can race a fetch writing the same ref: a one-off "cannot lock
+  ref" with *Retry*.
 - While a new head's commits are fetched, the old diff is hidden behind
   *Fetching…*.
 - Fetches are serialised per worktree, not per repository.

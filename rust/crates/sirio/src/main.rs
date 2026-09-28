@@ -13493,10 +13493,13 @@ impl SirioWorkspace {
         // The path is the forge's (or a tree entry git accepted unchecked):
         // one that is not plainly repository-relative is never joined onto
         // the worktree or into a virtual path, the same rule a restored
-        // snapshot's saved path meets. It opens as the failure it is.
+        // snapshot's saved path meets. It opens as the failure it is; the
+        // revision is the forge's and stays, so what is persisted restores
+        // as a refused path rather than a refused revision.
         if !snapshot_path_is_repository_relative(&path) {
-            let origin = refused_snapshot_origin(reference);
-            self.add_snapshot_tab(origin, Err(INVALID_SNAPSHOT_PATH.to_string()), None, cx);
+            let sha = if deleted { &revisions.base_sha } else { &revisions.head_sha };
+            let origin = refused_snapshot_origin(reference, sha);
+            self.add_snapshot_tab(origin, Err(INVALID_CHANGE_REQUEST_FILE_PATH.to_string()), None, cx);
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -20654,17 +20657,6 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
     Some(format!("{title}…"))
 }
 
-/// What was captured at save time, or the fallback page when the session
-/// predates the capture or the tab never carried an address. Both restore
-/// paths go through here so the fallback is spelled once.
-/// #323: the file a restored Editor tab reopens, or `None` when this session
-/// carries no path or that path no longer resolves.
-///
-/// The check lives here, at materialisation, and not in `SessionLayout`:
-/// answering it needs the filesystem, and `SessionLayout` is a pure data
-/// container. A file can be deleted, renamed, or sit on a volume that is not
-/// mounted this launch; a tab whose target is gone is dropped silently rather
-/// than restored onto an error the user never asked to see.
 /// Whether `tab` holds a change request's revision refs: a change request
 /// tab, or a snapshot of one (`sweep_revision_refs` counts the same panes).
 fn tab_holds_revision_refs(tab: &OpenTab, cx: &App) -> bool {
@@ -20677,6 +20669,17 @@ fn tab_holds_revision_refs(tab: &OpenTab, cx: &App) -> bool {
     holds
 }
 
+/// What was captured at save time, or the fallback page when the session
+/// predates the capture or the tab never carried an address. Both restore
+/// paths go through here so the fallback is spelled once.
+/// #323: the file a restored Editor tab reopens, or `None` when this session
+/// carries no path or that path no longer resolves.
+///
+/// The check lives here, at materialisation, and not in `SessionLayout`:
+/// answering it needs the filesystem, and `SessionLayout` is a pure data
+/// container. A file can be deleted, renamed, or sit on a volume that is not
+/// mounted this launch; a tab whose target is gone is dropped silently rather
+/// than restored onto an error the user never asked to see.
 fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(&state.editor_path);
     path.is_file().then_some(path)
@@ -20694,7 +20697,7 @@ fn restored_snapshot_view(
     cx: &mut App,
 ) -> Entity<FileView> {
     if let Some(refusal) = restored_snapshot_refusal(snapshot) {
-        let origin = refused_snapshot_origin(snapshot.change_request.clone());
+        let origin = refused_snapshot_origin(snapshot.change_request.clone(), &snapshot.sha);
         return cx.new(|cx| {
             let mut view = FileView::snapshot_pending(origin, cx);
             view.finish_snapshot(Err(refusal.to_string()), cx);
@@ -20714,13 +20717,17 @@ fn restored_snapshot_view(
 
 const INVALID_SNAPSHOT_PATH: &str = "The saved file path is not valid.";
 const INVALID_SNAPSHOT_SHA: &str = "The saved revision is not a valid commit id.";
+/// The same refusal met at a click on a change request's file, not on a
+/// restore: nothing was saved, so it must not say so.
+const INVALID_CHANGE_REQUEST_FILE_PATH: &str = "This file's path is not one a repository can hold.";
 
-/// The origin of a snapshot tab that shows a refusal instead of a file:
-/// neither sha nor path, so nothing untrusted reaches a label or a join.
-fn refused_snapshot_origin(reference: sirio_forge::ChangeRef) -> SnapshotOrigin {
+/// The origin of a snapshot tab that shows a refusal instead of a file: no
+/// path, and a sha only when it is a commit id, so nothing untrusted reaches
+/// a label or a join.
+fn refused_snapshot_origin(reference: sirio_forge::ChangeRef, sha: &str) -> SnapshotOrigin {
     SnapshotOrigin {
         reference,
-        sha: String::new(),
+        sha: if sirio_git::is_commit_id(sha) { sha.to_owned() } else { String::new() },
         relative_path: PathBuf::new(),
         local_copy: None,
     }
@@ -38911,9 +38918,6 @@ browser  profile  "
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A restored snapshot's path came from disk: only a plain
-    /// repository-relative path may be joined onto the worktree or handed
-    /// to git.
     /// A persisted sha is shown in the bar and joined into the view's
     /// virtual path before any read validates it, so the restore refuses
     /// one Sirio would never have written — before either happens.
@@ -38949,6 +38953,27 @@ browser  profile  "
         );
     }
 
+    /// A refused snapshot tab is persisted from its origin, so the origin
+    /// keeps the one part that is known good: a valid sha survives (a click
+    /// on a bad path, a saved bad path), an invalid one is dropped.
+    #[test]
+    fn a_refused_snapshot_keeps_a_valid_sha_and_never_a_path_or_a_bad_sha() {
+        let reference = sirio_forge::ChangeRef {
+            forge: sirio_forge::Forge::GitHub,
+            host: "ghe.test".into(),
+            project: "acme/widgets".into(),
+            number: 578,
+        };
+        let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        let kept = refused_snapshot_origin(reference.clone(), good);
+        assert_eq!(kept.sha, good);
+        assert!(kept.relative_path.as_os_str().is_empty());
+        assert!(kept.local_copy.is_none());
+        for bad in ["", "--upload-pack=x", "/etc/passwd", &good[..39]] {
+            assert_eq!(refused_snapshot_origin(reference.clone(), bad).sha, "", "{bad:?}");
+        }
+    }
+
     /// The git runner caps a blob at 10 MiB; a snapshot over it says so in
     /// Sirio's words, every other read failure in git's.
     #[test]
@@ -38969,6 +38994,9 @@ browser  profile  "
         assert_eq!(snapshot_read_error(other), text);
     }
 
+    /// A restored snapshot's path came from disk: only a plain
+    /// repository-relative path may be joined onto the worktree or handed
+    /// to git.
     #[test]
     fn a_restored_snapshot_path_must_be_plainly_repository_relative() {
         assert!(snapshot_path_is_repository_relative(Path::new("src/lib.rs")));
