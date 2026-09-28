@@ -9565,16 +9565,29 @@ impl SirioWorkspace {
                 })
                 .unwrap_or_default();
             let selected_is_git = worktree_context(&self.project_catalog, &selected_path).is_git;
-            let restored = self.restore_tabs_for_mounted_worktree(
+            let mut restored = self.restore_tabs_for_mounted_worktree(
                 &selected_path,
                 self.session.restore_tabs_for(&selected_path),
                 cx,
             );
-            let saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions {
+            let renamed_panes = reassign_taken_restored_pane_ids(
+                &mut restored,
+                &self.parked_pane_ids_outside(&selected_worktree_id),
+                0,
+                &mut self.next_pane_id,
+            );
+            let mut saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions
+            {
                 self.session.load_session_refs()
             } else {
                 BTreeMap::new()
             };
+            // A moved pane still resumes whatever its old key would have.
+            for (old, new) in renamed_panes {
+                if let Some(reference) = saved_session_refs.get(&format!("pane-{old}")).cloned() {
+                    saved_session_refs.insert(format!("pane-{new}"), reference);
+                }
+            }
             let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
             let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
                 &restored,
@@ -9629,7 +9642,11 @@ impl SirioWorkspace {
                 self.track_terminal_panes_in_cache_for_worktree(tab_id, &selected_path);
             }
             self.next_tab_id = self.tabs.len();
-            self.next_pane_id = next_pane_id(&self.tabs);
+            // Never lowered: the parked worktree's panes are still live under
+            // their `pane-N` keys (activity model, `SIRIO_PANE_ID`, the
+            // hooks' `--session`), so restarting the count from this
+            // worktree's own tabs would hand its next pane one of theirs.
+            self.next_pane_id = self.next_pane_id.max(next_pane_id(&self.tabs));
             self.active_tab = active.min(self.tabs.len().saturating_sub(1));
             // The restored-settings tagging and `rebuild_center_split`
             // need the destination set first: the former tags each
@@ -10047,7 +10064,7 @@ impl SirioWorkspace {
                     .insert(tab.id, self.working_directory.clone());
             }
             self.tabs.extend(tabs);
-            self.next_pane_id = next_pane_id(&self.tabs);
+            self.next_pane_id = self.next_pane_id.max(next_pane_id(&self.tabs));
             self.rebuild_center_split();
         }
         self.reveal_secondary_for_active_tab();
@@ -11039,6 +11056,23 @@ impl SirioWorkspace {
             },
         );
         layout
+    }
+
+    /// The pane ids the other parked worktrees are still live under — the
+    /// same sets their sidebar rows read their status from, and so the ids
+    /// a restore into `worktree_id` must not reuse.
+    fn parked_pane_ids_outside(&self, worktree_id: &str) -> HashSet<usize> {
+        self.parked_worktree_tabs
+            .iter()
+            .filter(|(parked_id, _)| parked_id.as_str() != worktree_id)
+            .flat_map(|(_, parked)| {
+                parked
+                    .terminal_panes_by_tab
+                    .iter()
+                    .chain(&parked.chat_panes_by_tab)
+            })
+            .flat_map(|panes| panes.iter().copied())
+            .collect()
     }
 
     fn restore_tabs_for_mounted_worktree(
@@ -19635,6 +19669,77 @@ fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<u
         .collect()
 }
 
+/// Gives every pane of a restored session that a live pane elsewhere already
+/// holds a fresh id, and returns the `(old, new)` pairs.
+///
+/// Pane ids are persisted per worktree, and every worktree's first pane was
+/// saved as 0, but the `pane-N` key they form is read as a global identity:
+/// by the activity model, the control registry, `SIRIO_PANE_ID` and the
+/// hooks' `--session`. A restored pane that kept a parked worktree's id would
+/// report that worktree's agent as its own. Everything that names a pane is
+/// rewritten — the root, the split history, the scrollback — so the session
+/// saves back under the new ids and the next restore finds nothing to move.
+/// `fallback_start` must be what the restore itself hands
+/// [`restored_pane_ids`], so a legacy root is judged by the id it would get.
+fn reassign_taken_restored_pane_ids(
+    restored: &mut RestoredSession,
+    taken: &HashSet<usize>,
+    fallback_start: usize,
+    next_pane_id: &mut usize,
+) -> Vec<(usize, usize)> {
+    let roots = restored_pane_ids(restored, fallback_start);
+    let mut used: BTreeSet<usize> = roots.iter().copied().collect();
+    for state in &restored.tab_states {
+        for event in &state.pane_events {
+            if let PaneEvent::Split { new_id, .. } = event {
+                used.insert(*new_id);
+            }
+        }
+    }
+    let mut fresh = (*next_pane_id).max(used.last().map_or(0, |id| id.saturating_add(1)));
+    let mut renamed = BTreeMap::new();
+    for &id in used.iter().filter(|id| taken.contains(id)) {
+        while taken.contains(&fresh) {
+            fresh = fresh.saturating_add(1);
+        }
+        renamed.insert(id, fresh);
+        fresh = fresh.saturating_add(1);
+    }
+    if renamed.is_empty() {
+        return Vec::new();
+    }
+    *next_pane_id = fresh;
+    let rename = |id: usize| renamed.get(&id).copied().unwrap_or(id);
+    if restored.tab_states.len() < restored.tabs.len() {
+        restored
+            .tab_states
+            .resize_with(restored.tabs.len(), SessionTabState::default);
+    }
+    for (tab_index, (state, root)) in restored.tab_states.iter_mut().zip(&roots).enumerate() {
+        // Every root is pinned once anything moves: an id freed by the move
+        // would otherwise let the restore re-derive a legacy root onto it.
+        materialize_restored_root(state, *root, fallback_start.saturating_add(tab_index));
+        state.root_id = state.root_id.map(rename);
+        for event in &mut state.pane_events {
+            match event {
+                PaneEvent::Split {
+                    focused, new_id, ..
+                } => {
+                    *focused = rename(*focused);
+                    *new_id = rename(*new_id);
+                }
+                PaneEvent::Close { id } => *id = rename(*id),
+                PaneEvent::SetRatio { .. } => {}
+            }
+        }
+        state.scrollback = std::mem::take(&mut state.scrollback)
+            .into_iter()
+            .map(|(id, bytes)| (rename(id), bytes))
+            .collect();
+    }
+    renamed.into_iter().collect()
+}
+
 fn materialize_restored_root(state: &mut SessionTabState, pane_id: usize, fallback_pane_id: usize) {
     if state.root_id.is_some() {
         return;
@@ -26228,6 +26333,114 @@ done
         assert!(
             cx.debug_bounds("sidebar-status-running-2").is_none(),
             "the empty selected worktree does not inherit the running indicator"
+        );
+
+        // The selected worktree opens a terminal of its own. Pane ids are
+        // what the activity model, the hooks' `--session` and
+        // `SIRIO_PANE_ID` all key on, so a pane that reused the parked
+        // worktree's id would light this row with the other one's agent.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_terminal_tab_with_shell(
+                "Terminal",
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+                None,
+                cx,
+            );
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-status-running-1").is_some(),
+            "the parked worktree still shows its own running agent"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-status-running-2").is_none(),
+            "a terminal opened in the selected worktree does not inherit the parked agent's status"
+        );
+
+        // And back: restoring the first worktree must not hand its panes an
+        // id the now-parked second worktree is still using.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktrees[0].clone(), None, cx)
+                .expect("reselect the running worktree");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-status-running-1").is_some(),
+            "the reselected worktree shows its own running agent"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-status-running-2").is_none(),
+            "the parked idle worktree does not show the reselected one's agent"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every worktree's first pane has been persisted as `root_id: 0`, so a
+    /// worktree restored from an earlier session carries the very id a
+    /// parked worktree's live agent is reporting under.
+    #[gpui::test]
+    async fn a_worktree_restored_from_an_earlier_session_keeps_its_own_status(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("restored-pane-identity");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.session.save_layout_now(&SessionLayout {
+                working_directory: worktrees[1].clone(),
+                branch: "branch-1".into(),
+                tabs: vec![SessionTab {
+                    id: "earlier-terminal".into(),
+                    title: "Terminal".into(),
+                    kind: "terminal".into(),
+                    agent_id: None,
+                    agent_session_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState::with_root(0)],
+            });
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-status-running-1").is_some());
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("select the restored worktree");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-status-running-1").is_some(),
+            "the parked worktree still shows its own running agent"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-status-running-2").is_none(),
+            "the restored worktree's terminal does not report the parked agent's status"
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);
