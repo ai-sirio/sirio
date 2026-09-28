@@ -1,0 +1,7 @@
+{"data": {"search": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+    {},
+    {"number": 104, "title": "Bump the parser", "url": "https://ghe.test/acme/widgets/pull/104", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-26T15:00:00Z", "author": {"login": "carol"}, "headRefName": "chore/deps", "baseRefName": "main", "headRepositoryOwner": {"login": "acme"}, "comments": {"totalCount": 1}, "reviewDecision": "REVIEW_REQUIRED", "approvals": {"totalCount": 0}, "reviewRequests": {"nodes": [{"requestedReviewer": {"__typename": "User", "login": "fake-user"}}]}, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS", "contexts": {"checkRunCountsByState": [{"state": "SUCCESS", "count": 7}], "statusContextCountsByState": []}}}}]}}
+  ]
+}}}

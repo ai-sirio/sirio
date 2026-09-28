@@ -22,6 +22,10 @@ pub enum TabKind {
     /// something the user looks at rather than talks to, so it lives in
     /// the Secondary half of the center split.
     ProjectSettings,
+    /// A pull or merge request, read-only (spec 2026-09-27). Something the
+    /// user looks at, so it lives in the Secondary half; the right panel
+    /// lists change requests itself, so the left sidebar does not.
+    ChangeRequest,
 }
 
 /// Which half of the [center split] a tab is drawn in.
@@ -64,7 +68,7 @@ impl TabKind {
     pub fn default_pane(self) -> PaneRole {
         match self {
             Self::Terminal | Self::AgentChat => PaneRole::Primary,
-            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings => {
+            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings | Self::ChangeRequest => {
                 PaneRole::Secondary
             }
         }
@@ -77,7 +81,7 @@ impl TabKind {
     pub fn can_move_between_panes(self) -> bool {
         match self {
             Self::Terminal | Self::AgentChat => true,
-            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings => false,
+            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings | Self::ChangeRequest => false,
         }
     }
 
@@ -92,7 +96,7 @@ impl TabKind {
     pub fn appears_in_sidebar(self) -> bool {
         match self {
             Self::Terminal | Self::AgentChat => true,
-            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings => false,
+            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings | Self::ChangeRequest => false,
         }
     }
 }

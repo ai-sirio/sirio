@@ -1,0 +1,6 @@
+{"data": {"repository": {"pullRequests": {
+  "pageInfo": {"hasNextPage": false, "endCursor": null},
+  "nodes": [
+    {"number": 103, "title": "Export orders as CSV", "url": "https://ghe.test/acme/widgets/pull/103", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-27T09:00:00Z", "author": {"login": "fake-user"}, "headRefName": "feat/export", "baseRefName": "main", "headRepositoryOwner": null, "comments": {"totalCount": 3}, "reviewDecision": "APPROVED", "approvals": {"totalCount": 2}, "reviewRequests": {"nodes": []}, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "PENDING", "contexts": {"checkRunCountsByState": [{"state": "SUCCESS", "count": 4}, {"state": "IN_PROGRESS", "count": 2}, {"state": "QUEUED", "count": 1}], "statusContextCountsByState": []}}}}]}}
+  ]
+}}}}

@@ -1,0 +1,3 @@
+{"data": {"repository": {"pullRequest": {"files": {"totalCount": 4, "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [
+  {"path": "docs/removed.md", "additions": 0, "deletions": 12, "changeType": "DELETED"}
+]}}}}}

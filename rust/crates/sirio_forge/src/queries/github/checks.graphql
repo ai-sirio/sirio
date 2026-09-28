@@ -1,0 +1,23 @@
+query ChangeRequestChecks($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 100, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion startedAt completedAt detailsUrl checkSuite { workflowRun { workflow { name } } } }
+                  ... on StatusContext { context state targetUrl createdAt }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

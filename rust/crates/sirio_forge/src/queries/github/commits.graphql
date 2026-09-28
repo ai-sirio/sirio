@@ -1,0 +1,11 @@
+query ChangeRequestCommits($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(first: 100, after: $after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { oid abbreviatedOid messageHeadline committedDate url author { name user { login } } } }
+      }
+    }
+  }
+}

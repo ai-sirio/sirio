@@ -471,3 +471,50 @@ fn actions_stage_all_and_discard_all() {
     assert_eq!(snapshot.changes().len(), 0);
     assert_eq!(snapshot.untracked().len(), 1);
 }
+
+fn forge_seed_repo(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sirio-git-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create repo dir");
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "Tester"],
+        vec!["commit", "-q", "--allow-empty", "-m", "first"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+    dir
+}
+
+#[test]
+fn remote_url_reads_the_configured_url_of_any_remote() {
+    let repo = forge_seed_repo("remote-url");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(&repo).status().expect("git")
+    };
+    git(&["remote", "add", "upstream", "git@github.com:acme/widgets.git"]);
+    git(&["config", "url.https://mirror.example.com/.insteadOf", "git@github.com:"]);
+    assert_eq!(
+        sirio_git::remote_url(&repo, "upstream").as_deref(),
+        Some("git@github.com:acme/widgets.git"),
+        "the configured value, not the insteadOf rewrite"
+    );
+    assert_eq!(sirio_git::remote_url(&repo, "origin"), None);
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn object_exists_answers_for_commits_only() {
+    let repo = forge_seed_repo("object-exists");
+    let head = sirio_git::head_sha(&repo).expect("a commit");
+    assert!(sirio_git::object_exists(&repo, &head));
+    assert!(!sirio_git::object_exists(&repo, "0123456789abcdef0123456789abcdef01234567"));
+    assert!(!sirio_git::object_exists(&repo, "not-a-sha; rm -rf /"));
+    let _ = std::fs::remove_dir_all(&repo);
+}

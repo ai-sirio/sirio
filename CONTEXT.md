@@ -110,3 +110,23 @@ generation e `repo_root` corrispondono ancora.
 Lo stato append-only in `sirio_git` che estende il layout del grafo commit
 pagina per pagina, con equivalenza stretta al layout completo. Si resetta su
 filtro o ricerca.
+
+## Forges
+
+### Forge
+
+A service hosting a project's remote, identified by its host: github.com,
+gitlab.com, a GitHub Enterprise Server or a self-managed GitLab. Sirio reads
+change requests from GitHub and GitLab forges only.
+
+### Change request
+
+The code's word for a GitHub pull request and a GitLab merge request alike.
+The UI keeps each forge's own: *PR* and `#578` on GitHub, *MR* and `!231` on
+GitLab.
+
+### Means
+
+How Sirio authenticates to a forge: its **CLI** (`gh`, `glab`), which owns the
+credential, or a **token** the user gave Sirio. Chosen per host; detected
+unless the user pinned one, and never swapped silently when it fails.

@@ -1,0 +1,10 @@
+query ChangeRequestMine($authored: String!, $assigned: String!, $afterAuthored: String, $afterAssigned: String, $withAuthored: Boolean!, $withAssigned: Boolean!) {
+  authored: search(query: $authored, type: ISSUE, first: 50, after: $afterAuthored) @include(if: $withAuthored) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { ...ChangeSummary } }
+  }
+  assigned: search(query: $assigned, type: ISSUE, first: 50, after: $afterAssigned) @include(if: $withAssigned) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { ...ChangeSummary } }
+  }
+}

@@ -1,0 +1,12 @@
+query MergeRequestUnion($fullPath: ID!, $search: String, $aState: MergeRequestState, $aAuthor: String, $aAssignee: String, $aAfter: String, $withA: Boolean!, $bState: MergeRequestState, $bAuthor: String, $bAssignee: String, $bAfter: String, $withB: Boolean!) {
+  project(fullPath: $fullPath) {
+    a: mergeRequests(state: $aState, authorUsername: $aAuthor, assigneeUsername: $aAssignee, search: $search, first: 50, after: $aAfter, sort: UPDATED_DESC) @include(if: $withA) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...MergeRequestSummary }
+    }
+    b: mergeRequests(state: $bState, authorUsername: $bAuthor, assigneeUsername: $bAssignee, search: $search, first: 50, after: $bAfter, sort: UPDATED_DESC) @include(if: $withB) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...MergeRequestSummary }
+    }
+  }
+}

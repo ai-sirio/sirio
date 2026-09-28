@@ -1,0 +1,3 @@
+query MergeRequestCount($fullPath: ID!, $reviewer: String!) {
+  project(fullPath: $fullPath) { mergeRequests(state: opened, reviewerUsername: $reviewer) { count } }
+}

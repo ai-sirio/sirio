@@ -1134,6 +1134,9 @@ impl AppDatabase {
         if let Some(value) = self.setting_value(settings_keys::MARKDOWN_PLANTUML_SERVER)? {
             defaults.markdown_plantuml_server = value;
         }
+        if let Some(value) = self.setting_value(settings_keys::FORGE_HOSTS)? {
+            defaults.forge_hosts = value;
+        }
         if let Some(value) = self.setting_value(settings_keys::TRANSLUCENCY)? {
             defaults.translucency = parse_bool_setting(&value, false);
         }
@@ -1307,6 +1310,7 @@ impl AppDatabase {
             settings_keys::MARKDOWN_PLANTUML_SERVER,
             &settings.markdown_plantuml_server,
         )?;
+        set_setting(&transaction, settings_keys::FORGE_HOSTS, &settings.forge_hosts)?;
         set_setting(
             &transaction,
             settings_keys::TRANSLUCENCY,

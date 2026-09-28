@@ -31,6 +31,16 @@ Scripts/ci-linux.sh
 # prints each stage the probe reported.
 Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 
+# Live end-to-end test of the forge layer (sirio_forge): the token transport
+# and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
+# transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1
+# prints every probe answer.
+Scripts/Tests/test-forge-e2e.sh    # -> prints "FORGE E2E OK"
+
+# The change request view and tab in a real, isolated Sirio against the fake
+# forge, over the control socket; --state-only skips the window captures.
+Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -80,7 +90,7 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
-sirio_privacy
+sirio_forge, sirio_privacy
                                 (leaves — no local deps beyond sirio_perf;
                                  sirio_theme and sirio_ui take the external
                                  `bezel` crate, pinned `=0.1.4`, and
@@ -91,6 +101,9 @@ sirio_privacy
                                  no process, no channels — which is what lets
                                  sirio_agents, sirio_acp and sirio_usage all
                                  take it without inverting the graph;
+                                 sirio_forge is GitHub and GitLab change
+                                 requests over GraphQL, with the token
+                                 handed in by its caller;
                                  sirio_privacy is the macOS TCC permissions
                                  as a pure model plus the one probe that asks
                                  macOS, on the objc2 0.6 family gpui links)
@@ -103,8 +116,8 @@ sirio_control    (-> sirio_acp, sirio_persistence)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_git, sirio_lsp,
-                      sirio_markdown, sirio_persistence, sirio_privacy,
+sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_git,
+                      sirio_lsp, sirio_markdown, sirio_persistence, sirio_privacy,
                       sirio_project, sirio_registry, sirio_syntax, sirio_theme,
                       sirio_usage)
     ^
@@ -176,6 +189,32 @@ app, and drives the real `Updater` through check → download → verify → app
 on Windows, the real silent spawn of the staged extensionless PE. Run it after any change
 to the three crates or to the compiled-in environment; `Scripts/ci-linux.sh` runs it as a
 stage.
+
+### Change requests: one GraphQL layer, two transports (`sirio_forge`)
+
+`sirio_forge` reads GitHub pull requests and GitLab merge requests —
+"change requests" — through GraphQL on both forges, and parses each forge's
+answers once. How the request travels is the user's *means*: `CliTransport`
+hands it to `gh api` / `glab api --include`, which own authentication;
+`TokenTransport` sends it with `ureq` and the platform certificate verifier,
+so a self-managed forge behind a corporate CA verifies. The token is handed
+in by the caller and never stored or logged by the crate. GitLab queries
+that carry a merge request summary have a baseline variant, used from the
+first `Field '…' doesn't exist` onward, because GraphQL rejects a whole
+query that names a field an older server lacks. `SIRIO_FORGE_TEST_ENDPOINTS`
+points hosts at loopback in debug builds only. `Scripts/Tests/test-forge-e2e.sh`
+proves the seam; `tests/forge_live.rs` notices the day a query stops
+matching the live schema (it SKIPs without credentials and is off both
+gates). `docs/superpowers/specs/2026-09-27-change-requests-design.md` has the
+design.
+
+The UI reads through one seam, `sirio_ui::forge_source::ChangeRequestSource`,
+a GPUI global the host sets once (`sirio/src/forge.rs`, `ForgeHub`): the
+right panel's fifth view and the `ChangeRequest` tab in the Secondary half
+never see a token or a setting. `ForgeHub` owns the `forge.hosts` setting —
+a Settings-screen save re-applies the stored value — and keeps tokens in the
+credential store under `forge:<host>`. The list asks nothing before it is
+shown and refreshes only while visible; a restored tab loads when shown.
 
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 

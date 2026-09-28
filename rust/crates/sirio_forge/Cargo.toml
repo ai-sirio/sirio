@@ -1,0 +1,20 @@
+[package]
+name = "sirio_forge"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# A leaf: no gpui, no bezel, no local crate but sirio_perf. GitHub pull
+# requests and GitLab merge requests over one GraphQL layer and two
+# transports. Blocking on purpose, like sirio_registry: the app runs these
+# calls on GPUI's background executor.
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde.workspace = true
+serde_json.workspace = true
+sirio_perf = { path = "../sirio_perf" }
+thiserror = "2"
+# `platform-verifier`: a self-managed forge whose certificate chains to a
+# corporate CA installed in the system trust store must verify. ureq's
+# default root store is Mozilla's; only this crate's client opts out of it.
+ureq = { version = "3.4", features = ["platform-verifier"] }

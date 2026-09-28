@@ -1,0 +1,8 @@
+query MergeRequestList($fullPath: ID!, $state: MergeRequestState, $reviewer: String, $search: String, $after: String) {
+  project(fullPath: $fullPath) {
+    mergeRequests(state: $state, reviewerUsername: $reviewer, search: $search, first: 50, after: $after, sort: UPDATED_DESC) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...MergeRequestSummary }
+    }
+  }
+}

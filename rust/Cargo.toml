@@ -30,11 +30,12 @@ members = [
     "crates/sirio_release",
     "crates/sirio_update",
     "crates/sirio_apply",
+    "crates/sirio_forge",
     "crates/sirio_privacy",
 ]
 
 [workspace.package]
-version = "0.26.2"
+version = "0.27.0"
 edition = "2024"
 publish = false
 
@@ -109,6 +110,7 @@ sirio_syntax = { path = "crates/sirio_syntax" }
 sirio_release = { path = "crates/sirio_release" }
 sirio_update = { path = "crates/sirio_update" }
 sirio_apply = { path = "crates/sirio_apply" }
+sirio_forge = { path = "crates/sirio_forge" }
 sirio_privacy = { path = "crates/sirio_privacy" }
 
 # Local override for F-CORE-FILE-03A: upstream `gpui_linux`'s wl_data_device `Drop` handler

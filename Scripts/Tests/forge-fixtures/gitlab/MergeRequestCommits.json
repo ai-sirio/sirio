@@ -1,0 +1,4 @@
+{"data": {"project": {"mergeRequest": {"commits": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [
+  {"sha": "abc1234aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "shortId": "abc1234", "title": "Add CSV export", "authoredDate": "2026-09-26T10:00:00+02:00", "webUrl": "https://gitlab.test/team/app/-/commit/abc1234aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "authorName": "Alice Doe", "author": {"username": "alice"}},
+  {"sha": "def5678bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "shortId": "def5678", "title": "Stream the rows", "authoredDate": "2026-09-26T11:00:00+02:00", "webUrl": "https://gitlab.test/team/app/-/commit/def5678bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "authorName": "Ghost Writer", "author": null}
+]}}}}}

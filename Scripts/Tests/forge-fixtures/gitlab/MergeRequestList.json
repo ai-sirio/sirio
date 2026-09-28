@@ -1,0 +1,8 @@
+{"data": {"project": {"mergeRequests": {
+  "pageInfo": {"hasNextPage": true, "endCursor": "g1"},
+  "nodes": [
+    {"iid": "201", "title": "Add CSV export", "webUrl": "https://gitlab.test/team/app/-/merge_requests/201", "draft": false, "state": "opened", "updatedAt": "2026-09-27T10:00:00Z", "author": {"username": "alice"}, "sourceBranch": "feat/export", "targetBranch": "main", "sourceProject": {"fullPath": "team/app"}, "userNotesCount": 7, "approvedBy": {"nodes": []}, "reviewers": {"nodes": [{"username": "fake-user", "mergeRequestInteraction": {"reviewState": "UNREVIEWED"}}, {"username": "carol", "mergeRequestInteraction": {"reviewState": "REQUESTED_CHANGES"}}]}, "headPipeline": {"status": "RUNNING", "jobs": {"count": 7}, "finished": {"count": 3}}},
+    {"iid": "202", "title": "Draft: new settings page", "webUrl": "https://gitlab.test/team/app/-/merge_requests/202", "draft": true, "state": "opened", "updatedAt": "2026-09-27T09:00:00Z", "author": {"username": "bob"}, "sourceBranch": "feat/settings", "targetBranch": "main", "sourceProject": {"fullPath": "team/app"}, "userNotesCount": 0, "approvedBy": {"nodes": []}, "reviewers": {"nodes": []}, "headPipeline": null},
+    null
+  ]
+}}}}

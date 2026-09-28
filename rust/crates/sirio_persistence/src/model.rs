@@ -135,7 +135,7 @@ pub struct TabRecord {
     pub worktree_id: String,
     /// The tab's title.
     pub title: String,
-    /// Surface kind: "terminal" | "chat" | "browser" | "editor" | "diff".
+    /// Surface kind: "terminal" | "chat" | "browser" | "file" | "diff" | "settings" | "change_request".
     pub kind: String,
     /// Stable agent identity for chat tabs, when one has been recorded.
     //
@@ -598,6 +598,11 @@ pub struct AppSettings {
     /// the Markdown Preview sends diagram source to when `plantuml` is not
     /// installed (design §6). Free text: the host trims it.
     pub markdown_plantuml_server: String,
+    /// "forge.hosts" — default `[]`. A JSON array of `{host, forge, means}`
+    /// the user decided in Settings → Git hosting or in the change request
+    /// view (spec §5.2, step 1). Owned by the host's `ForgeHub`, not by the
+    /// Settings snapshot: a Settings save re-applies the stored value.
+    pub forge_hosts: String,
 }
 
 impl Default for AppSettings {
@@ -628,6 +633,7 @@ impl Default for AppSettings {
             center_split_ratio: 500,
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: String::new(),
+            forge_hosts: "[]".to_string(),
         }
     }
 }
@@ -668,6 +674,8 @@ pub mod settings_keys {
     pub const LSP_SILENCED_LANGUAGES: &str = "lsp.silencedLanguages";
     /// Linux-rewrite-only: no Swift antecedent.
     pub const MARKDOWN_PLANTUML_SERVER: &str = "markdown.plantumlServer";
+    /// Linux-rewrite-only: no Swift antecedent.
+    pub const FORGE_HOSTS: &str = "forge.hosts";
 }
 
 /// The Swift ranges settings values are clamped into.

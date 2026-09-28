@@ -316,6 +316,21 @@ run_root_stage "test-install-sh.sh"            bash Scripts/Tests/test-install-s
 # release must not be gated on a local HTTP port being free.
 run_root_stage "test-update-e2e.sh"            bash Scripts/Tests/test-update-e2e.sh
 
+# The forge layer's seam with the outside -- gh's and glab's `--include`
+# output, chunked request bodies, HTTP statuses, GitLab's baseline queries --
+# against loopback fake forges. A CLI that is not installed is reported as a
+# SKIP line inside the stage's own transcript; the stage still passes.
+run_root_stage "test-forge-e2e.sh"             bash Scripts/Tests/test-forge-e2e.sh --out-dir "$RUN_DIR/forge-e2e"
+
+# The change request surfaces in a real, isolated Sirio against the fake
+# forge, over the control socket. Captures need an X display; without one
+# the run is state-only, which still proves every socket-visible fact.
+if [ -n "${DISPLAY:-}" ]; then
+    run_root_stage "test-forge-ui-e2e.sh"      bash Scripts/Tests/test-forge-ui-e2e.sh --out-dir "$RUN_DIR/forge-ui-e2e"
+else
+    run_root_stage "test-forge-ui-e2e.sh"      bash Scripts/Tests/test-forge-ui-e2e.sh --state-only --out-dir "$RUN_DIR/forge-ui-e2e"
+fi
+
 # The critics' own instrument. Both of these guard leaks that have already cost
 # this machine real resources — 184 orphaned virtual-pointers at once, and before
 # that a disk filled to within hours of full — and both failures are invisible

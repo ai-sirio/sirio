@@ -1,0 +1,1 @@
+query ChangeRequestCount($q: String!) { search(query: $q, type: ISSUE, first: 0) { issueCount } }

@@ -1,0 +1,5 @@
+{"data": {"repository": {"pullRequest": {"files": {"totalCount": 4, "pageInfo": {"hasNextPage": true, "endCursor": "f1"}, "nodes": [
+  {"path": "src/login.rs", "additions": 100, "deletions": 6, "changeType": "MODIFIED"},
+  {"path": "src/redirect.rs", "additions": 20, "deletions": 0, "changeType": "ADDED"},
+  {"path": "docs/new.md", "additions": 0, "deletions": 2, "changeType": "RENAMED"}
+]}}}}}

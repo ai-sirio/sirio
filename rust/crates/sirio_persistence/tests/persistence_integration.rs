@@ -2096,6 +2096,21 @@ fn markdown_plantuml_server_round_trips_and_defaults_to_empty() {
     );
 }
 
+#[test]
+fn forge_hosts_round_trip_and_default_to_an_empty_list() {
+    let dir = TempDir::new();
+    let path = dir.db_path("forge-hosts");
+    let db = AppDatabase::open(&path).expect("open fresh database");
+    assert_eq!(db.settings().expect("defaults").forge_hosts, "[]");
+    let hosts = r#"[{"host":"git.corp","forge":"gitlab","means":"token"}]"#;
+    db.save_settings(&AppSettings {
+        forge_hosts: hosts.into(),
+        ..AppSettings::default()
+    })
+    .expect("save settings");
+    assert_eq!(db.settings().expect("read back").forge_hosts, hosts);
+}
+
 fn chat_with_turn(db: &AppDatabase, id: &str, title: &str) {
     db.save_tab(&sample_tab(id, "worktree", title, "chat"))
         .expect("chat tab");

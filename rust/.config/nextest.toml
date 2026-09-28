@@ -48,7 +48,12 @@ retries = 2
 # reason and one more: it drives whatever `claude` the machine happens to
 # carry, and that binary self-updates. A release must not be decided by a
 # version that landed on a runner overnight.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims)'
+#
+# `github_answers_every_query_sirio_sends` and
+# `gitlab_answers_every_query_sirio_sends` join them for the same reason:
+# they call the live forges over the network, and a release must not depend
+# on the network.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends)'
 
 [profile.pr]
 # .github/workflows/pr.yml selects this profile, by way of Scripts/ci.sh mapping
@@ -71,12 +76,17 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # carry, and that binary self-updates. Which version landed on a runner
 # overnight must not decide a gate.
 #
+# `github_answers_every_query_sirio_sends` and
+# `gitlab_answers_every_query_sirio_sends` join them for the same reason:
+# they call the live forges over the network, and a pull request must not
+# depend on the network.
+#
 # Unlike `ci`, it retries nothing. Those two retries exist so a *release* does
 # not die of one timing flake on a machine compiling two thousand tests at
 # once. A pull request is the last run where the developer who caused a flake
 # can still see it, so hiding it here would cost exactly what the retries
 # elsewhere are worth.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims)'
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends)'
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 3 }
 

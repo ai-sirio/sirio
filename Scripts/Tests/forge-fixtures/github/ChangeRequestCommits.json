@@ -1,0 +1,4 @@
+{"data": {"repository": {"pullRequest": {"commits": {"totalCount": 2, "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [
+  {"commit": {"oid": "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "abbreviatedOid": "1111111", "messageHeadline": "Fix the redirect", "committedDate": "2026-09-26T10:00:00Z", "url": "https://ghe.test/acme/widgets/commit/1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "author": {"name": "Alice Doe", "user": {"login": "alice"}}}},
+  {"commit": {"oid": "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "abbreviatedOid": "2222222", "messageHeadline": "Test the redirect", "committedDate": "2026-09-26T10:05:00Z", "url": "https://ghe.test/acme/widgets/commit/2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "author": {"name": "Bob Roe", "user": null}}}
+]}}}}}

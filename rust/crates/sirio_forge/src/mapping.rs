@@ -1,0 +1,607 @@
+//! Pure translations from each forge's vocabulary into the model's. Every
+//! unknown value lands on a neutral member: a forge adding a state must
+//! never make a list fail to draw.
+
+use crate::model::{
+    ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress, ReviewOutcome,
+    ReviewState,
+};
+
+pub(crate) fn github_change_state(state: &str, is_draft: bool) -> ChangeState {
+    match state {
+        "MERGED" => ChangeState::Merged,
+        "CLOSED" => ChangeState::Closed,
+        _ if is_draft => ChangeState::Draft,
+        _ => ChangeState::Open,
+    }
+}
+
+pub(crate) fn gitlab_change_state(state: &str, draft: bool) -> ChangeState {
+    match state {
+        "merged" => ChangeState::Merged,
+        "closed" | "locked" => ChangeState::Closed,
+        _ if draft => ChangeState::Draft,
+        _ => ChangeState::Open,
+    }
+}
+
+/// One `{ state, count }` pair of a GitHub `…CountsByState` list.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StateCount<'a> {
+    pub state: &'a str,
+    pub count: u32,
+}
+
+/// A failing rollup shows as failed even while other checks run: it is the
+/// fact the user must act on. Otherwise a pending rollup reports how many
+/// checks and commit statuses have finished.
+pub(crate) fn github_ci(
+    rollup: Option<&str>,
+    check_runs: &[StateCount<'_>],
+    status_contexts: &[StateCount<'_>],
+) -> CiState {
+    let Some(rollup) = rollup else {
+        return CiState::NoChecks;
+    };
+    let total: u32 = check_runs
+        .iter()
+        .chain(status_contexts)
+        .map(|pair| pair.count)
+        .sum();
+    let unfinished: u32 = check_runs
+        .iter()
+        .filter(|pair| {
+            matches!(
+                pair.state,
+                "IN_PROGRESS" | "PENDING" | "QUEUED" | "WAITING" | "REQUESTED"
+            )
+        })
+        .chain(
+            status_contexts
+                .iter()
+                .filter(|pair| matches!(pair.state, "PENDING" | "EXPECTED")),
+        )
+        .map(|pair| pair.count)
+        .sum();
+    match rollup {
+        "SUCCESS" => CiState::Passed,
+        "FAILURE" | "ERROR" => CiState::Failed,
+        "PENDING" | "EXPECTED" => CiState::Running((total > 0).then(|| Progress {
+            done: total.saturating_sub(unfinished),
+            total,
+        })),
+        _ => CiState::NoChecks,
+    }
+}
+
+/// A pipeline waiting on a manual job has not finished, so it reads as
+/// running. The counts are absent on the baseline queries.
+pub(crate) fn gitlab_ci(
+    status: Option<&str>,
+    total_jobs: Option<u32>,
+    finished_jobs: Option<u32>,
+) -> CiState {
+    let progress = match (finished_jobs, total_jobs) {
+        (Some(done), Some(total)) if total > 0 => Some(Progress {
+            done: done.min(total),
+            total,
+        }),
+        _ => None,
+    };
+    match status {
+        Some("SUCCESS") => CiState::Passed,
+        Some("FAILED") => CiState::Failed,
+        Some("CANCELED" | "CANCELING") => CiState::Canceled,
+        Some(
+            "CREATED"
+            | "WAITING_FOR_RESOURCE"
+            | "PREPARING"
+            | "WAITING_FOR_CALLBACK"
+            | "PENDING"
+            | "RUNNING"
+            | "SCHEDULED"
+            | "MANUAL",
+        ) => CiState::Running(progress),
+        _ => CiState::NoChecks,
+    }
+}
+
+pub(crate) fn github_check_run(status: &str, conclusion: Option<&str>) -> CheckStatus {
+    match status {
+        "COMPLETED" => match conclusion {
+            Some("SUCCESS") => CheckStatus::Passed,
+            Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED") => {
+                CheckStatus::Failed
+            }
+            Some("CANCELLED") => CheckStatus::Canceled,
+            Some("SKIPPED") => CheckStatus::Skipped,
+            _ => CheckStatus::Neutral,
+        },
+        "IN_PROGRESS" => CheckStatus::Running,
+        "QUEUED" | "PENDING" | "WAITING" | "REQUESTED" => CheckStatus::Queued,
+        _ => CheckStatus::Neutral,
+    }
+}
+
+pub(crate) fn github_status_context(state: &str) -> CheckStatus {
+    match state {
+        "SUCCESS" => CheckStatus::Passed,
+        "FAILURE" | "ERROR" => CheckStatus::Failed,
+        "PENDING" | "EXPECTED" => CheckStatus::Running,
+        _ => CheckStatus::Neutral,
+    }
+}
+
+/// A manual job is waiting for a person, not failing, so it is neutral.
+pub(crate) fn gitlab_job(status: &str) -> CheckStatus {
+    match status {
+        "SUCCESS" => CheckStatus::Passed,
+        "FAILED" => CheckStatus::Failed,
+        "CANCELED" | "CANCELING" => CheckStatus::Canceled,
+        "SKIPPED" => CheckStatus::Skipped,
+        "RUNNING" => CheckStatus::Running,
+        "CREATED"
+        | "WAITING_FOR_RESOURCE"
+        | "PREPARING"
+        | "WAITING_FOR_CALLBACK"
+        | "PENDING"
+        | "SCHEDULED" => CheckStatus::Queued,
+        _ => CheckStatus::Neutral,
+    }
+}
+
+/// GitHub's own decision wins; without one (a repository with no review
+/// policy) approvals still show.
+pub(crate) fn github_review(decision: Option<&str>, approvals: u32) -> ReviewState {
+    match decision {
+        Some("APPROVED") => ReviewState::Approved {
+            count: approvals.max(1),
+        },
+        Some("CHANGES_REQUESTED") => ReviewState::ChangesRequested,
+        Some("REVIEW_REQUIRED") => ReviewState::ReviewRequired,
+        _ if approvals > 0 => ReviewState::Approved { count: approvals },
+        _ => ReviewState::None,
+    }
+}
+
+/// `None` for `PENDING`: an unsubmitted review is the viewer's own draft.
+pub(crate) fn github_review_outcome(state: &str) -> Option<ReviewOutcome> {
+    match state {
+        "PENDING" => None,
+        "APPROVED" => Some(ReviewOutcome::Approved),
+        "CHANGES_REQUESTED" => Some(ReviewOutcome::ChangesRequested),
+        "COMMENTED" => Some(ReviewOutcome::Commented),
+        "DISMISSED" => Some(ReviewOutcome::Dismissed),
+        _ => Some(ReviewOutcome::Other),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitLabReviewer<'a> {
+    pub username: &'a str,
+    pub review_state: Option<&'a str>,
+}
+
+/// Any request for changes outranks approvals. On the baseline queries the
+/// reviewers carry no state, so a reviewer list alone means "required".
+pub(crate) fn gitlab_review(reviewers: &[GitLabReviewer<'_>], approvals: u32) -> ReviewState {
+    if reviewers
+        .iter()
+        .any(|reviewer| reviewer.review_state == Some("REQUESTED_CHANGES"))
+    {
+        ReviewState::ChangesRequested
+    } else if approvals > 0 {
+        ReviewState::Approved { count: approvals }
+    } else if !reviewers.is_empty() {
+        ReviewState::ReviewRequired
+    } else {
+        ReviewState::None
+    }
+}
+
+/// On the baseline a reviewer entry carries no state; being listed is then
+/// the only evidence, and it counts as pending.
+pub(crate) fn gitlab_review_requested_from(reviewers: &[GitLabReviewer<'_>], me: &str) -> bool {
+    reviewers.iter().any(|reviewer| {
+        reviewer.username.eq_ignore_ascii_case(me)
+            && matches!(
+                reviewer.review_state,
+                None | Some("UNREVIEWED" | "REVIEW_STARTED" | "UNAPPROVED")
+            )
+    })
+}
+
+pub(crate) fn gitlab_reviewer_outcome(state: Option<&str>) -> ReviewOutcome {
+    match state {
+        Some("APPROVED") => ReviewOutcome::Approved,
+        Some("REQUESTED_CHANGES") => ReviewOutcome::ChangesRequested,
+        Some("REVIEWED") => ReviewOutcome::Commented,
+        None | Some("UNREVIEWED" | "REVIEW_STARTED" | "UNAPPROVED") => ReviewOutcome::Requested,
+        Some(_) => ReviewOutcome::Other,
+    }
+}
+
+/// What a GitLab system note means for the timeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SystemNote {
+    Approved,
+    Event(EventKind),
+}
+
+/// GitLab writes system notes in prose; these are the ones the timeline
+/// gives a meaning to. Anything else is kept as its first line.
+pub(crate) fn gitlab_system_note(body: &str) -> SystemNote {
+    let first = body.lines().next().unwrap_or("").trim();
+    if first == "approved this merge request" {
+        return SystemNote::Approved;
+    }
+    if let Some(rest) = first.strip_prefix("added ")
+        && rest.contains("commit")
+    {
+        let count = rest
+            .split_whitespace()
+            .next()
+            .and_then(|word| word.parse().ok())
+            .unwrap_or(1);
+        return SystemNote::Event(EventKind::CommitsPushed { count });
+    }
+    if let Some(rest) = first.strip_prefix("requested review from ") {
+        let reviewer = rest
+            .split([',', ' '])
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('@')
+            .to_string();
+        return SystemNote::Event(EventKind::ReviewRequested { reviewer });
+    }
+    let kind = match first {
+        "merged" => EventKind::Merged,
+        "closed" => EventKind::Closed,
+        "reopened" => EventKind::Reopened,
+        _ if first.starts_with("marked this merge request as **ready**") => {
+            EventKind::ReadyForReview
+        }
+        _ if first.starts_with("marked this merge request as **draft**") => {
+            EventKind::ConvertedToDraft
+        }
+        _ => EventKind::Other(first.to_string()),
+    };
+    SystemNote::Event(kind)
+}
+
+pub(crate) fn unix_seconds(timestamp: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|time| time.timestamp())
+}
+
+pub(crate) fn file_change_kind(change_type: &str) -> Option<FileChangeKind> {
+    match change_type {
+        "ADDED" => Some(FileChangeKind::Added),
+        "MODIFIED" | "CHANGED" => Some(FileChangeKind::Modified),
+        "DELETED" => Some(FileChangeKind::Deleted),
+        "RENAMED" => Some(FileChangeKind::Renamed),
+        "COPIED" => Some(FileChangeKind::Copied),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counts<'a>(pairs: &[(&'a str, u32)]) -> Vec<StateCount<'a>> {
+        pairs
+            .iter()
+            .map(|&(state, count)| StateCount { state, count })
+            .collect()
+    }
+
+    fn reviewers<'a>(pairs: &[(&'a str, Option<&'a str>)]) -> Vec<GitLabReviewer<'a>> {
+        pairs
+            .iter()
+            .map(|&(username, review_state)| GitLabReviewer {
+                username,
+                review_state,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_merged_draft_reads_as_merged_on_both_forges() {
+        assert_eq!(github_change_state("MERGED", true), ChangeState::Merged);
+        assert_eq!(gitlab_change_state("merged", true), ChangeState::Merged);
+    }
+
+    #[test]
+    fn an_open_draft_reads_as_draft() {
+        assert_eq!(github_change_state("OPEN", true), ChangeState::Draft);
+        assert_eq!(gitlab_change_state("opened", true), ChangeState::Draft);
+    }
+
+    #[test]
+    fn a_locked_merge_request_reads_as_closed() {
+        assert_eq!(gitlab_change_state("locked", false), ChangeState::Closed);
+        assert_eq!(github_change_state("CLOSED", false), ChangeState::Closed);
+    }
+
+    #[test]
+    fn an_unknown_state_reads_as_open_never_as_finished() {
+        assert_eq!(github_change_state("ARCHIVED", false), ChangeState::Open);
+        assert_eq!(gitlab_change_state("frozen", false), ChangeState::Open);
+    }
+
+    #[test]
+    fn a_github_head_without_a_rollup_has_no_checks() {
+        assert_eq!(github_ci(None, &[], &[]), CiState::NoChecks);
+    }
+
+    #[test]
+    fn a_pending_github_rollup_counts_what_finished() {
+        let runs = counts(&[("SUCCESS", 4), ("IN_PROGRESS", 2), ("QUEUED", 1)]);
+        assert_eq!(
+            github_ci(Some("PENDING"), &runs, &[]),
+            CiState::Running(Some(Progress { done: 4, total: 7 }))
+        );
+    }
+
+    #[test]
+    fn commit_statuses_count_toward_the_total() {
+        let statuses = counts(&[("SUCCESS", 1), ("PENDING", 1)]);
+        assert_eq!(
+            github_ci(Some("PENDING"), &[], &statuses),
+            CiState::Running(Some(Progress { done: 1, total: 2 }))
+        );
+    }
+
+    #[test]
+    fn a_github_failure_shows_while_other_checks_still_run() {
+        let runs = counts(&[("FAILURE", 1), ("IN_PROGRESS", 3)]);
+        assert_eq!(github_ci(Some("FAILURE"), &runs, &[]), CiState::Failed);
+        assert_eq!(github_ci(Some("ERROR"), &[], &[]), CiState::Failed);
+    }
+
+    #[test]
+    fn an_unknown_github_rollup_is_neutral() {
+        assert_eq!(
+            github_ci(Some("SOMETHING_NEW"), &[], &[]),
+            CiState::NoChecks
+        );
+    }
+
+    #[test]
+    fn a_blocked_gitlab_pipeline_is_still_running() {
+        assert_eq!(
+            gitlab_ci(Some("MANUAL"), Some(7), Some(3)),
+            CiState::Running(Some(Progress { done: 3, total: 7 }))
+        );
+    }
+
+    #[test]
+    fn a_gitlab_pipeline_on_the_baseline_runs_without_counts() {
+        assert_eq!(
+            gitlab_ci(Some("RUNNING"), None, None),
+            CiState::Running(None)
+        );
+    }
+
+    #[test]
+    fn finished_jobs_never_exceed_the_total() {
+        assert_eq!(
+            gitlab_ci(Some("RUNNING"), Some(3), Some(5)),
+            CiState::Running(Some(Progress { done: 3, total: 3 }))
+        );
+    }
+
+    #[test]
+    fn gitlab_verdicts_map_to_their_meaning() {
+        assert_eq!(
+            gitlab_ci(Some("SUCCESS"), Some(5), Some(5)),
+            CiState::Passed
+        );
+        assert_eq!(gitlab_ci(Some("FAILED"), None, None), CiState::Failed);
+        assert_eq!(gitlab_ci(Some("CANCELED"), None, None), CiState::Canceled);
+        assert_eq!(gitlab_ci(Some("SKIPPED"), None, None), CiState::NoChecks);
+        assert_eq!(gitlab_ci(None, None, None), CiState::NoChecks);
+        assert_eq!(
+            gitlab_ci(Some("SOMETHING_NEW"), None, None),
+            CiState::NoChecks
+        );
+    }
+
+    #[test]
+    fn a_completed_check_run_reads_its_conclusion() {
+        assert_eq!(
+            github_check_run("COMPLETED", Some("SUCCESS")),
+            CheckStatus::Passed
+        );
+        assert_eq!(
+            github_check_run("COMPLETED", Some("ACTION_REQUIRED")),
+            CheckStatus::Failed
+        );
+        assert_eq!(
+            github_check_run("COMPLETED", Some("TIMED_OUT")),
+            CheckStatus::Failed
+        );
+        assert_eq!(
+            github_check_run("COMPLETED", Some("CANCELLED")),
+            CheckStatus::Canceled
+        );
+        assert_eq!(
+            github_check_run("COMPLETED", Some("SKIPPED")),
+            CheckStatus::Skipped
+        );
+        assert_eq!(
+            github_check_run("COMPLETED", Some("SOMETHING_NEW")),
+            CheckStatus::Neutral
+        );
+        assert_eq!(github_check_run("COMPLETED", None), CheckStatus::Neutral);
+    }
+
+    #[test]
+    fn an_unfinished_check_run_is_queued_or_running() {
+        assert_eq!(github_check_run("IN_PROGRESS", None), CheckStatus::Running);
+        assert_eq!(github_check_run("WAITING", None), CheckStatus::Queued);
+        assert_eq!(
+            github_check_run("SOMETHING_NEW", None),
+            CheckStatus::Neutral
+        );
+    }
+
+    #[test]
+    fn a_pending_commit_status_is_running() {
+        assert_eq!(github_status_context("PENDING"), CheckStatus::Running);
+        assert_eq!(github_status_context("ERROR"), CheckStatus::Failed);
+        assert_eq!(github_status_context("SOMETHING_NEW"), CheckStatus::Neutral);
+    }
+
+    #[test]
+    fn a_manual_gitlab_job_is_neutral_not_failed() {
+        assert_eq!(gitlab_job("MANUAL"), CheckStatus::Neutral);
+        assert_eq!(gitlab_job("CREATED"), CheckStatus::Queued);
+        assert_eq!(gitlab_job("FAILED"), CheckStatus::Failed);
+        assert_eq!(gitlab_job("SOMETHING_NEW"), CheckStatus::Neutral);
+    }
+
+    #[test]
+    fn github_review_decisions_win_over_counts() {
+        assert_eq!(
+            github_review(Some("CHANGES_REQUESTED"), 2),
+            ReviewState::ChangesRequested
+        );
+        assert_eq!(
+            github_review(Some("REVIEW_REQUIRED"), 1),
+            ReviewState::ReviewRequired
+        );
+        assert_eq!(
+            github_review(Some("APPROVED"), 0),
+            ReviewState::Approved { count: 1 }
+        );
+    }
+
+    #[test]
+    fn without_a_decision_github_approvals_still_show() {
+        assert_eq!(github_review(None, 2), ReviewState::Approved { count: 2 });
+        assert_eq!(github_review(None, 0), ReviewState::None);
+        assert_eq!(github_review(Some("SOMETHING_NEW"), 0), ReviewState::None);
+    }
+
+    #[test]
+    fn a_pending_github_review_is_the_viewers_own_draft_and_is_hidden() {
+        assert_eq!(github_review_outcome("PENDING"), None);
+        assert_eq!(
+            github_review_outcome("APPROVED"),
+            Some(ReviewOutcome::Approved)
+        );
+        assert_eq!(
+            github_review_outcome("SOMETHING_NEW"),
+            Some(ReviewOutcome::Other)
+        );
+    }
+
+    #[test]
+    fn a_gitlab_change_request_beats_its_approvals() {
+        let people = reviewers(&[
+            ("carol", Some("REQUESTED_CHANGES")),
+            ("dave", Some("APPROVED")),
+        ]);
+        assert_eq!(gitlab_review(&people, 1), ReviewState::ChangesRequested);
+    }
+
+    #[test]
+    fn gitlab_approvals_and_waiting_reviewers() {
+        assert_eq!(gitlab_review(&[], 2), ReviewState::Approved { count: 2 });
+        let waiting = reviewers(&[("carol", Some("UNREVIEWED"))]);
+        assert_eq!(gitlab_review(&waiting, 0), ReviewState::ReviewRequired);
+        let baseline = reviewers(&[("carol", None)]);
+        assert_eq!(gitlab_review(&baseline, 0), ReviewState::ReviewRequired);
+        assert_eq!(gitlab_review(&[], 0), ReviewState::None);
+    }
+
+    #[test]
+    fn a_gitlab_review_is_pending_from_me_until_i_answer() {
+        assert!(gitlab_review_requested_from(
+            &reviewers(&[("Fake-User", Some("UNREVIEWED"))]),
+            "fake-user"
+        ));
+        assert!(gitlab_review_requested_from(
+            &reviewers(&[("fake-user", None)]),
+            "fake-user"
+        ));
+        assert!(!gitlab_review_requested_from(
+            &reviewers(&[("fake-user", Some("REVIEWED"))]),
+            "fake-user"
+        ));
+        assert!(!gitlab_review_requested_from(
+            &reviewers(&[("carol", Some("UNREVIEWED"))]),
+            "fake-user"
+        ));
+    }
+
+    #[test]
+    fn gitlab_system_notes_become_timeline_events() {
+        assert_eq!(
+            gitlab_system_note("approved this merge request"),
+            SystemNote::Approved
+        );
+        assert_eq!(
+            gitlab_system_note("added 3 commits\n\n<ul><li>abc - first</li></ul>"),
+            SystemNote::Event(EventKind::CommitsPushed { count: 3 })
+        );
+        assert_eq!(
+            gitlab_system_note("added 1 commit\n\n<ul><li>abc</li></ul>"),
+            SystemNote::Event(EventKind::CommitsPushed { count: 1 })
+        );
+        assert_eq!(
+            gitlab_system_note("requested review from @fake-user"),
+            SystemNote::Event(EventKind::ReviewRequested {
+                reviewer: "fake-user".into()
+            })
+        );
+        assert_eq!(
+            gitlab_system_note("merged"),
+            SystemNote::Event(EventKind::Merged)
+        );
+        assert_eq!(
+            gitlab_system_note("closed"),
+            SystemNote::Event(EventKind::Closed)
+        );
+        assert_eq!(
+            gitlab_system_note("reopened"),
+            SystemNote::Event(EventKind::Reopened)
+        );
+        assert_eq!(
+            gitlab_system_note("marked this merge request as **ready**"),
+            SystemNote::Event(EventKind::ReadyForReview)
+        );
+        assert_eq!(
+            gitlab_system_note("marked this merge request as **draft**"),
+            SystemNote::Event(EventKind::ConvertedToDraft)
+        );
+    }
+
+    #[test]
+    fn an_unknown_system_note_keeps_only_its_first_line() {
+        assert_eq!(
+            gitlab_system_note("mentioned in issue #3\n\nmore"),
+            SystemNote::Event(EventKind::Other("mentioned in issue #3".into()))
+        );
+    }
+
+    #[test]
+    fn both_forges_timestamp_shapes_parse() {
+        assert_eq!(unix_seconds("2026-09-25T07:58:52Z"), Some(1_790_323_132));
+        assert_eq!(
+            unix_seconds("2026-09-03T14:43:43+01:00"),
+            Some(1_788_443_023)
+        );
+        assert_eq!(unix_seconds("yesterday"), None);
+    }
+
+    #[test]
+    fn github_change_types_map_and_unknown_ones_are_none() {
+        assert_eq!(file_change_kind("RENAMED"), Some(FileChangeKind::Renamed));
+        assert_eq!(file_change_kind("CHANGED"), Some(FileChangeKind::Modified));
+        assert_eq!(file_change_kind("SOMETHING_NEW"), None);
+    }
+}

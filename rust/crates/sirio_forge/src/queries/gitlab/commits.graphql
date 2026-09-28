@@ -1,0 +1,10 @@
+query MergeRequestCommits($fullPath: ID!, $iid: String!, $after: String) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) {
+      commits(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { sha shortId title authoredDate webUrl authorName author { username } }
+      }
+    }
+  }
+}

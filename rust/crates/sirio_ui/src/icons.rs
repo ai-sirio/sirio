@@ -158,6 +158,35 @@ pub enum Icon {
     /// The file editor's Markdown Code mode (`zed/code.svg`), the other
     /// half of that pair.
     Code,
+    /// A pull or merge request (`zed/pull_request.svg`): the right panel's
+    /// change request view, and a change request's state.
+    PullRequest,
+    /// *Mine* (`zed/person.svg`).
+    Person,
+    /// Checks passed (`zed/check.svg`).
+    Check,
+    /// Checks failed (`zed/x_circle.svg`).
+    XCircle,
+    /// Checks running (`zed/clock.svg`).
+    Clock,
+    /// A check queued (`zed/circle.svg`).
+    Circle,
+    /// A check cancelled, skipped or neutral (`zed/dash.svg`).
+    Dash,
+    /// A review approved (`zed/user_check.svg`).
+    UserCheck,
+    /// Changes requested (`zed/warning.svg`).
+    Warning,
+    /// A commit (`zed/git_commit.svg`).
+    GitCommit,
+    /// Open on the forge (`zed/arrow_up_right.svg`).
+    ArrowUpRight,
+    /// Copy to the clipboard (`zed/copy.svg`).
+    Copy,
+    /// GitHub's mark (`dashboard/github.svg`), tinted.
+    GitHubMark,
+    /// GitLab's mark (`dashboard/gitlab.svg`), in its own colours.
+    GitLabMark,
     /// A full-colour Material file or folder icon, named by its asset stem
     /// (`rust`, `folder-src-open`). The stems and the bytes both come from
     /// `sirio_icons`; an unknown stem falls back to the theme's own `file`.
@@ -236,6 +265,20 @@ impl Icon {
             Icon::Eye => "icons/zed/eye.svg",
             Icon::EyeOff => "icons/zed/eye_off.svg",
             Icon::Code => "icons/zed/code.svg",
+            Icon::PullRequest => "icons/zed/pull_request.svg",
+            Icon::Person => "icons/zed/person.svg",
+            Icon::Check => "icons/zed/check.svg",
+            Icon::XCircle => "icons/zed/x_circle.svg",
+            Icon::Clock => "icons/zed/clock.svg",
+            Icon::Circle => "icons/zed/circle.svg",
+            Icon::Dash => "icons/zed/dash.svg",
+            Icon::UserCheck => "icons/zed/user_check.svg",
+            Icon::Warning => "icons/zed/warning.svg",
+            Icon::GitCommit => "icons/zed/git_commit.svg",
+            Icon::ArrowUpRight => "icons/zed/arrow_up_right.svg",
+            Icon::Copy => "icons/zed/copy.svg",
+            Icon::GitHubMark => "icons/dashboard/github.svg",
+            Icon::GitLabMark => "icons/dashboard/gitlab.svg",
             Icon::FileType(stem) => sirio_icons::asset_path(stem)
                 .or_else(|| sirio_icons::asset_path(sirio_icons::DEFAULT_FILE))
                 .unwrap_or("icons/material/file.svg"),
@@ -294,6 +337,20 @@ impl Icon {
             Icon::Eye => include_bytes!("../../../assets/icons/zed/eye.svg"),
             Icon::EyeOff => include_bytes!("../../../assets/icons/zed/eye_off.svg"),
             Icon::Code => include_bytes!("../../../assets/icons/zed/code.svg"),
+            Icon::PullRequest => include_bytes!("../../../assets/icons/zed/pull_request.svg"),
+            Icon::Person => include_bytes!("../../../assets/icons/zed/person.svg"),
+            Icon::Check => include_bytes!("../../../assets/icons/zed/check.svg"),
+            Icon::XCircle => include_bytes!("../../../assets/icons/zed/x_circle.svg"),
+            Icon::Clock => include_bytes!("../../../assets/icons/zed/clock.svg"),
+            Icon::Circle => include_bytes!("../../../assets/icons/zed/circle.svg"),
+            Icon::Dash => include_bytes!("../../../assets/icons/zed/dash.svg"),
+            Icon::UserCheck => include_bytes!("../../../assets/icons/zed/user_check.svg"),
+            Icon::Warning => include_bytes!("../../../assets/icons/zed/warning.svg"),
+            Icon::GitCommit => include_bytes!("../../../assets/icons/zed/git_commit.svg"),
+            Icon::ArrowUpRight => include_bytes!("../../../assets/icons/zed/arrow_up_right.svg"),
+            Icon::Copy => include_bytes!("../../../assets/icons/zed/copy.svg"),
+            Icon::GitHubMark => include_bytes!("../../../assets/icons/dashboard/github.svg"),
+            Icon::GitLabMark => include_bytes!("../../../assets/icons/dashboard/gitlab.svg"),
             Icon::FileType(stem) => sirio_icons::asset(stem)
                 .or_else(|| sirio_icons::asset(sirio_icons::DEFAULT_FILE))
                 .unwrap_or(b""),
@@ -325,8 +382,10 @@ impl Icon {
     /// `#D97757`, yet it stays on the tinted path, because that hex is the
     /// tint it is given. Same pixels, one fewer raster cache entry per
     /// size — and a test keeps the two from drifting apart.
+    ///
+    /// GitLab's forge mark is the fourth: its tanuki is four oranges.
     pub fn has_own_colours(self) -> bool {
-        matches!(self, Icon::OhMyPi | Icon::Gemini | Icon::FileType(_))
+        matches!(self, Icon::OhMyPi | Icon::Gemini | Icon::GitLabMark | Icon::FileType(_))
     }
 
     /// The stem to draw in a given appearance. Upstream ships a `_light`
@@ -572,7 +631,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 40] = [
+pub const ALL_ICONS: [Icon; 54] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -613,6 +672,20 @@ pub const ALL_ICONS: [Icon; 40] = [
     Icon::Eye,
     Icon::EyeOff,
     Icon::Code,
+    Icon::PullRequest,
+    Icon::Person,
+    Icon::Check,
+    Icon::XCircle,
+    Icon::Clock,
+    Icon::Circle,
+    Icon::Dash,
+    Icon::UserCheck,
+    Icon::Warning,
+    Icon::GitCommit,
+    Icon::ArrowUpRight,
+    Icon::Copy,
+    Icon::GitHubMark,
+    Icon::GitLabMark,
 ];
 
 #[cfg(test)]

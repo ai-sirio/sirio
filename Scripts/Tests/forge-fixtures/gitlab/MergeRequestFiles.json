@@ -1,0 +1,4 @@
+{"data": {"project": {"mergeRequest": {"diffStats": [
+  {"path": "app/models/order.rb", "additions": 30, "deletions": 2},
+  {"path": "app/exports/csv.rb", "additions": 10, "deletions": 0}
+]}}}}

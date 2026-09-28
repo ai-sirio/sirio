@@ -1,0 +1,16 @@
+fragment MergeRequestSummary on MergeRequest {
+  iid
+  title
+  webUrl
+  draft
+  state
+  updatedAt
+  author { username }
+  sourceBranch
+  targetBranch
+  sourceProject { fullPath }
+  userNotesCount
+  approvedBy { nodes { username } }
+  reviewers { nodes { username } }
+  headPipeline { status }
+}

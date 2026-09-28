@@ -948,6 +948,7 @@ mod tests {
                     SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
                     SettingsEvent::InstallAgent(_)
                     | SettingsEvent::InstallLanguageServer(_)
+                    | SettingsEvent::ForgeHostsChanged
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage
@@ -1002,6 +1003,7 @@ mod tests {
                     SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
                     SettingsEvent::InstallAgent(_)
                     | SettingsEvent::InstallLanguageServer(_)
+                    | SettingsEvent::ForgeHostsChanged
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage
@@ -1163,6 +1165,7 @@ mod tests {
                     SettingsEvent::InstallAgent(id) => recorder.borrow_mut().push(id.clone()),
                     SettingsEvent::UpdateAgent(_)
                     | SettingsEvent::InstallLanguageServer(_)
+                    | SettingsEvent::ForgeHostsChanged
                     | SettingsEvent::RefreshAgentSources
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage

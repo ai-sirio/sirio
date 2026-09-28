@@ -95,6 +95,28 @@ pub fn origin_url(repo: &Path) -> Option<String> {
     GitRemote::origin_url(repo)
 }
 
+/// The configured URL of remote `name`, or `None` when it has none. Read
+/// like [`GitRemote::origin_url`] — `config --get`, so no `insteadOf`
+/// rewrite — because a forge must be recognised by the URL the user
+/// configured.
+pub fn remote_url(repo: &Path, name: &str) -> Option<String> {
+    let key = format!("remote.{name}.url");
+    let output = git::run_accepting(&["config", "--get", &key], repo, &[0]).ok()?;
+    let url = output.stdout_string().trim().to_owned();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Whether `sha` names a commit in `repo`'s object store. Anything that is
+/// not a plain hex object name is refused before git sees it.
+pub fn object_exists(repo: &Path, sha: &str) -> bool {
+    if sha.is_empty() || sha.len() > 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let spec = format!("{sha}^{{commit}}");
+    git::run_accepting(&["cat-file", "-e", &spec], repo, &[0, 1, 128])
+        .is_ok_and(|output| output.is_success())
+}
+
 /// Free-function spelling for remote owner lookup.
 pub fn github_owner(repo: &Path) -> Option<String> {
     GitRemote::github_owner(repo)

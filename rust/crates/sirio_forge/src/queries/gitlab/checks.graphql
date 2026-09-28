@@ -1,0 +1,12 @@
+query MergeRequestChecks($fullPath: ID!, $iid: String!, $after: String) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) {
+      headPipeline {
+        jobs(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { name status stage { name } duration webPath }
+        }
+      }
+    }
+  }
+}

@@ -13,12 +13,15 @@ pub mod browser;
 extern crate self as sirio_ui;
 
 pub mod caret;
+pub mod change_request_tab;
+mod change_request_style;
 pub mod changes;
 pub mod chat;
 pub mod controls;
 pub mod editor;
 pub mod file_context_menu;
 pub mod file_view;
+pub mod forge_source;
 mod horizontal_scroll;
 // F-CHG-06: the single git-status -> colour resolver. Deliberately its own
 // module rather than a helper inside right_panel or changes, because those two

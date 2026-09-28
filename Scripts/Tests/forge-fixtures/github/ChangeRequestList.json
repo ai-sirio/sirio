@@ -1,0 +1,9 @@
+{"data": {"repository": {"pullRequests": {
+  "pageInfo": {"hasNextPage": true, "endCursor": "c1"},
+  "nodes": [
+    {"number": 101, "title": "Fix the login redirect", "url": "https://ghe.test/acme/widgets/pull/101", "isDraft": false, "state": "OPEN", "updatedAt": "2026-09-27T10:00:00Z", "author": {"login": "alice"}, "headRefName": "feat/login", "baseRefName": "main", "headRepositoryOwner": {"login": "acme"}, "comments": {"totalCount": 12}, "reviewDecision": "CHANGES_REQUESTED", "approvals": {"totalCount": 0}, "reviewRequests": {"nodes": [{"requestedReviewer": {"__typename": "User", "login": "fake-user"}}]}, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"checkRunCountsByState": [{"state": "SUCCESS", "count": 5}, {"state": "FAILURE", "count": 1}, {"state": "IN_PROGRESS", "count": 1}], "statusContextCountsByState": []}}}}]}},
+    {"number": 102, "title": "Draft the README", "url": "https://ghe.test/acme/widgets/pull/102", "isDraft": true, "state": "OPEN", "updatedAt": "2026-09-27T09:30:00Z", "author": {"login": "bob"}, "headRefName": "docs/readme", "baseRefName": "main", "headRepositoryOwner": {"login": "acme"}, "comments": {"totalCount": 0}, "reviewDecision": null, "approvals": {"totalCount": 0}, "reviewRequests": {"nodes": []}, "commits": {"nodes": [{"commit": {"statusCheckRollup": null}}]}},
+    null,
+    {"title": "a node without a number"}
+  ]
+}}}}
