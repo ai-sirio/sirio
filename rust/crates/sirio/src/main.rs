@@ -11517,6 +11517,9 @@ impl SirioWorkspace {
         let archived = (self.tabs[index].kind == TabKind::AgentChat)
             .then(|| self.tabs[index].persistence_id.clone())
             .filter(|id| self.session.archive_tab(id, unix_now_ms()));
+        // Read while the tab is still here: only a tab that held a change
+        // request's refs can be the last one holding them (spec §6.4).
+        let held_revision_refs = tab_holds_revision_refs(&self.tabs[index], cx);
 
         let mut terminals = Vec::new();
         let mut terminal_pane_ids = Vec::new();
@@ -11607,7 +11610,9 @@ impl SirioWorkspace {
         }
         self.schedule_save(cx);
         // The last tab holding a change request's refs may just have gone.
-        self.sweep_revision_refs(cx);
+        if held_revision_refs {
+            self.sweep_revision_refs(cx);
+        }
         if archived.is_some() {
             self.session.prune_closed_chats(unix_now_ms());
             self.refresh_closed_sessions(cx);
@@ -13485,12 +13490,23 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         let worktree = self.working_directory.clone();
+        // The path is the forge's (or a tree entry git accepted unchecked):
+        // one that is not plainly repository-relative is never joined onto
+        // the worktree or into a virtual path, the same rule a restored
+        // snapshot's saved path meets. It opens as the failure it is.
+        if !snapshot_path_is_repository_relative(&path) {
+            let origin = refused_snapshot_origin(reference);
+            self.add_snapshot_tab(origin, Err(INVALID_SNAPSHOT_PATH.to_string()), None, cx);
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let probe = worktree.clone();
             let current = cx.background_spawn(async move { sirio_git::head_sha(&probe) }).await;
             if !deleted && current.as_deref() == Some(revisions.head_sha.as_str()) {
                 let _ = this.update(cx, |workspace, cx| {
-                    workspace.open_local_file(worktree.join(&path), line, cx)
+                    if workspace.still_in(&worktree) {
+                        workspace.open_local_file(worktree.join(&path), line, cx);
+                    }
                 });
                 return;
             }
@@ -13508,9 +13524,21 @@ impl SirioWorkspace {
                 relative_path: path,
                 local_copy: (!deleted && local.is_file()).then_some(local),
             };
-            let _ = this.update(cx, |workspace, cx| workspace.add_snapshot_tab(origin, read, line, cx));
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.still_in(&worktree) {
+                    workspace.add_snapshot_tab(origin, read, line, cx);
+                }
+            });
         })
         .detach();
+    }
+
+    /// Whether `worktree`, captured when a click started a background read,
+    /// is still the one whose strip a tab would be inserted into. A switch
+    /// in between would land the tab in the wrong strip with a local copy
+    /// computed for the old one; the click is dropped instead.
+    fn still_in(&self, worktree: &Path) -> bool {
+        paths_name_the_same_document(&self.working_directory, worktree)
     }
 
     /// Opens `origin` in a read-only editor tab, or focuses the one already
@@ -13547,7 +13575,12 @@ impl SirioWorkspace {
             || origin.relative_path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let title = format!("{name} @ {}", origin.reference.label());
+        // A refused origin has no path to name the tab by.
+        let title = if name.is_empty() {
+            origin.label()
+        } else {
+            format!("{name} @ {}", origin.reference.label())
+        };
         let view = cx.new(|cx| match read {
             Ok(bytes) => FileView::snapshot(origin, bytes, cx),
             Err(reason) => {
@@ -14965,11 +14998,19 @@ impl SirioWorkspace {
             .editor()
             .map(|editor| editor.buffer().replace('\\', "\\\\").replace('\n', "\\n"))
             .unwrap_or_default();
+        let state = if view.editor().is_some() {
+            "loaded"
+        } else if view.snapshot_error().is_some() {
+            "error"
+        } else {
+            "loading"
+        };
         Ok(vec![
-            ("path".to_string(), view.path().to_string_lossy().into_owned()),
+            ("path".to_string(), display_absolute_path(view.path())),
             ("read_only".to_string(), view.is_snapshot().to_string()),
             ("origin".to_string(), view.snapshot_origin().map(|origin| origin.label()).unwrap_or_default()),
-            ("state".to_string(), if view.editor().is_some() { "loaded" } else { "loading" }.to_string()),
+            ("state".to_string(), state.to_string()),
+            ("error".to_string(), view.snapshot_error().unwrap_or_default().to_string()),
             ("content".to_string(), text),
         ])
     }
@@ -20624,6 +20665,18 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
 /// container. A file can be deleted, renamed, or sit on a volume that is not
 /// mounted this launch; a tab whose target is gone is dropped silently rather
 /// than restored onto an error the user never asked to see.
+/// Whether `tab` holds a change request's revision refs: a change request
+/// tab, or a snapshot of one (`sweep_revision_refs` counts the same panes).
+fn tab_holds_revision_refs(tab: &OpenTab, cx: &App) -> bool {
+    let mut holds = false;
+    tab.panes.for_each(&mut |_, content| match content {
+        TabContent::ChangeRequest(_) => holds = true,
+        TabContent::File { view } => holds |= view.read(cx).is_snapshot(),
+        _ => {}
+    });
+    holds
+}
+
 fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(&state.editor_path);
     path.is_file().then_some(path)
@@ -20631,28 +20684,24 @@ fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
 
 /// The view a restored snapshot tab comes back as: pending, so it reads its
 /// bytes again once a workspace adopts it (`adopt_file_view`). Both restore
-/// paths go through here. The path came from disk, so one that is not plainly
-/// repository-relative is never joined onto anything — not the worktree for
-/// its local copy, not the view's virtual path — and the tab shows why instead.
+/// paths go through here. The sha and the path came from disk, so a sha that
+/// is not a commit id, or a path that is not plainly repository-relative, is
+/// never joined onto anything — not the worktree for its local copy, not the
+/// view's virtual path, not a label — and the tab shows why instead.
 fn restored_snapshot_view(
     snapshot: &session::PersistedSnapshot,
     working_directory: &Path,
     cx: &mut App,
 ) -> Entity<FileView> {
-    let relative_path = PathBuf::from(&snapshot.path);
-    if !snapshot_path_is_repository_relative(&relative_path) {
-        let origin = SnapshotOrigin {
-            reference: snapshot.change_request.clone(),
-            sha: snapshot.sha.clone(),
-            relative_path: PathBuf::new(),
-            local_copy: None,
-        };
+    if let Some(refusal) = restored_snapshot_refusal(snapshot) {
+        let origin = refused_snapshot_origin(snapshot.change_request.clone());
         return cx.new(|cx| {
             let mut view = FileView::snapshot_pending(origin, cx);
-            view.finish_snapshot(Err(INVALID_SNAPSHOT_PATH.to_string()), cx);
+            view.finish_snapshot(Err(refusal.to_string()), cx);
             view
         });
     }
+    let relative_path = PathBuf::from(&snapshot.path);
     let local = working_directory.join(&relative_path);
     let origin = SnapshotOrigin {
         reference: snapshot.change_request.clone(),
@@ -20664,6 +20713,31 @@ fn restored_snapshot_view(
 }
 
 const INVALID_SNAPSHOT_PATH: &str = "The saved file path is not valid.";
+const INVALID_SNAPSHOT_SHA: &str = "The saved revision is not a valid commit id.";
+
+/// The origin of a snapshot tab that shows a refusal instead of a file:
+/// neither sha nor path, so nothing untrusted reaches a label or a join.
+fn refused_snapshot_origin(reference: sirio_forge::ChangeRef) -> SnapshotOrigin {
+    SnapshotOrigin {
+        reference,
+        sha: String::new(),
+        relative_path: PathBuf::new(),
+        local_copy: None,
+    }
+}
+
+/// Why a persisted snapshot cannot be rebuilt as saved, before its sha or
+/// path is joined into anything: the row came from disk. `None` when both
+/// are what Sirio itself would have written.
+fn restored_snapshot_refusal(snapshot: &session::PersistedSnapshot) -> Option<&'static str> {
+    if !sirio_git::is_commit_id(&snapshot.sha) {
+        return Some(INVALID_SNAPSHOT_SHA);
+    }
+    if !snapshot_path_is_repository_relative(Path::new(&snapshot.path)) {
+        return Some(INVALID_SNAPSHOT_PATH);
+    }
+    None
+}
 
 /// Whether `path` is one a repository tree can hold: at least one component,
 /// each a plain name — no root, no prefix, no `.` or `..`.
@@ -20684,7 +20758,7 @@ fn read_snapshot(
     origin: &SnapshotOrigin,
 ) -> Result<Vec<u8>, String> {
     if !sirio_git::is_commit_id(&origin.sha) {
-        return Err("The saved revision is not a valid commit id.".to_string());
+        return Err(INVALID_SNAPSHOT_SHA.to_string());
     }
     // A restored tab whose saved path was refused carries none; its Retry
     // must say so again rather than read the tree.
@@ -38840,6 +38914,61 @@ browser  profile  "
     /// A restored snapshot's path came from disk: only a plain
     /// repository-relative path may be joined onto the worktree or handed
     /// to git.
+    /// A persisted sha is shown in the bar and joined into the view's
+    /// virtual path before any read validates it, so the restore refuses
+    /// one Sirio would never have written — before either happens.
+    #[test]
+    fn a_restored_snapshot_sha_must_be_a_commit_id() {
+        let snapshot = |sha: &str, path: &str| session::PersistedSnapshot {
+            change_request: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".into(),
+                project: "acme/widgets".into(),
+                number: 578,
+            },
+            sha: sha.into(),
+            path: path.into(),
+        };
+        let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        assert_eq!(restored_snapshot_refusal(&snapshot(good, "src/lib.rs")), None);
+        for bad in ["", "abcdef€ghij", "--upload-pack=x", "/etc/passwd", "HEAD", &good[..39]] {
+            assert_eq!(
+                restored_snapshot_refusal(&snapshot(bad, "src/lib.rs")),
+                Some(INVALID_SNAPSHOT_SHA),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            restored_snapshot_refusal(&snapshot(good, "../outside.rs")),
+            Some(INVALID_SNAPSHOT_PATH)
+        );
+        assert_eq!(
+            restored_snapshot_refusal(&snapshot("", "../outside.rs")),
+            Some(INVALID_SNAPSHOT_SHA),
+            "the sha is checked first: it is the part a label shows"
+        );
+    }
+
+    /// The git runner caps a blob at 10 MiB; a snapshot over it says so in
+    /// Sirio's words, every other read failure in git's.
+    #[test]
+    fn an_oversized_snapshot_is_named_as_too_large_and_other_failures_keep_their_text() {
+        assert_eq!(
+            snapshot_read_error(sirio_git::GitError::OutputTruncated {
+                command: "cat-file blob".to_string(),
+                limit: 10 * 1024 * 1024,
+            }),
+            "This file is too large to open in Sirio."
+        );
+        let other = sirio_git::GitError::CommandFailed {
+            code: 128,
+            stderr: "fatal: path 'gone.txt' does not exist".to_string(),
+        };
+        let text = other.to_string();
+        assert!(text.contains("gone.txt"));
+        assert_eq!(snapshot_read_error(other), text);
+    }
+
     #[test]
     fn a_restored_snapshot_path_must_be_plainly_repository_relative() {
         assert!(snapshot_path_is_repository_relative(Path::new("src/lib.rs")));

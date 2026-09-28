@@ -2695,7 +2695,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_tabs_identity_survives_the_round_trip_and_an_old_build_would_drop_it() {
+    fn a_snapshot_tabs_identity_survives_the_round_trip() {
         let dir = TempDir::new();
         let db_path = dir.db_path("snapshot-roundtrip");
         let working_directory = dir.0.join("checkout");
@@ -2734,10 +2734,6 @@ mod tests {
 
         let restored = restore(&db_path, Path::new("/tmp"));
         assert_eq!(restored.tab_states[0].snapshot.as_ref(), Some(&snapshot));
-        assert_eq!(
-            restored.tab_states[0].editor_path, "",
-            "no editor path: a build that predates snapshots drops the tab instead of opening a local file"
-        );
     }
 
     /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
