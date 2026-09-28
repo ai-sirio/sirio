@@ -465,6 +465,52 @@ pub mod request {
         request("surface.settings.read", BTreeMap::new())
     }
 
+    pub fn change_requests_show() -> ControlRequest {
+        request("surface.change_requests.show", BTreeMap::new())
+    }
+
+    pub fn change_requests_read() -> ControlRequest {
+        request("surface.change_requests.read", BTreeMap::new())
+    }
+
+    pub fn change_requests_filter(filter: &str) -> ControlRequest {
+        request(
+            "surface.change_requests.filter",
+            BTreeMap::from([("filter".to_string(), filter.to_string())]),
+        )
+    }
+
+    /// Saves a forge token through the same verification as the UI. The
+    /// reply names the account; it never carries the token.
+    pub fn change_requests_token(host: &str, forge: &str, token: &str) -> ControlRequest {
+        request(
+            "surface.change_requests.token",
+            BTreeMap::from([
+                ("host".to_string(), host.to_string()),
+                ("forge".to_string(), forge.to_string()),
+                ("token".to_string(), token.to_string()),
+            ]),
+        )
+    }
+
+    pub fn change_request_open(number: &str) -> ControlRequest {
+        request(
+            "surface.change_request.open",
+            BTreeMap::from([("number".to_string(), number.to_string())]),
+        )
+    }
+
+    pub fn change_request_tab(tab: &str) -> ControlRequest {
+        request(
+            "surface.change_request.tab",
+            BTreeMap::from([("tab".to_string(), tab.to_string())]),
+        )
+    }
+
+    pub fn change_request_read() -> ControlRequest {
+        request("surface.change_request.read", BTreeMap::new())
+    }
+
     /// Opens the non-drawing chat surface for a worktree.
     pub fn chat_open(worktree: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();

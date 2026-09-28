@@ -1041,6 +1041,33 @@ enum ControlAction {
     ReadSettings {
         reply: ControlReply,
     },
+    ShowChangeRequests {
+        reply: ControlReply,
+    },
+    ReadChangeRequests {
+        reply: ControlReply,
+    },
+    FilterChangeRequests {
+        filter: sirio_forge::Filter,
+        reply: ControlReply,
+    },
+    SaveForgeToken {
+        host: String,
+        forge: sirio_forge::Forge,
+        token: String,
+        reply: ControlReply,
+    },
+    OpenChangeRequest {
+        number: u64,
+        reply: ControlReply,
+    },
+    SelectChangeRequestTab {
+        inner: InnerTab,
+        reply: ControlReply,
+    },
+    ReadChangeRequest {
+        reply: ControlReply,
+    },
     AddAgentAccount {
         provider: String,
         label: String,
@@ -1997,6 +2024,13 @@ impl ControlHandler for AppControlHandler {
                     "surface.settings.open",
                     "surface.settings.select",
                     "surface.settings.read",
+                    "surface.change_requests.show",
+                    "surface.change_requests.read",
+                    "surface.change_requests.filter",
+                    "surface.change_requests.token",
+                    "surface.change_request.open",
+                    "surface.change_request.tab",
+                    "surface.change_request.read",
                     "settings.account.add",
                     "settings.account.select",
                     "surface.chat.open",
@@ -2201,6 +2235,64 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.settings.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadSettings { reply })
+            }
+            "surface.change_requests.show" => {
+                self.queue_action(request, |reply| ControlAction::ShowChangeRequests { reply })
+            }
+            "surface.change_requests.read" => {
+                self.queue_action(request, |reply| ControlAction::ReadChangeRequests { reply })
+            }
+            "surface.change_requests.filter" => {
+                let Some(filter) = request
+                    .params
+                    .get("filter")
+                    .and_then(|value| sirio_ui::right_panel::parse_filter(value))
+                else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.change_requests.filter requires filter: mine, to-review, all-open or closed",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::FilterChangeRequests { filter, reply })
+            }
+            "surface.change_requests.token" => {
+                let host = request.params.get("host").cloned().unwrap_or_default();
+                let token = request.params.get("token").cloned().unwrap_or_default();
+                let forge = match request.params.get("forge").map(String::as_str) {
+                    Some("github") => sirio_forge::Forge::GitHub,
+                    Some("gitlab") => sirio_forge::Forge::GitLab,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.change_requests.token requires forge: github or gitlab",
+                        );
+                    }
+                };
+                if host.is_empty() || token.trim().is_empty() {
+                    return ControlResponse::failure(&request.id, "surface.change_requests.token requires host and token");
+                }
+                self.queue_action(request, move |reply| ControlAction::SaveForgeToken { host, forge, token, reply })
+            }
+            "surface.change_request.open" => {
+                let Some(number) = request.params.get("number").and_then(|value| value.parse::<u64>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.open requires a number");
+                };
+                self.queue_action(request, move |reply| ControlAction::OpenChangeRequest { number, reply })
+            }
+            "surface.change_request.tab" => {
+                let inner = match request.params.get("tab").map(String::as_str) {
+                    Some(tab @ ("conversation" | "commits" | "checks" | "files")) => InnerTab::parse(tab),
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.change_request.tab requires tab: conversation, commits, checks or files",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::SelectChangeRequestTab { inner, reply })
+            }
+            "surface.change_request.read" => {
+                self.queue_action(request, |reply| ControlAction::ReadChangeRequest { reply })
             }
             // F-SET-15: registers an isolated Claude/Codex account and
             // selects it, the real production entry point that gives the
@@ -4993,6 +5085,27 @@ impl SirioWorkspace {
                                 ControlAction::ReadSettings { reply } => {
                                     let result = workspace.control_read_settings(cx);
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::ShowChangeRequests { reply } => {
+                                    let _ = reply.send(workspace.control_show_change_requests(cx));
+                                }
+                                ControlAction::ReadChangeRequests { reply } => {
+                                    let _ = reply.send(workspace.control_read_change_requests(cx));
+                                }
+                                ControlAction::FilterChangeRequests { filter, reply } => {
+                                    let _ = reply.send(workspace.control_filter_change_requests(filter, cx));
+                                }
+                                ControlAction::SaveForgeToken { host, forge, token, reply } => {
+                                    workspace.control_save_forge_token(host, forge, token, reply, cx);
+                                }
+                                ControlAction::OpenChangeRequest { number, reply } => {
+                                    let _ = reply.send(workspace.control_open_change_request(number, cx));
+                                }
+                                ControlAction::SelectChangeRequestTab { inner, reply } => {
+                                    let _ = reply.send(workspace.control_select_change_request_tab(inner, cx));
+                                }
+                                ControlAction::ReadChangeRequest { reply } => {
+                                    let _ = reply.send(workspace.control_read_change_request(cx));
                                 }
                                 ControlAction::AddAgentAccount {
                                     provider,
@@ -14189,6 +14302,96 @@ impl SirioWorkspace {
             return Err("Settings surface is not open".to_string());
         }
         settings_report_pairs(&self.settings.read(cx).report())
+    }
+
+    fn control_show_change_requests(&mut self, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| panel.show_change_requests(cx));
+        cx.notify();
+        Ok(vec![("view".to_string(), "change-requests".to_string())])
+    }
+
+    fn control_read_change_requests(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
+        self.right_panel
+            .read(cx)
+            .change_requests_report(cx)
+            .ok_or_else(|| "the change request view has not been shown".to_string())
+    }
+
+    fn control_filter_change_requests(
+        &mut self,
+        filter: sirio_forge::Filter,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        if !self.right_panel.update(cx, |panel, cx| panel.set_change_request_filter(filter, cx)) {
+            return Err("the change request view has not been shown".to_string());
+        }
+        self.control_read_change_requests(cx)
+    }
+
+    /// The token is verified and stored off the UI thread, by the same
+    /// `save_token` the view's field calls; the reply names the account.
+    fn control_save_forge_token(
+        &mut self,
+        host: String,
+        forge: sirio_forge::Forge,
+        token: String,
+        reply: ControlReply,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = sirio_ui::forge_source::source(cx) else {
+            let _ = reply.send(Err("change requests are unavailable".to_string()));
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { source.save_token(&host, forge, &token) }).await;
+            let _ = this.update(cx, |workspace, cx| match result {
+                Ok(account) => {
+                    workspace
+                        .right_panel
+                        .update(cx, |panel, cx| panel.reconnect_change_requests(cx));
+                    let _ = reply.send(Ok(vec![("account".to_string(), account)]));
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error.to_string()));
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn active_change_request(&self) -> Option<Entity<ChangeRequestTab>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let mut found = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::ChangeRequest(view) = content {
+                found = Some(view.clone());
+            }
+        });
+        found
+    }
+
+    fn control_open_change_request(&mut self, number: u64, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let Some((reference, title)) = self.right_panel.read(cx).change_request_for(number, cx) else {
+            return Err("the change request view is not connected".to_string());
+        };
+        self.add_change_request_tab(reference, title, cx);
+        self.control_read_change_request(cx)
+    }
+
+    fn control_select_change_request_tab(&mut self, inner: InnerTab, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_change_request()
+            .ok_or_else(|| "the active tab is not a change request".to_string())?;
+        view.update(cx, |tab, cx| tab.select_inner(inner, cx));
+        self.control_read_change_request(cx)
+    }
+
+    fn control_read_change_request(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_change_request()
+            .ok_or_else(|| "the active tab is not a change request".to_string())?;
+        Ok(view.read(cx).report())
     }
 
     /// F-SET-15: registers an isolated account for `provider`
@@ -35228,6 +35431,13 @@ done
             | ControlAction::OpenSettings { reply, .. }
             | ControlAction::SelectSettings { reply, .. }
             | ControlAction::ReadSettings { reply }
+            | ControlAction::ShowChangeRequests { reply }
+            | ControlAction::ReadChangeRequests { reply }
+            | ControlAction::FilterChangeRequests { reply, .. }
+            | ControlAction::SaveForgeToken { reply, .. }
+            | ControlAction::OpenChangeRequest { reply, .. }
+            | ControlAction::SelectChangeRequestTab { reply, .. }
+            | ControlAction::ReadChangeRequest { reply }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -35341,6 +35551,13 @@ done
             "surface.settings.open" => request::settings_open(None),
             "surface.settings.select" => request_with_params(method, &[]),
             "surface.settings.read" => request::settings_read(),
+            "surface.change_requests.show" => request::change_requests_show(),
+            "surface.change_requests.read" => request::change_requests_read(),
+            "surface.change_requests.filter" => request::change_requests_filter("all-open"),
+            "surface.change_requests.token" => request::change_requests_token("git.corp", "gitlab", "t"),
+            "surface.change_request.open" => request::change_request_open("1"),
+            "surface.change_request.tab" => request::change_request_tab("checks"),
+            "surface.change_request.read" => request::change_request_read(),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }

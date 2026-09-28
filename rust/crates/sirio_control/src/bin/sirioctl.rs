@@ -132,6 +132,10 @@ fn usage() {
          \x20 surface settings open [--section s]\n\
          \x20 surface settings select <section>\n\
          \x20 surface settings read             read the mounted Settings section\n\
+         \x20 surface change-requests show|read      the right panel's change request view\n\
+         \x20 surface change-requests filter <mine|to-review|all-open|closed>\n\
+         \x20 surface change-requests token --host h --forge github|gitlab --token t\n\
+         \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
          \x20 browser get <surface> <url|text|html> [--selector s] [--json]\n\
@@ -771,6 +775,42 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("settings", "read") => {
             require_ok(socket, &sirio_control::protocol::request::settings_read())
         }
+        ("change-requests", "show") => {
+            require_ok(socket, &sirio_control::protocol::request::change_requests_show())
+        }
+        ("change-requests", "read") => {
+            require_ok(socket, &sirio_control::protocol::request::change_requests_read())
+        }
+        ("change-requests", "filter") => {
+            let filter = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing filter: mine, to-review, all-open or closed".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_requests_filter(filter))
+        }
+        ("change-requests", "token") => {
+            let host = parsed.value("host").ok_or_else(|| "Missing --host".to_string())?;
+            let forge = parsed.value("forge").ok_or_else(|| "Missing --forge github|gitlab".to_string())?;
+            let token = parsed.value("token").ok_or_else(|| "Missing --token".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_requests_token(host, forge, token))
+        }
+        ("change-request", "open") => {
+            let number = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing change request number".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_request_open(number))
+        }
+        ("change-request", "tab") => {
+            let tab = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing tab: conversation, commits, checks or files".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_request_tab(tab))
+        }
+        ("change-request", "read") => {
+            require_ok(socket, &sirio_control::protocol::request::change_request_read())
+        }
         _ => return Err(format!("unknown surface action '{surface} {action}'")),
     };
     print_result(
@@ -783,6 +823,19 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             "changedCount",
             "untrackedCount",
             "ready",
+            "view",
+            "state",
+            "host",
+            "filter",
+            "rows",
+            "labels",
+            "card",
+            "toReview",
+            "error",
+            "account",
+            "label",
+            "title",
+            "inner",
         ],
         parsed.flag("json"),
     );

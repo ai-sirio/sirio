@@ -136,6 +136,13 @@ impl ControlHandler for TestHandler {
                     "surface.settings.open",
                     "surface.settings.select",
                     "surface.settings.read",
+                    "surface.change_requests.show",
+                    "surface.change_requests.read",
+                    "surface.change_requests.filter",
+                    "surface.change_requests.token",
+                    "surface.change_request.open",
+                    "surface.change_request.tab",
+                    "surface.change_request.read",
                 ];
                 let method_rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -252,7 +259,14 @@ impl ControlHandler for TestHandler {
             | "surface.changes.discard_all"
             | "surface.settings.open"
             | "surface.settings.select"
-            | "surface.settings.read" => ControlResponse::success(
+            | "surface.settings.read"
+            | "surface.change_requests.show"
+            | "surface.change_requests.read"
+            | "surface.change_requests.filter"
+            | "surface.change_requests.token"
+            | "surface.change_request.open"
+            | "surface.change_request.tab"
+            | "surface.change_request.read" => ControlResponse::success(
                 &request.id,
                 BTreeMap::from([("ready".to_string(), "true".to_string())]),
             ),
@@ -1293,6 +1307,16 @@ fn sirioctl_exposes_terminal_state_and_surface_subcommands() {
             "surface.settings.select",
         ),
         (vec!["surface", "settings", "read"], "surface.settings.read"),
+        (vec!["surface", "change-requests", "show"], "surface.change_requests.show"),
+        (vec!["surface", "change-requests", "read"], "surface.change_requests.read"),
+        (vec!["surface", "change-requests", "filter", "mine"], "surface.change_requests.filter"),
+        (
+            vec!["surface", "change-requests", "token", "--host", "git.corp", "--forge", "gitlab", "--token", "t"],
+            "surface.change_requests.token",
+        ),
+        (vec!["surface", "change-request", "open", "101"], "surface.change_request.open"),
+        (vec!["surface", "change-request", "tab", "checks"], "surface.change_request.tab"),
+        (vec!["surface", "change-request", "read"], "surface.change_request.read"),
     ];
 
     for (args, method) in &commands {

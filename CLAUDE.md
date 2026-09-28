@@ -37,6 +37,10 @@ Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 # prints every probe answer.
 Scripts/Tests/test-forge-e2e.sh    # -> prints "FORGE E2E OK"
 
+# The change request view and tab in a real, isolated Sirio against the fake
+# forge, over the control socket; --state-only skips the window captures.
+Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -198,6 +202,14 @@ proves the seam; `tests/forge_live.rs` notices the day a query stops
 matching the live schema (it SKIPs without credentials and is off both
 gates). `docs/superpowers/specs/2026-09-27-change-requests-design.md` has the
 design.
+
+The UI reads through one seam, `sirio_ui::forge_source::ChangeRequestSource`,
+a GPUI global the host sets once (`sirio/src/forge.rs`, `ForgeHub`): the
+right panel's fifth view and the `ChangeRequest` tab in the Secondary half
+never see a token or a setting. `ForgeHub` owns the `forge.hosts` setting —
+a Settings-screen save re-applies the stored value — and keeps tokens in the
+credential store under `forge:<host>`. The list asks nothing before it is
+shown and refreshes only while visible; a restored tab loads when shown.
 
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 
