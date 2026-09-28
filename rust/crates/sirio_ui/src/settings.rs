@@ -57,11 +57,13 @@ const DETAIL_BOTTOM_PADDING: f32 = 12.0;
 const DETAIL_SECTION_MARGIN: f32 = 20.0;
 
 const SEGMENTED_THEME: &[&str] = &["System", "Light", "Dark"];
-/// bezel's five base colours, in its own order, then Sirio's Notte preset.
-/// Text rather than swatches: the five differ by hue at chroma 0.013–0.046,
-/// which a 16px pill cannot show, and the names are Tailwind's — a vocabulary
-/// a user may already have.
-const SEGMENTED_BASE_COLOR: &[&str] = &["Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte"];
+/// bezel's five base colours, in its own order, then Sirio's Notte and Onice
+/// presets. Text rather than swatches: the five differ by hue at chroma
+/// 0.013–0.046, which a 16px pill cannot show, and the names are Tailwind's —
+/// a vocabulary a user may already have.
+const SEGMENTED_BASE_COLOR: &[&str] = &[
+    "Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte", "Onice",
+];
 
 /// The segment index of a base colour. `BaseColor::ALL` is the display order,
 /// so the index is its position in that array.
@@ -4224,15 +4226,15 @@ impl Render for Settings {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_base_colour_segments_are_bezels_five_then_sirios_preset() {
+    fn every_base_colour_has_a_segment_labelled_with_its_own_title() {
+        let titles: Vec<&str> = sirio_theme::BaseColor::ALL
+            .iter()
+            .map(|base| base.title())
+            .collect();
         assert_eq!(
             SEGMENTED_BASE_COLOR,
-            &["Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte"]
-        );
-        assert_eq!(
-            SEGMENTED_BASE_COLOR.len(),
-            sirio_theme::BaseColor::ALL.len(),
-            "a base colour without a segment cannot be picked"
+            titles.as_slice(),
+            "a base colour without a segment cannot be picked, and a segment's index is its position in ALL"
         );
     }
 
