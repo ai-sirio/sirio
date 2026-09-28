@@ -1,0 +1,33 @@
+[package]
+name = "sirio_privacy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The macOS privacy (TCC) permissions Settings → Permissions shows: what each
+# one is, how it is read, how it is asked for, and the one action its row
+# offers. The model is plain data on every platform; only `probe` touches the
+# system, and only on macOS — everywhere else it answers "check manually".
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The objc2 0.6 family gpui's own macOS backend (bezel-gpui-macos) links, so
+# every one of these resolves to a copy already in the lockfile. `sirio`
+# stays on 0.5 for its tray; the two never exchange an Objective-C object.
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSBundle",
+    "NSDictionary",
+    "NSError",
+    "NSString",
+    "NSUserDefaults",
+    "NSValue",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "bitflags",
+    "block2",
+    "UNNotificationSettings",
+    "UNUserNotificationCenter",
+] }

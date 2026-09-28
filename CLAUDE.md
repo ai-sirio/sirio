@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. **macOS is the reference release platform** — it gates every release, with Linux and Windows released behind it; see `docs/superpowers/specs/2026-08-29-macos-release-platform-design.md`. The macOS release job runs on a GitHub-hosted `macos-15`, pinned rather than `macos-latest` because the Zig 0.15.2 tarball cannot link on macOS 26 (see the Zig step in `build-release.yml`), and publishes a signed, notarized DMG beside the Linux AppImage and the Windows installer, with the signed manifest served from `dl.sirioai.app/<channel>.json`. A *stable* `v*.*.*` tag needs a hand-written `docs/release-notes/<version>.md` and a tag matching `rust/Cargo.toml` (`Scripts/check-release-version.sh` refuses otherwise). The macOS code paths are deliberate and specific (the libproc process walk in `sirio_activity`, `getpeereid` peer identity in `sirio_control`, a native `NSStatusItem` tray in `sirio`). Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory. Its final commit is `5430d7bfdb4a295be8ce072526ae5108259b80f8`; read any of its source with `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`, or check it out with `git worktree add <dir> 5430d7bfdb4a295be8ce072526ae5108259b80f8`. Terminal rendering is built on `libghostty-vt`, with `portable-pty` supplying the PTY.
+Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. **macOS is the reference release platform** — it gates every release, with Linux and Windows released behind it; see `docs/superpowers/specs/2026-08-29-macos-release-platform-design.md`. The macOS release job runs on a GitHub-hosted `macos-15`, pinned rather than `macos-latest` because the Zig 0.15.2 tarball cannot link on macOS 26 (see the Zig step in `build-release.yml`), and publishes a signed, notarized DMG beside the Linux AppImage and the Windows installer, with the signed manifest served from `dl.sirioai.app/<channel>.json`. A *stable* `v*.*.*` tag needs a hand-written `docs/release-notes/<version>.md` and a tag matching `rust/Cargo.toml` (`Scripts/check-release-version.sh` refuses otherwise). The macOS code paths are deliberate and specific (the libproc process walk in `sirio_activity`, `getpeereid` peer identity in `sirio_control`, a native `NSStatusItem` tray in `sirio`, the TCC permission probe in `sirio_privacy`). Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory. Its final commit is `5430d7bfdb4a295be8ce072526ae5108259b80f8`; read any of its source with `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`, or check it out with `git worktree add <dir> 5430d7bfdb4a295be8ce072526ae5108259b80f8`. Terminal rendering is built on `libghostty-vt`, with `portable-pty` supplying the PTY.
 
 ### External references
 
@@ -89,7 +89,8 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
     ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
-sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram, sirio_forge
+sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
+sirio_forge, sirio_privacy
                                 (leaves — no local deps beyond sirio_perf;
                                  sirio_theme and sirio_ui take the external
                                  `bezel` crate, pinned `=0.1.4`, and
@@ -102,7 +103,10 @@ sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram, sirio_forge
                                  take it without inverting the graph;
                                  sirio_forge is GitHub and GitLab change
                                  requests over GraphQL, with the token
-                                 handed in by its caller)
+                                 handed in by its caller;
+                                 sirio_privacy is the macOS TCC permissions
+                                 as a pure model plus the one probe that asks
+                                 macOS, on the objc2 0.6 family gpui links)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
@@ -112,9 +116,10 @@ sirio_control    (-> sirio_acp, sirio_persistence)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_git, sirio_lsp,
-                      sirio_markdown, sirio_persistence, sirio_project,
-                      sirio_registry, sirio_syntax, sirio_theme, sirio_usage)
+sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_git,
+                      sirio_lsp, sirio_markdown, sirio_persistence, sirio_privacy,
+                      sirio_project, sirio_registry, sirio_syntax, sirio_theme,
+                      sirio_usage)
     ^
 sirio            (the app: main.rs — the only crate that depends on everything above,
                     including sirio_terminal, sirio_control, and sirio_activity, which
@@ -322,7 +327,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
   - `Scripts/ci-linux.sh`'s comment covers the two workspace-wide tests that must run per-crate rather than concurrently with every other test binary.
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
 - **The version names the next release, not the last commit.** `[workspace.package] version` in `rust/Cargo.toml` carries the next stable release's number and moves once per cycle, in the commit that opens it, right after a release is tagged (`v0.13.3` → `0.13.4`). Nothing else in the cycle touches it: only its first `feat:` moves it again, patch to minor (`0.14.0`), later `feat:`s leave it, and the release-notes commit writes only `docs/release-notes/<version>.md`. `Scripts/set-workspace-version.sh <version>` stays its only writer, `Scripts/check-release-version.sh` still compares the release tag against it, and `Scripts/check-cycle-version.sh` refuses a version that is not above the last released tag, the guard against a forgotten opening bump. A nightly is therefore always the prerelease of the stable actually coming.
-- `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the *local* run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead. `.github/workflows/pr.yml` runs `Scripts/ci.sh` on Linux for every pull request and every push to `main`. That is a backstop, not a substitute — it reports after the fact, and the macOS-only paths (the libproc walk in `sirio_activity`, `getpeereid` in `sirio_control`, the `NSStatusItem` tray in `sirio`) are `cfg`-gated away on that runner and stay the release gate's business. `Scripts/Tests/test-pr-workflow.sh` guards the workflow's shape, the way its siblings guard `release.yml` and `nightly.yml`.
+- `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the *local* run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead. `.github/workflows/pr.yml` runs `Scripts/ci.sh` on Linux for every pull request and every push to `main`. That is a backstop, not a substitute — it reports after the fact, and the macOS-only paths (the libproc walk in `sirio_activity`, `getpeereid` in `sirio_control`, the `NSStatusItem` tray in `sirio`, the TCC probe in `sirio_privacy`) are `cfg`-gated away on that runner. `.github/workflows/macos-check.yml` builds and links the app on `macos-15` for every pull request and runs `sirio_privacy`'s `permissions` example, which calls every TCC read for real; the test suite on macOS stays the release gate's business. `Scripts/Tests/test-pr-workflow.sh` guards the workflow's shape, the way its siblings guard `release.yml` and `nightly.yml`.
 
 ## Agent skills
 

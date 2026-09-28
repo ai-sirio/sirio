@@ -238,6 +238,9 @@ mod forge;
 mod login_path;
 mod lsp;
 mod lsp_install;
+// Compiled everywhere so every platform checks it; only macOS routes to it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod native_notification;
 #[cfg(feature = "perf-native")]
 mod native_perf;
 mod panel_layout;
@@ -3284,6 +3287,18 @@ fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -
 fn post_desktop_notification(payload: &NotificationPayload) {
     #[cfg(target_os = "macos")]
     let result = {
+        use sirio_privacy::notifications::{NotificationRoute, route};
+        let road = route(
+            sirio_privacy::probe::is_bundled(),
+            sirio_privacy::probe::last_known_notifications(),
+        );
+        match road {
+            NotificationRoute::Suppressed => return,
+            NotificationRoute::Native if native_notification::post(payload) => return,
+            // No posting task yet (or a harness without one): the old road
+            // rather than a lost notification.
+            NotificationRoute::Native | NotificationRoute::AppleScript => {}
+        }
         let script = format!(
             "display notification {} with title {}",
             apple_script_string_literal(&payload.body),
@@ -6875,8 +6890,69 @@ impl SirioWorkspace {
                         .status_bar
                         .update(cx, |bar, cx| bar.on_refresh_clicked(cx));
                 }
+                sirio_ui::settings::SettingsEvent::RefreshPermissions => {
+                    workspace.refresh_permissions(cx);
+                }
+                sirio_ui::settings::SettingsEvent::RequestPermission(kind) => {
+                    workspace.request_permission(*kind, cx);
+                }
             },
         )
+        .detach();
+    }
+
+    /// Re-reads every macOS permission off the UI thread — a notification
+    /// read waits on a completion handler — and hands each to Settings. Off
+    /// macOS the probe answers "check manually" at once.
+    fn refresh_permissions(&mut self, cx: &mut Context<Self>) {
+        let settings = self.settings.clone();
+        cx.spawn(async move |_, cx| {
+            let statuses = cx
+                .background_executor()
+                .spawn(async {
+                    sirio_privacy::PermissionKind::ALL
+                        .map(|kind| (kind, sirio_privacy::probe::status(kind)))
+                })
+                .await;
+            let _ = settings.update(cx, |settings, cx| {
+                for (kind, status) in statuses {
+                    settings.set_permission_status(kind, status);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_permissions_on_screen(&mut self, cx: &mut Context<Self>) {
+        if self.show_settings && self.settings.read(cx).category() == SettingsCategory::Permissions
+        {
+            self.refresh_permissions(cx);
+        }
+    }
+
+    /// Shows one permission's prompt and re-reads it once the prompt has
+    /// been answered (or, where macOS does not say when, at once). Off the
+    /// UI thread: Notifications and Automation block until the user answers.
+    fn request_permission(
+        &mut self,
+        kind: sirio_privacy::PermissionKind,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = self.settings.clone();
+        cx.spawn(async move |_, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move {
+                    sirio_privacy::probe::request(kind);
+                    sirio_privacy::probe::status(kind)
+                })
+                .await;
+            let _ = settings.update(cx, |settings, cx| {
+                settings.set_permission_status(kind, status);
+                cx.notify();
+            });
+        })
         .detach();
     }
 
@@ -14185,6 +14261,9 @@ impl SirioWorkspace {
             cx.notify();
         });
         self.show_settings = true;
+        // Reopening onto the Permissions screen does not change category,
+        // so `select_category` does not ask; a switch may have moved since.
+        self.refresh_permissions_on_screen(cx);
         // F-SET-02: the Escape handler lives on this workspace's root, which
         // GPUI only reaches through the focused element's dispatch path. The
         // settings surface must hold focus while it is open; the request is
@@ -21279,6 +21358,19 @@ fn main() {
             None => (None, None, None),
         };
 
+        // A notification's road depends on what macOS says about Sirio's
+        // Notifications permission (`post_desktop_notification`), so that is
+        // read once now, off the UI thread. A read never shows a prompt.
+        #[cfg(target_os = "macos")]
+        {
+            native_notification::install(cx);
+            cx.background_executor()
+                .spawn(async {
+                    sirio_privacy::probe::status(sirio_privacy::PermissionKind::Notifications);
+                })
+                .detach();
+        }
+
         let window_result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -21520,6 +21612,15 @@ fn main() {
                         update_wake.clone(),
                         cx,
                     );
+                    // A permission is changed in System Settings, and coming
+                    // back is the only moment Sirio can notice: an open
+                    // Permissions page re-reads macOS then.
+                    cx.observe_window_activation(window, |workspace, window, cx| {
+                        if window.is_window_active() {
+                            workspace.refresh_permissions_on_screen(cx);
+                        }
+                    })
+                    .detach();
                     workspace
                 });
                 // F-WIN-08: the Swift original hides the window on close

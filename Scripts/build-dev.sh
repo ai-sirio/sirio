@@ -43,6 +43,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   <key>CFBundleName</key><string>${SIRIO_DISPLAY_NAME}</string>
   <key>CFBundleExecutable</key><string>sirio</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSAppleEventsUsageDescription</key><string>Tools and agents running in Sirio's terminals use Apple Events to control other apps.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Tools and agents running in Sirio's terminals reach development servers on your local network.</string>
 </dict>
 </plist>
 PLIST

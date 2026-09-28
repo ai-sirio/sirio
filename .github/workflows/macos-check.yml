@@ -1,0 +1,77 @@
+name: macOS check
+
+# What pr.yml deliberately leaves out: the code that only compiles on macOS.
+#
+# pr.yml runs on Linux, where every `cfg(target_os = "macos")` path is compiled
+# away, and says so -- "a green run here is not a claim about them; the release
+# gate is still where they are proven". The release gate runs once a night.
+# That left a pull request that touches only macOS code (the privacy probe in
+# sirio_privacy, the notification route in sirio) with no check at all before
+# merge, and a Linux box cannot close the gap on its own: `cargo check
+# --target aarch64-apple-darwin` stops at the first C dependency with no macOS
+# SDK to build against, and a check never links, so a misspelt framework
+# symbol would sail through it anyway.
+#
+# So this builds the app on the release platform's own runner, and runs the
+# one program that exercises the privacy FFI for real. It does not run the
+# test suite: Scripts/ci.sh already does, on macOS, in the release gate.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build (macOS)
+    # Pinned for the reason build-release.yml gives in its Zig step: the Zig
+    # 0.15.2 tarball cannot link on a macOS 26 host.
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # libghostty-vt-sys shells out to `zig build`; upstream pins 0.15.2
+      # exactly, and a newer Zig fails too (#63).
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # Compiles and links the app: every macOS-only path in `sirio` and the
+      # crates under it, and every framework symbol they name.
+      - name: Build the app
+        working-directory: rust
+        run: cargo build -p sirio --locked
+
+      # The privacy model's tests, on the platform whose facts they encode.
+      - name: Test sirio_privacy
+        working-directory: rust
+        run: cargo test -p sirio_privacy --locked
+
+      # Reads every permission through the real TCC, CoreGraphics, HIServices
+      # and AppleEvents calls. Passing means each one returned rather than
+      # aborting -- including the notification read, which in this unbundled
+      # process must never touch UNUserNotificationCenter.
+      - name: Read every permission
+        working-directory: rust
+        run: cargo run -p sirio_privacy --example permissions --locked
