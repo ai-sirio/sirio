@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{App, Global};
-use sirio_forge::{ChangeRef, Forge, ForgeClient, ForgeError, Means};
+use sirio_forge::{ChangeRef, Forge, ForgeClient, ForgeError, Means, Revisions};
 
 /// What a worktree's remote is connected to.
 #[derive(Clone)]
@@ -56,6 +56,36 @@ pub struct HostRow {
     pub configured: bool,
 }
 
+/// Why a change request's revisions could not be made local (spec §9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RevisionError {
+    /// No remote of the repository points at the forge project.
+    NoMatchingRemote { expected: String },
+    /// git failed; `detail` is its stderr's tail with credentials removed.
+    FetchFailed { detail: String },
+    FetchTimedOut,
+    /// Fetched, and still missing: a force-push, or the forge dropped the ref.
+    RevisionGone { sha: String },
+    /// A local `git` call failed.
+    Git { detail: String },
+}
+
+impl std::fmt::Display for RevisionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoMatchingRemote { expected } => write!(formatter, "No remote points at {expected}."),
+            Self::FetchFailed { detail } => write!(formatter, "Fetching the commits failed: {detail}"),
+            Self::FetchTimedOut => formatter.write_str("git fetch did not answer in time."),
+            Self::RevisionGone { sha } => {
+                write!(formatter, "The forge no longer has commit {}.", &sha[..sha.len().min(7)])
+            }
+            Self::Git { detail } => write!(formatter, "git failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for RevisionError {}
+
 /// What the UI may ask the host. Every method may block — running `gh` or
 /// `glab`, probing a host, reading the credential store — so callers run
 /// them on the background executor.
@@ -75,6 +105,19 @@ pub trait ChangeRequestSource: Send + Sync {
     fn delete_token(&self, host: &str);
     /// Every host seen this session or configured.
     fn hosts(&self) -> Vec<HostRow>;
+    /// Makes both shas local, fetching only what is missing; `target_branch:
+    /// Some(b)` also fetches `b` into the `base` ref, `None` fetches the head
+    /// ref only (a restored snapshot knows just its sha).
+    fn ensure_revisions(
+        &self,
+        worktree: &Path,
+        reference: &ChangeRef,
+        revisions: &Revisions,
+        target_branch: Option<&str>,
+    ) -> Result<(), RevisionError>;
+    /// Deletes every `refs/sirio/change-requests/<remote>/<N>/*` no `live`
+    /// change request holds.
+    fn release_revisions(&self, worktree: &Path, live: &[ChangeRef]);
 }
 
 struct SourceGlobal(Arc<dyn ChangeRequestSource>);
@@ -100,10 +143,11 @@ pub(crate) mod testing {
 
     use serde_json::{Value, json};
     use sirio_forge::{
-        ApiResponse, ChangeRef, Forge, ForgeClient, ForgeError, ForgeTarget, Means, Transport,
+        ApiResponse, ChangeRef, Forge, ForgeClient, ForgeError, ForgeTarget, Means, Revisions,
+        Transport,
     };
 
-    use super::{ChangeRequestSource, Connection, HostRow, ReadyConnection};
+    use super::{ChangeRequestSource, Connection, HostRow, ReadyConnection, RevisionError};
 
     /// Never blocks: GPUI's test dispatcher polls background work on the
     /// test's own thread, so a transport that waited for the test to release
@@ -248,6 +292,28 @@ pub(crate) mod testing {
         json!({"data": {"repository": {"pullRequest": node}}}).to_string()
     }
 
+    pub(crate) fn header_with_revisions(number: u64, title: &str, body: &str, base: &str, head: &str) -> String {
+        let mut value: Value = serde_json::from_str(&header(number, title, body)).expect("header JSON");
+        let node = &mut value["data"]["repository"]["pullRequest"];
+        node["baseRefOid"] = json!(base);
+        node["headRefOid"] = json!(head);
+        value.to_string()
+    }
+
+    /// `ChangeRequestFiles` for `(path, additions, deletions, changeType)`.
+    pub(crate) fn files(files: &[(&str, u32, u32, &str)]) -> String {
+        let nodes: Vec<Value> = files
+            .iter()
+            .map(|(path, additions, deletions, kind)| {
+                json!({"path": path, "additions": additions, "deletions": deletions, "changeType": kind})
+            })
+            .collect();
+        json!({"data": {"repository": {"pullRequest": {"files": {
+            "totalCount": nodes.len(), "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes
+        }}}}})
+        .to_string()
+    }
+
     pub(crate) fn commits() -> String {
         json!({"data": {"repository": {"pullRequest": {"commits": {
             "totalCount": 1, "pageInfo": {"hasNextPage": false, "endCursor": null},
@@ -267,6 +333,9 @@ pub(crate) mod testing {
         pub(crate) tokens: Mutex<Vec<(String, Forge, String)>>,
         pub(crate) token_answer: Mutex<Result<String, ForgeError>>,
         pub(crate) connects: Mutex<u32>,
+        pub(crate) ensured: Mutex<Vec<(ChangeRef, Revisions, Option<String>)>>,
+        pub(crate) revisions_answer: Mutex<Result<(), RevisionError>>,
+        pub(crate) released: Mutex<Vec<Vec<ChangeRef>>>,
     }
 
     impl FakeSource {
@@ -278,6 +347,9 @@ pub(crate) mod testing {
                 tokens: Mutex::new(Vec::new()),
                 token_answer: Mutex::new(Ok("me".to_string())),
                 connects: Mutex::new(0),
+                ensured: Mutex::new(Vec::new()),
+                revisions_answer: Mutex::new(Ok(())),
+                released: Mutex::new(Vec::new()),
             })
         }
 
@@ -330,6 +402,15 @@ pub(crate) mod testing {
 
         fn hosts(&self) -> Vec<HostRow> {
             Vec::new()
+        }
+
+        fn ensure_revisions(&self, _worktree: &Path, reference: &ChangeRef, revisions: &Revisions, target_branch: Option<&str>) -> Result<(), RevisionError> {
+            self.ensured.lock().unwrap().push((reference.clone(), revisions.clone(), target_branch.map(str::to_string)));
+            self.revisions_answer.lock().unwrap().clone()
+        }
+
+        fn release_revisions(&self, _worktree: &Path, live: &[ChangeRef]) {
+            self.released.lock().unwrap().push(live.to_vec());
         }
     }
 }
