@@ -1071,6 +1071,34 @@ enum ControlAction {
     ReadChangeRequest {
         reply: ControlReply,
     },
+    RevealChangeRequestFile {
+        path: String,
+        line: Option<u32>,
+        reply: ControlReply,
+    },
+    OpenChangeRequestFile {
+        path: String,
+        line: Option<u32>,
+        reply: ControlReply,
+    },
+    OpenChangeRequestCommit {
+        sha: String,
+        reply: ControlReply,
+    },
+    ReadTabs {
+        reply: ControlReply,
+    },
+    SelectListedTab {
+        position: usize,
+        reply: ControlReply,
+    },
+    CloseListedTab {
+        position: usize,
+        reply: ControlReply,
+    },
+    ReadFile {
+        reply: ControlReply,
+    },
     AddAgentAccount {
         provider: String,
         label: String,
@@ -2034,6 +2062,13 @@ impl ControlHandler for AppControlHandler {
                     "surface.change_request.open",
                     "surface.change_request.tab",
                     "surface.change_request.read",
+                    "surface.change_request.reveal",
+                    "surface.change_request.open_file",
+                    "surface.change_request.open_commit",
+                    "surface.tabs.read",
+                    "surface.tabs.select",
+                    "surface.tabs.close",
+                    "surface.file.read",
                     "settings.account.add",
                     "settings.account.select",
                     "surface.chat.open",
@@ -2297,6 +2332,50 @@ impl ControlHandler for AppControlHandler {
             "surface.change_request.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadChangeRequest { reply })
             }
+            "surface.change_request.reveal" => {
+                let Some(path) = request.params.get("path").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.reveal requires path");
+                };
+                let line = request.params.get("line").and_then(|value| value.parse::<u32>().ok());
+                self.queue_action(request, move |reply| ControlAction::RevealChangeRequestFile { path, line, reply })
+            }
+            "surface.change_request.open_file" => {
+                let Some(path) = request.params.get("path").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.open_file requires path");
+                };
+                let line = request.params.get("line").and_then(|value| value.parse::<u32>().ok());
+                self.queue_action(request, move |reply| ControlAction::OpenChangeRequestFile { path, line, reply })
+            }
+            "surface.change_request.open_commit" => {
+                let Some(sha) = request.params.get("sha").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.open_commit requires sha");
+                };
+                self.queue_action(request, move |reply| ControlAction::OpenChangeRequestCommit { sha, reply })
+            }
+            "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
+            "surface.tabs.select" => {
+                let Some(position) = request
+                    .params
+                    .get("index")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|position| *position > 0)
+                else {
+                    return ControlResponse::failure(&request.id, "surface.tabs.select requires a positive index");
+                };
+                self.queue_action(request, move |reply| ControlAction::SelectListedTab { position, reply })
+            }
+            "surface.tabs.close" => {
+                let Some(position) = request
+                    .params
+                    .get("index")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|position| *position > 0)
+                else {
+                    return ControlResponse::failure(&request.id, "surface.tabs.close requires a positive index");
+                };
+                self.queue_action(request, move |reply| ControlAction::CloseListedTab { position, reply })
+            }
+            "surface.file.read" => self.queue_action(request, |reply| ControlAction::ReadFile { reply }),
             // F-SET-15: registers an isolated Claude/Codex account and
             // selects it, the real production entry point that gives the
             // Accounts section a second, genuinely selectable row —
@@ -5121,6 +5200,34 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::ReadChangeRequest { reply } => {
                                     let _ = reply.send(workspace.control_read_change_request(cx));
+                                }
+                                ControlAction::RevealChangeRequestFile { path, line, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.reveal(PathBuf::from(&path), line, cx);
+                                        Ok(())
+                                    }));
+                                }
+                                ControlAction::OpenChangeRequestFile { path, line, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.open_file(PathBuf::from(&path), line, cx)
+                                    }));
+                                }
+                                ControlAction::OpenChangeRequestCommit { sha, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.open_commit_by_sha(&sha, cx)
+                                    }));
+                                }
+                                ControlAction::ReadTabs { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
+                                }
+                                ControlAction::SelectListedTab { position, reply } => {
+                                    let _ = reply.send(workspace.control_select_listed_tab(position, window, cx));
+                                }
+                                ControlAction::CloseListedTab { position, reply } => {
+                                    let _ = reply.send(workspace.control_close_listed_tab(position, window, cx));
+                                }
+                                ControlAction::ReadFile { reply } => {
+                                    let _ = reply.send(workspace.control_read_file(cx));
                                 }
                                 ControlAction::AddAgentAccount {
                                     provider,
@@ -14768,6 +14875,103 @@ impl SirioWorkspace {
             .active_change_request()
             .ok_or_else(|| "the active tab is not a change request".to_string())?;
         Ok(view.read(cx).report(cx))
+    }
+
+    /// Runs `act` on the active change request tab, then reports the tab.
+    fn control_change_request(
+        &mut self,
+        cx: &mut Context<Self>,
+        act: impl FnOnce(&mut ChangeRequestTab, &mut Context<ChangeRequestTab>) -> Result<(), String>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_change_request()
+            .ok_or_else(|| "the active tab is not a change request".to_string())?;
+        view.update(cx, act)?;
+        self.control_read_change_request(cx)
+    }
+
+    /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
+    fn control_read_tabs(&self, cx: &Context<Self>) -> Vec<(String, String)> {
+        let mut report = vec![
+            ("count".to_string(), self.tabs.len().to_string()),
+            ("active".to_string(), (self.active_tab + 1).to_string()),
+        ];
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut snapshot = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content {
+                    snapshot |= view.read(cx).is_snapshot();
+                }
+            });
+            report.push((
+                format!("tab.{}", index + 1),
+                format!("{}|{}|{}", session::persisted_kind(tab.kind), if snapshot { "yes" } else { "no" }, tab.title),
+            ));
+        }
+        report
+    }
+
+    /// The id of the `position`th tab (1-based) of `control_read_tabs`'s
+    /// list — every tab, in whichever half it lives.
+    fn listed_tab_id(&self, position: usize) -> Result<usize, String> {
+        position
+            .checked_sub(1)
+            .and_then(|index| self.tabs.get(index))
+            .map(|tab| tab.id)
+            .ok_or_else(|| format!("there is no tab {position}"))
+    }
+
+    /// Selects the `position`th tab of `control_read_tabs`'s list, then
+    /// reports the tabs.
+    fn control_select_listed_tab(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let id = self.listed_tab_id(position)?;
+        self.select_tab(id, Some(window), cx);
+        Ok(self.control_read_tabs(cx))
+    }
+
+    /// Closes the `position`th tab of `control_read_tabs`'s list the way its
+    /// close button does (a dirty tab asks first), then reports the tabs.
+    fn control_close_listed_tab(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let id = self.listed_tab_id(position)?;
+        self.request_close_tab_by_id(id, window, cx);
+        Ok(self.control_read_tabs(cx))
+    }
+
+    /// The active tab's file: its path, whether it is a read-only snapshot,
+    /// and its text with backslashes and newlines escaped.
+    fn control_read_file(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let tab = self.tabs.get(self.active_tab).ok_or_else(|| "no active tab".to_string())?;
+        let mut found = None;
+        tab.panes.for_each(&mut |_, content| {
+            if found.is_none()
+                && let TabContent::File { view } = content
+            {
+                found = Some(view.clone());
+            }
+        });
+        let view = found.ok_or_else(|| "the active tab is not a file".to_string())?;
+        let view = view.read(cx);
+        let text = view
+            .editor()
+            .map(|editor| editor.buffer().replace('\\', "\\\\").replace('\n', "\\n"))
+            .unwrap_or_default();
+        Ok(vec![
+            ("path".to_string(), view.path().to_string_lossy().into_owned()),
+            ("read_only".to_string(), view.is_snapshot().to_string()),
+            ("origin".to_string(), view.snapshot_origin().map(|origin| origin.label()).unwrap_or_default()),
+            ("state".to_string(), if view.editor().is_some() { "loaded" } else { "loading" }.to_string()),
+            ("content".to_string(), text),
+        ])
     }
 
     /// F-SET-15: registers an isolated account for `provider`
@@ -36240,6 +36444,13 @@ done
             | ControlAction::OpenChangeRequest { reply, .. }
             | ControlAction::SelectChangeRequestTab { reply, .. }
             | ControlAction::ReadChangeRequest { reply }
+            | ControlAction::RevealChangeRequestFile { reply, .. }
+            | ControlAction::OpenChangeRequestFile { reply, .. }
+            | ControlAction::OpenChangeRequestCommit { reply, .. }
+            | ControlAction::ReadTabs { reply }
+            | ControlAction::SelectListedTab { reply, .. }
+            | ControlAction::CloseListedTab { reply, .. }
+            | ControlAction::ReadFile { reply }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -36360,6 +36571,13 @@ done
             "surface.change_request.open" => request::change_request_open("1"),
             "surface.change_request.tab" => request::change_request_tab("checks"),
             "surface.change_request.read" => request::change_request_read(),
+            "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
+            "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
+            "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
+            "surface.tabs.read" => request::tabs_read(),
+            "surface.tabs.select" => request::tabs_select(1),
+            "surface.tabs.close" => request::tabs_close(1),
+            "surface.file.read" => request::file_read(),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }
