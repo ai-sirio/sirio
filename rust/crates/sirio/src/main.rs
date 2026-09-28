@@ -6749,6 +6749,11 @@ impl SirioWorkspace {
                 sirio_ui::settings::SettingsEvent::InstallLanguageServer(language) => {
                     workspace.install_language_server(language, cx);
                 }
+                sirio_ui::settings::SettingsEvent::ForgeHostsChanged => {
+                    workspace
+                        .right_panel
+                        .update(cx, |panel, cx| panel.reconnect_change_requests(cx));
+                }
                 sirio_ui::settings::SettingsEvent::StartAccountLogin(request) => {
                     account_login::start(&workspace.settings, request, cx);
                 }

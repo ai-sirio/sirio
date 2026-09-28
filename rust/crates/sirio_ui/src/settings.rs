@@ -34,8 +34,10 @@ const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
 actions!(settings_summarizer, [CloseSummarizerPicker]);
 
 mod agents_page;
+mod git_hosting_page;
 mod language_servers_page;
 
+use git_hosting_page::GitHostStatus;
 use language_servers_page::ServerStates;
 
 /// The settings content column — the frozen 720px content column of
@@ -92,6 +94,7 @@ pub enum SettingsCategory {
     AiProviders,
     Agents,
     LanguageServers,
+    GitHosting,
     General,
     Permissions,
     Appearance,
@@ -102,10 +105,11 @@ impl SettingsCategory {
     ///
     /// Permissions contains the platform-specific privacy controls and the
     /// in-app browser's durable origin grants.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::AiProviders,
         Self::Agents,
         Self::LanguageServers,
+        Self::GitHosting,
         Self::General,
         Self::Permissions,
         Self::Appearance,
@@ -121,6 +125,7 @@ impl SettingsCategory {
             Self::AiProviders => "AI Providers",
             Self::Agents => "Agents",
             Self::LanguageServers => "Language Servers",
+            Self::GitHosting => "Git Hosting",
             Self::General => "General",
             Self::Permissions => "Permissions",
             Self::Appearance => "Appearance",
@@ -143,6 +148,7 @@ impl SettingsCategory {
             // The socket's `settings_category_id` writes the title back in
             // this same normalized form, so the label has to parse here.
             "language-servers" | "languageservers" | "language" => Some(Self::LanguageServers),
+            "git-hosting" | "githosting" | "git" => Some(Self::GitHosting),
             "general" => Some(Self::General),
             "permissions" => Some(Self::Permissions),
             "appearance" => Some(Self::Appearance),
@@ -155,6 +161,7 @@ impl SettingsCategory {
             Self::AiProviders => Icon::Sparkles,
             Self::Agents => Icon::SquareTerminal,
             Self::LanguageServers => Icon::File,
+            Self::GitHosting => Icon::PullRequest,
             Self::General => Icon::Settings,
             Self::Permissions => Icon::Shield,
             Self::Appearance => Icon::SunMoon,
@@ -737,6 +744,8 @@ pub enum SettingsEvent {
     /// owns the installer and the store, and returns its result through
     /// [`Settings::set_install_state`].
     InstallLanguageServer(String),
+    /// A forge host's setting or token changed; the host reconnects what reads through it.
+    ForgeHostsChanged,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -888,6 +897,9 @@ pub struct Settings {
     /// crate never resolves the environment itself, and `None` until a host
     /// says so means nothing has been probed.
     lsp_store_root: Option<PathBuf>,
+    /// Settings → Git Hosting: the forge hosts seen this session or
+    /// configured, and the transient token fields and outcomes.
+    pub(crate) git_hosting: git_hosting_page::GitHosting,
     /// Optional account-management override for embedders.
     on_manage_account: Option<Rc<dyn Fn(&'static str)>>,
     account_action_error: Option<(ProviderKind, String)>,
@@ -1081,6 +1093,7 @@ impl Settings {
                 ..ServerStates::default()
             },
             lsp_store_root: None,
+            git_hosting: Default::default(),
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
@@ -1636,12 +1649,19 @@ impl Settings {
         // up without a restart.
         let entering_language_servers = category == SettingsCategory::LanguageServers
             && self.category != SettingsCategory::LanguageServers;
+        // Entering the Git Hosting screen re-reads the hosts: a token saved
+        // or a means pinned elsewhere has to show up without a restart.
+        let entering_git_hosting = category == SettingsCategory::GitHosting
+            && self.category != SettingsCategory::GitHosting;
         self.category = category;
         if entering_agents {
             cx.emit(SettingsEvent::RefreshAgentSources);
         }
         if entering_language_servers {
             self.refresh_language_servers();
+        }
+        if entering_git_hosting {
+            self.refresh_git_hosts(cx);
         }
         cx.notify();
     }
@@ -4142,6 +4162,7 @@ impl Render for Settings {
             SettingsCategory::LanguageServers => {
                 self.render_language_servers(theme, entity.clone())
             }
+            SettingsCategory::GitHosting => self.render_git_hosting(theme, entity.clone()),
             SettingsCategory::General => self.render_general(theme, entity.clone(), window),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
             SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
