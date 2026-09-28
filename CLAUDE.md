@@ -41,6 +41,11 @@ Scripts/Tests/test-forge-e2e.sh    # -> prints "FORGE E2E OK"
 # forge, over the control socket; --state-only skips the window captures.
 Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
 
+# A change request's diff, the editor hand-off (local file or read-only
+# snapshot, across a quit and relaunch) and the fetch with its failures,
+# against a bare repository and the fake forge; same flags as above.
+Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -215,6 +220,17 @@ never see a token or a setting. `ForgeHub` owns the `forge.hosts` setting —
 a Settings-screen save re-applies the stored value — and keeps tokens in the
 credential store under `forge:<host>`. The list asks nothing before it is
 shown and refreshes only while visible; a restored tab loads when shown.
+
+The detail tab's *Files* is the diff, read by `sirio_git::range_*` between
+the commits `sirio_forge::Revisions` names. When either is not local,
+`ForgeHub` makes them local with one non-interactive `git fetch` into
+`refs/sirio/change-requests/<remote>/<N>/{head,base}` — invisible to
+History's `--branches`, visible to an external `git log --all`. Those refs
+only anchor objects against `git gc`, and are swept whenever no tab, open or
+parked with another worktree, holds them. *Open in editor* opens the local
+file when the worktree is at the head, and a read-only snapshot tab
+otherwise. `docs/superpowers/specs/2026-09-28-change-request-diff-design.md`
+has the design; `Scripts/Tests/test-forge-diff-e2e.sh` proves it.
 
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 

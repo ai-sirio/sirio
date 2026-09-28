@@ -376,3 +376,79 @@ End to end, per the project convention; every run ends in an artifact.
 | `url.<bare>.insteadOf` rewrites the fetch while `remote_url` keeps the forge URL | **verified**: `remote_url` reads `config --get` (§2), which applies no rewrite |
 | An `ext::` remote can hang a fetch for the timeout stage | a fake forge HTTP endpoint that accepts and never answers |
 | Embedding a `ChangesTab` entity inside the detail tab keeps its keyboard focus and scroll working | open the Range surface as its own Changes tab beside the detail tab, keyed by `ChangeRef` |
+
+## §14 Revised during planning (2026-09-28)
+
+The plan (`docs/superpowers/plans/2026-09-28-change-request-diff.md`) found
+five places where this spec could not be built as written. Each supersedes
+the sentence named.
+
+1. **Range diffs are lazy, per file.** Supersedes §4's `sirio_git` bullet
+   ("`range_files(repo, base, head)` and `range_diff(repo, base, head)` … from
+   **two** git processes whatever the file count") and the diff read in §5.1.
+   `sirio_git` caps a process's captured output at 10 MiB, which one
+   whole-change-request patch can exceed, and the working-tree view already
+   loads a diff only when its row is expanded. So `range_files`
+   (`--name-status -z`) and `range_stats` (`--numstat -z`) build the rows, and
+   `range_file_diff` reads one file's patch when its row opens.
+2. **The ref sweep keeps the refs of the tabs that are live, open or parked**
+   with another worktree. Supersedes §6.4's "deletes every ref no tab
+   recorded in the session store holds". A ref only anchors objects against
+   `git gc`; the diff and the snapshots are read by sha, and
+   `ensure_revisions` fetches again when an object is missing, so a ref
+   deleted under a tab of a worktree not yet restored costs one refetch,
+   never a wrong answer.
+3. **A sibling script, `Scripts/Tests/test-forge-diff-e2e.sh`**
+   (`FORGE DIFF E2E OK`). Supersedes §10.1's "`test-forge-ui-e2e.sh`,
+   extended": that script is one linear GitHub flow, and the diff needs a
+   bare repository, one app launch per scenario and fixtures that name that
+   repository's commits. The assertions and artifacts are §10.1's.
+4. **A `--name-status -z` parser test replaces the patch-splitter test.**
+   Supersedes §10.4's first bullet: with item 1 there is no multi-file patch
+   to split.
+5. **`ensure_revisions` takes the target branch as an `Option`.** Supersedes
+   §6.2's single fetch shape and §4's host bullet: `Some(branch)` fetches the
+   head ref and the branch into the `base` ref; `None` fetches the head ref
+   only, which is all a restored snapshot — which knows just its sha — can
+   name. A snapshot tab is persisted with kind `file`
+   (`persisted_kind(TabKind::Editor)`), not §8's `"editor"`.
+
+Known limitation: in Split mode, `focus_line` reveals the file's row rather
+than the line.
+
+### What execution changed
+
+- The fetch also passes `--refmap=` (no remote-tracking ref is written),
+  `--no-recurse-submodules` and `-c gc.auto=0 -c maintenance.auto=false`.
+  The fallback for a git older than 2.29 classifies the **full** stderr
+  before trimming it to the tail it shows.
+- A blob larger than git's 10 MiB output cap shows "This file is too large
+  to open in Sirio."; between 1 and 10 MiB it is the editor's own Too-large
+  state (§7.2's "the states the editor already has").
+- A snapshot whose read failed keeps that failure as view state, with a
+  *Retry* surface, until a retry or a later read replaces it — never a
+  dismissible card. Supersedes §8's "shows the error with *Retry* and
+  *Close*" and the plan's offer card; *Close* is the tab's own button.
+- `ChangesTab`'s pending focus is a list, so every opened file carried over
+  survives a new head rebuilding the diff.
+- A restored snapshot's saved sha must pass `is_commit_id` and its saved
+  path must be all normal components, or the tab shows the snapshot error
+  (the surface above) instead of reading anything. A restored snapshot is read from its own
+  tab's worktree.
+- The ref sweep runs after the startup restore, after a worktree switch and
+  when a tab is removed, counting open and parked tabs, and always after the
+  incoming tabs are installed.
+- The control socket gained, beside the five verbs the plan named
+  (`surface.change_request.reveal`, `.open_file`, `.open_commit`,
+  `surface.tabs.read`, `surface.file.read`), `surface.tabs.select` and
+  `surface.tabs.close`, which address a tab by its place in
+  `surface.tabs.read`'s list. `tab.select` counts only the focused center
+  half's tabs, and `pane.close` closes a split leaf, never a whole tab, so
+  neither could reach a change request tab in the Secondary half.
+- The E2E quits each success scenario gracefully halfway and relaunches it
+  on the same database: the snapshot tabs come back with the same origin and
+  the same bytes, and the startup sweep removes an orphan planted meanwhile
+  while keeping the restored tabs' refs. Its hang stage is an `ssh` remote
+  whose `core.sshCommand` never answers, not §10.1's `ext::` remote, and its
+  fixtures are rewritten per run with the bare repository's real shas rather
+  than fixed dates.
