@@ -232,6 +232,7 @@ struct SurfaceScroll {
     source_horizontal_bar: HorizontalBarState,
     preview: ScrollHandle,
     preview_bar: ScrollbarState,
+    preview_horizontal_bar: HorizontalBarState,
 }
 
 impl SurfaceScroll {
@@ -242,6 +243,7 @@ impl SurfaceScroll {
             source_horizontal_bar: HorizontalBarState::default(),
             preview: ScrollHandle::new(),
             preview_bar: ScrollbarState::new(painter),
+            preview_horizontal_bar: HorizontalBarState::default(),
         }
     }
 }
@@ -2047,20 +2049,30 @@ fn render_content(
                     }
                 },
             );
+        // The column is a fixed width, not a cap: a pane narrower than it
+        // scrolls the page sideways rather than rewrapping the prose into a
+        // strip, the way Code mode never wraps a source line.
+        //
+        // The surface takes what the Markdown bar above it leaves, as the
+        // source surface's `flex_1().min_h(0)` does: at `size_full` it was
+        // the whole pane tall, so the bar's height of document — and both
+        // scrollbars' bottom edge — hung below the pane, out of reach.
         return div()
-            .size_full()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.0))
             .relative()
             .child(
                 div()
                     .id("file-markdown-scroll")
                     .debug_selector(|| "file-markdown-scroll".into())
                     .size_full()
-                    .overflow_y_scroll()
+                    .overflow_scroll()
                     .track_scroll(&scroll.preview)
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(MARKDOWN_COLUMN_WIDTH))
+                            .debug_selector(|| "file-markdown-column".into())
+                            .w(px(MARKDOWN_COLUMN_WIDTH))
                             .mx_auto()
                             .p(px(24.0))
                             .child(Chat::render_markdown_document_with_link_override(
@@ -2074,6 +2086,12 @@ fn render_content(
                 "file-markdown-bar",
                 &scroll.preview,
                 &scroll.preview_bar,
+            ))
+            .child(horizontal_scrollbar(
+                "file-markdown-horizontal-bar",
+                &scroll.preview,
+                &scroll.preview_horizontal_bar,
+                entity,
             ))
             .into_any_element();
     }
@@ -2185,55 +2203,15 @@ fn render_content(
                 ),
         );
     }
-    // The bar overlays the list's own box, so it spans exactly the viewport
-    // it reports on and never reflows the rows beneath it. It reads the
-    // list handle's base `ScrollHandle`: the same offset and overflow the
-    // list itself scrolls by.
+    // Both bars read the list handle's base `ScrollHandle`: the same offset
+    // and overflow the list itself scrolls by.
     let source_handle = scroll.source.0.borrow().base_handle.clone();
-    let viewport_width = source_handle.bounds().size.width;
-    let overflow_width = source_handle.max_offset().x;
-    let horizontal_offset = source_handle.offset().x;
-    let horizontal_bar = if scroll::thumb(
-        viewport_width,
-        overflow_width,
-        horizontal_offset,
-        scroll::MIN_THUMB,
-    )
-    .is_some()
-    {
-        let drag_handle = source_handle.clone();
-        horizontal_scroll::bar(
-            "file-horizontal-bar",
-            viewport_width,
-            overflow_width,
-            horizontal_offset,
-            &scroll.source_horizontal_bar,
-            move |x, cx| {
-                drag_handle.set_offset(point(x, drag_handle.offset().y));
-                entity.update(cx, |_, cx| cx.notify());
-            },
-        )
-    } else {
-        let watched = source_handle.clone();
-        canvas(
-            move |_, window, _| {
-                if scroll::thumb(
-                    watched.bounds().size.width,
-                    watched.max_offset().x,
-                    watched.offset().x,
-                    scroll::MIN_THUMB,
-                )
-                .is_some()
-                {
-                    window.request_animation_frame();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
-        .into_any_element()
-    };
+    let horizontal_bar = horizontal_scrollbar(
+        "file-horizontal-bar",
+        &source_handle,
+        &scroll.source_horizontal_bar,
+        entity,
+    );
     source
         .child(
             div()
@@ -2298,6 +2276,55 @@ fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) ->
         .left_0()
         .child(scroll::scrollbar(id, handle, state))
         .into_any_element()
+}
+
+/// The horizontal counterpart of [`scrollbar`], for a surface wider than
+/// its viewport. The bar overlays the surface's own box, so it spans
+/// exactly the viewport it reports on and never reflows what is beneath
+/// it; a drag moves only X, leaving the vertical offset where it was.
+/// While there is nothing to show, the same canvas watch asks for the
+/// frame that paints the bar once the content first lays out wider.
+fn horizontal_scrollbar(
+    id: &'static str,
+    handle: &ScrollHandle,
+    state: &HorizontalBarState,
+    entity: gpui::Entity<FileView>,
+) -> AnyElement {
+    let has_overflow = |handle: &ScrollHandle| {
+        scroll::thumb(
+            handle.bounds().size.width,
+            handle.max_offset().x,
+            handle.offset().x,
+            scroll::MIN_THUMB,
+        )
+        .is_some()
+    };
+    if !has_overflow(handle) {
+        let watched = handle.clone();
+        return canvas(
+            move |_, window, _| {
+                if has_overflow(&watched) {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .into_any_element();
+    }
+    let drag_handle = handle.clone();
+    horizontal_scroll::bar(
+        id,
+        handle.bounds().size.width,
+        handle.max_offset().x,
+        handle.offset().x,
+        state,
+        move |x, cx| {
+            drag_handle.set_offset(point(x, drag_handle.offset().y));
+            entity.update(cx, |_, cx| cx.notify());
+        },
+    )
 }
 
 /// One row of the virtualized source surface: the gutter number plus the
@@ -5425,6 +5452,112 @@ mod tests {
         assert!(
             cx.debug_bounds("file-markdown-bar").is_none(),
             "a document that fits its viewport shows no scrollbar"
+        );
+    }
+
+    /// Preview keeps its reading column at full width however narrow the
+    /// pane gets: the page scrolls sideways instead of rewrapping into a
+    /// strip, and the bar that reaches the rest moves only X. A pane wide
+    /// enough for the column shows no bar and keeps the column centred.
+    #[gpui::test]
+    async fn a_narrow_pane_scrolls_the_markdown_preview_sideways_instead_of_rewrapping(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut source = String::from("# Title\n\n");
+        for i in 0..200 {
+            source.push_str(&format!(
+                "Paragraph {i} runs long enough to wrap in a narrow strip of pane.\n\n"
+            ));
+        }
+        let file = TempFile::with_extension("md", &source);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.simulate_resize(gpui::size(px(400.), px(600.)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        let viewport = cx
+            .debug_bounds("file-markdown-scroll")
+            .expect("the Markdown document is drawn in Preview");
+        let column = cx
+            .debug_bounds("file-markdown-column")
+            .expect("the reading column is drawn");
+        assert!(viewport.size.width < px(MARKDOWN_COLUMN_WIDTH));
+        assert_eq!(
+            column.size.width,
+            px(MARKDOWN_COLUMN_WIDTH),
+            "a narrow pane must not squeeze the column into a strip"
+        );
+        assert_eq!(
+            column.origin.x, viewport.origin.x,
+            "an overflowing column starts at the viewport's left edge, \
+             never left of it where no scroll offset can reach"
+        );
+
+        view.read_with(&cx.cx, |v, _| {
+            v.scroll.preview.set_offset(point(px(0.), px(-100.)));
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        let before_y = view.read_with(&cx.cx, |v, _| v.scroll.preview.offset().y);
+        assert!(before_y < px(0.), "the document scrolled down first");
+
+        let track = cx
+            .debug_bounds("file-markdown-horizontal-bar-track")
+            .expect("a column wider than the pane shows a horizontal bar");
+        let thumb = cx
+            .debug_bounds("file-markdown-horizontal-bar-thumb")
+            .expect("the horizontal bar has a thumb");
+        let pane_bottom = cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            viewport.bottom() <= pane_bottom && track.bottom() <= pane_bottom,
+            "the Markdown bar above leaves the surface less than the pane's \
+             height; neither the document nor its bar may hang below it"
+        );
+        let end = gpui::point(track.right() + px(50.), thumb.center().y);
+        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(thumb.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(thumb.center().x + px(8.), thumb.center().y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        view.read_with(&cx.cx, |v, _| {
+            let handle = &v.scroll.preview;
+            assert_eq!(
+                handle.offset().x,
+                -handle.max_offset().x,
+                "dragging to the end reaches the column's right edge"
+            );
+            assert!(handle.max_offset().x > px(0.));
+            assert_eq!(handle.offset().y, before_y, "a sideways drag keeps Y");
+        });
+
+        cx.simulate_resize(gpui::size(px(1600.), px(600.)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-markdown-horizontal-bar-track")
+                .is_none(),
+            "a pane wide enough for the column shows no horizontal bar"
+        );
+        let viewport = cx.debug_bounds("file-markdown-scroll").unwrap();
+        let column = cx.debug_bounds("file-markdown-column").unwrap();
+        assert_eq!(column.size.width, px(MARKDOWN_COLUMN_WIDTH));
+        assert_eq!(
+            column.origin.x - viewport.origin.x,
+            (viewport.size.width - px(MARKDOWN_COLUMN_WIDTH)) / 2.0,
+            "a wide pane centres the column, with no leftover sideways offset"
         );
     }
 
