@@ -10,6 +10,9 @@ gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 sirio_theme.workspace = true
 sirio_project.workspace = true
+# The scrollbar's geometry (`scroll::thumb`, `scroll::offset_for_thumb`) and its
+# drag payload are bezel's own, the same ones the chat and file view bars use.
+bezel.workspace = true
 anyhow.workspace = true
 futures = "0.3"
 # #301 (R2.2): the pane decodes Kitty image pixels with the same `image`
