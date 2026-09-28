@@ -39,6 +39,8 @@ sirio_release.workspace = true
 sirio_update.workspace = true
 sirio_apply.workspace = true
 sirio_git.workspace = true
+sirio_forge.workspace = true
+sirio_usage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

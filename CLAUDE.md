@@ -108,7 +108,7 @@ sirio_control    (-> sirio_acp, sirio_persistence)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_git, sirio_lsp,
+sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_git, sirio_lsp,
                       sirio_markdown, sirio_persistence, sirio_project,
                       sirio_registry, sirio_syntax, sirio_theme, sirio_usage)
     ^

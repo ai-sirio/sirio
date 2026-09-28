@@ -232,6 +232,7 @@ mod command_palette;
 /// Windows, where the platform picks itself.
 #[cfg(target_os = "linux")]
 mod display_backend;
+mod forge;
 #[cfg(not(windows))]
 mod login_path;
 mod lsp;
@@ -20820,6 +20821,11 @@ fn main() {
         control_socket.set_enabled(saved_settings.control_socket_enabled);
         let session_store_for_window = session_store.clone();
         let session_store_for_settings = session_store.clone();
+        let forge_hub = std::sync::Arc::new(forge::ForgeHub::new(
+            session_store_for_settings.clone(),
+            sirio_usage::CredentialStore::from_env().ok(),
+        ));
+        sirio_ui::forge_source::set_source(forge_hub, cx);
         let session_store_for_update_enabled = session_store.clone();
         let session_store_for_browser_revoke = session_store.clone();
         let control_socket_for_settings = control_socket.clone();
