@@ -20296,6 +20296,9 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
         markdown_plantuml_server: snapshot.plantuml_server,
+        // Not in the Settings snapshot: `ForgeHub` owns it. Callers re-apply
+        // the stored value — see `app_settings_for_settings_save`.
+        forge_hosts: AppSettings::default().forge_hosts,
     }
 }
 
@@ -20303,10 +20306,11 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
 /// emitted and the row that is already stored.
 ///
 /// The snapshot carries every value the surface owns, so the declined-install
-/// list comes from it — the screen is that list's only editor. Two things do
+/// list comes from it — the screen is that list's only editor. Three things do
 /// not ride in the snapshot and are re-applied from the store instead: the
-/// update opt-out (its callback owns it) and the widths and centre split (the
-/// divider owns them, see `schedule_panel_width_save`). Re-applying a value
+/// update opt-out (its callback owns it), the widths and centre split (the
+/// divider owns them, see `schedule_panel_width_save`), and the forge hosts
+/// (`ForgeHub` owns them). Re-applying a value
 /// the snapshot *does* carry would silently throw away the edit that produced
 /// it, which is what this function exists to be a single place against.
 fn app_settings_for_settings_save(snapshot: SettingsSnapshot, stored: &AppSettings) -> AppSettings {
@@ -20315,6 +20319,7 @@ fn app_settings_for_settings_save(snapshot: SettingsSnapshot, stored: &AppSettin
     settings.sidebar_width = stored.sidebar_width;
     settings.right_panel_width = stored.right_panel_width;
     settings.center_split_ratio = stored.center_split_ratio;
+    settings.forge_hosts = stored.forge_hosts.clone();
     settings
 }
 
@@ -31707,6 +31712,7 @@ done
             center_split_ratio: 610,
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: "http://plantuml.test".into(),
+            forge_hosts: "[]".to_string(),
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -31848,6 +31854,19 @@ done
         assert_eq!(saved.right_panel_width, 405);
         assert_eq!(saved.center_split_ratio, 610);
         assert!(!saved.updates_enabled, "the update opt-out is kept too");
+    }
+
+    #[test]
+    fn a_settings_save_keeps_the_stored_forge_hosts() {
+        let stored = AppSettings {
+            forge_hosts: r#"[{"host":"git.corp","forge":"gitlab"}]"#.to_owned(),
+            ..AppSettings::default()
+        };
+        let saved = app_settings_for_settings_save(SettingsSnapshot::default(), &stored);
+        assert_eq!(
+            saved.forge_hosts, stored.forge_hosts,
+            "a Settings save must not erase what the change request view decided"
+        );
     }
 
     fn stale_copy_test_files(name: &str) -> (PathBuf, PathBuf, PathBuf) {

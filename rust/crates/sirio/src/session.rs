@@ -2860,6 +2860,7 @@ mod tests {
             // carries a silenced-language list through to its SQLite row.
             lsp_silenced_languages: r#"["java"]"#.into(),
             markdown_plantuml_server: "http://plantuml.test".into(),
+            forge_hosts: r#"[{"host":"git.corp","forge":"gitlab"}]"#.into(),
         };
 
         {
@@ -2890,6 +2891,7 @@ mod tests {
                 ("chat.limitHistory".into(), "false".into()),
                 ("chat.retentionCount".into(), "37".into()),
                 ("controlSocket.enabled".into(), "false".into()),
+                ("forge.hosts".into(), r#"[{"host":"git.corp","forge":"gitlab"}]"#.into()),
                 ("general.autoNaming".into(), "true".into()),
                 ("general.summarizerAgent".into(), "codex".into()),
                 ("lsp.silencedLanguages".into(), r#"["java"]"#.into()),
