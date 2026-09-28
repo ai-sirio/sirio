@@ -125,29 +125,44 @@ impl RevisionFetcher {
                 expected: format!("{}/{}", reference.host, reference.project),
             }
         })?;
+        // The guarded value is `()`, so a poisoned lock protects nothing:
+        // a panic while holding a turn must not close this change request
+        // for the rest of the session.
         let flight = self
             .flights
             .lock()
-            .expect("flights lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry((worktree.to_path_buf(), remote.clone(), reference.number))
             .or_default()
             .clone();
-        let _turn = flight.lock().expect("flight lock");
+        let _turn = flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A request that held the turn before this one may have fetched already.
         if all_local() {
             return Ok(());
         }
         let refused = |error: FetchError| RevisionError::FetchFailed { detail: error.to_string() };
-        let mut specs = vec![
-            FetchRefspec::new(&reference.head_ref(), &revision_ref(&remote, reference.number, "head")).map_err(refused)?,
-        ];
-        if let Some(branch) = target_branch {
-            specs.push(
+        let head_spec =
+            FetchRefspec::new(&reference.head_ref(), &revision_ref(&remote, reference.number, "head")).map_err(refused)?;
+        let base_spec = match target_branch {
+            Some(branch) => Some(
                 FetchRefspec::new(&format!("refs/heads/{branch}"), &revision_ref(&remote, reference.number, "base"))
                     .map_err(refused)?,
-            );
-        }
-        sirio_git::fetch_refs(worktree, &remote, &specs, fetch_timeout()).map_err(|error| match error {
+            ),
+            None => None,
+        };
+        let fetch = |specs: &[FetchRefspec]| sirio_git::fetch_refs(worktree, &remote, specs, fetch_timeout());
+        let both = base_spec.iter().chain(std::iter::once(&head_spec)).cloned().collect::<Vec<_>>();
+        let result = match fetch(&both) {
+            // git aborts a fetch as a whole when one of its refs is missing
+            // on the remote, so a target branch the forge deleted (a merged
+            // stacked change request, say) would take the head down with it.
+            // The head ref alone usually carries the base too; when it does
+            // not, the check below says which sha is gone. A timeout is not
+            // retried, and the head-only error names the real problem.
+            Err(FetchError::Failed { .. }) if base_spec.is_some() => fetch(std::slice::from_ref(&head_spec)),
+            other => other,
+        };
+        result.map_err(|error| match error {
             FetchError::TimedOut => RevisionError::FetchTimedOut,
             FetchError::Failed { detail } => RevisionError::FetchFailed { detail },
         })?;
@@ -752,6 +767,41 @@ mod tests {
             fetcher.ensure(&setup.work, &reference(), &missing, Some("main")),
             Err(RevisionError::RevisionGone { sha: missing.base_sha.clone() })
         );
+    }
+
+    /// A merged stacked pull request whose base branch was deleted: git
+    /// refuses the whole two-refspec fetch, so the head is fetched alone and
+    /// the base, an ancestor of it here, comes along.
+    #[test]
+    fn a_target_branch_the_forge_no_longer_has_still_lets_the_head_be_fetched() {
+        let setup = setup();
+        let fetcher = RevisionFetcher::default();
+        fetcher
+            .ensure(&setup.work, &reference(), &revisions_of(&setup), Some("a-branch-that-does-not-exist"))
+            .expect("the head ref alone brings both commits in");
+        assert!(sirio_git::object_exists(&setup.work, &setup.head));
+        assert!(sirio_git::object_exists(&setup.work, &setup.base));
+        assert_eq!(
+            sirio_git::refs_under(&setup.work, REVISION_REF_PREFIX).expect("refs"),
+            vec!["refs/sirio/change-requests/origin/7/head".to_string()],
+            "the head ref is written, no base ref"
+        );
+    }
+
+    /// A restored snapshot knows no target branch (§8): only the head ref is
+    /// fetched, and nothing is written for the base.
+    #[test]
+    fn without_a_target_branch_only_the_head_ref_is_fetched() {
+        let setup = setup();
+        let fetcher = RevisionFetcher::default();
+        fetcher
+            .ensure(&setup.work, &reference(), &revisions_of(&setup), None)
+            .expect("fetch");
+        assert_eq!(
+            sirio_git::refs_under(&setup.work, REVISION_REF_PREFIX).expect("refs"),
+            vec!["refs/sirio/change-requests/origin/7/head".to_string()]
+        );
+        assert!(sirio_git::object_exists(&setup.work, &setup.base), "the base is an ancestor of the head");
     }
 
     #[test]
