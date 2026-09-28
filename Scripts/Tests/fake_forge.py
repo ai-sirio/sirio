@@ -40,6 +40,18 @@ import os
 import sys
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forge-fixtures")
+# Every fixture on disk, by flavour and then by name without `.json`. A request
+# picks one by looking its name up here, so no path is ever built from what a
+# request says.
+FIXTURE_FILES = {
+    flavor: {
+        entry[: -len(".json")]: os.path.join(FIXTURES, flavor, entry)
+        for entry in os.listdir(os.path.join(FIXTURES, flavor))
+        if entry.endswith(".json")
+    }
+    for flavor in os.listdir(FIXTURES)
+    if os.path.isdir(os.path.join(FIXTURES, flavor))
+}
 # Operations that have a baseline variant, and the fields those variants omit.
 BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader"}
 NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount"}
@@ -167,11 +179,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name += ".page2"
         if variables.get("number") == 404 or variables.get("iid") == "404":
             name = "NotFound"
-        try:
-            with open(os.path.join(FIXTURES, self.flavor, name + ".json"), encoding="utf-8") as fixture:
-                payload = json.load(fixture)
-        except FileNotFoundError:
+        path = FIXTURE_FILES.get(self.flavor, {}).get(name)
+        if path is None:
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})
+        with open(path, encoding="utf-8") as fixture:
+            payload = json.load(fixture)
         if old and operation in BASELINE_OPERATIONS:
             payload = strip_newer(payload)
         return self.answer(200, payload, [("X-RateLimit-Remaining", "4999")])
