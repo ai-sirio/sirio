@@ -51,8 +51,16 @@ pub fn range_files(repo: &Path, base: &str, head: &str) -> Result<Vec<RangeFile>
     let spec = range_spec(base, head)?;
     let output = git::run_accepting(
         &[
-            "-c", "core.quotePath=false", "diff", "--name-status", "-z", "-M", "--no-color",
-            "--no-ext-diff", &spec, "--",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-status",
+            "-z",
+            "-M",
+            "--no-color",
+            "--no-ext-diff",
+            &spec,
+            "--",
         ],
         repo,
         &[0],
@@ -69,8 +77,16 @@ pub fn range_stats(
     let spec = range_spec(base, head)?;
     let output = git::run_accepting(
         &[
-            "-c", "core.quotePath=false", "diff", "--numstat", "-z", "-M", "--no-color",
-            "--no-ext-diff", &spec, "--",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--numstat",
+            "-z",
+            "-M",
+            "--no-color",
+            "--no-ext-diff",
+            &spec,
+            "--",
         ],
         repo,
         &[0],

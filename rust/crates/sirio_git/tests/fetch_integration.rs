@@ -16,8 +16,8 @@ impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("sirio-fetch-test-{}-{unique}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("sirio-fetch-test-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self(std::fs::canonicalize(&path).expect("canonicalize temp dir"))
     }
@@ -53,8 +53,16 @@ fn write_commit(repo: &Path, file: &str, content: &str, message: &str) {
     git(
         repo,
         &[
-            "-c", "user.email=test@sirio.dev", "-c", "user.name=Sirio Test",
-            "-c", "commit.gpgSign=false", "commit", "-q", "-m", message,
+            "-c",
+            "user.email=test@sirio.dev",
+            "-c",
+            "user.name=Sirio Test",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-q",
+            "-m",
+            message,
         ],
     );
 }
@@ -83,11 +91,22 @@ fn remote_with_a_change_request() -> Remote {
     let bare = holder.path().join("forge.git");
     git(
         holder.path(),
-        &["clone", "-q", "--bare", s.to_str().unwrap(), bare.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            s.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
     );
     git(&bare, &["update-ref", "refs/pull/7/head", &pull_head]);
     git(&bare, &["update-ref", "-d", "refs/heads/pr"]);
-    Remote { _dirs: (source, holder), bare, pull_head, main_tip }
+    Remote {
+        _dirs: (source, holder),
+        bare,
+        pull_head,
+        main_tip,
+    }
 }
 
 /// A checkout with `origin` at `url` and no credential helper to answer for it.
@@ -101,8 +120,16 @@ fn work_repo(url: &str) -> TempDir {
 
 fn specs() -> Vec<FetchRefspec> {
     vec![
-        FetchRefspec::new("refs/pull/7/head", "refs/sirio/change-requests/origin/7/head").unwrap(),
-        FetchRefspec::new("refs/heads/main", "refs/sirio/change-requests/origin/7/base").unwrap(),
+        FetchRefspec::new(
+            "refs/pull/7/head",
+            "refs/sirio/change-requests/origin/7/head",
+        )
+        .unwrap(),
+        FetchRefspec::new(
+            "refs/heads/main",
+            "refs/sirio/change-requests/origin/7/base",
+        )
+        .unwrap(),
     ]
 }
 
@@ -121,9 +148,16 @@ fn a_fetch_lands_the_refs_and_touches_nothing_else() {
     );
     assert!(object_exists(work.path(), &remote.pull_head));
     assert!(object_exists(work.path(), &remote.main_tip));
-    assert!(!work.path().join(".git/FETCH_HEAD").exists(), "FETCH_HEAD stays untouched");
+    assert!(
+        !work.path().join(".git/FETCH_HEAD").exists(),
+        "FETCH_HEAD stays untouched"
+    );
     assert_eq!(git(work.path(), &["tag", "-l"]), "", "no tag came along");
-    assert_eq!(git(work.path(), &["branch", "-a"]), "", "no branch came along");
+    assert_eq!(
+        git(work.path(), &["branch", "-a"]),
+        "",
+        "no branch came along"
+    );
 }
 
 #[test]
@@ -131,8 +165,11 @@ fn a_ref_the_remote_does_not_have_is_a_failure_that_says_so() {
     let remote = remote_with_a_change_request();
     let work = work_repo(remote.bare.to_str().unwrap());
     let missing = vec![
-        FetchRefspec::new("refs/pull/999/head", "refs/sirio/change-requests/origin/999/head")
-            .unwrap(),
+        FetchRefspec::new(
+            "refs/pull/999/head",
+            "refs/sirio/change-requests/origin/999/head",
+        )
+        .unwrap(),
     ];
     let Err(FetchError::Failed { detail }) =
         fetch_refs(work.path(), "origin", &missing, Duration::from_secs(60))
@@ -164,10 +201,17 @@ fn delete_ref_removes_a_symbolic_ref_itself_and_never_the_branch_it_points_at() 
     let remote = remote_with_a_change_request();
     let work = work_repo(remote.bare.to_str().unwrap());
     fetch_refs(work.path(), "origin", &specs(), Duration::from_secs(60)).expect("fetch");
-    git(work.path(), &["update-ref", "refs/heads/keep", &remote.main_tip]);
     git(
         work.path(),
-        &["symbolic-ref", "refs/sirio/change-requests/origin/9/head", "refs/heads/keep"],
+        &["update-ref", "refs/heads/keep", &remote.main_tip],
+    );
+    git(
+        work.path(),
+        &[
+            "symbolic-ref",
+            "refs/sirio/change-requests/origin/9/head",
+            "refs/heads/keep",
+        ],
     );
 
     delete_ref(work.path(), "refs/sirio/change-requests/origin/9/head").expect("delete");
@@ -192,24 +236,39 @@ fn refs_under_refuses_a_prefix_outside_refs_or_shaped_like_an_option() {
     let work = work_repo("https://ghe.test/acme/widgets.git");
     for prefix in ["--format=%(objectname)", "-x", "HEAD", "", "heads/"] {
         assert!(
-            matches!(refs_under(work.path(), prefix), Err(sirio_git::GitError::CommandFailed { .. })),
+            matches!(
+                refs_under(work.path(), prefix),
+                Err(sirio_git::GitError::CommandFailed { .. })
+            ),
             "{prefix:?} must be refused"
         );
     }
-    assert_eq!(refs_under(work.path(), "refs/sirio/").expect("an empty namespace"), Vec::<String>::new());
+    assert_eq!(
+        refs_under(work.path(), "refs/sirio/").expect("an empty namespace"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
 fn list_remotes_reports_names_and_configured_urls() {
     let work = work_repo("https://ghe.test/acme/widgets.git");
-    git(work.path(), &["remote", "add", "upstream", "git@ghe.test:acme/widgets.git"]);
+    git(
+        work.path(),
+        &["remote", "add", "upstream", "git@ghe.test:acme/widgets.git"],
+    );
     let mut remotes = list_remotes(work.path());
     remotes.sort();
     assert_eq!(
         remotes,
         vec![
-            ("origin".to_string(), "https://ghe.test/acme/widgets.git".to_string()),
-            ("upstream".to_string(), "git@ghe.test:acme/widgets.git".to_string()),
+            (
+                "origin".to_string(),
+                "https://ghe.test/acme/widgets.git".to_string()
+            ),
+            (
+                "upstream".to_string(),
+                "git@ghe.test:acme/widgets.git".to_string()
+            ),
         ]
     );
     let bare_repo = TempDir::new();
@@ -235,7 +294,10 @@ fn an_ssh_that_waits_forever_is_killed_at_the_timeout() {
     )
     .expect("write script");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    git(work.path(), &["config", "core.sshCommand", script.to_str().unwrap()]);
+    git(
+        work.path(),
+        &["config", "core.sshCommand", script.to_str().unwrap()],
+    );
 
     let started = Instant::now();
     let result = fetch_refs(work.path(), "origin", &specs(), Duration::from_secs(1));
@@ -247,7 +309,10 @@ fn an_ssh_that_waits_forever_is_killed_at_the_timeout() {
     );
 
     let recorded = std::fs::read_to_string(&pids).expect("the fake ssh ran and recorded its pids");
-    let recorded: Vec<u32> = recorded.lines().map(|line| line.trim().parse().expect("a pid")).collect();
+    let recorded: Vec<u32> = recorded
+        .lines()
+        .map(|line| line.trim().parse().expect("a pid"))
+        .collect();
     assert_eq!(recorded.len(), 2, "the shell and its sleep: {recorded:?}");
     let deadline = Instant::now() + Duration::from_secs(2);
     let alive = |pid: u32| {
@@ -300,7 +365,10 @@ fn a_remote_that_asks_for_a_password_fails_fast_instead_of_prompting() {
     )
     .expect("write askpass");
     std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    git(work.path(), &["config", "core.askPass", askpass.to_str().unwrap()]);
+    git(
+        work.path(),
+        &["config", "core.askPass", askpass.to_str().unwrap()],
+    );
 
     let started = Instant::now();
     let Err(FetchError::Failed { detail }) =
@@ -313,6 +381,9 @@ fn a_remote_that_asks_for_a_password_fails_fast_instead_of_prompting() {
         "it failed at once instead of waiting for a password: {:?}",
         started.elapsed()
     );
-    assert!(!marker.exists(), "the repository's askpass was never asked: {detail}");
+    assert!(
+        !marker.exists(),
+        "the repository's askpass was never asked: {detail}"
+    );
     assert!(detail.contains("terminal prompts disabled"), "{detail}");
 }

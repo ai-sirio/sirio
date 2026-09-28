@@ -39,7 +39,9 @@ pub struct FetchRefspec {
 fn ref_is_safe(name: &str) -> bool {
     !name.is_empty()
         && !name.contains("..")
-        && !name.chars().any(|c| c.is_whitespace() || c.is_control() || ":?[\\^~*".contains(c))
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || ":?[\\^~*".contains(c))
 }
 
 impl FetchRefspec {
@@ -79,7 +81,9 @@ pub fn fetch_refs(
     match run(repo, remote, &spelled, timeout, true) {
         // `--no-write-fetch-head` needs git 2.29; an older git says so, and
         // then `FETCH_HEAD` is written — harmless, but never a failure.
-        Err(Failure::FlagUnknown) => run(repo, remote, &spelled, timeout, false).map_err(Failure::into_error),
+        Err(Failure::FlagUnknown) => {
+            run(repo, remote, &spelled, timeout, false).map_err(Failure::into_error)
+        }
         other => other.map_err(Failure::into_error),
     }
 }
@@ -177,7 +181,10 @@ fn run(
 
 /// The last few lines of git's stderr: where its verdict is.
 fn tail(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     lines[lines.len().saturating_sub(6)..].join("\n")
 }
 
@@ -231,7 +238,11 @@ pub fn refs_under(repo: &Path, prefix: &str) -> Result<Vec<String>, GitError> {
             stderr: format!("refusing to list {prefix:?}: not a ref namespace"),
         });
     }
-    let output = git::run_accepting(&["for-each-ref", "--format=%(refname)", "--", prefix], repo, &[0])?;
+    let output = git::run_accepting(
+        &["for-each-ref", "--format=%(refname)", "--", prefix],
+        repo,
+        &[0],
+    )?;
     Ok(output.stdout_string().lines().map(str::to_string).collect())
 }
 
@@ -255,14 +266,19 @@ mod tests {
     #[test]
     fn user_and_password_are_removed_from_an_http_url() {
         assert_eq!(
-            redact_credentials("fatal: unable to access 'https://bob:hunter2@ghe.test/acme/w.git/': 403"),
+            redact_credentials(
+                "fatal: unable to access 'https://bob:hunter2@ghe.test/acme/w.git/': 403"
+            ),
             "fatal: unable to access 'https://ghe.test/acme/w.git/': 403"
         );
     }
 
     #[test]
     fn a_bare_token_is_removed_too() {
-        assert_eq!(redact_credentials("https://ghp_abc123@github.com/o/r.git"), "https://github.com/o/r.git");
+        assert_eq!(
+            redact_credentials("https://ghp_abc123@github.com/o/r.git"),
+            "https://github.com/o/r.git"
+        );
     }
 
     #[test]
@@ -276,7 +292,10 @@ mod tests {
     #[test]
     fn a_token_that_contains_a_slash_leaves_no_fragment() {
         let cleaned = redact_credentials("https://user:ab/cd@host.test/x.git");
-        assert!(!cleaned.contains("ab") && !cleaned.contains("cd@"), "{cleaned}");
+        assert!(
+            !cleaned.contains("ab") && !cleaned.contains("cd@"),
+            "{cleaned}"
+        );
     }
 
     #[test]
@@ -308,7 +327,9 @@ mod tests {
                 "{source} -> {destination} must be refused"
             );
         }
-        assert!(FetchRefspec::new("refs/pull/7/head", "refs/sirio/change-requests/o/7/head").is_ok());
+        assert!(
+            FetchRefspec::new("refs/pull/7/head", "refs/sirio/change-requests/o/7/head").is_ok()
+        );
     }
 
     /// What git older than 2.29 prints for `--no-write-fetch-head`: the
@@ -378,16 +399,25 @@ usage: git fetch [<options>] [<repository> [<refspec>...]]
 
     #[test]
     fn an_old_git_refusing_no_write_fetch_head_is_recognised_above_its_usage_text() {
-        assert!(OLD_GIT_REFUSAL.lines().count() > 50, "the fixture is the full usage dump");
+        assert!(
+            OLD_GIT_REFUSAL.lines().count() > 50,
+            "the fixture is the full usage dump"
+        );
         assert_eq!(classify(OLD_GIT_REFUSAL, Some(129)), Failure::FlagUnknown);
     }
 
     #[test]
     fn any_other_failure_is_reported_with_the_tail_of_stderr() {
         let other_option = OLD_GIT_REFUSAL.replacen("no-write-fetch-head", "refetch", 1);
-        assert!(matches!(classify(&other_option, Some(129)), Failure::Fetch(FetchError::Failed { .. })));
+        assert!(matches!(
+            classify(&other_option, Some(129)),
+            Failure::Fetch(FetchError::Failed { .. })
+        ));
         assert_eq!(
-            classify("fatal: couldn't find remote ref refs/pull/9/head\n", Some(128)),
+            classify(
+                "fatal: couldn't find remote ref refs/pull/9/head\n",
+                Some(128)
+            ),
             Failure::Fetch(FetchError::Failed {
                 detail: "fatal: couldn't find remote ref refs/pull/9/head".to_string()
             })
@@ -403,8 +433,15 @@ usage: git fetch [<options>] [<repository> [<refspec>...]]
             assert!(!detail.trim().is_empty(), "{silent:?} left an empty reason");
             assert!(detail.contains("exit status 3"), "{detail}");
             let signalled = verdict(silent, None);
-            assert!(!signalled.trim().is_empty(), "{silent:?} left an empty reason");
+            assert!(
+                !signalled.trim().is_empty(),
+                "{silent:?} left an empty reason"
+            );
         }
-        assert_eq!(verdict("fatal: nope\n", Some(128)), "fatal: nope", "a real reason is kept");
+        assert_eq!(
+            verdict("fatal: nope\n", Some(128)),
+            "fatal: nope",
+            "a real reason is kept"
+        );
     }
 }
