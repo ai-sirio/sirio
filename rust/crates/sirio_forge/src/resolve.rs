@@ -67,7 +67,13 @@ pub fn resolve(
         && let Some(means) = setting.means
     {
         return match (means, stored_token) {
-            (Means::Token, None) => Resolution::NotConnected {
+            (Means::Token, Some(token_forge)) if token_forge == setting.forge => {
+                Resolution::Ready {
+                    forge: setting.forge,
+                    means,
+                }
+            }
+            (Means::Token, _) => Resolution::NotConnected {
                 forge: setting.forge,
             },
             _ => Resolution::Ready {
@@ -226,6 +232,19 @@ mod tests {
                 forge: Forge::GitHub
             }
         );
+    }
+
+    #[test]
+    fn a_token_setting_with_the_other_forges_token_is_not_connected() {
+        let fake = Fake::default();
+        let chosen = setting("git.corp", Forge::GitLab, Some(Means::Token));
+        assert_eq!(
+            resolve("git.corp", Some(&chosen), Some(Forge::GitHub), &fake),
+            Resolution::NotConnected {
+                forge: Forge::GitLab
+            }
+        );
+        assert!(fake.asked().is_empty(), "asked {:?}", fake.asked());
     }
 
     #[test]

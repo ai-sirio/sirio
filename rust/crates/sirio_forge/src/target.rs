@@ -61,7 +61,10 @@ fn split_url<'a>(scheme: &str, rest: &'a str) -> Option<(String, &'a str)> {
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     let (host, port) = match host_port.rsplit_once(':') {
-        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => (host, Some(port)),
+        Some((_, "")) => return None,
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            (host, Some(port))
+        }
         _ => (host_port, None),
     };
     let default_port = if scheme == "https" { "443" } else { "80" };
@@ -211,5 +214,11 @@ mod tests {
     #[test]
     fn a_scheme_git_cannot_fetch_from_a_forge_is_refused() {
         assert_eq!(parsed("ftp://git.example.com/group/project"), None);
+    }
+
+    #[test]
+    fn an_empty_port_is_not_a_remote() {
+        assert_eq!(parsed("https://host:/group/project"), None);
+        assert_eq!(parsed("http://host:/group/project"), None);
     }
 }
