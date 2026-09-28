@@ -156,6 +156,11 @@ pub struct FileView {
     /// `Some` for a file shown at a revision rather than read from `path` —
     /// read-only, no monitor, no language server.
     snapshot: Option<SnapshotOrigin>,
+    /// Why a snapshot's read failed, while it stays failed. Kept in the
+    /// view rather than in a card: a card is dismissed by a click or
+    /// replaced by the next message, and this sentence carries the tab's
+    /// only remedy, its Retry (spec §8).
+    snapshot_error: Option<String>,
     /// A message that answers something the user just did: a definition
     /// that does not exist, a save that failed, a language server that
     /// would not start. It is *about* the file, never instead of it —
@@ -417,6 +422,7 @@ impl FileView {
             file_monitor: None,
             _file_monitor_task: None,
             snapshot: None,
+            snapshot_error: None,
             message: None,
             markdown_mode: MarkdownMode::Preview,
             source_selection: None,
@@ -471,7 +477,9 @@ impl FileView {
     }
 
     /// The read finished: fill the view in, or say why it could not, with a
-    /// Retry the workspace answers (`FileViewEvent::RetrySnapshot`).
+    /// Retry the workspace answers (`FileViewEvent::RetrySnapshot`). The
+    /// failure fills the surface and stays until a retry or a later read
+    /// replaces it; no card can take it away.
     pub fn finish_snapshot(&mut self, result: Result<Vec<u8>, String>, cx: &mut Context<Self>) {
         let Some(origin) = self.snapshot.clone() else {
             return;
@@ -481,21 +489,17 @@ impl FileView {
                 let editor = Editor::from_snapshot(self.path.clone(), bytes);
                 self.markdown_mode = Self::initial_markdown_mode(&editor);
                 self.state = ViewState::Ready(editor);
+                self.snapshot_error = None;
                 self.message = None;
                 cx.emit(FileViewEvent::Loaded(self.path.clone()));
             }
-            Err(reason) => self.offer(
-                format!(
+            Err(reason) => {
+                self.snapshot_error = Some(format!(
                     "Could not read {} at {}: {reason}",
                     origin.relative_path.display(),
                     origin.label()
-                ),
-                vec![MessageAction {
-                    label: "Retry".to_string(),
-                    event: FileViewEvent::RetrySnapshot,
-                }],
-                cx,
-            ),
+                ));
+            }
         }
         cx.notify();
     }
@@ -504,9 +508,15 @@ impl FileView {
     pub fn restart_snapshot(&mut self, cx: &mut Context<Self>) {
         if self.snapshot.is_some() {
             self.state = ViewState::Loading;
+            self.snapshot_error = None;
             self.message = None;
             cx.notify();
         }
+    }
+
+    /// Why the snapshot's read failed, while the tab shows that failure.
+    pub fn snapshot_error(&self) -> Option<&str> {
+        self.snapshot_error.as_deref()
     }
 
     pub fn path(&self) -> &Path {
@@ -1627,6 +1637,11 @@ impl FileView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match &self.state {
+            ViewState::Loading if self.snapshot_error.is_some() => render_snapshot_failure(
+                self.snapshot_error.as_deref().unwrap_or_default(),
+                theme,
+                entity,
+            ),
             ViewState::Loading => div()
                 .id("file-loading")
                 .debug_selector(|| "file-loading".to_owned())
@@ -1945,6 +1960,45 @@ fn render_snapshot_bar(
                     }),
             )
         })
+}
+
+/// A snapshot whose read failed: the reason, and the Retry that is the
+/// tab's only remedy. It fills the surface, like the Loading it replaces,
+/// so nothing that dismisses a card can take it away.
+fn render_snapshot_failure(
+    reason: &str,
+    theme: Theme,
+    entity: gpui::Entity<FileView>,
+) -> AnyElement {
+    div()
+        .id("file-snapshot-failed")
+        .debug_selector(|| "file-snapshot-failed".into())
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(theme.spacing.card_gap)
+        .p(px(24.0))
+        .text_color(theme.text_muted)
+        .child(reason.to_owned())
+        .child(
+            div()
+                .id("file-snapshot-retry")
+                .debug_selector(|| "file-snapshot-retry".into())
+                .px(px(10.0))
+                .py(px(3.0))
+                .rounded(theme.radii.control)
+                .cursor_pointer()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.text_muted)
+                .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |_, cx| cx.emit(FileViewEvent::RetrySnapshot));
+                })
+                .child("Retry"),
+        )
+        .into_any_element()
 }
 
 /// F-EDIT-01: the Code/Preview switcher for Markdown files. Each option is
@@ -6009,11 +6063,71 @@ mod tests {
         let failed = cx.new(|cx| FileView::snapshot_pending(snapshot_origin_for_tests(), cx));
         failed.update(cx, |view, cx| {
             view.finish_snapshot(Err("boom".to_string()), cx);
-            assert!(view.message_text().is_some_and(|text| text.contains("boom")));
-            assert_eq!(view.message_action_labels(), vec!["Retry".to_string()]);
+            assert!(view
+                .snapshot_error()
+                .is_some_and(|text| text.contains("boom") && text.contains("#578 at a1b2c3d")));
             view.restart_snapshot(cx);
             assert!(view.editor().is_none(), "a retry starts from nothing");
-            assert!(view.message_text().is_none(), "and the old failure is gone");
+            assert!(view.snapshot_error().is_none(), "and the old failure is gone");
+            view.finish_snapshot(Err("boom".to_string()), cx);
+            view.finish_snapshot(Ok(b"late\n".to_vec()), cx);
+            assert!(view.snapshot_error().is_none(), "a read that succeeds clears it");
         });
+    }
+
+    #[gpui::test]
+    async fn a_failed_snapshot_keeps_its_retry_after_every_card_is_gone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Spec §8: an unreachable tab keeps its error with Retry. The two
+        // ways a transient card disappears — a click on its body, and any
+        // later message such as the Read-only answer to Ctrl+S — must not
+        // take the only remedy with them.
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+        });
+        let window =
+            cx.add_window(|_window, cx| FileView::snapshot_pending(snapshot_origin_for_tests(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.finish_snapshot(Err("boom".to_string()), cx);
+            view.dismiss_message(cx);
+            let saved = view.save(cx);
+            assert!(saved.is_err(), "a snapshot still refuses to save");
+            view.dismiss_message(cx);
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-snapshot-failed").is_some(),
+            "the failure is still drawn"
+        );
+        assert!(
+            cx.debug_bounds("file-loading").is_none(),
+            "and the tab does not claim to be loading"
+        );
+        let retry = cx
+            .debug_bounds("file-snapshot-retry")
+            .expect("the Retry survives every card");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[FileViewEvent::RetrySnapshot],
+            "and a click on it asks for the read again"
+        );
     }
 }
