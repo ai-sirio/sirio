@@ -1,8 +1,10 @@
 //! GitHub's GraphQL: the queries Sirio sends and what it reads back.
 //!
 //! Every query in `queries/github/` was validated against github.com on
-//! 2026-09-27 (`gh api graphql`, repository ai-sirio/sirio). Change a field
-//! only after running the changed query there again.
+//! 2026-09-27 (`gh api graphql`, repository ai-sirio/sirio); the header
+//! query's `baseRefOid`/`headRefOid` fields were added and run there again
+//! on 2026-09-28 (pull request #578). Change a field only after running the
+//! changed query there again.
 
 use serde_json::{Value, json};
 

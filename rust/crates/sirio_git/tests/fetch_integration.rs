@@ -157,6 +157,48 @@ fn delete_ref_refuses_everything_outside_the_sirio_namespace() {
     );
 }
 
+/// A symbolic ref planted inside the namespace must not cost the branch it
+/// points at: `update-ref -d` dereferences a symref unless told not to.
+#[test]
+fn delete_ref_removes_a_symbolic_ref_itself_and_never_the_branch_it_points_at() {
+    let remote = remote_with_a_change_request();
+    let work = work_repo(remote.bare.to_str().unwrap());
+    fetch_refs(work.path(), "origin", &specs(), Duration::from_secs(60)).expect("fetch");
+    git(work.path(), &["update-ref", "refs/heads/keep", &remote.main_tip]);
+    git(
+        work.path(),
+        &["symbolic-ref", "refs/sirio/change-requests/origin/9/head", "refs/heads/keep"],
+    );
+
+    delete_ref(work.path(), "refs/sirio/change-requests/origin/9/head").expect("delete");
+
+    assert_eq!(
+        refs_under(work.path(), "refs/sirio/change-requests/").expect("refs"),
+        vec![
+            "refs/sirio/change-requests/origin/7/base".to_string(),
+            "refs/sirio/change-requests/origin/7/head".to_string(),
+        ],
+        "the symbolic ref itself is gone, its neighbours stay"
+    );
+    assert_eq!(
+        git(work.path(), &["rev-parse", "refs/heads/keep"]),
+        remote.main_tip,
+        "the branch the symref pointed at survives"
+    );
+}
+
+#[test]
+fn refs_under_refuses_a_prefix_outside_refs_or_shaped_like_an_option() {
+    let work = work_repo("https://ghe.test/acme/widgets.git");
+    for prefix in ["--format=%(objectname)", "-x", "HEAD", "", "heads/"] {
+        assert!(
+            matches!(refs_under(work.path(), prefix), Err(sirio_git::GitError::CommandFailed { .. })),
+            "{prefix:?} must be refused"
+        );
+    }
+    assert_eq!(refs_under(work.path(), "refs/sirio/").expect("an empty namespace"), Vec::<String>::new());
+}
+
 #[test]
 fn list_remotes_reports_names_and_configured_urls() {
     let work = work_repo("https://ghe.test/acme/widgets.git");
@@ -181,7 +223,17 @@ fn an_ssh_that_waits_forever_is_killed_at_the_timeout() {
     use std::os::unix::fs::PermissionsExt;
     let work = work_repo("ssh://hang.invalid/x.git");
     let script = work.path().join("hang.sh");
-    std::fs::write(&script, "#!/bin/sh\nsleep 30\n").expect("write script");
+    // The fake ssh records its own pid and its `sleep` child's, so the test
+    // can check the whole tree died rather than only that the call returned.
+    let pids = work.path().join("pids");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nsleep 30 &\necho $$ > '{0}'\necho $! >> '{0}'\nwait\n",
+            pids.display()
+        ),
+    )
+    .expect("write script");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     git(work.path(), &["config", "core.sshCommand", script.to_str().unwrap()]);
 
@@ -193,6 +245,30 @@ fn an_ssh_that_waits_forever_is_killed_at_the_timeout() {
         "the whole process tree was killed, not waited for: {:?}",
         started.elapsed()
     );
+
+    let recorded = std::fs::read_to_string(&pids).expect("the fake ssh ran and recorded its pids");
+    let recorded: Vec<u32> = recorded.lines().map(|line| line.trim().parse().expect("a pid")).collect();
+    assert_eq!(recorded.len(), 2, "the shell and its sleep: {recorded:?}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let alive = |pid: u32| {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    };
+    loop {
+        let survivors: Vec<u32> = recorded.iter().copied().filter(|pid| alive(*pid)).collect();
+        if survivors.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "processes still alive after the timeout killed the fetch: {survivors:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(unix)]
@@ -212,6 +288,19 @@ fn a_remote_that_asks_for_a_password_fails_fast_instead_of_prompting() {
         }
     });
     let work = work_repo(&format!("http://127.0.0.1:{port}/x.git"));
+    // The repository has an askpass of its own that would answer the 401
+    // with a password: git consults `core.askPass` before it looks at
+    // `GIT_TERMINAL_PROMPT`, so only the fetch's environment keeps it quiet.
+    use std::os::unix::fs::PermissionsExt;
+    let marker = work.path().join("askpass-ran");
+    let askpass = work.path().join("askpass.sh");
+    std::fs::write(
+        &askpass,
+        format!("#!/bin/sh\ntouch '{}'\necho hunter2\n", marker.display()),
+    )
+    .expect("write askpass");
+    std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    git(work.path(), &["config", "core.askPass", askpass.to_str().unwrap()]);
 
     let started = Instant::now();
     let Err(FetchError::Failed { detail }) =
@@ -224,5 +313,6 @@ fn a_remote_that_asks_for_a_password_fails_fast_instead_of_prompting() {
         "it failed at once instead of waiting for a password: {:?}",
         started.elapsed()
     );
+    assert!(!marker.exists(), "the repository's askpass was never asked: {detail}");
     assert!(detail.contains("terminal prompts disabled"), "{detail}");
 }

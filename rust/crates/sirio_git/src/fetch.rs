@@ -106,7 +106,7 @@ impl Failure {
 /// Reads a failed fetch's whole stderr: git's own refusal of
 /// `--no-write-fetch-head` comes first, above its full usage text, so it is
 /// looked for before the stderr is cut down to the tail the user sees.
-fn classify(stderr: &str) -> Failure {
+fn classify(stderr: &str, status: Option<i32>) -> Failure {
     let refused = stderr
         .lines()
         .any(|line| line.trim() == "error: unknown option `no-write-fetch-head'");
@@ -114,8 +114,22 @@ fn classify(stderr: &str) -> Failure {
         return Failure::FlagUnknown;
     }
     Failure::Fetch(FetchError::Failed {
-        detail: tail(&redact_credentials(stderr)),
+        detail: verdict(stderr, status),
     })
+}
+
+/// What the user is told about a failed fetch: the tail of git's stderr with
+/// credentials removed — or, when git (or a helper) said nothing, the way it
+/// ended, so the line after "failed:" is never blank.
+fn verdict(stderr: &str, status: Option<i32>) -> String {
+    let detail = tail(&redact_credentials(stderr));
+    if !detail.is_empty() {
+        return detail;
+    }
+    match status {
+        Some(code) => format!("git fetch failed (exit status {code}) without saying why"),
+        None => "git fetch was ended by a signal without saying why".to_string(),
+    }
 }
 
 fn run(
@@ -150,9 +164,9 @@ fn run(
     args.extend(spelled.iter().map(String::as_str));
     match git::run_remote(&args, repo, timeout) {
         Ok(output) if output.is_success() => Ok(()),
-        Ok(output) if no_write_fetch_head => Err(classify(&output.stderr)),
+        Ok(output) if no_write_fetch_head => Err(classify(&output.stderr, output.status)),
         Ok(output) => Err(Failure::Fetch(FetchError::Failed {
-            detail: tail(&redact_credentials(&output.stderr)),
+            detail: verdict(&output.stderr, output.status),
         })),
         Err(GitError::TimedOut { .. }) => Err(Failure::Fetch(FetchError::TimedOut)),
         Err(error) => Err(Failure::Fetch(FetchError::Failed {
@@ -207,13 +221,23 @@ pub fn list_remotes(repo: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Every ref under `prefix`, by full name.
+/// Every ref under `prefix`, by full name. Only a `refs/…` prefix is
+/// accepted: anything else is not a ref namespace, and a leading `-` would
+/// be an option to `for-each-ref`.
 pub fn refs_under(repo: &Path, prefix: &str) -> Result<Vec<String>, GitError> {
-    let output = git::run_accepting(&["for-each-ref", "--format=%(refname)", prefix], repo, &[0])?;
+    if !prefix.starts_with("refs/") {
+        return Err(GitError::CommandFailed {
+            code: 128,
+            stderr: format!("refusing to list {prefix:?}: not a ref namespace"),
+        });
+    }
+    let output = git::run_accepting(&["for-each-ref", "--format=%(refname)", "--", prefix], repo, &[0])?;
     Ok(output.stdout_string().lines().map(str::to_string).collect())
 }
 
-/// Deletes `name`, which must be inside Sirio's own `refs/sirio/`.
+/// Deletes `name`, which must be inside Sirio's own `refs/sirio/`. A
+/// symbolic ref is deleted itself (`--no-deref`), never the ref it points
+/// at — the one way a delete inside the namespace could reach outside it.
 pub fn delete_ref(repo: &Path, name: &str) -> Result<(), GitError> {
     if !name.starts_with(NAMESPACE) || !ref_is_safe(name) {
         return Err(GitError::CommandFailed {
@@ -221,7 +245,7 @@ pub fn delete_ref(repo: &Path, name: &str) -> Result<(), GitError> {
             stderr: format!("refusing to delete {name:?}: not a Sirio ref"),
         });
     }
-    git::run_accepting(&["update-ref", "-d", name], repo, &[0]).map(|_| ())
+    git::run_accepting(&["update-ref", "--no-deref", "-d", name], repo, &[0]).map(|_| ())
 }
 
 #[cfg(test)]
@@ -355,18 +379,32 @@ usage: git fetch [<options>] [<repository> [<refspec>...]]
     #[test]
     fn an_old_git_refusing_no_write_fetch_head_is_recognised_above_its_usage_text() {
         assert!(OLD_GIT_REFUSAL.lines().count() > 50, "the fixture is the full usage dump");
-        assert_eq!(classify(OLD_GIT_REFUSAL), Failure::FlagUnknown);
+        assert_eq!(classify(OLD_GIT_REFUSAL, Some(129)), Failure::FlagUnknown);
     }
 
     #[test]
     fn any_other_failure_is_reported_with_the_tail_of_stderr() {
         let other_option = OLD_GIT_REFUSAL.replacen("no-write-fetch-head", "refetch", 1);
-        assert!(matches!(classify(&other_option), Failure::Fetch(FetchError::Failed { .. })));
+        assert!(matches!(classify(&other_option, Some(129)), Failure::Fetch(FetchError::Failed { .. })));
         assert_eq!(
-            classify("fatal: couldn't find remote ref refs/pull/9/head\n"),
+            classify("fatal: couldn't find remote ref refs/pull/9/head\n", Some(128)),
             Failure::Fetch(FetchError::Failed {
                 detail: "fatal: couldn't find remote ref refs/pull/9/head".to_string()
             })
         );
+    }
+
+    /// A helper that exits non-zero without a word, or git ended by a signal,
+    /// must still leave the user a reason after "Fetching the commits failed:".
+    #[test]
+    fn a_silent_failure_names_the_exit_status_instead_of_saying_nothing() {
+        for silent in ["", "   \n\n\t\n"] {
+            let detail = verdict(silent, Some(3));
+            assert!(!detail.trim().is_empty(), "{silent:?} left an empty reason");
+            assert!(detail.contains("exit status 3"), "{detail}");
+            let signalled = verdict(silent, None);
+            assert!(!signalled.trim().is_empty(), "{silent:?} left an empty reason");
+        }
+        assert_eq!(verdict("fatal: nope\n", Some(128)), "fatal: nope", "a real reason is kept");
     }
 }

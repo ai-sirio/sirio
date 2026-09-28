@@ -2,8 +2,9 @@
 //!
 //! Every query in `queries/gitlab/` was validated against gitlab.com on
 //! 2026-09-27 (`curl https://gitlab.com/api/graphql`, project
-//! gitlab-org/cli). Change a field only after running the changed query
-//! there again.
+//! gitlab-org/cli); the header query's `diffRefs` was added and run there
+//! again on 2026-09-28 (merge request !2000, full and baseline variants).
+//! Change a field only after running the changed query there again.
 //!
 //! GraphQL rejects a whole query that names a field the server lacks, and
 //! self-managed installations run old versions. So the queries that carry

@@ -111,6 +111,7 @@ fn fixture() -> Fixture {
     git(&repo, &["checkout", "-q", "-b", "feat"]);
     write(&repo, "a.txt", sixty_lines(Some(42)).as_bytes());
     write(&repo, "sp ace/ünï.txt", b"hi\n");
+    write(&repo, "new\nline.txt", b"nl\n");
     write(&repo, "bin.dat", &[0, 1, 2, 0]);
     git(&repo, &["mv", "docs/old notes.md", "docs/new notes.md"]);
     write(&repo, "docs/new notes.md", b"alpha\nBETA\ngamma\ndelta\n");
@@ -149,6 +150,7 @@ fn range_files_lists_what_the_branch_changed_since_the_merge_base() {
             ('A', "bin.dat".to_string(), None),
             ('R', "docs/new notes.md".to_string(), Some("docs/old notes.md".to_string())),
             ('D', "gone.txt".to_string(), None),
+            ('A', "new\nline.txt".to_string(), None),
             ('A', "sp ace/ünï.txt".to_string(), None),
         ],
         "main-only.txt must not appear: `base...head` diffs against the merge base"
@@ -168,6 +170,7 @@ fn range_stats_counts_each_file_by_its_new_path() {
     assert_eq!((of("sp ace/ünï.txt").additions, of("sp ace/ünï.txt").deletions), (1, 0));
     assert_eq!((of("docs/new notes.md").additions, of("docs/new notes.md").deletions), (1, 1));
     assert_eq!((of("gone.txt").additions, of("gone.txt").deletions), (0, 2));
+    assert_eq!((of("new\nline.txt").additions, of("new\nline.txt").deletions), (1, 0));
     assert!(of("bin.dat").is_binary);
 }
 
@@ -208,6 +211,10 @@ fn a_files_diff_is_read_on_its_own_and_a_rename_stays_one_change() {
     let binary = range_file_diff(&f.repo, &f.base, &f.head, Path::new("bin.dat"), None, 3)
         .expect("binary diff");
     assert!(binary.is_binary);
+
+    let newline = range_file_diff(&f.repo, &f.base, &f.head, Path::new("new\nline.txt"), None, 3)
+        .expect("a newline in the name is only ever after `--`, as one argument");
+    assert_eq!((newline.additions, newline.deletions), (1, 0));
 }
 
 #[test]
@@ -217,30 +224,23 @@ fn a_string_that_is_not_a_full_commit_id_never_reaches_git() {
     let option = format!("--upload-pack=touch {}", marker.display());
     let newline = format!("{}\n", f.head);
     let short = f.head[..39].to_string();
+    // Git itself exits 128 for some of these, so the exit code alone cannot
+    // tell the validator from git: the refusal must be the validator's own.
+    fn refused_by_the_validator<T: std::fmt::Debug>(result: Result<T, GitError>, what: &str) {
+        let Err(GitError::CommandFailed { code: 128, stderr }) = result else {
+            panic!("{what} must be refused with CommandFailed(128)");
+        };
+        assert!(stderr.starts_with("not a commit id"), "{what}: git ran, or the message changed: {stderr}");
+    }
     for bad in ["", "HEAD", option.as_str(), newline.as_str(), short.as_str()] {
-        assert!(
-            matches!(range_files(&f.repo, bad, &f.head), Err(GitError::CommandFailed { code: 128, .. })),
-            "range_files base {bad:?}"
+        refused_by_the_validator(range_files(&f.repo, bad, &f.head), &format!("range_files base {bad:?}"));
+        refused_by_the_validator(range_files(&f.repo, &f.base, bad), &format!("range_files head {bad:?}"));
+        refused_by_the_validator(range_stats(&f.repo, bad, &f.head), &format!("range_stats {bad:?}"));
+        refused_by_the_validator(
+            range_file_diff(&f.repo, &f.base, bad, Path::new("a.txt"), None, 3),
+            &format!("range_file_diff {bad:?}"),
         );
-        assert!(
-            matches!(range_files(&f.repo, &f.base, bad), Err(GitError::CommandFailed { code: 128, .. })),
-            "range_files head {bad:?}"
-        );
-        assert!(
-            matches!(range_stats(&f.repo, bad, &f.head), Err(GitError::CommandFailed { code: 128, .. })),
-            "range_stats {bad:?}"
-        );
-        assert!(
-            matches!(
-                range_file_diff(&f.repo, &f.base, bad, Path::new("a.txt"), None, 3),
-                Err(GitError::CommandFailed { code: 128, .. })
-            ),
-            "range_file_diff {bad:?}"
-        );
-        assert!(
-            matches!(show_blob(&f.repo, bad, Path::new("a.txt")), Err(GitError::CommandFailed { code: 128, .. })),
-            "show_blob {bad:?}"
-        );
+        refused_by_the_validator(show_blob(&f.repo, bad, Path::new("a.txt")), &format!("show_blob {bad:?}"));
     }
     assert!(!marker.exists(), "an option-shaped string must never be run");
 }
@@ -254,6 +254,10 @@ fn show_blob_returns_the_exact_bytes_at_a_revision() {
         b"hi\n".to_vec()
     );
     assert_eq!(show_blob(&f.repo, &f.head, Path::new("-flag.txt")).expect("dash name"), b"y\n".to_vec());
+    assert_eq!(
+        show_blob(&f.repo, &f.head, Path::new("new\nline.txt")).expect("newline name"),
+        b"nl\n".to_vec()
+    );
     assert_eq!(
         show_blob(&f.repo, &f.base, Path::new("gone.txt")).expect("a deleted file, at the base"),
         b"bye\nbye\n".to_vec()
