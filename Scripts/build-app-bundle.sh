@@ -108,17 +108,26 @@ cat > "$APP_PATH/Contents/Info.plist" <<EOF
 	<string>public.app-category.developer-tools</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Tools and agents running in Sirio's terminals use Apple Events to control other apps.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Tools and agents running in Sirio's terminals reach development servers on your local network.</string>
 </dict>
 </plist>
 EOF
 
 # --options runtime enables the hardened runtime, without which notarization
-# refuses the submission outright. No entitlements on purpose: an app that
-# spawns shells and reads PTYs needs none a priori, because the hardened
-# runtime restricts dylib injection rather than fork/exec. If notarization or
-# first launch fails, add the one exception the error names -- never a
-# pre-emptive entitlements file full of permissions nothing uses.
+# refuses the submission outright. An app that spawns shells and reads PTYs
+# needs no exception for that, because the hardened runtime restricts dylib
+# injection rather than fork/exec. It does need one for Apple Events: the
+# hardened runtime refuses them outright -- errAEEventNotPermitted, no prompt
+# -- unless the signature carries `automation.apple-events`, and the tools in
+# a pane run inside Sirio's TCC envelope, so an agent's `osascript` driving
+# another app was dead in the signed build while working in the ad-hoc dev
+# one. That is the only entry in sirio.entitlements; add another only for a
+# failure that names it, never pre-emptively.
 codesign --force --options runtime --timestamp \
+  --entitlements "$SCRIPT_DIR/sirio.entitlements" \
   --sign "$CODESIGN_IDENTITY" \
   "$APP_PATH"
 
