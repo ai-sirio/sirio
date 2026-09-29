@@ -441,6 +441,7 @@ impl ChangeRequestTab {
                 let index = text("index")
                     .and_then(|index| index.parse().ok())
                     .ok_or("edit-comment needs index")?;
+                self.actions.comment_edit = None;
                 self.start_comment_edit(index, cx);
                 let edit = self
                     .actions

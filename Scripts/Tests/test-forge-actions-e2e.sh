@@ -685,6 +685,17 @@ PY
   wait_for comment_editing "" surface change-request read
   expect_sent "$flavour" "$comment_op" 1
   if ctl surface change-request act edit-comment --index 0 --text "no" >/dev/null 2>&1; then fail "an event was edited"; fi
+  expect_sent "$flavour" "$comment_op" 1
+  wait_for comment_editing "" surface change-request read
+  # A refused save leaves its editor open; editing another entry must not
+  # reuse that stale editor.
+  ctl surface change-request act edit-comment --index "$comment_index" --text "" >/dev/null
+  wait_for action failed surface change-request read
+  [ -n "$(key comment_editing surface change-request read)" ] || fail "the refused save left no editor open"
+  if ctl surface change-request act edit-comment --index 0 --text "X" >/dev/null 2>"$WORK/stale-err.txt"; then fail "a stale editor edited the wrong comment"; fi
+  case "$(cat "$WORK/stale-err.txt")" in *"that timeline entry cannot be edited"*) ;; *) fail "the stale edit was refused for the wrong reason" ;; esac
+  expect_sent "$flavour" "$comment_op" 1
+  wait_for comment_editing "" surface change-request read
 
   echo "  [$flavour] a double send while the first is in flight is one request; words typed meanwhile stay"
   saved_token "$host" "$flavour" slow
