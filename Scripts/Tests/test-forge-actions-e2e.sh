@@ -719,6 +719,10 @@ PY
   case "$(cat "$WORK/stale-err.txt")" in *"that timeline entry cannot be edited"*) ;; *) fail "the stale edit was refused for the wrong reason" ;; esac
   expect_sent "$flavour" "$comment_op" 1
   wait_for comment_editing "" surface change-request read
+  # Saving the words the entry already holds sends nothing.
+  ctl surface change-request act edit-comment --index "$comment_index" --text "Edited comment" >/dev/null
+  wait_for comment_editing "" surface change-request read
+  expect_sent "$flavour" "$comment_op" 1
 
   echo "  [$flavour] a double send while the first is in flight is one request; words typed meanwhile stay"
   saved_token "$host" "$flavour" slow

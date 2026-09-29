@@ -134,13 +134,38 @@ impl ChangeRequestTab {
     }
 
     pub(crate) fn save_comment_edit(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let edit = self
-            .actions
-            .comment_edit
-            .as_ref()
-            .ok_or("no comment is being edited")?;
-        let body = edit.field.read(cx).content().to_string();
-        let comment = edit.comment.clone();
+        let (comment, body) = {
+            let edit = self
+                .actions
+                .comment_edit
+                .as_ref()
+                .ok_or("no comment is being edited")?;
+            (
+                edit.comment.clone(),
+                edit.field.read(cx).content().to_string(),
+            )
+        };
+        // Like the header edit's untouched path: words that match what the
+        // forge holds — compared as the field holds them — are not a write.
+        let header = self.header.value().ok_or("the change request is not loaded")?;
+        let unchanged = header.timeline.iter().any(|item| match item {
+            TimelineItem::Comment {
+                edit: Some(edit),
+                body: current,
+                ..
+            }
+            | TimelineItem::Review {
+                edit: Some(edit),
+                body: current,
+                ..
+            } => edit.id == comment.id && body == normalize(current, BODY_SHAPE),
+            _ => false,
+        });
+        if unchanged {
+            self.actions.comment_edit = None;
+            cx.notify();
+            return Ok(());
+        }
         self.perform(Action::EditComment { comment, body }, cx)
     }
 
