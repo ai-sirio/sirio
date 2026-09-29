@@ -153,8 +153,8 @@ pub(crate) mod testing {
 
     use serde_json::{Value, json};
     use sirio_forge::{
-        ApiResponse, ChangeRef, Forge, ForgeClient, ForgeError, ForgeTarget, Means, Revisions,
-        Transport,
+        ApiResponse, ChangeRef, Forge, ForgeClient, ForgeError, ForgeTarget, Means, RestRequest,
+        Revisions, Transport,
     };
 
     use super::{ChangeRequestSource, Connection, HostRow, ReadyConnection, RevisionError};
@@ -226,6 +226,15 @@ pub(crate) mod testing {
                 status,
                 headers,
                 body: body.into_bytes(),
+            })
+        }
+
+        /// No test of the UI reads a REST path yet.
+        fn request(&self, _request: &RestRequest) -> Result<ApiResponse, ForgeError> {
+            Ok(ApiResponse {
+                status: 404,
+                headers: Vec::new(),
+                body: b"{}".to_vec(),
             })
         }
     }

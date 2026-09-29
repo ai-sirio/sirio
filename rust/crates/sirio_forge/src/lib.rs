@@ -27,4 +27,6 @@ pub use model::{
 };
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};
 pub use target::{ForgeTarget, parse_remote_url};
-pub use transport::{ApiResponse, CliProgram, CliTransport, TokenTransport, Transport};
+pub use transport::{
+    ApiResponse, CliProgram, CliTransport, RestMethod, RestRequest, TokenTransport, Transport,
+};

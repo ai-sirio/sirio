@@ -10,7 +10,7 @@ use crate::client::ForgeClient;
 use crate::error::ForgeError;
 use crate::mapping;
 use crate::model::Revisions;
-use crate::transport::ApiResponse;
+use crate::transport::{ApiResponse, RestRequest};
 
 pub(crate) fn execute(
     client: &ForgeClient,
@@ -150,6 +150,16 @@ pub(crate) fn execute_mutation(
     let body = serde_json::to_vec(&body).expect("a JSON value serialises");
     let response = client.transport.post_graphql(&body)?;
     interpret_mutation(&client.host, &response)
+}
+
+/// One REST call, its answer interpreted as a write's: a 2xx, or the error
+/// it means.
+pub(crate) fn execute_rest(
+    client: &ForgeClient,
+    request: &RestRequest,
+) -> Result<ApiResponse, ForgeError> {
+    let response = client.transport.request(request)?;
+    interpret_rest(&client.host, response)
 }
 
 pub(crate) fn interpret_mutation(host: &str, response: &ApiResponse) -> Result<Value, ForgeError> {
