@@ -6,6 +6,7 @@
 //! blocks; the app runs them on GPUI's background executor. A token, when
 //! there is one, is handed in by the caller and never stored or logged here.
 
+mod action;
 mod client;
 mod error;
 mod github;
@@ -17,6 +18,7 @@ mod resolve;
 mod target;
 mod transport;
 
+pub use action::{Action, ActionOutcome, ReviewVerdict};
 pub use client::ForgeClient;
 pub use error::ForgeError;
 

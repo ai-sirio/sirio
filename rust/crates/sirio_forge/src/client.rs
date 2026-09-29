@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
+use crate::action::{Action, ActionOutcome};
 use crate::error::ForgeError;
 use crate::model::{
     ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CommitSummary,
@@ -145,6 +146,21 @@ impl ForgeClient {
         match self.forge {
             Forge::GitHub => github::files(self, number),
             Forge::GitLab => gitlab::files(self, number),
+        }
+    }
+
+    /// The one door for a write (spec §5). Reads the change request's
+    /// permissions afresh, refuses what the forge would refuse, sends the
+    /// rest — and never retries it: a write that may have been sent is not
+    /// sent again by anything but the user.
+    pub fn act(&self, number: u64, action: &Action) -> Result<ActionOutcome, ForgeError> {
+        let _perf = sirio_perf::span("forge.act", 0);
+        match self.forge {
+            Forge::GitHub => github::act(self, number, action),
+            Forge::GitLab => Err(ForgeError::Unsupported {
+                host: self.host.clone(),
+                what: "writing to GitLab".to_string(),
+            }),
         }
     }
 

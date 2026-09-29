@@ -1,0 +1,8 @@
+query ChangeRequestActionContext($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id state isDraft locked
+      viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor
+    }
+  }
+}

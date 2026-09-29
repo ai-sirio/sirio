@@ -8,10 +8,11 @@
 
 use serde_json::{Value, json};
 
+use crate::action::{Action, ActionContext, ActionOutcome, ReviewVerdict, check_action};
 use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, execute_mutation, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping;
 use crate::model::{
@@ -38,6 +39,16 @@ const HEADER: &str = with_summary!("queries/github/header.graphql");
 const COMMITS: &str = include_str!("queries/github/commits.graphql");
 const CHECKS: &str = include_str!("queries/github/checks.graphql");
 const FILES: &str = include_str!("queries/github/files.graphql");
+const ACTION_CONTEXT: &str = include_str!("queries/github/action_context.graphql");
+const ADD_COMMENT: &str = include_str!("queries/github/add_comment.graphql");
+const ADD_REVIEW: &str = include_str!("queries/github/add_review.graphql");
+const CLOSE: &str = include_str!("queries/github/close.graphql");
+const REOPEN: &str = include_str!("queries/github/reopen.graphql");
+const READY: &str = include_str!("queries/github/ready.graphql");
+const DRAFT: &str = include_str!("queries/github/draft.graphql");
+const UPDATE: &str = include_str!("queries/github/update.graphql");
+const UPDATE_COMMENT: &str = include_str!("queries/github/update_comment.graphql");
+const UPDATE_REVIEW: &str = include_str!("queries/github/update_review.graphql");
 
 /// A GitHub query. GitHub has no baseline to fall back to, so a field the
 /// server does not know is an answer Sirio cannot read.
@@ -571,4 +582,129 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
             .collect();
         Ok((items, next_cursor(&data, connection)))
     })
+}
+
+/// The pre-flight read of one pull request: its id, its state and what the
+/// viewer may do to it now.
+fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, ForgeError> {
+    let (owner, name) = owner_and_name(client)?;
+    let data = run(
+        client,
+        "ChangeRequestActionContext",
+        ACTION_CONTEXT,
+        json!({ "owner": owner, "name": name, "number": number }),
+    )?;
+    let node = data
+        .pointer("/repository/pullRequest")
+        .filter(|node| !node.is_null())
+        .ok_or_else(|| ForgeError::NotFound {
+            host: client.host.clone(),
+        })?;
+    let node_id = opt_str(node, "/id")
+        .ok_or_else(|| ForgeError::UnexpectedResponse {
+            host: client.host.clone(),
+            detail: "a pull request without an id".to_string(),
+        })?
+        .to_string();
+    Ok(ActionContext {
+        node_id,
+        state: mapping::github_change_state(&str_at(node, "/state"), bool_at(node, "/isDraft")),
+        capabilities: capabilities(node),
+    })
+}
+
+/// One mutation. Every GitHub mutation takes a single `$input`.
+fn mutate(
+    client: &ForgeClient,
+    operation: &str,
+    document: &str,
+    input: Value,
+) -> Result<(), ForgeError> {
+    execute_mutation(client, operation, document, json!({ "input": input })).map(|_| ())
+}
+
+pub(crate) fn act(
+    client: &ForgeClient,
+    number: u64,
+    action: &Action,
+) -> Result<ActionOutcome, ForgeError> {
+    let context = action_context(client, number)?;
+    check_action(&client.host, action, &context)?;
+    let id = context.node_id.as_str();
+    match action {
+        Action::Comment { body } => mutate(
+            client,
+            "AddComment",
+            ADD_COMMENT,
+            json!({ "subjectId": id, "body": body }),
+        )?,
+        Action::Review { verdict, body } => {
+            let event = match verdict {
+                ReviewVerdict::Approve => "APPROVE",
+                ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+                ReviewVerdict::Comment => "COMMENT",
+            };
+            let mut input = json!({ "pullRequestId": id, "event": event });
+            if !body.trim().is_empty() {
+                input["body"] = json!(body);
+            }
+            mutate(client, "AddPullRequestReview", ADD_REVIEW, input)?
+        }
+        Action::Close => mutate(
+            client,
+            "ClosePullRequest",
+            CLOSE,
+            json!({ "pullRequestId": id }),
+        )?,
+        Action::Reopen => mutate(
+            client,
+            "ReopenPullRequest",
+            REOPEN,
+            json!({ "pullRequestId": id }),
+        )?,
+        Action::MarkReady => mutate(
+            client,
+            "MarkPullRequestReadyForReview",
+            READY,
+            json!({ "pullRequestId": id }),
+        )?,
+        Action::ConvertToDraft => mutate(
+            client,
+            "ConvertPullRequestToDraft",
+            DRAFT,
+            json!({ "pullRequestId": id }),
+        )?,
+        Action::Edit {
+            title,
+            body,
+            target_branch,
+        } => {
+            let mut input = json!({ "pullRequestId": id });
+            if let Some(title) = title {
+                input["title"] = json!(title);
+            }
+            if let Some(body) = body {
+                input["body"] = json!(body);
+            }
+            if let Some(branch) = target_branch {
+                input["baseRefName"] = json!(branch);
+            }
+            mutate(client, "UpdatePullRequest", UPDATE, input)?
+        }
+        Action::EditComment { comment, body } => match comment.kind {
+            CommentKind::Comment => mutate(
+                client,
+                "UpdateIssueComment",
+                UPDATE_COMMENT,
+                json!({ "id": comment.id, "body": body }),
+            )?,
+            CommentKind::Review => mutate(
+                client,
+                "UpdatePullRequestReview",
+                UPDATE_REVIEW,
+                json!({ "pullRequestReviewId": comment.id, "body": body }),
+            )?,
+        },
+    }
+    Ok(ActionOutcome::default())
 }
