@@ -551,18 +551,63 @@ pub(crate) fn run_with_timeout(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<GitOutput, GitError> {
+    run_configured(args, cwd, timeout, false)
+}
+
+/// Runs `git <args>` for a command that talks to a remote: it must never
+/// prompt and never outlive `timeout`. No terminal prompt, no askpass, no
+/// ssh passphrase dialog, null stdin — and, on Unix, a session of its own, so
+/// `ssh` has no controlling terminal to open `/dev/tty` on. `setsid` also
+/// makes the child its process group's leader, so the timeout's `killpg`
+/// still reaches the whole tree.
+pub(crate) fn run_remote(args: &[&str], cwd: &Path, timeout: Duration) -> Result<GitOutput, GitError> {
+    run_configured(args, cwd, timeout, true)
+}
+
+/// The body of [`run_with_timeout`] and [`run_remote`]; `remote` adds the
+/// no-prompt environment and the new session.
+fn run_configured(
+    args: &[&str],
+    cwd: &Path,
+    timeout: Duration,
+    remote: bool,
+) -> Result<GitOutput, GitError> {
     let mut command = Command::new(GIT_BINARY);
     command
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if remote {
+        command
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GCM_INTERACTIVE", "never")
+            // Set-but-empty wins over `core.askPass` and `SSH_ASKPASS`, and
+            // git skips an empty askpass: nothing can ask.
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .env("LC_ALL", "C");
+    }
     // Put the child in its own process group so the whole tree — including
     // any grandchild holding the output pipes — can be killed at once.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        if remote {
+            // SAFETY: `setsid` is async-signal-safe and touches no memory.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+        } else {
+            command.process_group(0);
+        }
     }
     let mut child = command.spawn().map_err(|error| GitError::Spawn {
         message: error.to_string(),

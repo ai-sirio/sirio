@@ -2,8 +2,9 @@
 //!
 //! Every query in `queries/gitlab/` was validated against gitlab.com on
 //! 2026-09-27 (`curl https://gitlab.com/api/graphql`, project
-//! gitlab-org/cli). Change a field only after running the changed query
-//! there again.
+//! gitlab-org/cli); the header query's `diffRefs` was added and run there
+//! again on 2026-09-28 (merge request !2000, full and baseline variants).
+//! Change a field only after running the changed query there again.
 //!
 //! GraphQL rejects a whole query that names a field the server lacks, and
 //! self-managed installations run old versions. So the queries that carry
@@ -19,7 +20,7 @@ use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
     array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32,
-    str_at, time_at, u32_at,
+    revisions, str_at, time_at, u32_at,
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
@@ -348,6 +349,11 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         commit_count: opt_u32(node, "/commitCount"),
         timeline: timeline(&array_at(node, "/notes/nodes")),
         timeline_truncated: has_previous_page(node, "/notes"),
+        revisions: revisions(
+            opt_str(node, "/diffRefs/baseSha"),
+            opt_str(node, "/diffRefs/headSha"),
+            opt_str(node, "/diffRefs/startSha"),
+        ),
     })
 }
 

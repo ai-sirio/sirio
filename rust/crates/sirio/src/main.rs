@@ -46,7 +46,7 @@ use sirio_ui::{
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     file_context_menu::{FileContextFacts, MissingServer},
-    file_view::{FileView, FileViewEvent},
+    file_view::{FileView, FileViewEvent, SnapshotOrigin},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
@@ -1071,6 +1071,34 @@ enum ControlAction {
     ReadChangeRequest {
         reply: ControlReply,
     },
+    RevealChangeRequestFile {
+        path: String,
+        line: Option<u32>,
+        reply: ControlReply,
+    },
+    OpenChangeRequestFile {
+        path: String,
+        line: Option<u32>,
+        reply: ControlReply,
+    },
+    OpenChangeRequestCommit {
+        sha: String,
+        reply: ControlReply,
+    },
+    ReadTabs {
+        reply: ControlReply,
+    },
+    SelectListedTab {
+        position: usize,
+        reply: ControlReply,
+    },
+    CloseListedTab {
+        position: usize,
+        reply: ControlReply,
+    },
+    ReadFile {
+        reply: ControlReply,
+    },
     AddAgentAccount {
         provider: String,
         label: String,
@@ -2034,6 +2062,13 @@ impl ControlHandler for AppControlHandler {
                     "surface.change_request.open",
                     "surface.change_request.tab",
                     "surface.change_request.read",
+                    "surface.change_request.reveal",
+                    "surface.change_request.open_file",
+                    "surface.change_request.open_commit",
+                    "surface.tabs.read",
+                    "surface.tabs.select",
+                    "surface.tabs.close",
+                    "surface.file.read",
                     "settings.account.add",
                     "settings.account.select",
                     "surface.chat.open",
@@ -2297,6 +2332,50 @@ impl ControlHandler for AppControlHandler {
             "surface.change_request.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadChangeRequest { reply })
             }
+            "surface.change_request.reveal" => {
+                let Some(path) = request.params.get("path").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.reveal requires path");
+                };
+                let line = request.params.get("line").and_then(|value| value.parse::<u32>().ok());
+                self.queue_action(request, move |reply| ControlAction::RevealChangeRequestFile { path, line, reply })
+            }
+            "surface.change_request.open_file" => {
+                let Some(path) = request.params.get("path").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.open_file requires path");
+                };
+                let line = request.params.get("line").and_then(|value| value.parse::<u32>().ok());
+                self.queue_action(request, move |reply| ControlAction::OpenChangeRequestFile { path, line, reply })
+            }
+            "surface.change_request.open_commit" => {
+                let Some(sha) = request.params.get("sha").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.open_commit requires sha");
+                };
+                self.queue_action(request, move |reply| ControlAction::OpenChangeRequestCommit { sha, reply })
+            }
+            "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
+            "surface.tabs.select" => {
+                let Some(position) = request
+                    .params
+                    .get("index")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|position| *position > 0)
+                else {
+                    return ControlResponse::failure(&request.id, "surface.tabs.select requires a positive index");
+                };
+                self.queue_action(request, move |reply| ControlAction::SelectListedTab { position, reply })
+            }
+            "surface.tabs.close" => {
+                let Some(position) = request
+                    .params
+                    .get("index")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|position| *position > 0)
+                else {
+                    return ControlResponse::failure(&request.id, "surface.tabs.close requires a positive index");
+                };
+                self.queue_action(request, move |reply| ControlAction::CloseListedTab { position, reply })
+            }
+            "surface.file.read" => self.queue_action(request, |reply| ControlAction::ReadFile { reply }),
             // F-SET-15: registers an isolated Claude/Codex account and
             // selects it, the real production entry point that gives the
             // Accounts section a second, genuinely selectable row —
@@ -5124,6 +5203,34 @@ impl SirioWorkspace {
                                 ControlAction::ReadChangeRequest { reply } => {
                                     let _ = reply.send(workspace.control_read_change_request(cx));
                                 }
+                                ControlAction::RevealChangeRequestFile { path, line, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.reveal(PathBuf::from(&path), line, cx);
+                                        Ok(())
+                                    }));
+                                }
+                                ControlAction::OpenChangeRequestFile { path, line, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.open_file(PathBuf::from(&path), line, cx)
+                                    }));
+                                }
+                                ControlAction::OpenChangeRequestCommit { sha, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.open_commit_by_sha(&sha, cx)
+                                    }));
+                                }
+                                ControlAction::ReadTabs { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
+                                }
+                                ControlAction::SelectListedTab { position, reply } => {
+                                    let _ = reply.send(workspace.control_select_listed_tab(position, window, cx));
+                                }
+                                ControlAction::CloseListedTab { position, reply } => {
+                                    let _ = reply.send(workspace.control_close_listed_tab(position, window, cx));
+                                }
+                                ControlAction::ReadFile { reply } => {
+                                    let _ = reply.send(workspace.control_read_file(cx));
+                                }
                                 ControlAction::AddAgentAccount {
                                     provider,
                                     label,
@@ -5555,9 +5662,13 @@ impl SirioWorkspace {
         // The other half of the `restored_files` collection above: subscribe
         // the restored file views, push their shell facts and start their
         // language servers, now that there is a workspace to do it with.
+        let restored_worktree = workspace.working_directory.clone();
         for (path, view) in restored_files {
-            workspace.adopt_file_view(&path, &view, cx);
+            workspace.adopt_file_view(&path, &view, &restored_worktree, cx);
         }
+        // Spec §6.4: at startup, once the session is restored, the refs no
+        // tab holds go (a crash or a kill never closed their last tab).
+        workspace.sweep_revision_refs(cx);
         // Settings tabs wait for the sidebar their seed comes from.
         let launch_snapshot = workspace.launch_snapshot.clone();
         if workspace.restore_project_settings_tabs(&launch_snapshot, cx) {
@@ -6006,9 +6117,22 @@ impl SirioWorkspace {
                             // #323: same live read as the arms above, so a
                             // restored Editor tab reopens the document the
                             // user left open rather than nothing.
+                            // A snapshot saves its revision instead of a
+                            // path, which an older build then drops.
                             TabContent::File { view } => {
-                                state.editor_path =
-                                    view.read(cx).path().to_string_lossy().into_owned();
+                                let view = view.read(cx);
+                                match view.snapshot_origin() {
+                                    Some(origin) => {
+                                        state.snapshot = Some(session::PersistedSnapshot {
+                                            change_request: origin.reference.clone(),
+                                            sha: origin.sha.clone(),
+                                            path: origin.relative_path.to_string_lossy().into_owned(),
+                                        });
+                                    }
+                                    None => {
+                                        state.editor_path = view.path().to_string_lossy().into_owned();
+                                    }
+                                }
                             }
                             // Same live read: a commit tab keeps its commit
                             // and a focused Changes tab its file.
@@ -6617,79 +6741,102 @@ impl SirioWorkspace {
         // them — and `sync_document_with_server` opens with the text
         // comparison that makes the other 99% of notifies free.
         cx.observe(file_view, |workspace, view, cx| {
+            if view.read(cx).is_snapshot() {
+                return;
+            }
             let path = view.read(cx).path().to_path_buf();
             workspace.sync_document_with_server(&path, &view, cx);
         })
         .detach();
         cx.subscribe(
             file_view,
-            |workspace, view, event: &FileViewEvent, cx| match event {
-                FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
-                // The one moment a freshly opened tab has text to describe.
-                FileViewEvent::Loaded(path) => {
-                    workspace.sync_document_with_server(path, &view, cx);
-                }
-                FileViewEvent::RevealInFileManager(path) => {
-                    if let Some(mut command) = reveal_command(path) {
-                        command
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null());
-                        let _ = command.spawn();
+            |workspace, view, event: &FileViewEvent, cx| {
+                if view.read(cx).is_snapshot() {
+                    match event {
+                        FileViewEvent::RetrySnapshot => {
+                            view.update(cx, |view, cx| view.restart_snapshot(cx));
+                            // Only a shown tab draws a Retry, and every
+                            // shown tab belongs to the current worktree.
+                            let worktree = workspace.working_directory.clone();
+                            workspace.begin_snapshot_load(&view, &worktree, cx);
+                        }
+                        FileViewEvent::OpenLocalCopy(path) => workspace.add_file_tab(path.clone(), cx),
+                        // Everything else names a real path — reveal, terminal,
+                        // history, the language server — which a snapshot lacks.
+                        _ => {}
                     }
+                    return;
                 }
-                FileViewEvent::OpenInTerminal(path) => {
-                    let directory = path
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| path.clone());
-                    workspace.open_terminal_in(directory, cx);
-                }
-                FileViewEvent::SendSelectionToAgent {
-                    path,
-                    lines,
-                    text,
-                    language,
-                } => {
-                    if let Some(chat) = workspace.active_chat_for(path) {
-                        let label = workspace
-                            .repo_relative(path)
-                            .unwrap_or_else(|| path.display().to_string());
-                        let payload = sirio_ui::file_context_menu::agent_payload(
-                            &label, *lines, text, language,
-                        );
-                        chat.update(cx, |chat, cx| chat.control_append(&payload, cx));
+                match event {
+                    FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                    // The one moment a freshly opened tab has text to describe.
+                    FileViewEvent::Loaded(path) => {
+                        workspace.sync_document_with_server(path, &view, cx);
                     }
-                }
-                FileViewEvent::CopyPermalink { path, lines } => {
-                    if let Some(url) = workspace.permalink_for(path, *lines) {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+                    FileViewEvent::RevealInFileManager(path) => {
+                        if let Some(mut command) = reveal_command(path) {
+                            command
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null());
+                            let _ = command.spawn();
+                        }
                     }
-                }
-                FileViewEvent::ViewFileHistory(path) => {
-                    workspace.show_file_history(path.clone(), cx);
-                }
-                FileViewEvent::Hover { path, offset, seq } => {
-                    workspace.request_hover(path.clone(), *offset, *seq, view.clone(), cx);
-                }
-                FileViewEvent::GoToDefinition { path, offset } => {
-                    workspace.go_to_definition(path.clone(), *offset, view.clone(), cx);
-                }
-                FileViewEvent::FindReferences { path, offset } => {
-                    workspace.find_references(path.clone(), *offset, view.clone(), cx);
-                }
-                FileViewEvent::InstallLanguageServer { path } => {
-                    if let Some(entry) = workspace.lsp.known_entry_for(path) {
-                        let language = entry.name.clone();
-                        workspace.install_language_server(&language, cx);
+                    FileViewEvent::OpenInTerminal(path) => {
+                        let directory = path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| path.clone());
+                        workspace.open_terminal_in(directory, cx);
                     }
-                }
-                FileViewEvent::SilenceLanguageServer { path } => {
-                    if let Some(entry) = workspace.lsp.known_entry_for(path) {
-                        let language = entry.name.clone();
-                        workspace.silence_language_server_offer(&language, cx);
-                        view.update(cx, |view, cx| view.dismiss_message(cx));
+                    FileViewEvent::SendSelectionToAgent {
+                        path,
+                        lines,
+                        text,
+                        language,
+                    } => {
+                        if let Some(chat) = workspace.active_chat_for(path) {
+                            let label = workspace
+                                .repo_relative(path)
+                                .unwrap_or_else(|| path.display().to_string());
+                            let payload = sirio_ui::file_context_menu::agent_payload(
+                                &label, *lines, text, language,
+                            );
+                            chat.update(cx, |chat, cx| chat.control_append(&payload, cx));
+                        }
                     }
+                    FileViewEvent::CopyPermalink { path, lines } => {
+                        if let Some(url) = workspace.permalink_for(path, *lines) {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+                        }
+                    }
+                    FileViewEvent::ViewFileHistory(path) => {
+                        workspace.show_file_history(path.clone(), cx);
+                    }
+                    FileViewEvent::Hover { path, offset, seq } => {
+                        workspace.request_hover(path.clone(), *offset, *seq, view.clone(), cx);
+                    }
+                    FileViewEvent::GoToDefinition { path, offset } => {
+                        workspace.go_to_definition(path.clone(), *offset, view.clone(), cx);
+                    }
+                    FileViewEvent::FindReferences { path, offset } => {
+                        workspace.find_references(path.clone(), *offset, view.clone(), cx);
+                    }
+                    FileViewEvent::InstallLanguageServer { path } => {
+                        if let Some(entry) = workspace.lsp.known_entry_for(path) {
+                            let language = entry.name.clone();
+                            workspace.install_language_server(&language, cx);
+                        }
+                    }
+                    FileViewEvent::SilenceLanguageServer { path } => {
+                        if let Some(entry) = workspace.lsp.known_entry_for(path) {
+                            let language = entry.name.clone();
+                            workspace.silence_language_server_offer(&language, cx);
+                            view.update(cx, |view, cx| view.dismiss_message(cx));
+                        }
+                    }
+                    // Only a snapshot raises these, and it returned above.
+                    FileViewEvent::RetrySnapshot | FileViewEvent::OpenLocalCopy(_) => {}
                 }
             },
         )
@@ -7181,9 +7328,22 @@ impl SirioWorkspace {
     }
 
     /// Subscribes a file view and pushes what only the workspace knows: the
-    /// context-menu facts and the language server start.
-    fn adopt_file_view(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+    /// context-menu facts and the language server start. `worktree` is the
+    /// one the view's tab belongs to — on a switch, not yet
+    /// `self.working_directory` — which a snapshot reads its bytes from.
+    fn adopt_file_view(
+        &mut self,
+        path: &Path,
+        view: &Entity<FileView>,
+        worktree: &Path,
+        cx: &mut Context<Self>,
+    ) {
         Self::subscribe_file_view(view, cx);
+        if view.read(cx).is_snapshot() {
+            // No shell facts and no language server for a file at a revision.
+            self.begin_snapshot_load(view, worktree, cx);
+            return;
+        }
         let facts = self.file_context_facts(path);
         view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
         self.start_language_server_for(path, view, cx);
@@ -7196,9 +7356,9 @@ impl SirioWorkspace {
     /// the same reason, its shell facts would stay at their defaults (so
     /// "Copy Permalink" and "View File History" disable with a false
     /// reason) and its language server would never start.
-    fn bind_file_tabs(&mut self, tabs: &[OpenTab], cx: &mut Context<Self>) {
+    fn bind_file_tabs(&mut self, tabs: &[OpenTab], worktree: &Path, cx: &mut Context<Self>) {
         for (path, view) in Self::open_file_views(tabs, cx) {
-            self.adopt_file_view(&path, &view, cx);
+            self.adopt_file_view(&path, &view, worktree, cx);
         }
     }
 
@@ -9629,7 +9789,7 @@ impl SirioWorkspace {
             }
             Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
-            self.bind_file_tabs(&new_tabs, cx);
+            self.bind_file_tabs(&new_tabs, &selected_path, cx);
             Self::bind_change_request_tabs(&new_tabs, cx);
             for tab in &new_tabs {
                 tab.panes.for_each(&mut |_, content| {
@@ -9668,6 +9828,8 @@ impl SirioWorkspace {
             seed_shown_tabs(&mut self.center_split, &self.tabs, &restored);
             self.rebuild_center_split();
             restored_secondary_pane_hidden = Some(self.secondary_pane_hidden);
+            // Once the incoming strip is `self.tabs`: it reads what is open.
+            self.sweep_revision_refs(cx);
         }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
@@ -10053,7 +10215,8 @@ impl SirioWorkspace {
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             Self::bind_terminal_tabs(&tabs, cx);
-            self.bind_file_tabs(&tabs, cx);
+            let worktree = self.working_directory.clone();
+            self.bind_file_tabs(&tabs, &worktree, cx);
             Self::bind_change_request_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
@@ -10074,6 +10237,7 @@ impl SirioWorkspace {
             self.tabs.extend(tabs);
             self.next_pane_id = self.next_pane_id.max(next_pane_id(&self.tabs));
             self.rebuild_center_split();
+            self.sweep_revision_refs(cx);
         }
         self.reveal_secondary_for_active_tab();
         self.schedule_save(cx);
@@ -11361,6 +11525,9 @@ impl SirioWorkspace {
         let archived = (self.tabs[index].kind == TabKind::AgentChat)
             .then(|| self.tabs[index].persistence_id.clone())
             .filter(|id| self.session.archive_tab(id, unix_now_ms()));
+        // Read while the tab is still here: only a tab that held a change
+        // request's refs can be the last one holding them (spec §6.4).
+        let held_revision_refs = tab_holds_revision_refs(&self.tabs[index], cx);
 
         let mut terminals = Vec::new();
         let mut terminal_pane_ids = Vec::new();
@@ -11394,9 +11561,12 @@ impl SirioWorkspace {
         let worktree_path = self.tab_worktree_path(tab_id);
         // The server still thinks every open document is open until it is
         // told otherwise; say so before the tab — and its view — is gone.
+        // A snapshot was never opened on a server, so it has nothing to close.
         let mut closed_files = Vec::new();
         self.tabs[index].panes.for_each(&mut |_, content| {
-            if let TabContent::File { view } = content {
+            if let TabContent::File { view } = content
+                && !view.read(cx).is_snapshot()
+            {
                 closed_files.push(view.read(cx).path().to_path_buf());
             }
         });
@@ -11447,6 +11617,10 @@ impl SirioWorkspace {
             self.focus_active_pane(window, cx);
         }
         self.schedule_save(cx);
+        // The last tab holding a change request's refs may just have gone.
+        if held_revision_refs {
+            self.sweep_revision_refs(cx);
+        }
         if archived.is_some() {
             self.session.prune_closed_chats(unix_now_ms());
             self.refresh_closed_sessions(cx);
@@ -13192,7 +13366,7 @@ impl SirioWorkspace {
             return;
         }
         let tab_title = ChangeRequestTab::tab_title(&reference, &title);
-        let view = cx.new(|cx| ChangeRequestTab::new(reference, title, cx));
+        let view = cx.new(|cx| ChangeRequestTab::new(reference, title, self.working_directory.clone(), cx));
         Self::subscribe_change_request_tab(&view, cx);
         view.update(cx, |tab, cx| tab.on_selected(cx));
         let tab_id = self.next_tab_id;
@@ -13257,6 +13431,15 @@ impl SirioWorkspace {
                     ChangeRequestTabEvent::OpenCommit { sha, web_url } => {
                         workspace.open_change_request_commit(sha.clone(), web_url.clone(), cx)
                     }
+                    ChangeRequestTabEvent::OpenFile { path, line, revisions, deleted } => workspace
+                        .open_change_request_file(
+                            emitter.read(cx).reference().clone(),
+                            path.clone(),
+                            *line,
+                            revisions.clone(),
+                            *deleted,
+                            cx,
+                        ),
                     ChangeRequestTabEvent::Close => {
                         for tab_id in hosted {
                             workspace.close_tab_by_id(tab_id, None, cx);
@@ -13299,6 +13482,229 @@ impl SirioWorkspace {
             });
         })
         .detach();
+    }
+
+    /// *Open in editor* on a change request's file (spec §5.3): the local file
+    /// when the worktree is at the change request's head, a read-only snapshot
+    /// of it at the head — or at the base, for a file the change request
+    /// deletes — otherwise.
+    fn open_change_request_file(
+        &mut self,
+        reference: sirio_forge::ChangeRef,
+        path: PathBuf,
+        line: Option<u32>,
+        revisions: sirio_forge::Revisions,
+        deleted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let worktree = self.working_directory.clone();
+        // The path is the forge's (or a tree entry git accepted unchecked):
+        // one that is not plainly repository-relative is never joined onto
+        // the worktree or into a virtual path, the same rule a restored
+        // snapshot's saved path meets. It opens as the failure it is; the
+        // revision is the forge's and stays, so what is persisted restores
+        // as a refused path rather than a refused revision.
+        if !snapshot_path_is_repository_relative(&path) {
+            let sha = if deleted { &revisions.base_sha } else { &revisions.head_sha };
+            let origin = refused_snapshot_origin(reference, sha);
+            self.add_snapshot_tab(origin, Err(INVALID_CHANGE_REQUEST_FILE_PATH.to_string()), None, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let probe = worktree.clone();
+            let current = cx.background_spawn(async move { sirio_git::head_sha(&probe) }).await;
+            if !deleted && current.as_deref() == Some(revisions.head_sha.as_str()) {
+                let _ = this.update(cx, |workspace, cx| {
+                    if workspace.still_in(&worktree) {
+                        workspace.open_local_file(worktree.join(&path), line, cx);
+                    }
+                });
+                return;
+            }
+            let sha = if deleted { revisions.base_sha.clone() } else { revisions.head_sha.clone() };
+            let (blob_worktree, blob_sha, blob_path) = (worktree.clone(), sha.clone(), path.clone());
+            let read = cx
+                .background_spawn(async move {
+                    sirio_git::show_blob(&blob_worktree, &blob_sha, &blob_path).map_err(snapshot_read_error)
+                })
+                .await;
+            let local = worktree.join(&path);
+            let origin = SnapshotOrigin {
+                reference,
+                sha,
+                relative_path: path,
+                local_copy: (!deleted && local.is_file()).then_some(local),
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.still_in(&worktree) {
+                    workspace.add_snapshot_tab(origin, read, line, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether `worktree`, captured when a click started a background read,
+    /// is still the one whose strip a tab would be inserted into. A switch
+    /// in between would land the tab in the wrong strip with a local copy
+    /// computed for the old one; the click is dropped instead.
+    fn still_in(&self, worktree: &Path) -> bool {
+        paths_name_the_same_document(&self.working_directory, worktree)
+    }
+
+    /// Opens `origin` in a read-only editor tab, or focuses the one already
+    /// showing it; `read` failing leaves the tab with its error and a Retry.
+    fn add_snapshot_tab(
+        &mut self,
+        origin: SnapshotOrigin,
+        read: Result<Vec<u8>, String>,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut existing: Option<(usize, Entity<FileView>)> = None;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content
+                    && let Some(shown) = view.read(cx).snapshot_origin()
+                    && shown.reference == origin.reference
+                    && shown.sha == origin.sha
+                    && shown.relative_path == origin.relative_path
+                {
+                    existing = Some((index, view.clone()));
+                }
+            });
+        }
+        if let Some((index, view)) = existing {
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
+            if let Some(line) = line {
+                view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+            }
+            return;
+        }
+        let name = origin.relative_path.file_name().map_or_else(
+            || origin.relative_path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        // A refused origin has no path to name the tab by.
+        let title = if name.is_empty() {
+            origin.label()
+        } else {
+            format!("{name} @ {}", origin.reference.label())
+        };
+        let view = cx.new(|cx| match read {
+            Ok(bytes) => FileView::snapshot(origin, bytes, cx),
+            Err(reason) => {
+                let mut view = FileView::snapshot_pending(origin, cx);
+                view.finish_snapshot(Err(reason), cx);
+                view
+            }
+        });
+        Self::subscribe_file_view(&view, cx);
+        if let Some(line) = line {
+            view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+        }
+        let tab_id = self.next_tab_id;
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            title: title.clone(),
+            kind: TabKind::Editor,
+            pane: TabKind::Editor.default_pane(),
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(self.next_pane_id),
+            panes: PaneNode::leaf(self.next_pane_id, TabContent::File { view }),
+            focused_pane: self.next_pane_id,
+            title_is_auto_named: false,
+        });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.open_secondary_pane();
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    /// Reads a snapshot's bytes on the background executor — making its commit
+    /// local first when a restored tab finds it gone — and hands them to the view.
+    /// `worktree` is the one the view's tab belongs to.
+    fn begin_snapshot_load(
+        &mut self,
+        view: &Entity<FileView>,
+        worktree: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        if view.read(cx).editor().is_some() {
+            return;
+        }
+        let Some(origin) = view.read(cx).snapshot_origin().cloned() else {
+            return;
+        };
+        let source = sirio_ui::forge_source::source(cx);
+        let worktree = worktree.to_path_buf();
+        let view = view.downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move { read_snapshot(source.as_deref(), &worktree, &origin) })
+                .await;
+            let _ = view.update(cx, |view, cx| view.finish_snapshot(result, cx));
+        })
+        .detach();
+    }
+
+    /// Deletes the revision refs no tab holds — open, or parked with another
+    /// worktree (spec §6.4; `RevisionFetcher::sweep` says why a wrong guess is
+    /// only a refetch).
+    fn sweep_revision_refs(&mut self, cx: &mut Context<Self>) {
+        let mut live: Vec<sirio_forge::ChangeRef> = Vec::new();
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| match content {
+                TabContent::ChangeRequest(view) => live.push(view.read(cx).reference().clone()),
+                TabContent::File { view } => {
+                    if let Some(origin) = view.read(cx).snapshot_origin() {
+                        live.push(origin.reference.clone());
+                    }
+                }
+                _ => {}
+            });
+        }
+        for parked in self.parked_worktree_tabs.values() {
+            for state in &parked.layout.tab_states {
+                live.extend(state.change_request.iter().cloned());
+                live.extend(state.snapshot.iter().map(|snapshot| snapshot.change_request.clone()));
+            }
+        }
+        let Some(source) = sirio_ui::forge_source::source(cx) else {
+            return;
+        };
+        let worktree = self.working_directory.clone();
+        cx.background_spawn(async move { source.release_revisions(&worktree, &live) })
+            .detach();
+    }
+
+    /// Opens `path` in the editor and scrolls to the 1-based `line`.
+    fn open_local_file(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        self.add_file_tab(path.clone(), cx);
+        let Some(line) = line else {
+            return;
+        };
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content
+                    && paths_name_the_same_document(view.read(cx).path(), &path)
+                {
+                    view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+                }
+            });
+        }
     }
 
     fn add_browser_tab(
@@ -14512,7 +14918,112 @@ impl SirioWorkspace {
         let view = self
             .active_change_request()
             .ok_or_else(|| "the active tab is not a change request".to_string())?;
-        Ok(view.read(cx).report())
+        Ok(view.read(cx).report(cx))
+    }
+
+    /// Runs `act` on the active change request tab, then reports the tab.
+    fn control_change_request(
+        &mut self,
+        cx: &mut Context<Self>,
+        act: impl FnOnce(&mut ChangeRequestTab, &mut Context<ChangeRequestTab>) -> Result<(), String>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_change_request()
+            .ok_or_else(|| "the active tab is not a change request".to_string())?;
+        view.update(cx, act)?;
+        self.control_read_change_request(cx)
+    }
+
+    /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
+    fn control_read_tabs(&self, cx: &Context<Self>) -> Vec<(String, String)> {
+        let mut report = vec![
+            ("count".to_string(), self.tabs.len().to_string()),
+            ("active".to_string(), (self.active_tab + 1).to_string()),
+        ];
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut snapshot = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content {
+                    snapshot |= view.read(cx).is_snapshot();
+                }
+            });
+            report.push((
+                format!("tab.{}", index + 1),
+                format!("{}|{}|{}", session::persisted_kind(tab.kind), if snapshot { "yes" } else { "no" }, tab.title),
+            ));
+        }
+        report
+    }
+
+    /// The id of the `position`th tab (1-based) of `control_read_tabs`'s
+    /// list — every tab, in whichever half it lives.
+    fn listed_tab_id(&self, position: usize) -> Result<usize, String> {
+        position
+            .checked_sub(1)
+            .and_then(|index| self.tabs.get(index))
+            .map(|tab| tab.id)
+            .ok_or_else(|| format!("there is no tab {position}"))
+    }
+
+    /// Selects the `position`th tab of `control_read_tabs`'s list, then
+    /// reports the tabs.
+    fn control_select_listed_tab(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let id = self.listed_tab_id(position)?;
+        self.select_tab(id, Some(window), cx);
+        Ok(self.control_read_tabs(cx))
+    }
+
+    /// Closes the `position`th tab of `control_read_tabs`'s list the way its
+    /// close button does (a dirty tab asks first), then reports the tabs.
+    fn control_close_listed_tab(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let id = self.listed_tab_id(position)?;
+        self.request_close_tab_by_id(id, window, cx);
+        Ok(self.control_read_tabs(cx))
+    }
+
+    /// The active tab's file: its path, whether it is a read-only snapshot,
+    /// and its text with backslashes and newlines escaped.
+    fn control_read_file(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let tab = self.tabs.get(self.active_tab).ok_or_else(|| "no active tab".to_string())?;
+        let mut found = None;
+        tab.panes.for_each(&mut |_, content| {
+            if found.is_none()
+                && let TabContent::File { view } = content
+            {
+                found = Some(view.clone());
+            }
+        });
+        let view = found.ok_or_else(|| "the active tab is not a file".to_string())?;
+        let view = view.read(cx);
+        let text = view
+            .editor()
+            .map(|editor| editor.buffer().replace('\\', "\\\\").replace('\n', "\\n"))
+            .unwrap_or_default();
+        let state = if view.editor().is_some() {
+            "loaded"
+        } else if view.snapshot_error().is_some() {
+            "error"
+        } else {
+            "loading"
+        };
+        Ok(vec![
+            ("path".to_string(), display_absolute_path(view.path())),
+            ("read_only".to_string(), view.is_snapshot().to_string()),
+            ("origin".to_string(), view.snapshot_origin().map(|origin| origin.label()).unwrap_or_default()),
+            ("state".to_string(), state.to_string()),
+            ("error".to_string(), view.snapshot_error().unwrap_or_default().to_string()),
+            ("content".to_string(), text),
+        ])
     }
 
     /// F-SET-15: registers an isolated account for `provider`
@@ -19998,17 +20509,25 @@ fn restore_tabs_with_terminal_cache(
                 TabContent::Browser(browser)
             }
             Some(TabKind::Editor) => {
-                // #323: an Editor tab comes back only when its file still
-                // does; see `restored_editor_path`.
-                let Some(path) = restored_editor_path(&tab_state) else {
-                    continue;
-                };
-                // This free function has no workspace, so the arm stays
-                // thin: subscribing, the shell-facts push and the language
-                // server start all happen in `bind_file_tabs`, where
-                // `&mut self` exists.
-                let view = cx.new(|cx| FileView::new(path, cx));
-                TabContent::File { view }
+                if let Some(snapshot) = &tab_state.snapshot {
+                    // A file at a revision, not on disk: it reads its bytes
+                    // again once a workspace adopts it (`adopt_file_view`).
+                    TabContent::File {
+                        view: restored_snapshot_view(snapshot, working_directory, cx),
+                    }
+                } else {
+                    // #323: an Editor tab comes back only when its file still
+                    // does; see `restored_editor_path`.
+                    let Some(path) = restored_editor_path(&tab_state) else {
+                        continue;
+                    };
+                    // This free function has no workspace, so the arm stays
+                    // thin: subscribing, the shell-facts push and the language
+                    // server start all happen in `bind_file_tabs`, where
+                    // `&mut self` exists.
+                    let view = cx.new(|cx| FileView::new(path, cx));
+                    TabContent::File { view }
+                }
             }
             // Spec §8: back under its saved title, loading when shown. A tab
             // whose identity was never saved has nothing to come back as.
@@ -20019,7 +20538,7 @@ fn restore_tabs_with_terminal_cache(
                 let title = ChangeRequestTab::title_from_tab(&reference, &tab.title);
                 let inner = InnerTab::parse(&tab_state.change_request_tab);
                 TabContent::ChangeRequest(
-                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, cx)),
+                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, working_directory.to_path_buf(), cx)),
                 )
             }
             // Built by `restore_project_settings_tabs` once a workspace
@@ -20148,6 +20667,18 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
     Some(format!("{title}…"))
 }
 
+/// Whether `tab` holds a change request's revision refs: a change request
+/// tab, or a snapshot of one (`sweep_revision_refs` counts the same panes).
+fn tab_holds_revision_refs(tab: &OpenTab, cx: &App) -> bool {
+    let mut holds = false;
+    tab.panes.for_each(&mut |_, content| match content {
+        TabContent::ChangeRequest(_) => holds = true,
+        TabContent::File { view } => holds |= view.read(cx).is_snapshot(),
+        _ => {}
+    });
+    holds
+}
+
 /// What was captured at save time, or the fallback page when the session
 /// predates the capture or the tab never carried an address. Both restore
 /// paths go through here so the fallback is spelled once.
@@ -20162,6 +20693,116 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
 fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(&state.editor_path);
     path.is_file().then_some(path)
+}
+
+/// The view a restored snapshot tab comes back as: pending, so it reads its
+/// bytes again once a workspace adopts it (`adopt_file_view`). Both restore
+/// paths go through here. The sha and the path came from disk, so a sha that
+/// is not a commit id, or a path that is not plainly repository-relative, is
+/// never joined onto anything — not the worktree for its local copy, not the
+/// view's virtual path, not a label — and the tab shows why instead.
+fn restored_snapshot_view(
+    snapshot: &session::PersistedSnapshot,
+    working_directory: &Path,
+    cx: &mut App,
+) -> Entity<FileView> {
+    if let Some(refusal) = restored_snapshot_refusal(snapshot) {
+        let origin = refused_snapshot_origin(snapshot.change_request.clone(), &snapshot.sha);
+        return cx.new(|cx| {
+            let mut view = FileView::snapshot_pending(origin, cx);
+            view.finish_snapshot(Err(refusal.to_string()), cx);
+            view
+        });
+    }
+    let relative_path = PathBuf::from(&snapshot.path);
+    let local = working_directory.join(&relative_path);
+    let origin = SnapshotOrigin {
+        reference: snapshot.change_request.clone(),
+        sha: snapshot.sha.clone(),
+        relative_path,
+        local_copy: local.is_file().then_some(local),
+    };
+    cx.new(|cx| FileView::snapshot_pending(origin, cx))
+}
+
+const INVALID_SNAPSHOT_PATH: &str = "The saved file path is not valid.";
+const INVALID_SNAPSHOT_SHA: &str = "The saved revision is not a valid commit id.";
+/// The same refusal met at a click on a change request's file, not on a
+/// restore: nothing was saved, so it must not say so.
+const INVALID_CHANGE_REQUEST_FILE_PATH: &str = "This file's path is not one a repository can hold.";
+
+/// The origin of a snapshot tab that shows a refusal instead of a file: no
+/// path, and a sha only when it is a commit id, so nothing untrusted reaches
+/// a label or a join.
+fn refused_snapshot_origin(reference: sirio_forge::ChangeRef, sha: &str) -> SnapshotOrigin {
+    SnapshotOrigin {
+        reference,
+        sha: if sirio_git::is_commit_id(sha) { sha.to_owned() } else { String::new() },
+        relative_path: PathBuf::new(),
+        local_copy: None,
+    }
+}
+
+/// Why a persisted snapshot cannot be rebuilt as saved, before its sha or
+/// path is joined into anything: the row came from disk. `None` when both
+/// are what Sirio itself would have written.
+fn restored_snapshot_refusal(snapshot: &session::PersistedSnapshot) -> Option<&'static str> {
+    if !sirio_git::is_commit_id(&snapshot.sha) {
+        return Some(INVALID_SNAPSHOT_SHA);
+    }
+    if !snapshot_path_is_repository_relative(Path::new(&snapshot.path)) {
+        return Some(INVALID_SNAPSHOT_PATH);
+    }
+    None
+}
+
+/// Whether `path` is one a repository tree can hold: at least one component,
+/// each a plain name — no root, no prefix, no `.` or `..`.
+fn snapshot_path_is_repository_relative(path: &Path) -> bool {
+    path.components().next().is_some()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+/// A snapshot's bytes: its commit made local if a restored tab finds it gone
+/// (the head ref only — a restored tab knows just its sha), then the blob.
+/// The sha of a restored tab came from disk, so it is checked here before a
+/// fetch or git ever sees it.
+fn read_snapshot(
+    source: Option<&dyn sirio_ui::forge_source::ChangeRequestSource>,
+    worktree: &Path,
+    origin: &SnapshotOrigin,
+) -> Result<Vec<u8>, String> {
+    if !sirio_git::is_commit_id(&origin.sha) {
+        return Err(INVALID_SNAPSHOT_SHA.to_string());
+    }
+    // A restored tab whose saved path was refused carries none; its Retry
+    // must say so again rather than read the tree.
+    if !snapshot_path_is_repository_relative(&origin.relative_path) {
+        return Err(INVALID_SNAPSHOT_PATH.to_string());
+    }
+    if !sirio_git::object_exists(worktree, &origin.sha) {
+        let source = source.ok_or_else(|| "Change requests are unavailable in this build.".to_string())?;
+        let revisions = sirio_forge::Revisions {
+            base_sha: origin.sha.clone(),
+            head_sha: origin.sha.clone(),
+            start_sha: None,
+        };
+        source
+            .ensure_revisions(worktree, &origin.reference, &revisions, None)
+            .map_err(|error| error.to_string())?;
+    }
+    sirio_git::show_blob(worktree, &origin.sha, &origin.relative_path).map_err(snapshot_read_error)
+}
+
+/// What a snapshot tab says when its blob cannot be read. A blob over the git
+/// runner's output cap would otherwise surface as git's own diagnostic.
+fn snapshot_read_error(error: sirio_git::GitError) -> String {
+    match error {
+        sirio_git::GitError::OutputTruncated { .. } => "This file is too large to open in Sirio.".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// The Changes surface a restored "diff" tab rebuilds: on the commit it was
@@ -20385,14 +21026,22 @@ fn restore_tabs_in_workspace(
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
             }
             Some(TabKind::Editor) => {
-                // #323: see the matching arm in `restore_tabs`.
-                let Some(path) = restored_editor_path(&tab_state) else {
-                    continue;
-                };
-                // As above: no workspace here, so `bind_file_tabs` adopts
-                // the view once it reaches one.
-                let view = cx.new(|cx| FileView::new(path, cx));
-                TabContent::File { view }
+                if let Some(snapshot) = &tab_state.snapshot {
+                    // As in `restore_tabs`: the bytes are read once a
+                    // workspace adopts the view (`adopt_file_view`).
+                    TabContent::File {
+                        view: restored_snapshot_view(snapshot, working_directory, cx),
+                    }
+                } else {
+                    // #323: see the matching arm in `restore_tabs`.
+                    let Some(path) = restored_editor_path(&tab_state) else {
+                        continue;
+                    };
+                    // As above: no workspace here, so `bind_file_tabs` adopts
+                    // the view once it reaches one.
+                    let view = cx.new(|cx| FileView::new(path, cx));
+                    TabContent::File { view }
+                }
             }
             // Spec §8: back under its saved title, loading when shown. A tab
             // whose identity was never saved has nothing to come back as.
@@ -20403,7 +21052,7 @@ fn restore_tabs_in_workspace(
                 let title = ChangeRequestTab::title_from_tab(&reference, &tab.title);
                 let inner = InnerTab::parse(&tab_state.change_request_tab);
                 TabContent::ChangeRequest(
-                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, cx)),
+                    cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, working_directory.to_path_buf(), cx)),
                 )
             }
             // Built by `restore_project_settings_tabs` once a workspace
@@ -23167,7 +23816,7 @@ done
                 .expect("workspace root")
         });
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.bind_file_tabs(&tabs, cx);
+            workspace.bind_file_tabs(&tabs, &repo, cx);
         });
         cx.run_until_parked();
         let dead = workspace.update(&mut cx, |workspace, _| {
@@ -23243,7 +23892,7 @@ done
                 window,
                 cx,
             );
-            workspace.bind_file_tabs(&tabs, cx);
+            workspace.bind_file_tabs(&tabs, &repo, cx);
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -25697,6 +26346,130 @@ done
             cx.debug_bounds(static_pill_selector(1, 0)).is_none(),
             "the selected worktree shows only live tabs, never its persisted strip"
         );
+    }
+
+    /// A snapshot tab a switch restores reads its bytes from the worktree it
+    /// belongs to — the one being switched to — not from the one being left,
+    /// which in another project does not even hold the commit.
+    #[gpui::test]
+    async fn a_snapshot_restored_by_a_switch_reads_from_its_own_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let first = committed_test_repo("snapshot-switch-first");
+        let second = committed_test_repo("snapshot-switch-second");
+        std::fs::write(second.join("only.rs"), "fn only_in_second() {}\n")
+            .expect("write the second project's file");
+        git_test(&second, &["add", "only.rs"]);
+        git_test(
+            &second,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "second"],
+        );
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&second)
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf-8 sha")
+        .trim()
+        .to_owned();
+        let (first_for_window, second_for_window) = (first.clone(), second.clone());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+            let project = |id: &str, root: &Path| session::CatalogProject {
+                id: id.into(),
+                name: id.into(),
+                root_path: root.to_path_buf(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: root.to_path_buf(),
+                    is_primary: true,
+                }],
+            };
+            let project_catalog = ProjectCatalog::from_projects(vec![
+                project("snapshot-first", &first_for_window),
+                project("snapshot-second", &second_for_window),
+            ]);
+            workspace.working_directory = first_for_window.clone();
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &project_catalog,
+                &first_for_window,
+            )));
+            workspace.project_catalog = project_catalog;
+            workspace.refresh_sidebar(cx);
+            workspace
+                .session
+                .schedule_catalog(&workspace.project_catalog);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.session.save_layout_now(&SessionLayout {
+                working_directory: second.clone(),
+                branch: "main".into(),
+                tabs: vec![SessionTab {
+                    id: "snapshot".into(),
+                    title: "only.rs @ #578".into(),
+                    kind: "file".into(),
+                    agent_id: None,
+                    agent_session_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState {
+                    root_id: Some(0),
+                    snapshot: Some(session::PersistedSnapshot {
+                        change_request: sirio_forge::ChangeRef {
+                            forge: sirio_forge::Forge::GitHub,
+                            host: "github.com".into(),
+                            project: "acme/widgets".into(),
+                            number: 578,
+                        },
+                        sha: sha.clone(),
+                        path: "only.rs".into(),
+                    }),
+                    ..SessionTabState::default()
+                }],
+            });
+            workspace
+                .select_worktree(second.clone(), None, cx)
+                .expect("select the second project");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            let mut snapshots = Vec::new();
+            for tab in &workspace.tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::File { view } = content
+                        && view.read(cx).is_snapshot()
+                    {
+                        snapshots.push(view.clone());
+                    }
+                });
+            }
+            assert_eq!(snapshots.len(), 1, "the switch restores the snapshot tab");
+            let view = snapshots[0].read(cx);
+            assert_eq!(view.snapshot_error(), None, "the read did not fail");
+            assert_eq!(
+                view.editor().map(|editor| editor.buffer()),
+                Some("fn only_in_second() {}\n"),
+                "the bytes come from the second project's commit"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     /// The user's own case: switch away from a worktree with open tabs, and
@@ -35876,6 +36649,13 @@ done
             | ControlAction::OpenChangeRequest { reply, .. }
             | ControlAction::SelectChangeRequestTab { reply, .. }
             | ControlAction::ReadChangeRequest { reply }
+            | ControlAction::RevealChangeRequestFile { reply, .. }
+            | ControlAction::OpenChangeRequestFile { reply, .. }
+            | ControlAction::OpenChangeRequestCommit { reply, .. }
+            | ControlAction::ReadTabs { reply }
+            | ControlAction::SelectListedTab { reply, .. }
+            | ControlAction::CloseListedTab { reply, .. }
+            | ControlAction::ReadFile { reply }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -35996,6 +36776,13 @@ done
             "surface.change_request.open" => request::change_request_open("1"),
             "surface.change_request.tab" => request::change_request_tab("checks"),
             "surface.change_request.read" => request::change_request_read(),
+            "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
+            "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
+            "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
+            "surface.tabs.read" => request::tabs_read(),
+            "surface.tabs.select" => request::tabs_select(1),
+            "surface.tabs.close" => request::tabs_close(1),
+            "surface.file.read" => request::file_read(),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }
@@ -38253,6 +39040,111 @@ browser  profile  "
             "a path that resolves to a directory is not a document"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A persisted sha is shown in the bar and joined into the view's
+    /// virtual path before any read validates it, so the restore refuses
+    /// one Sirio would never have written — before either happens.
+    #[test]
+    fn a_restored_snapshot_sha_must_be_a_commit_id() {
+        let snapshot = |sha: &str, path: &str| session::PersistedSnapshot {
+            change_request: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".into(),
+                project: "acme/widgets".into(),
+                number: 578,
+            },
+            sha: sha.into(),
+            path: path.into(),
+        };
+        let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        assert_eq!(restored_snapshot_refusal(&snapshot(good, "src/lib.rs")), None);
+        for bad in ["", "abcdef€ghij", "--upload-pack=x", "/etc/passwd", "HEAD", &good[..39]] {
+            assert_eq!(
+                restored_snapshot_refusal(&snapshot(bad, "src/lib.rs")),
+                Some(INVALID_SNAPSHOT_SHA),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            restored_snapshot_refusal(&snapshot(good, "../outside.rs")),
+            Some(INVALID_SNAPSHOT_PATH)
+        );
+        assert_eq!(
+            restored_snapshot_refusal(&snapshot("", "../outside.rs")),
+            Some(INVALID_SNAPSHOT_SHA),
+            "the sha is checked first: it is the part a label shows"
+        );
+    }
+
+    /// A refused snapshot tab is persisted from its origin, so the origin
+    /// keeps the one part that is known good: a valid sha survives (a click
+    /// on a bad path, a saved bad path), an invalid one is dropped.
+    #[test]
+    fn a_refused_snapshot_keeps_a_valid_sha_and_never_a_path_or_a_bad_sha() {
+        let reference = sirio_forge::ChangeRef {
+            forge: sirio_forge::Forge::GitHub,
+            host: "ghe.test".into(),
+            project: "acme/widgets".into(),
+            number: 578,
+        };
+        let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        let kept = refused_snapshot_origin(reference.clone(), good);
+        assert_eq!(kept.sha, good);
+        assert!(kept.relative_path.as_os_str().is_empty());
+        assert!(kept.local_copy.is_none());
+        for bad in ["", "--upload-pack=x", "/etc/passwd", &good[..39]] {
+            assert_eq!(refused_snapshot_origin(reference.clone(), bad).sha, "", "{bad:?}");
+        }
+    }
+
+    /// The git runner caps a blob at 10 MiB; a snapshot over it says so in
+    /// Sirio's words, every other read failure in git's.
+    #[test]
+    fn an_oversized_snapshot_is_named_as_too_large_and_other_failures_keep_their_text() {
+        assert_eq!(
+            snapshot_read_error(sirio_git::GitError::OutputTruncated {
+                command: "cat-file blob".to_string(),
+                limit: 10 * 1024 * 1024,
+            }),
+            "This file is too large to open in Sirio."
+        );
+        let other = sirio_git::GitError::CommandFailed {
+            code: 128,
+            stderr: "fatal: path 'gone.txt' does not exist".to_string(),
+        };
+        let text = other.to_string();
+        assert!(text.contains("gone.txt"));
+        assert_eq!(snapshot_read_error(other), text);
+    }
+
+    /// A restored snapshot's path came from disk: only a plain
+    /// repository-relative path may be joined onto the worktree or handed
+    /// to git.
+    #[test]
+    fn a_restored_snapshot_path_must_be_plainly_repository_relative() {
+        assert!(snapshot_path_is_repository_relative(Path::new("src/lib.rs")));
+        assert!(snapshot_path_is_repository_relative(Path::new("README.md")));
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("/etc/passwd")),
+            "an absolute path would replace the worktree it is joined onto"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("../outside.rs")),
+            "a leading `..` leaves the worktree"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("src/../../outside.rs")),
+            "a `..` anywhere can leave the worktree"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("./src/lib.rs")),
+            "a leading `.` is not how a repository path is written"
+        );
+        assert!(
+            !snapshot_path_is_repository_relative(Path::new("")),
+            "an empty path names the tree, not a file"
+        );
     }
 
     #[gpui::test]

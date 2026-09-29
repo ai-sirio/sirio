@@ -1,4 +1,5 @@
 {"data": {"project": {"mergeRequest": {
+  "diffRefs": {"baseSha": "c3d4e5f60718293a4b5c6d7e8f901234567890a1", "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2", "startSha": "c3d4e5f60718293a4b5c6d7e8f901234567890a1"},
   "iid": "201", "title": "Add CSV export", "webUrl": "https://gitlab.test/team/app/-/merge_requests/201", "draft": false, "state": "opened", "updatedAt": "2026-09-27T10:00:00Z", "author": {"username": "alice"}, "sourceBranch": "feat/export", "targetBranch": "main", "sourceProject": {"fullPath": "team/app"}, "userNotesCount": 7, "approvedBy": {"nodes": []}, "reviewers": {"nodes": [{"username": "fake-user", "mergeRequestInteraction": {"reviewState": "UNREVIEWED"}}, {"username": "carol", "mergeRequestInteraction": {"reviewState": "REQUESTED_CHANGES"}}]}, "headPipeline": {"status": "RUNNING", "jobs": {"count": 7}, "finished": {"count": 3}},
   "description": "## Why\n\nOrders need a CSV export.",
   "diffStatsSummary": {"additions": 40, "deletions": 2, "fileCount": 2},

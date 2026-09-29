@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::client::ForgeClient;
 use crate::error::ForgeError;
 use crate::mapping;
+use crate::model::Revisions;
 use crate::transport::ApiResponse;
 
 pub(crate) fn execute(
@@ -203,4 +204,88 @@ pub(crate) fn next_cursor(value: &Value, connection: &str) -> Option<String> {
 /// A connection read with `last:` has older items before this page.
 pub(crate) fn has_previous_page(value: &Value, connection: &str) -> bool {
     bool_at(value, &format!("{connection}/pageInfo/hasPreviousPage"))
+}
+
+/// A commit id as a forge spells it: 40 (SHA-1) or 64 (SHA-256) hex digits,
+/// returned lower-case. Anything else is `None`, because these strings end
+/// up on git's command line — one that begins with `-` would be an option.
+pub(crate) fn commit_id(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let well_formed =
+        matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    well_formed.then(|| value.to_ascii_lowercase())
+}
+
+/// The revisions a change request's diff is taken between. `None` unless both
+/// ends are well formed; a malformed `start` alone is dropped.
+pub(crate) fn revisions(
+    base: Option<&str>,
+    head: Option<&str>,
+    start: Option<&str>,
+) -> Option<Revisions> {
+    Some(Revisions {
+        base_sha: commit_id(base)?,
+        head_sha: commit_id(head)?,
+        start_sha: commit_id(start),
+    })
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    const BASE: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const HEAD: &str = "b2c3d4e5f60718293a4b5c6d7e8f901234567890";
+
+    #[test]
+    fn two_well_formed_ends_give_revisions() {
+        let found = revisions(Some(BASE), Some(HEAD), Some(BASE)).expect("revisions");
+        assert_eq!(found.base_sha, BASE);
+        assert_eq!(found.head_sha, HEAD);
+        assert_eq!(found.start_sha.as_deref(), Some(BASE));
+    }
+
+    #[test]
+    fn a_missing_end_gives_none() {
+        assert_eq!(revisions(None, Some(HEAD), None), None);
+        assert_eq!(revisions(Some(BASE), None, None), None);
+        assert_eq!(revisions(None, None, None), None);
+    }
+
+    #[test]
+    fn anything_that_is_not_a_full_hex_commit_id_gives_none() {
+        let forty_dashes = "-".repeat(40);
+        let not_hex = format!("g{}", &BASE[1..]);
+        let spaced = format!(" {BASE}");
+        let newline = format!("{BASE}\n");
+        let option = "--upload-pack=touch /tmp/pwned";
+        for bad in [
+            "",
+            "abc",
+            &BASE[..39],
+            &format!("{BASE}0"),
+            forty_dashes.as_str(),
+            not_hex.as_str(),
+            spaced.as_str(),
+            newline.as_str(),
+            option,
+        ] {
+            assert_eq!(commit_id(Some(bad)), None, "{bad:?} must be refused");
+            assert_eq!(revisions(Some(bad), Some(HEAD), None), None);
+            assert_eq!(revisions(Some(BASE), Some(bad), None), None);
+        }
+    }
+
+    #[test]
+    fn a_malformed_start_alone_is_dropped_not_fatal() {
+        let found = revisions(Some(BASE), Some(HEAD), Some("nope")).expect("revisions");
+        assert_eq!(found.start_sha, None);
+    }
+
+    #[test]
+    fn upper_case_is_lowered_and_a_sha256_id_is_accepted() {
+        assert_eq!(commit_id(Some(&BASE.to_uppercase())).as_deref(), Some(BASE));
+        let sha256 = "0123456789abcdef".repeat(4);
+        assert_eq!(commit_id(Some(&sha256)).as_deref(), Some(sha256.as_str()));
+    }
 }

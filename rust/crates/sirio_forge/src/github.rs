@@ -1,8 +1,10 @@
 //! GitHub's GraphQL: the queries Sirio sends and what it reads back.
 //!
 //! Every query in `queries/github/` was validated against github.com on
-//! 2026-09-27 (`gh api graphql`, repository ai-sirio/sirio). Change a field
-//! only after running the changed query there again.
+//! 2026-09-27 (`gh api graphql`, repository ai-sirio/sirio); the header
+//! query's `baseRefOid`/`headRefOid` fields were added and run there again
+//! on 2026-09-28 (pull request #578). Change a field only after running the
+//! changed query there again.
 
 use serde_json::{Value, json};
 
@@ -10,7 +12,7 @@ use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
     array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32,
-    str_at, time_at, u32_at,
+    revisions, str_at, time_at, u32_at,
 };
 use crate::mapping;
 use crate::model::{
@@ -305,6 +307,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         commit_count: opt_u32(node, "/allCommits/totalCount"),
         timeline_truncated: has_previous_page(node, "/timelineItems"),
         timeline,
+        revisions: revisions(opt_str(node, "/baseRefOid"), opt_str(node, "/headRefOid"), None),
     })
 }
 

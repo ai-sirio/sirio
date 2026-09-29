@@ -272,6 +272,7 @@ expect_line "HEADER #101 state=open additions=120 deletions=8 files=3 commits=2 
 expect_line "BODY ## What"
 expect_line "REVIEWER bob changes"
 expect_line "REVIEWER fake-user requested"
+expect_line "REVISIONS base=a1b2c3d head=b2c3d4e"
 timeline=$(echo "$PROBE_OUT" | grep -E '^(COMMENT|REVIEW|LINE|EVENT) ' | paste -sd'|' -)
 [ "$timeline" = "EVENT commits:2|COMMENT alice|EVENT review-requested:fake-user|REVIEW bob changes lines=1|EVENT other:SomethingNew" ] ||
   { dump; fail "github timeline was '$timeline'"; }
@@ -340,6 +341,7 @@ expect_line "HEADER !201 state=open additions=40 deletions=2 files=2 commits=3 t
 expect_line "BODY ## Why"
 expect_line "REVIEWER fake-user requested"
 expect_line "REVIEWER carol changes"
+expect_line "REVISIONS base=c3d4e5f head=d4e5f60"
 timeline=$(echo "$PROBE_OUT" | grep -E '^(COMMENT|REVIEW|LINE|EVENT) ' | paste -sd'|' -)
 [ "$timeline" = "EVENT commits:3|COMMENT alice|EVENT review-requested:fake-user|LINE carol app/models/order.rb:12|REVIEW dave approved lines=0|EVENT ready|EVENT other:mentioned in issue #3" ] ||
   { dump; fail "gitlab timeline was '$timeline'"; }
@@ -370,6 +372,7 @@ expect_line "PAGE 2 rows=1 next=no"
 probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old header 201
 expect_line "HEADER !201 state=open additions=- deletions=- files=- commits=- truncated=yes"
 expect_line "REVIEWER carol requested"
+expect_line "REVISIONS base=c3d4e5f head=d4e5f60"
 if command -v glab >/dev/null; then
   probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" "${GL_CLI_ARGS[@]}" list all-open
   expect_code 0 "gitlab reads through glab"

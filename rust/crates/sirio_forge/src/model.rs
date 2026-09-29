@@ -54,6 +54,27 @@ impl ChangeRef {
     pub fn label(&self) -> String {
         format!("{}{}", self.forge.sigil(), self.number)
     }
+
+    /// The ref the forge keeps for this change request's head, forks
+    /// included: `refs/pull/N/head` on GitHub, `refs/merge-requests/N/head`
+    /// on GitLab.
+    pub fn head_ref(&self) -> String {
+        match self.forge {
+            Forge::GitHub => format!("refs/pull/{}/head", self.number),
+            Forge::GitLab => format!("refs/merge-requests/{}/head", self.number),
+        }
+    }
+}
+
+/// The pair of commits a change request's diff is taken between, as the
+/// forge reports them (spec §3). The diff is `base...head`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Revisions {
+    pub base_sha: String,
+    pub head_sha: String,
+    /// GitLab's `diffRefs.startSha`, the target's tip when the diff was
+    /// computed. Unused by B1; read now because B3's line positions need it.
+    pub start_sha: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,6 +260,9 @@ pub struct ChangeHeader {
     /// older ones. The tab says so and links to the forge rather than cutting
     /// silently.
     pub timeline_truncated: bool,
+    /// `None` where the forge did not report them, or reported them
+    /// malformed: *Files* then stays on the forge's list (spec §7.1).
+    pub revisions: Option<Revisions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -488,6 +488,39 @@ impl Editor {
         editor
     }
 
+    /// An editor over bytes that are not on disk — a file at a revision. The
+    /// classification `open` applies: over `MAX_FILE_BYTES` is `TooLarge`, NUL
+    /// bytes or invalid UTF-8 is `Binary`; either leaves the buffer empty and
+    /// `load_message` says why.
+    pub fn from_snapshot(path: PathBuf, bytes: Vec<u8>) -> Editor {
+        let size = bytes.len() as u64;
+        let status = if size > MAX_FILE_BYTES {
+            Some(LoadStatus::TooLarge { size })
+        } else if is_binary(&bytes) {
+            Some(LoadStatus::Binary)
+        } else {
+            None
+        };
+        match status {
+            None => Self::from_buffer(
+                path,
+                String::from_utf8(bytes).expect("is_binary checked UTF-8"),
+            ),
+            Some(status) => Editor {
+                language: Language::from_path(&path),
+                path,
+                document: None,
+                buffer: String::new(),
+                snapshot: None,
+                status,
+                conflict: Conflict::None,
+                save_error: None,
+                preview_locked: false,
+                dirty: false,
+            },
+        }
+    }
+
     fn recompute_preview_lock(&mut self) {
         self.preview_locked = self.language == Language::Markdown
             && self.buffer.len() as u64 > MARKDOWN_PREVIEW_THRESHOLD;

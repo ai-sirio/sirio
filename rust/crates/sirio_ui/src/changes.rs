@@ -51,7 +51,8 @@ use gpui::{
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
     GitDiffSideBySide, GitError, StatusEntry, StatusKind, StatusSnapshot, commit_diff_entry,
-    commit_files, diff_entry, discard, discard_all, stage, stage_all, stats, status, unstage,
+    commit_files, diff_entry, discard, discard_all, range_file_diff, range_files, range_stats,
+    stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
 use std::collections::hash_map::DefaultHasher;
@@ -502,6 +503,12 @@ enum ChangesSource {
     WorkingTree,
     /// One commit, by sha. Immutable: stage/unstage/discard are refused.
     Commit(String),
+    /// A change request's diff: `base...head`, read from objects the host
+    /// made local. Immutable like a commit and never polled — a revision does
+    /// not change. Files and counts load up front; one file's diff loads when
+    /// its row opens, because a whole-request patch can exceed the git
+    /// runner's output cap.
+    Range { base: String, head: String },
 }
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
@@ -578,17 +585,21 @@ pub struct ChangesTab {
     /// It bounds staleness for anything still live and, if the surface is
     /// in fact visible, the draw that follows releases the gate properly.
     suspended_ticks: u32,
-    /// F-CHG-13: a `focus_path` request that arrived before `entries` had
+    /// F-CHG-13: the `focus_path` requests that arrived before `entries` had
     /// been populated by the first `refresh()` (the common case — `new()`
     /// starts that refresh asynchronously, so a caller that opens the tab
-    /// and asks it to focus a path in the same tick always races it).
+    /// and asks it to focus a path in the same tick always races it). Every
+    /// one is kept, so a caller reopening several files gets them all back.
     /// Replayed once the next snapshot lands, then cleared either way.
-    pending_focus: Option<PathBuf>,
+    pending_focus: Vec<PathBuf>,
     /// The file last opened through `focus_path` or a row expansion
     /// (`toggle_change`). Kept, unlike `pending_focus` — which is consumed
     /// once a snapshot lands — so the host can save it and replay it after
     /// a restart. Cleared when that file's last expanded row is collapsed.
     last_focus: Option<PathBuf>,
+    /// A `focus_line` request not yet drawn; consumed by the frame that can
+    /// scroll to it.
+    reveal_line: Option<(PathBuf, usize)>,
     /// #325: the keyboard-selected file row, keyed like `expanded_changes`
     /// because one path can appear in two sections and Enter has to act on
     /// the one the user is actually on.
@@ -650,6 +661,37 @@ impl ChangesTab {
         Self::with_source(repo_root, ChangesSource::Commit(sha), true, cx)
     }
 
+    /// Creates a read-only surface over a change request's range: its files
+    /// and counts now, each file's diff when its row opens.
+    pub fn for_range(repo_root: PathBuf, base: String, head: String, cx: &mut Context<Self>) -> Self {
+        Self::with_source(repo_root, ChangesSource::Range { base, head }, true, cx)
+    }
+
+    /// The `(base, head)` this surface shows, or `None` for any other source.
+    pub fn range(&self) -> Option<(&str, &str)> {
+        match &self.source {
+            ChangesSource::Range { base, head } => Some((base, head)),
+            _ => None,
+        }
+    }
+
+    /// Every path with an expanded row — what a rebuilt surface reopens.
+    pub fn expanded_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.expanded_changes.iter().map(|(_, path)| path.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// Whether the diff deletes `path`. Read from the index column, which is
+    /// where a commit or a range surface reports every entry (each reads as
+    /// staged); on the working tree a deletion not yet staged answers false.
+    pub fn is_deleted(&self, path: &Path) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.path == path && entry.index_status == Some(StatusKind::Deleted))
+    }
+
     /// Creates the surface the right panel's Diff view embeds. Identical to
     /// `new` except that it draws `Open diff`, which reveals the Changes tab
     /// — something only a host that is not that tab can ask for (#217).
@@ -696,8 +738,9 @@ impl ChangesTab {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
+            reveal_line: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -743,7 +786,7 @@ impl ChangesTab {
     pub fn commit(&self) -> Option<&str> {
         match &self.source {
             ChangesSource::Commit(sha) => Some(sha),
-            ChangesSource::WorkingTree => None,
+            ChangesSource::WorkingTree | ChangesSource::Range { .. } => None,
         }
     }
 
@@ -827,11 +870,11 @@ impl ChangesTab {
         self.entries = snapshot.entries;
         self.stats = snapshot.stats;
         self.unified_width_dirty = true;
-        // F-CHG-13: replay a focus_path request that raced this snapshot.
-        // Applied at most once — if the path still isn't present (e.g. it
+        // F-CHG-13: replay the focus_path requests that raced this snapshot.
+        // Applied at most once — if a path still isn't present (e.g. it
         // was reverted before the snapshot came back), there is nothing
         // further to wait for.
-        if let Some(path) = self.pending_focus.take() {
+        for path in std::mem::take(&mut self.pending_focus) {
             self.apply_focus(&path, cx);
         }
     }
@@ -1224,11 +1267,10 @@ impl ChangesTab {
             return;
         };
         let repo_root = self.repo_root.clone();
+        let source = self.source.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(
-                    async move { diff_entry(&repo_root, &entry, CHANGES_CONTEXT_LINES) },
-                )
+                .background_spawn(async move { load_expanded_diff(&repo_root, &source, &entry) })
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 match result {
@@ -1240,10 +1282,40 @@ impl ChangesTab {
                     }
                 }
                 tab.unified_width_dirty = true;
+                tab.resolve_reveal_line(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Opens `path`, opens the collapsed context band that hides new-side
+    /// line `line`, and scrolls that row into view once its diff has loaded.
+    /// A line that is in no hunk (an outdated comment) reveals the file's row.
+    pub fn focus_line(&mut self, path: &Path, line: usize, cx: &mut Context<Self>) {
+        self.reveal_line = Some((path.to_path_buf(), line));
+        self.focus_path(path, cx);
+        self.resolve_reveal_line(cx);
+    }
+
+    /// Runs when a diff lands and when a reveal is requested: opens the band
+    /// that hides the pending line, so the next frame has a row to scroll to.
+    fn resolve_reveal_line(&mut self, cx: &mut Context<Self>) {
+        let Some((path, line)) = self.reveal_line.clone() else {
+            return;
+        };
+        let Some(diff) = self.diffs.get(&path) else {
+            return;
+        };
+        if let Some(key) = band_key_containing(diff, line) {
+            for section in ChangeSection::ORDER {
+                if self.is_expanded(section, &path) {
+                    self.expanded_bands.insert((section, path.clone(), key));
+                }
+            }
+        }
+        self.unified_width_dirty = true;
+        cx.notify();
     }
 
     /// F-CHG-13: `RightPanelActionEvent::OpenDiff(path)` and
@@ -1262,7 +1334,9 @@ impl ChangesTab {
         // remember the request and replay it once a snapshot lands in
         // apply_snapshot, rather than silently no-op'ing.
         if self.entries.is_empty() && self.git_task.is_some() {
-            self.pending_focus = Some(path.to_path_buf());
+            if !self.pending_focus.iter().any(|pending| pending == path) {
+                self.pending_focus.push(path.to_path_buf());
+            }
             return;
         }
         self.apply_focus(path, cx);
@@ -1560,6 +1634,20 @@ impl ChangesTab {
                     )
                 });
                 if let Some(index) = index {
+                    self.list_state.scroll_to_reveal_item(index);
+                }
+            }
+        }
+        if let Some((path, line)) = self.reveal_line.clone() {
+            // The line's row exists once the diff is here. A diff that
+            // failed, or a path the surface does not list, will never bring
+            // it: the reveal is spent on the file's row instead of being
+            // held for a frame that never comes.
+            let listed = self.entries.iter().any(|entry| entry.path == path);
+            let settled = self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) || !listed;
+            if settled {
+                self.reveal_line = None;
+                if let Some(index) = reveal_target(&rows, &path, line) {
                     self.list_state.scroll_to_reveal_item(index);
                 }
             }
@@ -2345,6 +2433,29 @@ impl ChangesTab {
 
 impl EventEmitter<ChangesTabEvent> for ChangesTab {}
 impl EventEmitter<ChangesTabActionEvent> for ChangesTab {}
+
+/// The row a reveal of `path`:`line` scrolls to: the row showing that new
+/// line, or the file's own row when the line is in no hunk (an outdated
+/// comment).
+fn reveal_target(rows: &[ListRow], path: &Path, line: usize) -> Option<usize> {
+    rows.iter()
+        .position(|row| match row {
+            ListRow::Change(ChangeRow::Line { path: row_path, line: row_line, .. }) => {
+                row_path == path && row_line.new_line_number == Some(line)
+            }
+            // Split mode: the new line is on the row's right side.
+            ListRow::Change(ChangeRow::SplitLine { path: row_path, row, .. }) => {
+                row_path == path
+                    && row.right.as_ref().and_then(|side| side.new_line_number) == Some(line)
+            }
+            _ => false,
+        })
+        .or_else(|| {
+            rows.iter().position(|row| {
+                matches!(row, ListRow::Change(ChangeRow::File { entry, .. }) if entry.path == path)
+            })
+        })
+}
 
 /// Appends one contiguous run of unified diff lines in the requested view
 /// mode.
@@ -3276,6 +3387,7 @@ fn load_snapshot(
     match source {
         ChangesSource::WorkingTree => load_worktree_snapshot(repo_root, expanded_paths),
         ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
+        ChangesSource::Range { base, head } => load_range_snapshot(repo_root, base, head),
     }
 }
 
@@ -3385,11 +3497,83 @@ fn load_commit_snapshot(repo_root: &Path, sha: &str) -> Result<GitSnapshot, Stri
     })
 }
 
+/// The snapshot of a change request's range: its files and their counts, from
+/// two git processes. No diff is read here — `fetch_expanded_diff` reads one
+/// when its row opens. Every entry reads as staged, like a commit's.
+fn load_range_snapshot(repo_root: &Path, base: &str, head: &str) -> Result<GitSnapshot, String> {
+    let files = range_files(repo_root, base, head).map_err(|error| error.to_string())?;
+    let stats = range_stats(repo_root, base, head).map_err(|error| error.to_string())?;
+    let entries = files
+        .into_iter()
+        .map(|file| StatusEntry {
+            path: file.path,
+            original_path: file.old_path,
+            index_status: Some(commit_status_kind(file.status)),
+            worktree_status: None,
+        })
+        .collect();
+    Ok(GitSnapshot {
+        entries,
+        diffs: HashMap::new(),
+        stats,
+        diff_errors: HashMap::new(),
+    })
+}
+
+/// One file's diff for whichever source the surface reads.
+fn load_expanded_diff(
+    repo_root: &Path,
+    source: &ChangesSource,
+    entry: &StatusEntry,
+) -> Result<FileDiff, GitError> {
+    match source {
+        ChangesSource::WorkingTree => diff_entry(repo_root, entry, CHANGES_CONTEXT_LINES),
+        ChangesSource::Commit(sha) => commit_diff_entry(repo_root, sha, &entry.path),
+        ChangesSource::Range { base, head } => range_file_diff(
+            repo_root,
+            base,
+            head,
+            &entry.path,
+            entry.original_path.as_deref(),
+            CHANGES_CONTEXT_LINES,
+        ),
+    }
+}
+
+/// The key of the collapsed context band that hides new-side line `line` of
+/// `diff`, if one does. Mirrors the walk in `expand_diff`: a run of context
+/// lines of at least `CONTEXT_BAND_MIN` is one band, keyed by the position of
+/// its first line in the file's flattened line stream.
+fn band_key_containing(diff: &FileDiff, line: usize) -> Option<usize> {
+    let mut line_index = 0usize;
+    for hunk in &diff.hunks {
+        let mut i = 0usize;
+        while i < hunk.lines.len() {
+            let is_context = hunk.lines[i].origin == DiffOrigin::Context;
+            let start = i;
+            while i < hunk.lines.len() && (hunk.lines[i].origin == DiffOrigin::Context) == is_context {
+                i += 1;
+            }
+            if is_context
+                && i - start >= CONTEXT_BAND_MIN
+                && hunk.lines[start..i]
+                    .iter()
+                    .any(|candidate| candidate.new_line_number == Some(line))
+            {
+                return Some(line_index + start);
+            }
+        }
+        line_index += hunk.lines.len();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use sirio_git::StatusKind;
+    use sirio_git::{DiffLine, DiffOrigin, FileDiff, Hunk};
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     struct TempDir(PathBuf);
@@ -3596,15 +3780,137 @@ mod tests {
         (cx, tab)
     }
 
+    /// A range surface over one file whose diff is at hand, as the tests
+    /// below need it: no window, no git.
+    fn range_tab_with_one_diff(expanded: bool) -> ChangesTab {
+        let path = PathBuf::from("x.rs");
+        let context = |n: usize| DiffLine {
+            origin: DiffOrigin::Context,
+            old_line_number: Some(n),
+            new_line_number: Some(n),
+            content: format!("line {n}"),
+        };
+        let diff = FileDiff {
+            path: path.clone(),
+            hunks: vec![sirio_git::Hunk {
+                header: "@@ -1,4 +1,4 @@".to_string(),
+                old_start: 1,
+                old_lines: 4,
+                new_start: 1,
+                new_lines: 4,
+                lines: vec![
+                    context(1),
+                    context(2),
+                    DiffLine {
+                        origin: DiffOrigin::Deletion,
+                        old_line_number: Some(3),
+                        new_line_number: None,
+                        content: "old".to_string(),
+                    },
+                    DiffLine {
+                        origin: DiffOrigin::Addition,
+                        old_line_number: None,
+                        new_line_number: Some(3),
+                        content: "new".to_string(),
+                    },
+                    context(4),
+                ],
+            }],
+            additions: 1,
+            deletions: 1,
+            is_binary: false,
+            is_submodule: false,
+        };
+        let mut tab = settled_changes_tab_without_git(PathBuf::from("/tmp"));
+        tab.source = ChangesSource::Range {
+            base: "0".repeat(40),
+            head: "1".repeat(40),
+        };
+        tab.entries = vec![StatusEntry {
+            path: path.clone(),
+            original_path: None,
+            index_status: Some(StatusKind::Modified),
+            worktree_status: None,
+        }];
+        tab.diffs = HashMap::from([(path.clone(), diff)]);
+        if expanded {
+            tab.expanded_changes.insert((ChangeSection::Staged, path));
+        }
+        tab
+    }
+
+    /// In Split mode a changed line lives in a `SplitLine` row, on its right
+    /// side; a reveal must land on that row, not on the file's.
+    #[test]
+    fn a_revealed_line_is_found_on_the_right_side_of_a_split_row() {
+        let mut tab = range_tab_with_one_diff(true);
+        let path = PathBuf::from("x.rs");
+        let unified = tab.section_rows(DiffViewMode::Unified);
+        let unified = tab.sync_list_rows(unified);
+        let file_row = unified
+            .iter()
+            .position(|row| matches!(row, ListRow::Change(ChangeRow::File { .. })))
+            .expect("the file row");
+        let in_unified = reveal_target(&unified, &path, 3).expect("line 3 is in the hunk");
+        assert!(
+            matches!(&unified[in_unified], ListRow::Change(ChangeRow::Line { line, .. }) if line.new_line_number == Some(3)),
+            "unified: the line's own row"
+        );
+
+        let split = tab.section_rows(DiffViewMode::Split);
+        let split = tab.sync_list_rows(split);
+        let in_split = reveal_target(&split, &path, 3).expect("line 3 is in the hunk");
+        assert_ne!(in_split, file_row, "split: not the file row");
+        assert!(
+            matches!(&split[in_split], ListRow::Change(ChangeRow::SplitLine { row, .. })
+                if row.right.as_ref().and_then(|side| side.new_line_number) == Some(3)),
+            "split: the row whose right side is new line 3"
+        );
+        assert_eq!(reveal_target(&split, &path, 99), Some(file_row), "a line in no hunk reveals the file");
+    }
+
+    /// A reveal for a file whose diff failed, or for a path the range does
+    /// not touch, can never be satisfied: it is dropped at the file's row
+    /// rather than held for a diff that will not come.
+    #[test]
+    fn a_reveal_that_cannot_be_satisfied_is_cleared_at_the_file_row() {
+        let mut tab = range_tab_with_one_diff(true);
+        tab.diffs.clear();
+        tab.diff_errors.insert(PathBuf::from("x.rs"), "fatal: bad object".to_string());
+        tab.reveal_line = Some((PathBuf::from("x.rs"), 3));
+        let rows = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(rows);
+        assert_eq!(tab.reveal_line, None, "a failed diff will not bring the line");
+
+        let mut tab = range_tab_with_one_diff(false);
+        tab.reveal_line = Some((PathBuf::from("not-in-the-range.rs"), 1));
+        let rows = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(rows);
+        assert_eq!(tab.reveal_line, None, "a path outside the range has no row to wait for");
+
+        let mut tab = range_tab_with_one_diff(false);
+        tab.diffs.clear();
+        tab.reveal_line = Some((PathBuf::from("x.rs"), 3));
+        let rows = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(rows);
+        assert_eq!(tab.reveal_line, Some((PathBuf::from("x.rs"), 3)), "a diff still loading keeps the reveal");
+    }
+
     fn settled_changes_tab(repo_root: PathBuf) -> ChangesTab {
         let entries = status(&repo_root)
             .expect("status for settled Changes tab")
             .entries;
+        let mut tab = settled_changes_tab_without_git(repo_root);
+        tab.entries = entries;
+        tab
+    }
+
+    fn settled_changes_tab_without_git(repo_root: PathBuf) -> ChangesTab {
         ChangesTab {
             repo_root,
             is_git: true,
             source: ChangesSource::WorkingTree,
-            entries,
+            entries: Vec::new(),
             diffs: HashMap::new(),
             stats: HashMap::new(),
             expanded_changes: HashSet::new(),
@@ -3622,8 +3928,9 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
+            reveal_line: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -4176,6 +4483,30 @@ mod tests {
                 tab.is_expanded(ChangeSection::Changed, Path::new("tracked.txt")),
                 "the deferred focus_path request is replayed once the snapshot lands"
             );
+        });
+    }
+
+    /// Every path asked for before the first snapshot lands is expanded
+    /// once it does, not only the last one asked for.
+    #[gpui::test]
+    async fn several_focus_path_calls_before_the_first_refresh_all_expand(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+        std::fs::write(dir.0.join("fresh.txt"), "new\n").expect("write untracked");
+
+        let tab = cx.new(|cx| {
+            let mut tab = ChangesTab::new(dir.0.clone(), cx);
+            tab.focus_path(Path::new("tracked.txt"), cx);
+            tab.focus_path(Path::new("fresh.txt"), cx);
+            tab
+        });
+
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 2));
+
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.is_expanded(ChangeSection::Changed, Path::new("tracked.txt")));
+            assert!(tab.is_expanded(ChangeSection::Untracked, Path::new("fresh.txt")));
         });
     }
 
@@ -5137,8 +5468,9 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
+            reveal_line: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -5220,8 +5552,9 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
+            reveal_line: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -5495,8 +5828,9 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
+            reveal_line: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -5958,8 +6292,9 @@ mod tests {
                 renders_at_last_tick: 0,
                 refresh_suspended: false,
                 suspended_ticks: 0,
-                pending_focus: None,
+                pending_focus: Vec::new(),
                 last_focus: None,
+                reveal_line: None,
                 selected_change: None,
                 list_focus: None,
                 list_state: new_list_state(),
@@ -6415,8 +6750,9 @@ mod tests {
             renders_at_last_tick: 0,
             refresh_suspended: false,
             suspended_ticks: 0,
-            pending_focus: None,
+            pending_focus: Vec::new(),
             last_focus: None,
+            reveal_line: None,
             selected_change: None,
             list_focus: None,
             list_state: new_list_state(),
@@ -6517,4 +6853,212 @@ mod tests {
         }
     }
 
+    // ---- a change request's range ----------------------------------------
+
+    fn ctx_line(n: usize) -> DiffLine {
+        DiffLine {
+            origin: DiffOrigin::Context,
+            old_line_number: Some(n),
+            new_line_number: Some(n),
+            content: format!("line {n}"),
+        }
+    }
+
+    fn add_line(n: usize) -> DiffLine {
+        DiffLine {
+            origin: DiffOrigin::Addition,
+            old_line_number: None,
+            new_line_number: Some(n),
+            content: format!("new {n}"),
+        }
+    }
+
+    fn del_line(n: usize) -> DiffLine {
+        DiffLine {
+            origin: DiffOrigin::Deletion,
+            old_line_number: Some(n),
+            new_line_number: None,
+            content: format!("old {n}"),
+        }
+    }
+
+    fn diff_of(hunks: Vec<Vec<DiffLine>>) -> FileDiff {
+        FileDiff {
+            path: PathBuf::from("a.txt"),
+            hunks: hunks
+                .into_iter()
+                .map(|lines| Hunk {
+                    header: "@@".to_string(),
+                    old_start: 1,
+                    old_lines: lines.len(),
+                    new_start: 1,
+                    new_lines: lines.len(),
+                    lines,
+                })
+                .collect(),
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+            is_submodule: false,
+        }
+    }
+
+    #[test]
+    fn a_line_inside_a_long_context_run_gives_that_bands_key() {
+        // add(1), six context lines 2..=7, add(8): the run starts at index 1.
+        let mut lines = vec![add_line(1)];
+        lines.extend((2..=7).map(ctx_line));
+        lines.push(add_line(8));
+        let diff = diff_of(vec![lines]);
+        assert_eq!(band_key_containing(&diff, 4), Some(1));
+        assert_eq!(band_key_containing(&diff, 2), Some(1), "the run's first line");
+        assert_eq!(band_key_containing(&diff, 7), Some(1), "and its last");
+    }
+
+    #[test]
+    fn a_run_shorter_than_a_band_is_no_band_and_four_lines_is() {
+        let three = diff_of(vec![[vec![add_line(1)], (2..=4).map(ctx_line).collect::<Vec<_>>(), vec![add_line(5)]].concat()]);
+        assert_eq!(band_key_containing(&three, 3), None);
+        let four = diff_of(vec![[vec![add_line(1)], (2..=5).map(ctx_line).collect::<Vec<_>>(), vec![add_line(6)]].concat()]);
+        assert_eq!(band_key_containing(&four, 3), Some(1));
+    }
+
+    #[test]
+    fn changed_deleted_and_out_of_range_lines_are_in_no_band() {
+        let mut lines = vec![add_line(1), del_line(2)];
+        lines.extend((2..=8).map(ctx_line));
+        let diff = diff_of(vec![lines]);
+        assert_eq!(band_key_containing(&diff, 1), None, "an added line is not context");
+        assert_eq!(band_key_containing(&diff, 999), None, "outside every hunk");
+        assert_eq!(band_key_containing(&diff_of(vec![]), 1), None, "no hunks at all");
+    }
+
+    #[test]
+    fn a_bands_key_counts_the_lines_of_the_hunks_before_it() {
+        let first: Vec<DiffLine> = (1..=5).map(add_line).collect();
+        let mut second: Vec<DiffLine> = (20..=24).map(ctx_line).collect();
+        second.push(add_line(25));
+        let diff = diff_of(vec![first, second]);
+        assert_eq!(band_key_containing(&diff, 22), Some(5));
+    }
+
+    /// `main` → `feat`: `a.txt` (200 lines) is edited at two lines close enough
+    /// that git merges them into one hunk with an unchanged run — a context
+    /// band — between; `c.txt` is added; `b.txt` is renamed to `d.txt`.
+    fn seed_range(dir: &Path) -> (String, String) {
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Sirio tests"]);
+        let lines = |edits: &[usize]| -> String {
+            (1..=200)
+                .map(|n| {
+                    if edits.contains(&n) {
+                        format!("edited {n}\n")
+                    } else {
+                        format!("line {n}\n")
+                    }
+                })
+                .collect()
+        };
+        std::fs::write(dir.join("a.txt"), lines(&[])).expect("write a.txt");
+        std::fs::write(dir.join("b.txt"), "b\n").expect("write b.txt");
+        git(dir, &["add", "-A"]);
+        git(dir, &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "base"]);
+        let base = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "feat"]);
+        let gap = 2 * CHANGES_CONTEXT_LINES - 2;
+        std::fs::write(dir.join("a.txt"), lines(&[100, 100 + gap + 1])).expect("edit a.txt");
+        std::fs::write(dir.join("c.txt"), "new\n").expect("write c.txt");
+        git(dir, &["mv", "b.txt", "d.txt"]);
+        git(dir, &["add", "-A"]);
+        git(dir, &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "change"]);
+        (base, rev_parse(dir, "HEAD"))
+    }
+
+    #[gpui::test]
+    async fn a_range_surface_lists_its_files_and_reads_no_diff_until_one_opens(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        let (base, head) = seed_range(&dir.0);
+        let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base.clone(), head.clone(), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.report().sections.iter().any(|section| !section.files.is_empty())
+            })
+        });
+        tab.read_with(cx, |tab, _| {
+            let mut files: Vec<(String, usize, usize)> = tab
+                .report()
+                .sections
+                .iter()
+                .flat_map(|section| section.files.iter())
+                .map(|file| (file.path.to_string_lossy().into_owned(), file.additions, file.deletions))
+                .collect();
+            files.sort();
+            assert_eq!(
+                files,
+                vec![
+                    ("a.txt".to_string(), 2, 2),
+                    ("c.txt".to_string(), 1, 0),
+                    ("d.txt".to_string(), 0, 0),
+                ]
+            );
+            assert!(!tab.allows_staging(), "a change request's diff is immutable");
+            assert_eq!(tab.range(), Some((base.as_str(), head.as_str())));
+            assert!(tab.diffs.is_empty(), "no diff is read until a row opens");
+        });
+
+        tab.update(cx, |tab, cx| tab.focus_path(Path::new("a.txt"), cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.diffs.contains_key(Path::new("a.txt"))));
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(tab.diffs.len(), 1, "only the opened file's diff was read");
+            assert_eq!(tab.expanded_paths(), vec![PathBuf::from("a.txt")]);
+        });
+    }
+
+    #[gpui::test]
+    async fn focusing_a_line_opens_the_context_band_that_hides_it(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        let (base, head) = seed_range(&dir.0);
+        let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base, head, cx));
+        // Inside the unchanged run between the two edits.
+        let line = 101 + CHANGES_CONTEXT_LINES;
+        tab.update(cx, |tab, cx| tab.focus_line(Path::new("a.txt"), line, cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                let path = Path::new("a.txt");
+                tab.diffs
+                    .get(path)
+                    .and_then(|diff| band_key_containing(diff, line))
+                    .is_some_and(|key| {
+                        ChangeSection::ORDER
+                            .iter()
+                            .any(|section| tab.is_band_expanded(*section, path, key))
+                    })
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_deleted_file_is_known_to_be_deleted(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        let (base, _) = seed_range(&dir.0);
+        git(&dir.0, &["rm", "-q", "a.txt"]);
+        git(&dir.0, &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "drop a"]);
+        let head = rev_parse(&dir.0, "HEAD");
+        let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base, head, cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.report().sections.iter().any(|section| !section.files.is_empty())
+            })
+        });
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.is_deleted(Path::new("a.txt")));
+            assert!(!tab.is_deleted(Path::new("c.txt")), "an added file is not a deleted one");
+        });
+    }
 }

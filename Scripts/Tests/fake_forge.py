@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""A loopback stand-in for GitHub and GitLab, for Scripts/Tests/test-forge-e2e.sh.
+"""A loopback stand-in for GitHub and GitLab, for the three forge E2E scripts:
+Scripts/Tests/test-forge-e2e.sh, test-forge-ui-e2e.sh and test-forge-diff-e2e.sh.
 
 One process serves one flavour on one port:
 
-    fake_forge.py --flavor github|gitlab|none --port N --log FILE
+    fake_forge.py --flavor github|gitlab|none --port N --log FILE [--fixtures DIR]
 
 It answers only what sirio_forge and the two CLIs ask:
 
 - POST /graphql and /api/graphql -- including the absolute-URI form
   (`POST http://api.github.localhost/graphql`) that `gh` sends when this
   server is its HTTP proxy -- with the fixture named after the request's
-  operationName, from Scripts/Tests/forge-fixtures/<flavour>/. A request with
+  operationName, from <fixtures>/<flavour>/, where <fixtures> is --fixtures
+  (default Scripts/Tests/forge-fixtures; test-forge-diff-e2e.sh passes a copy
+  whose commit ids name a real repository's commits). A request with
   a non-empty `after*` variable gets `<Operation>.page2.json`; number 404
   (GitHub) or iid "404" (GitLab) gets `NotFound.json`.
 - GET / and /user (read by `gh auth status`), GET /api/v4/user (read by
   `glab auth status`), GET /api/v3/meta (the GitHub Enterprise probe, which
   only the github flavour answers).
+- GET <anything>/info/refs -- git's smart-HTTP discovery, the first request
+  of a `git fetch` over http -- gets a 401 asking for Basic credentials, the
+  answer that makes git want a password it must not prompt for.
 - The none flavour answers 404 to everything: a host that is not a forge.
 
 The credential picks the scenario, so one server covers every error path:
@@ -40,18 +46,23 @@ import os
 import sys
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forge-fixtures")
-# Every fixture on disk, by flavour and then by name without `.json`. A request
-# picks one by looking its name up here, so no path is ever built from what a
-# request says.
-FIXTURE_FILES = {
-    flavor: {
-        entry[: -len(".json")]: os.path.join(FIXTURES, flavor, entry)
-        for entry in os.listdir(os.path.join(FIXTURES, flavor))
-        if entry.endswith(".json")
+
+
+def load_fixtures(root):
+    """Every fixture under `root`, by flavour and then by name without `.json`.
+    A request picks one by looking its name up here, so no path is ever built
+    from what a request says."""
+    return {
+        flavor: {
+            entry[: -len(".json")]: os.path.join(root, flavor, entry)
+            for entry in os.listdir(os.path.join(root, flavor))
+            if entry.endswith(".json")
+        }
+        for flavor in os.listdir(root)
+        if os.path.isdir(os.path.join(root, flavor))
     }
-    for flavor in os.listdir(FIXTURES)
-    if os.path.isdir(os.path.join(FIXTURES, flavor))
-}
+
+
 # Operations that have a baseline variant, and the fields those variants omit.
 BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader"}
 NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount"}
@@ -74,6 +85,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     flavor = "github"
     log_path = None
+    fixture_files = {}
 
     def credential(self):
         auth = self.headers.get("Authorization") or ""
@@ -142,6 +154,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.record("GET", path, None, None, None)
         if self.flavor == "none":
             return self.answer(404, {"message": "Not Found"})
+        if path.endswith("/info/refs"):
+            return self.answer(401, {"message": "Authentication required"}, [("WWW-Authenticate", 'Basic realm="fake forge"')])
         if path == "/api/v3/meta":
             if self.flavor == "github":
                 return self.answer(200, {"installed_version": "3.17.0"})
@@ -179,7 +193,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name += ".page2"
         if variables.get("number") == 404 or variables.get("iid") == "404":
             name = "NotFound"
-        path = FIXTURE_FILES.get(self.flavor, {}).get(name)
+        path = self.fixture_files.get(self.flavor, {}).get(name)
         if path is None:
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})
         with open(path, encoding="utf-8") as fixture:
@@ -197,9 +211,11 @@ def main():
     parser.add_argument("--flavor", choices=("github", "gitlab", "none"), required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--log")
+    parser.add_argument("--fixtures", default=FIXTURES)
     options = parser.parse_args()
     Handler.flavor = options.flavor
     Handler.log_path = options.log
+    Handler.fixture_files = load_fixtures(options.fixtures)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", options.port), Handler)
     try:
         server.serve_forever()

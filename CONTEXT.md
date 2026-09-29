@@ -130,3 +130,14 @@ GitLab.
 How Sirio authenticates to a forge: its **CLI** (`gh`, `glab`), which owns the
 credential, or a **token** the user gave Sirio. Chosen per host; detected
 unless the user pinned one, and never swapped silently when it fails.
+
+### Revisions
+
+The pair of commits a change request's diff is taken between, as the forge
+reports them: its **base** and its **head**. The diff is `base...head` (from
+their merge base).
+
+### Snapshot
+
+A file as it is at one revision, shown read-only in an editor tab because it
+is not what the worktree has on disk.

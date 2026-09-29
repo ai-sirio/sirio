@@ -136,6 +136,10 @@ fn usage() {
          \x20 surface change-requests filter <mine|to-review|all-open|closed>\n\
          \x20 surface change-requests token --host h --forge github|gitlab --token t\n\
          \x20 surface change-request open <number>|tab <name>|read\n\
+         \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
+         \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
+         \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
+         \x20 surface file read                 the active file tab's path, origin and text\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
          \x20 browser get <surface> <url|text|html> [--selector s] [--json]\n\
@@ -811,6 +815,36 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("change-request", "read") => {
             require_ok(socket, &sirio_control::protocol::request::change_request_read())
         }
+        ("change-request", "reveal") => {
+            let path = parsed.positional.get(2).ok_or_else(|| "Missing path".to_string())?;
+            let line = parsed.positional.get(3).map(String::as_str);
+            require_ok(socket, &sirio_control::protocol::request::change_request_reveal(path, line))
+        }
+        ("change-request", "open-file") => {
+            let path = parsed.positional.get(2).ok_or_else(|| "Missing path".to_string())?;
+            let line = parsed.positional.get(3).map(String::as_str);
+            require_ok(socket, &sirio_control::protocol::request::change_request_open_file(path, line))
+        }
+        ("change-request", "open-commit") => {
+            let sha = parsed.positional.get(2).ok_or_else(|| "Missing commit sha".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_request_open_commit(sha))
+        }
+        ("tabs", "read") => require_ok(socket, &sirio_control::protocol::request::tabs_read()),
+        ("tabs", "select" | "close") => {
+            let position = parsed
+                .positional
+                .get(2)
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|position| *position > 0)
+                .ok_or_else(|| "Tab index must be a positive integer".to_string())?;
+            let request = if action == "select" {
+                sirio_control::protocol::request::tabs_select(position)
+            } else {
+                sirio_control::protocol::request::tabs_close(position)
+            };
+            require_ok(socket, &request)
+        }
+        ("file", "read") => require_ok(socket, &sirio_control::protocol::request::file_read()),
         _ => return Err(format!("unknown surface action '{surface} {action}'")),
     };
     print_result(

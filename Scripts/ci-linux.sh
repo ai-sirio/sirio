@@ -323,12 +323,16 @@ run_root_stage "test-update-e2e.sh"            bash Scripts/Tests/test-update-e2
 run_root_stage "test-forge-e2e.sh"             bash Scripts/Tests/test-forge-e2e.sh --out-dir "$RUN_DIR/forge-e2e"
 
 # The change request surfaces in a real, isolated Sirio against the fake
-# forge, over the control socket. Captures need an X display; without one
-# the run is state-only, which still proves every socket-visible fact.
+# forge, over the control socket, then a change request's diff, snapshots and
+# fetch against a real bare repository standing in for the forge's git side.
+# Captures need an X display; without one each run is state-only, which
+# still proves every socket-visible fact.
 if [ -n "${DISPLAY:-}" ]; then
     run_root_stage "test-forge-ui-e2e.sh"      bash Scripts/Tests/test-forge-ui-e2e.sh --out-dir "$RUN_DIR/forge-ui-e2e"
+    run_root_stage "test-forge-diff-e2e.sh"    bash Scripts/Tests/test-forge-diff-e2e.sh --out-dir "$RUN_DIR/forge-diff-e2e"
 else
     run_root_stage "test-forge-ui-e2e.sh"      bash Scripts/Tests/test-forge-ui-e2e.sh --state-only --out-dir "$RUN_DIR/forge-ui-e2e"
+    run_root_stage "test-forge-diff-e2e.sh"    bash Scripts/Tests/test-forge-diff-e2e.sh --state-only --out-dir "$RUN_DIR/forge-diff-e2e"
 fi
 
 # The critics' own instrument. Both of these guard leaks that have already cost

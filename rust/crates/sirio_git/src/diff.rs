@@ -460,7 +460,9 @@ pub fn parse_numstat(output: &str) -> HashMap<PathBuf, DiffStat> {
             continue;
         }
 
-        let mut fields = record.split('\t');
+        // Only the first two tabs separate fields: `-z` does not quote, so a
+        // tab inside the path is raw and belongs to it.
+        let mut fields = record.splitn(3, '\t');
         let Some(adds) = fields.next() else {
             index += 1;
             continue;
@@ -638,6 +640,22 @@ mod tests {
                 deletions: 0,
                 is_binary: false
             }
+        );
+    }
+
+    /// `--numstat -z` does not quote, so a tab inside a path is raw: only the
+    /// first two tabs separate fields, the rest belong to the path.
+    #[test]
+    fn a_path_containing_a_tab_keeps_its_whole_name_and_counts() {
+        let stats = parse_numstat("3\t1\tdir/a\tb.txt\x00");
+        assert_eq!(
+            stats.get(&PathBuf::from("dir/a\tb.txt")).copied(),
+            Some(DiffStat {
+                additions: 3,
+                deletions: 1,
+                is_binary: false
+            }),
+            "{stats:?}"
         );
     }
 

@@ -511,6 +511,60 @@ pub mod request {
         request("surface.change_request.read", BTreeMap::new())
     }
 
+    /// Shows `path` (and `line`) of the active change request in its diff — what
+    /// a line comment's link does.
+    pub fn change_request_reveal(path: &str, line: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([("path".to_string(), path.to_string())]);
+        if let Some(line) = line {
+            params.insert("line".to_string(), line.to_string());
+        }
+        request("surface.change_request.reveal", params)
+    }
+
+    /// *Open in editor* on a file of the active change request's diff.
+    pub fn change_request_open_file(path: &str, line: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([("path".to_string(), path.to_string())]);
+        if let Some(line) = line {
+            params.insert("line".to_string(), line.to_string());
+        }
+        request("surface.change_request.open_file", params)
+    }
+
+    /// Opens one of the active change request's (loaded) commits.
+    pub fn change_request_open_commit(sha: &str) -> ControlRequest {
+        request(
+            "surface.change_request.open_commit",
+            BTreeMap::from([("sha".to_string(), sha.to_string())]),
+        )
+    }
+
+    pub fn tabs_read() -> ControlRequest {
+        request("surface.tabs.read", BTreeMap::new())
+    }
+
+    /// Selects the `position`th tab of `tabs_read`'s list (1-based), whichever
+    /// half of the center it is in — unlike `tab_select`, which counts only
+    /// the focused half's tabs.
+    pub fn tabs_select(position: usize) -> ControlRequest {
+        request(
+            "surface.tabs.select",
+            BTreeMap::from([("index".to_string(), position.to_string())]),
+        )
+    }
+
+    /// Closes the `position`th tab of `tabs_read`'s list (1-based) the way its
+    /// close button does.
+    pub fn tabs_close(position: usize) -> ControlRequest {
+        request(
+            "surface.tabs.close",
+            BTreeMap::from([("index".to_string(), position.to_string())]),
+        )
+    }
+
+    pub fn file_read() -> ControlRequest {
+        request("surface.file.read", BTreeMap::new())
+    }
+
     /// Opens the non-drawing chat surface for a worktree.
     pub fn chat_open(worktree: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();
