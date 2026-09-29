@@ -538,6 +538,18 @@ pub mod request {
         )
     }
 
+    /// Runs one write on the active change request's tab: the buttons' own
+    /// handlers, by name (`close`, `reopen`, `ready`, `draft`, `compose`,
+    /// `send`, `edit`, `edit-comment`), with their text in `params`. A debug
+    /// build of Sirio answers it; a release build answers "unknown method", so
+    /// nothing that can write to a forge is reachable over the socket
+    /// (spec §10).
+    pub fn change_request_act(action: &str, params: &BTreeMap<String, String>) -> ControlRequest {
+        let mut all = params.clone();
+        all.insert("action".to_string(), action.to_string());
+        request("surface.change_request.act", all)
+    }
+
     pub fn tabs_read() -> ControlRequest {
         request("surface.tabs.read", BTreeMap::new())
     }

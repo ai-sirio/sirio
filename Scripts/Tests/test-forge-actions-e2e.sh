@@ -15,15 +15,21 @@ set -euo pipefail
 # have gone through.
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
-# `--stage NAME` runs one: wire-github, wire-gitlab, failures, cli. Nothing is
-# published and the user's own gh/glab configuration is never read.
+# `--stage NAME` runs one: wire-github, wire-gitlab, failures, cli, ui. Nothing
+# is published and the user's own gh/glab configuration is never read.
+#
+# The `ui` stage launches a real, isolated Sirio (debug build) against the
+# same fake forges and drives the change request tab over the control socket.
+# The verb that writes -- `surface change-request act` -- exists only in a debug
+# build, and calls the very handlers the tab's buttons call.
 #
 # The artifact: --out-dir DIR (default artifacts/forge-actions-e2e-<stamp>-<pid>)
 # keeps transcript.log and every fake forge's request log. Rerunning the
 # script reproduces it.
 #
-# Usage: Scripts/Tests/test-forge-actions-e2e.sh [--stage NAME] [--out-dir DIR]
-#        SIRIO_FORGE_E2E_VERBOSE=1 prints every probe answer.
+# Usage: Scripts/Tests/test-forge-actions-e2e.sh [--stage NAME] [--state-only] [--out-dir DIR] [--display :N]
+#        SIRIO_FORGE_E2E_VERBOSE=1 prints every probe answer. `--state-only`
+#        skips the ui stage's window captures (frames/), which need a display.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -31,15 +37,19 @@ CARGO_DIR="$REPO_ROOT/rust"
 
 OUT_DIR=""
 ONLY=""
+STATE_ONLY=0
+DISPLAY_TARGET="${DISPLAY:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --stage) ONLY="$2"; shift 2 ;;
+    --state-only) STATE_ONLY=1; shift ;;
+    --display) DISPLAY_TARGET="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$OUT_DIR" ] || OUT_DIR="$REPO_ROOT/artifacts/forge-actions-e2e-$(date +%Y%m%d-%H%M%S)-$$"
-mkdir -p "$OUT_DIR"
+mkdir -p "$OUT_DIR/frames"
 exec > >(tee "$OUT_DIR/transcript.log") 2>&1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -66,8 +76,77 @@ free_port() {
   "$PYTHON" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
 
+# The committed fixtures, plus what a read shows after each write: generated
+# from them here, so each overlay is the base with one change rather than a
+# second copy to keep in step.
+FIXTURES="$WORK/fixtures"
+cp -r "$SCRIPT_DIR/forge-fixtures" "$FIXTURES"
+"$PYTHON" - "$FIXTURES" <<'PY'
+import copy, json, sys
+root = sys.argv[1]
+
+def load(flavor, name):
+    with open(f"{root}/{flavor}/{name}.json", encoding="utf-8") as handle:
+        return json.load(handle)
+
+def save(flavor, name, value):
+    with open(f"{root}/{flavor}/{name}.json", "w", encoding="utf-8") as handle:
+        json.dump(value, handle)
+
+def github(name, change):
+    doc = copy.deepcopy(load("github", "ChangeRequestHeader"))
+    change(doc["data"]["repository"]["pullRequest"])
+    save("github", name, doc)
+
+def comment_of(pr):
+    return next(node for node in pr["timelineItems"]["nodes"] if node.get("__typename") == "IssueComment")
+
+def closed(pr):
+    pr.update(state="CLOSED", viewerCanClose=False, viewerCanReopen=True)
+
+def drafted(pr):
+    pr["isDraft"] = True
+
+def edited(pr):
+    pr.update(title="A better title", body="New description", baseRefName="develop")
+
+def comment_edited(pr):
+    comment_of(pr)["body"] = "Edited comment"
+
+def readonly(pr):
+    pr.update(locked=True, viewerDidAuthor=True, viewerCanUpdate=False, viewerCanClose=False, viewerCanReopen=False)
+    comment_of(pr)["viewerCanUpdate"] = False
+
+github("ChangeRequestHeader.after.ClosePullRequest", closed)
+github("ChangeRequestHeader.after.ReopenPullRequest", lambda pr: None)
+github("ChangeRequestHeader.after.ConvertPullRequestToDraft", drafted)
+github("ChangeRequestHeader.after.MarkPullRequestReadyForReview", lambda pr: None)
+github("ChangeRequestHeader.after.UpdatePullRequest", edited)
+github("ChangeRequestHeader.after.UpdateIssueComment", comment_edited)
+github("ChangeRequestHeader.readonly", readonly)
+
+def gitlab(name, change):
+    doc = copy.deepcopy(load("gitlab", "MergeRequestHeader"))
+    change(doc["data"]["project"]["mergeRequest"])
+    save("gitlab", name, doc)
+
+def note_of(mr):
+    return next(note for note in mr["notes"]["nodes"] if note["userPermissions"]["adminNote"])
+
+gitlab("MergeRequestHeader.after.MergeRequestUpdate.CLOSED", lambda mr: mr.update(state="closed"))
+gitlab("MergeRequestHeader.after.MergeRequestUpdate.OPEN", lambda mr: None)
+gitlab("MergeRequestHeader.after.MergeRequestSetDraft.true", lambda mr: mr.update(draft=True))
+gitlab("MergeRequestHeader.after.MergeRequestSetDraft.false", lambda mr: None)
+gitlab("MergeRequestHeader.after.MergeRequestUpdate", lambda mr: mr.update(title="Better", description="Desc", targetBranch="develop"))
+gitlab("MergeRequestHeader.after.UpdateNote", lambda mr: note_of(mr).update(body="Edited comment"))
+gitlab("MergeRequestHeader.readonly", lambda mr: (
+    mr.update(discussionLocked=True, userPermissions={"canApprove": False, "createNote": False, "updateMergeRequest": False}),
+    note_of(mr)["userPermissions"].update(adminNote=False),
+))
+PY
+
 start_forge() { # flavour port
-  "$PYTHON" "$SCRIPT_DIR/fake_forge.py" --flavor "$1" --port "$2" \
+  "$PYTHON" "$SCRIPT_DIR/fake_forge.py" --flavor "$1" --port "$2" --fixtures "$FIXTURES" \
     --log "$WORK/$1-requests.log" 2>"$WORK/$1-server.log" &
   PIDS+=($!)
   for _ in $(seq 1 50); do
@@ -411,6 +490,166 @@ else
   echo "SKIP: glab is not on PATH -- writes through glab (and the REST approval) were not exercised"
 fi
 fi
+
+
+if wanted ui; then
+echo "stage ui: a real Sirio, the change request tab, every action of B2a"
+BIN="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirio"
+CTL="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirioctl"
+if [ "$STATE_ONLY" -eq 0 ]; then
+  [ -n "$DISPLAY_TARGET" ] || fail "no DISPLAY; pass --display :N or --state-only"
+  for tool in import identify xwininfo xprop; do
+    command -v "$tool" >/dev/null || fail "$tool is required for captures; pass --state-only to skip them"
+  done
+fi
+echo "building sirio and sirioctl"
+(cd "$CARGO_DIR" && cargo build --quiet -p sirio --bin sirio && cargo build --quiet -p sirio_control --bin sirioctl)
+
+APP_PID=""
+stop_app() {
+  [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; APP_PID=""; }
+}
+trap 'stop_app; cleanup' EXIT
+
+ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
+reply() { "$CTL" "$@" --json; }
+field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get(sys.argv[1], ""))' "$1"; }
+key() { reply "${@:2}" | field "$1"; } # key sirioctl-args...
+wait_for() { # key value sirioctl-args...
+  local want_key=$1 want=$2
+  shift 2
+  local got=""
+  for _ in $(seq 1 100); do
+    got=$(reply "$@" | field "$want_key" || true)
+    [ "$got" = "$want" ] && { echo "OK: $want_key=$want"; return 0; }
+    sleep 0.3
+  done
+  reply "$@" || true
+  fail "$want_key never became '$want' (last: '$got') for: $*"
+}
+find_window() {
+  DISPLAY_TARGET="$DISPLAY_TARGET" APP_PID="$APP_PID" python3 - <<'PY'
+import os, re, subprocess
+display = os.environ["DISPLAY_TARGET"]
+want = int(os.environ["APP_PID"])
+listing = subprocess.run(["xwininfo", "-display", display, "-root", "-children"], capture_output=True, text=True, timeout=5).stdout
+best = None
+for line in listing.splitlines():
+    match = re.match(r"\s+(0x[0-9a-fA-F]+).*?\s(\d+)x(\d+)\+", line)
+    if not match:
+        continue
+    window, width, height = match.group(1), int(match.group(2)), int(match.group(3))
+    prop = subprocess.run(["xprop", "-display", display, "-id", window, "_NET_WM_PID"], capture_output=True, text=True, timeout=5).stdout
+    pid = re.search(r"=\s*(\d+)\s*$", prop)
+    if pid and int(pid.group(1)) == want and (best is None or width * height > best[0]):
+        best = (width * height, window)
+if best:
+    print(best[1])
+PY
+}
+capture() { # name
+  [ "$STATE_ONLY" -eq 0 ] || return 0
+  sleep 2
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID for $1"
+  import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png"
+  local colours
+  colours=$(identify -format '%k' "$OUT_DIR/frames/$1.png")
+  [ "$colours" -ge 200 ] || fail "$1 is blank ($colours colours)"
+  echo "FRAME: $1 ($colours colours)"
+}
+
+# Where the change request tab is in the tab list, so it can be closed and
+# opened again -- which is how it picks up another token.
+reopen_tab() { # number
+  local index
+  index=$(reply surface tabs read | python3 -c '
+import json, sys
+row = json.load(sys.stdin)[0]
+print(next((name.split(".")[1] for name, value in row.items() if name.startswith("tab.") and value.startswith("change_request|")), ""))')
+  [ -z "$index" ] || ctl surface tabs close "$index" >/dev/null
+  ctl surface change-request open "$1" >/dev/null
+  wait_for state loaded surface change-request read
+}
+saved_token() { # host forge token
+  local account
+  account=$(reply surface change-requests token --host "$1" --forge "$2" --token "$3" | field account)
+  [ "$account" = "fake-user" ] || fail "token $3 signed in as '$account'"
+  # A new token makes the right panel connect again; the tab's list is what
+  # `surface change-request open` reads, so it waits for it.
+  wait_for state ready surface change-requests read >/dev/null
+}
+
+run_ui() { # flavour host project number origin-url commentIndex noteOperation editedTitle
+  local flavour=$1 host=$2 number=$4 origin=$5 comment_index=$6 comment_op=$7
+  local port=$GH_PORT
+  [ "$flavour" = gitlab ] && port=$GL_PORT
+  local run_dir
+  run_dir=$(mktemp -d /tmp/sirio-forge-actions-XXXXXX)
+  reset_forge "$flavour" "$port"
+
+  local repo="$run_dir/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@example.com
+  git -C "$repo" config user.name Tester
+  git -C "$repo" commit -q --allow-empty -m first
+  git -C "$repo" checkout -q -b feat/work
+  git -C "$repo" remote add origin "$origin"
+
+  export SIRIO_SOCKET="$run_dir/control.sock" SIRIO_DB="$run_dir/session.sqlite" SIRIO_CREDENTIALS="$run_dir/credentials.json"
+  export GH_CONFIG_DIR="$run_dir/gh" GLAB_CONFIG_DIR="$run_dir/glab"
+  mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
+  chmod 700 "$GLAB_CONFIG_DIR"
+  if [ "$STATE_ONLY" -eq 1 ]; then
+    (cd "$repo" && exec env -u DISPLAY -u WAYLAND_DISPLAY "$BIN" >"$run_dir/app.log" 2>&1) &
+  else
+    (cd "$repo" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 "$BIN" >"$run_dir/app.log" 2>&1) &
+  fi
+  APP_PID=$!
+  for _ in $(seq 1 75); do [ -S "$SIRIO_SOCKET" ] && break; sleep 0.2; done
+  [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket"
+
+  ctl project add "$repo" >/dev/null
+  ctl select-workspace --workspace "$repo" >/dev/null
+  ctl surface change-requests show >/dev/null
+  saved_token "$host" "$flavour" good
+  ctl surface change-request open "$number" >/dev/null
+  wait_for state loaded surface change-request read
+  wait_for caps "comment,approve,request-changes,edit,state,draft" surface change-request read
+  wait_for cr_state open surface change-request read
+  wait_for action idle surface change-request read
+  capture "$flavour-tab"
+
+  sent() { sent_count "$flavour" "$1"; }
+  local comment_mutation="AddComment" review_mutation="AddPullRequestReview"
+  if [ "$flavour" = gitlab ]; then comment_mutation="CreateNote"; fi
+
+  echo "  [$flavour] the state comes back from the forge: close, reopen, draft, ready"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act close >/dev/null
+  wait_for cr_state closed surface change-request read
+  wait_for caps "comment,edit,state" surface change-request read
+  capture "$flavour-closed"
+  # No reset from here to the end of the sequence: the fake remembers each write,
+  # so a reopen finds a closed change request and a ready finds a draft.
+  ctl surface change-request act reopen >/dev/null
+  wait_for cr_state open surface change-request read
+  ctl surface change-request act draft >/dev/null
+  wait_for cr_state draft surface change-request read
+  ctl surface change-request act ready >/dev/null
+  wait_for cr_state open surface change-request read
+
+  stop_app
+  cp "$run_dir/app.log" "$OUT_DIR/app-$flavour.log" 2>/dev/null || true
+  rm -rf "$run_dir"
+}
+
+run_ui github ghe.test acme/widgets 101 https://ghe.test/acme/widgets.git 1 UpdateIssueComment
+run_ui gitlab gitlab.test team/app 201 https://gitlab.test/team/app.git 1 UpdateNote
+fi
+
 # Later stages are added above this line.
 
 echo "artifact: $OUT_DIR"

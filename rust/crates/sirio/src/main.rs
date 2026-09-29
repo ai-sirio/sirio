@@ -1085,6 +1085,13 @@ enum ControlAction {
         sha: String,
         reply: ControlReply,
     },
+    /// A write on the active change request's tab, by name. Debug builds
+    /// only: `handle_control_request` never builds it in a release build.
+    ActChangeRequest {
+        action: String,
+        params: BTreeMap<String, String>,
+        reply: ControlReply,
+    },
     ReadTabs {
         reply: ControlReply,
     },
@@ -2079,6 +2086,9 @@ impl ControlHandler for AppControlHandler {
                     "surface.chat.read",
                 ];
                 methods.extend(BROWSER_CAPABILITIES);
+                if cfg!(debug_assertions) {
+                    methods.push("surface.change_request.act");
+                }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
                     .map(|method| BTreeMap::from([("method".to_string(), (*method).to_string())]))
@@ -2351,6 +2361,17 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.change_request.open_commit requires sha");
                 };
                 self.queue_action(request, move |reply| ControlAction::OpenChangeRequestCommit { sha, reply })
+            }
+            // The one verb that writes to a forge. A release build has no such
+            // door: the guard is false there, the request falls through to
+            // "unknown method", and `system.capabilities` does not list it.
+            "surface.change_request.act" if cfg!(debug_assertions) => {
+                let Some(action) = request.params.get("action").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.change_request.act requires action");
+                };
+                let mut params = request.params.clone();
+                params.remove("action");
+                self.queue_action(request, move |reply| ControlAction::ActChangeRequest { action, params, reply })
             }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.tabs.select" => {
@@ -5217,6 +5238,11 @@ impl SirioWorkspace {
                                 ControlAction::OpenChangeRequestCommit { sha, reply } => {
                                     let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
                                         tab.open_commit_by_sha(&sha, cx)
+                                    }));
+                                }
+                                ControlAction::ActChangeRequest { action, params, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                        tab.control_act(&action, &params, cx)
                                     }));
                                 }
                                 ControlAction::ReadTabs { reply } => {
@@ -13444,6 +13470,11 @@ impl SirioWorkspace {
                         for tab_id in hosted {
                             workspace.close_tab_by_id(tab_id, None, cx);
                         }
+                    }
+                    ChangeRequestTabEvent::Changed => {
+                        workspace
+                            .right_panel
+                            .update(cx, |panel, cx| panel.refresh_change_requests(cx));
                     }
                 }
             },
@@ -36652,6 +36683,7 @@ done
             | ControlAction::RevealChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestCommit { reply, .. }
+            | ControlAction::ActChangeRequest { reply, .. }
             | ControlAction::ReadTabs { reply }
             | ControlAction::SelectListedTab { reply, .. }
             | ControlAction::CloseListedTab { reply, .. }
@@ -36779,6 +36811,7 @@ done
             "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
+            "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),
