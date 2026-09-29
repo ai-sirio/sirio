@@ -46,6 +46,7 @@ mod context_menu;
 mod domain;
 mod lifecycle;
 mod link_router;
+mod scrollbar;
 
 pub use context_menu::{
     TerminalContextAction, TerminalContextEvent, TerminalContextItem, TerminalContextRoute,
@@ -493,6 +494,10 @@ enum SirioScroll {
     /// line at a time; a page per tick would fly past whatever the user was
     /// dragging towards.
     Lines(isize),
+    /// The scrollbar's drag: an absolute row from the top of the scrollback.
+    /// A delta computed against metrics that are a frame old overshoots when
+    /// the thumb moves quickly; a row does not.
+    Row(usize),
 }
 
 /// A cheap, clonable reader for a live terminal's retained scrollback.
@@ -660,6 +665,11 @@ struct TerminalHandle {
     /// Sirio-gesture vs encode without a blocking round-trip into the !Send
     /// terminal state.
     mouse_tracking: Arc<AtomicBool>,
+    /// Where the viewport sits in the scrollback, for the scrollbar. Written
+    /// by the owner thread *before* it sends any event that asks the view to
+    /// repaint, so a render that follows an event never reads metrics older
+    /// than the one the event announced.
+    scroll_metrics: Arc<Mutex<scrollbar::ScrollMetrics>>,
     /// #259: the resolved selection, in viewport grid coordinates.
     ///
     /// Written by the main-thread mouse handlers when a gesture changes it,
@@ -817,6 +827,7 @@ struct TerminalThreadInputs {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     mouse_tracking: Arc<AtomicBool>,
+    scroll_metrics: Arc<Mutex<scrollbar::ScrollMetrics>>,
     /// #308 R4.4: the mutation stamp the view gates its Kitty placement
     /// re-scan and grid render cache on; bumped in the poll loop whenever
     /// this thread mutated the terminal in any way that could change either
@@ -1331,6 +1342,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             master,
             mut child,
             mouse_tracking,
+            scroll_metrics,
             mutation_stamp,
             snapshot_builds,
             scrollback_captures,
@@ -1404,6 +1416,8 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                 let _ = writer.flush();
             }
             if had_output {
+                // Before the event: the repaint it asks for reads the metrics.
+                publish_scroll_metrics(&terminal, &scroll_metrics);
                 let _ = event_tx.unbounded_send(TerminalEvent::Wakeup);
             }
 
@@ -1468,9 +1482,11 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             SirioScroll::PageUp => ScrollViewport::Delta(-page),
                             SirioScroll::PageDown => ScrollViewport::Delta(page),
                             SirioScroll::Lines(delta) => ScrollViewport::Delta(delta),
+                            SirioScroll::Row(row) => ScrollViewport::Row(row),
                         };
                         terminal.scroll_viewport(viewport);
                         mutated = true;
+                        publish_scroll_metrics(&terminal, &scroll_metrics);
                         let _ = event_tx.unbounded_send(TerminalEvent::ViewportChanged);
                     }
                     TerminalCommand::Snapshot(reply) => {
@@ -1521,6 +1537,14 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             }
             if mutated {
                 mutation_stamp.fetch_add(1, Ordering::Relaxed);
+                // Output and scrolling published above, before their own
+                // events. What is left is a change with no event of its own
+                // -- a resize reflowing the history, a replayed `Feed` -- and
+                // it is announced here, so the bar is never left drawn for a
+                // viewport that is gone. A still pane never gets this far.
+                if publish_scroll_metrics(&terminal, &scroll_metrics) {
+                    let _ = event_tx.unbounded_send(TerminalEvent::ViewportChanged);
+                }
             }
             if shutdown {
                 let _ = child.kill();
@@ -1915,6 +1939,7 @@ impl TerminalHandle {
         // Shared before the thread spawns and handed to both the owner loop
         // (writer) and the handle (reader) below.
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
+        let scroll_metrics = Arc::new(Mutex::new(scrollbar::ScrollMetrics::default()));
         let mutation_stamp = Arc::new(AtomicU64::new(0));
         let snapshot_builds = Arc::new(AtomicU64::new(0));
         let scrollback_captures = Arc::new(AtomicU64::new(0));
@@ -1929,6 +1954,7 @@ impl TerminalHandle {
             master: pair.master,
             child,
             mouse_tracking: mouse_tracking_flag.clone(),
+            scroll_metrics: scroll_metrics.clone(),
             mutation_stamp: mutation_stamp.clone(),
             snapshot_builds: snapshot_builds.clone(),
             scrollback_captures: scrollback_captures.clone(),
@@ -1954,6 +1980,7 @@ impl TerminalHandle {
                 grid_assemblies: Arc::new(AtomicU64::new(0)),
                 kitty_decode_failed,
                 mouse_tracking: mouse_tracking_flag,
+                scroll_metrics,
                 selection: Arc::new(Mutex::new(None)),
                 selection_anchor: Arc::new(Mutex::new(None)),
                 #[cfg(unix)]
@@ -2070,6 +2097,12 @@ impl TerminalHandle {
                 ));
             }
         });
+    }
+
+    /// The viewport's position in the scrollback as of the owner thread's last
+    /// mutation.
+    fn scroll_metrics(&self) -> scrollbar::ScrollMetrics {
+        *self.scroll_metrics.lock()
     }
 
     fn scroll_display(&self, scroll: SirioScroll) {
@@ -2210,6 +2243,30 @@ fn normalize_scrollback_for_replay(bytes: &[u8]) -> Vec<u8> {
 #[cfg_attr(not(unix), allow(dead_code))] // referenced by unix-only teardown
 const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// Reads where the viewport sits and stores it for the view, returning whether
+/// it differs from what was stored. libghostty counts in `u64`; a row count
+/// that does not fit a `usize` cannot be a real terminal, and saturates.
+fn publish_scroll_metrics(
+    terminal: &Terminal<'static, 'static>,
+    shared: &Mutex<scrollbar::ScrollMetrics>,
+) -> bool {
+    let Ok(bar) = terminal.scrollbar() else {
+        return false;
+    };
+    let rows = |count: u64| usize::try_from(count).unwrap_or(usize::MAX);
+    let now = scrollbar::ScrollMetrics {
+        total: rows(bar.total),
+        offset: rows(bar.offset),
+        len: rows(bar.len),
+    };
+    let mut published = shared.lock();
+    if *published == now {
+        return false;
+    }
+    *published = now;
+    true
+}
 
 /// Plain-text capture of a terminal's complete retained grid (history +
 /// viewport), newline-delimited, trailing blank rows dropped. The one place
@@ -2526,6 +2583,9 @@ pub struct TerminalView {
     /// `caret::schedule` and the composer's streaming border already follow,
     /// rather than a loop that runs whether or not anyone is dragging.
     autoscroll: Option<gpui::Task<()>>,
+    /// The scrollbar's thumb drag, shared with the bar element and read by the
+    /// mouse handlers that must leave that gesture alone.
+    scrollbar: scrollbar::ScrollbarGesture,
     /// Live link-hover tooltip (#41): the pointer position plus the resolved
     /// target URI of the cell under the pointer. Set only while the platform
     /// modifier is held over a linked cell; cleared on modifier release or
@@ -2724,6 +2784,7 @@ impl TerminalView {
             identity,
             context_menu: None,
             autoscroll: None,
+            scrollbar: scrollbar::ScrollbarGesture::default(),
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -2753,6 +2814,7 @@ impl TerminalView {
             identity,
             context_menu: None,
             autoscroll: None,
+            scrollbar: scrollbar::ScrollbarGesture::default(),
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -2804,6 +2866,7 @@ impl TerminalView {
             identity,
             context_menu: None,
             autoscroll: None,
+            scrollbar: scrollbar::ScrollbarGesture::default(),
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -3315,6 +3378,14 @@ impl TerminalView {
         }
     }
 
+    /// The scrollbar's drag: shows the row `row` (counted from the top of the
+    /// scrollback) as the first row of the viewport.
+    fn scroll_to_row(&self, row: usize) {
+        if let Some(terminal) = self.running_terminal() {
+            terminal.scroll_display(SirioScroll::Row(row));
+        }
+    }
+
     /// Writes bytes to the live PTY, the same path keystrokes use. Callers
     /// send bytes, never a raw file descriptor. A failed pane has no PTY and
     /// silently drops input (it renders a retry button instead).
@@ -3473,6 +3544,10 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
+        // A press that reaches here did not begin on the scrollbar (the bar
+        // stops its own), so any earlier bar gesture is over -- even one whose
+        // release was never delivered because it ended outside the window.
+        self.scrollbar.forget_press();
         // #43: Sirio's gestures are decided BEFORE any encoding — left-down
         // still focuses (above) and platform+left-click still opens links
         // below. Whatever remains may belong to the guest: encode the press
@@ -3750,6 +3825,11 @@ impl TerminalView {
         _: &mut Window,
         _: &mut gpui::Context<Self>,
     ) {
+        // The release that ends a scrollbar drag belongs to the bar: the guest
+        // was never told about the press, so it must not be told about this.
+        if self.scrollbar.take_pressed() {
+            return;
+        }
         // #259: the gesture ends; the selection it produced stays until the
         // next press clears it, and the autoscroll stops with the button.
         self.autoscroll = None;
@@ -4712,6 +4792,18 @@ impl gpui::Render for TerminalView {
                     palette,
                     font_size: self.font_size,
                 })
+                .child({
+                    let scrolled = cx.entity();
+                    scrollbar::bar(
+                        cx.entity_id().as_u64(),
+                        terminal.scroll_metrics(),
+                        &terminal.last_bounds,
+                        &self.scrollbar,
+                        move |row, cx| {
+                            scrolled.update(cx, |view, _| view.scroll_to_row(row));
+                        },
+                    )
+                })
                 .when_some(dropped_path, |this, path| {
                     this.child(
                         div()
@@ -5480,7 +5572,7 @@ mod tests {
 
     use super::*;
 
-    fn screen_text(handle: &TerminalHandle) -> String {
+    pub(super) fn screen_text(handle: &TerminalHandle) -> String {
         let (cells, _) = handle.snapshot();
         cells
             .iter()
@@ -7820,6 +7912,7 @@ mod tests {
 
 #[cfg(test)]
 mod view_tests {
+    use super::tests::screen_text;
     use super::*;
     use gpui::{AppContext, Modifiers, MouseButton, VisualTestContext, point, px};
     use std::cell::RefCell;
@@ -10006,5 +10099,317 @@ mod view_tests {
         );
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
+    }
+
+    // ---- the scrollbar --------------------------------------------------
+    //
+    // Everything below drives a real PTY through a drawn pane. The geometry has
+    // its own unit tests in `scrollbar.rs`; what only a pane can show is that
+    // the thumb is *there*, follows the viewport, moves it when dragged, and
+    // leaves everything else the pane does alone.
+
+    /// A drawn, settled pane running `script`, plus the handle its tests read.
+    #[cfg(unix)]
+    fn open_scrollbar_pane(
+        cx: &mut gpui::TestAppContext,
+        name: &str,
+        script: &str,
+    ) -> (
+        VisualTestContext,
+        gpui::Entity<TerminalView>,
+        TerminalHandle,
+        PathBuf,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("sirio-terminal-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = pty_fixture_shell(script, &[]);
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _cx| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+                .clone()
+        });
+        let handle = settled_drawn_terminal(&terminal, &mut cx);
+        (cx, terminal, handle, working_directory)
+    }
+
+    /// Pumps the pane until `condition` holds of its handle, then repaints so
+    /// what was drawn reflects it. What the owner thread publishes arrives on
+    /// its own clock, so an assertion about it must wait for it.
+    #[cfg(unix)]
+    fn pump_until(
+        terminal: &gpui::Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+        handle: &TerminalHandle,
+        condition: impl Fn(&TerminalHandle) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if condition(handle) {
+                terminal.update(&mut cx.cx, |_, cx| cx.notify());
+                cx.run_until_parked();
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A drag as a hand makes it: press, a first move that only *starts* the
+    /// drag (gpui reports `on_drag_move` from the move after it), the move
+    /// that matters, then release wherever that lands.
+    #[cfg(unix)]
+    fn drag(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(from.x, from.y + px(4.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    }
+
+    /// Two hundred numbered lines, then the process stays alive so the pane
+    /// keeps its terminal.
+    #[cfg(unix)]
+    const TWO_HUNDRED_LINES: &str =
+        "i=0; while [ \"$i\" -lt 200 ]; do printf 'SCROLLBAR_%03d\\n' \"$i\"; i=$((i + 1)); done";
+
+    /// The scrollbar is the only way to see *where* in a long scrollback the
+    /// viewport is, and to jump there. Driven as a hand drives it: history
+    /// appears, the wheel moves the thumb, dragging the thumb moves the
+    /// viewport (to either end, and past them), and none of it selects text.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn the_scrollbar_follows_the_viewport_and_dragging_it_scrolls_the_terminal(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let script = format!("{TWO_HUNDRED_LINES}; exec sleep 60");
+        let (mut cx, terminal, handle, working_directory) =
+            open_scrollbar_pane(cx, "scrollbar-drag", &script);
+
+        let metrics = handle.scroll_metrics();
+        assert!(
+            metrics.total > metrics.len,
+            "two hundred lines must overflow the viewport: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.offset,
+            metrics.total - metrics.len,
+            "output leaves the viewport at the bottom: {metrics:?}"
+        );
+        terminal.update(&mut cx.cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let track = cx
+            .debug_bounds("terminal-scrollbar-track")
+            .expect("a pane with history draws its scrollbar");
+        let thumb = cx
+            .debug_bounds("terminal-scrollbar-thumb")
+            .expect("the scrollbar has a thumb");
+        assert!(
+            (thumb.bottom() - track.bottom()).abs() < px(1.0),
+            "at the bottom of the history the thumb rests on the bottom of its track: \
+             thumb {thumb:?}, track {track:?}"
+        );
+
+        // The wheel moves the viewport; the thumb has to follow it.
+        let body = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is drawn");
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: body.center(),
+            delta: ScrollDelta::Lines(point(0.0, 10.0)),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |handle| {
+                handle.scroll_metrics().offset < metrics.offset
+            }),
+            "the wheel never moved the viewport"
+        );
+        let after_wheel = cx
+            .debug_bounds("terminal-scrollbar-thumb")
+            .expect("the thumb is still drawn after scrolling");
+        assert!(
+            after_wheel.origin.y < thumb.origin.y,
+            "scrolling up must lift the thumb: was {thumb:?}, now {after_wheel:?}"
+        );
+
+        // Grab the thumb and pull it past the top of its track.
+        let grab = after_wheel.center();
+        let above = point(grab.x, track.origin.y - px(40.0));
+        drag(&mut cx, grab, above);
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |handle| {
+                handle.scroll_metrics().offset == 0
+            }),
+            "dragging the thumb past the top must show the oldest row: {:?}",
+            handle.scroll_metrics()
+        );
+        assert!(
+            screen_text(&handle).contains("SCROLLBAR_000"),
+            "the oldest line is on screen once the viewport is at the top"
+        );
+        assert_eq!(
+            handle.selected_text(),
+            None,
+            "a drag that began on the scrollbar is not a text selection"
+        );
+
+        // And back down, past the bottom of the track.
+        let at_top = cx
+            .debug_bounds("terminal-scrollbar-thumb")
+            .expect("the thumb is drawn at the top");
+        assert!(
+            (at_top.origin.y - track.origin.y).abs() < px(1.0),
+            "at the top of the history the thumb rests on the top of its track: \
+             thumb {at_top:?}, track {track:?}"
+        );
+        let grab = at_top.center();
+        let below = point(grab.x, track.bottom() + px(40.0));
+        drag(&mut cx, grab, below);
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |handle| {
+                let m = handle.scroll_metrics();
+                m.offset == m.total - m.len
+            }),
+            "dragging the thumb past the bottom must return to the live screen: {:?}",
+            handle.scroll_metrics()
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// An application that asked for mouse reports owns the pointer, so a press
+    /// on Sirio's own scrollbar must never reach it -- neither the press nor
+    /// the release that ends the drag, wherever that release lands.
+    ///
+    /// Observed through the tty's own echo: the guest turns mouse reporting on
+    /// and then does nothing, and the line discipline echoes every report the
+    /// pane writes back onto the grid as `^[[<0;x;yM`. A left click on the
+    /// body is the positive control -- it must show up -- and a middle click
+    /// afterwards is the fence: reports travel one ordered channel, so once
+    /// the fence's echo is on screen anything the drag sent would be too.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn dragging_the_scrollbar_sends_nothing_to_a_guest_that_asked_for_mouse_reports(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let script =
+            format!("printf '\\033[?1000h\\033[?1006h'; {TWO_HUNDRED_LINES}; exec sleep 60");
+        let (mut cx, terminal, handle, working_directory) =
+            open_scrollbar_pane(cx, "scrollbar-mouse-reports", &script);
+        let reports = |handle: &TerminalHandle, button: &str| {
+            String::from_utf8_lossy(&handle.capture_scrollback())
+                .matches(&format!("[<{button};"))
+                .count()
+        };
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |handle| {
+                handle.mouse_tracking.load(Ordering::Relaxed)
+            }),
+            "the guest's mouse-tracking request never registered"
+        );
+
+        let body = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is drawn");
+        cx.simulate_mouse_down(body.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(body.center(), MouseButton::Left, Modifiers::none());
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |h| reports(h, "0") == 2),
+            "control: a left click on the body must be reported to the guest \
+             (press and release), or this test proves nothing: {}",
+            reports(&handle, "0")
+        );
+
+        let thumb = cx
+            .debug_bounds("terminal-scrollbar-thumb")
+            .expect("a pane with history draws a scrollbar thumb");
+        let start = handle.scroll_metrics().offset;
+        let grab = thumb.center();
+        // Released over the terminal body, well away from the track: that is
+        // where the pane's own release handler listens, so the release must
+        // not leak either.
+        let released_elsewhere = body.center();
+        drag(&mut cx, grab, released_elsewhere);
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |handle| {
+                handle.scroll_metrics().offset < start
+            }),
+            "the drag must still scroll the viewport while reporting is on"
+        );
+
+        cx.simulate_mouse_down(body.center(), MouseButton::Middle, Modifiers::none());
+        cx.simulate_mouse_up(body.center(), MouseButton::Middle, Modifiers::none());
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |h| reports(h, "1") == 2),
+            "fence: the middle click never reached the guest"
+        );
+        assert_eq!(
+            reports(&handle, "0"),
+            2,
+            "only the control click may have reached the guest as a left press and release; \
+             the scrollbar drag leaked one"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A full-screen application (vim, a TUI) has no scrollback to show, so it
+    /// gets no bar -- and the same pane had one a moment earlier, which is
+    /// what makes the absence mean something.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn the_scrollbar_goes_away_while_an_alternate_screen_application_runs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let script = format!(
+            "{TWO_HUNDRED_LINES}; read _; printf '\\033[?1049h'; printf 'ALTERNATE\\n'; exec sleep 60"
+        );
+        let (mut cx, terminal, handle, working_directory) =
+            open_scrollbar_pane(cx, "scrollbar-alternate-screen", &script);
+        terminal.update(&mut cx.cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-scrollbar-thumb").is_some(),
+            "control: the pane has a thumb before the alternate screen starts"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.input(b"\n".to_vec()));
+        assert!(
+            pump_until(&terminal, &mut cx, &handle, |handle| {
+                let m = handle.scroll_metrics();
+                m.total == m.len && screen_text(handle).contains("ALTERNATE")
+            }),
+            "the alternate screen never took over: {:?}",
+            handle.scroll_metrics()
+        );
+        assert!(
+            cx.debug_bounds("terminal-scrollbar-thumb").is_none(),
+            "an alternate screen has no history, so no thumb"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 }

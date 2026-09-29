@@ -111,7 +111,7 @@ sirio_forge, sirio_privacy
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
 sirio_acp        (-> sirio_persistence, sirio_claude)
-sirio_terminal    (-> sirio_project, sirio_theme)
+sirio_terminal    (-> sirio_project, sirio_theme, and `bezel` directly for its scrollbar)
 sirio_control    (-> sirio_acp, sirio_persistence)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
