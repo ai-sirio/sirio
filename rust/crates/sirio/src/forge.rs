@@ -18,7 +18,7 @@ use sirio_forge::{
 };
 use sirio_git::{FetchError, FetchRefspec};
 use sirio_ui::forge_source::{
-    ChangeRequestSource, Connection, HostRow, ReadyConnection, RevisionError,
+    ChangeRequestSource, Connection, HostRow, ReadyConnection, RevisionError, TokenWrite,
 };
 use sirio_usage::CredentialStore;
 
@@ -479,7 +479,7 @@ impl ChangeRequestSource for ForgeHub {
                     Resolution::NotConnected { forge } => (Some(forge), None),
                     Resolution::UnknownForge => (setting.map(|setting| setting.forge), None),
                 };
-                let account = match (forge, means) {
+                let client = match (forge, means) {
                     (Some(forge), Some(means)) => self
                         .client(
                             forge,
@@ -489,8 +489,19 @@ impl ChangeRequestSource for ForgeHub {
                                 project: String::new(),
                             },
                         )
-                        .ok()
-                        .and_then(|client| client.viewer().ok()),
+                        .ok(),
+                    _ => None,
+                };
+                let account = client.as_ref().and_then(|client| client.viewer().ok());
+                // Only a token has scopes to report; a CLI holds its own.
+                let write = match (&client, forge, means) {
+                    (Some(client), Some(forge), Some(Means::Token)) => {
+                        Some(match client.token_scopes() {
+                            Some(scopes) if scopes.allows_writing(forge) => TokenWrite::Yes,
+                            Some(_) => TokenWrite::No,
+                            None => TokenWrite::NotReported,
+                        })
+                    }
                     _ => None,
                 };
                 HostRow {
@@ -501,6 +512,7 @@ impl ChangeRequestSource for ForgeHub {
                     forge,
                     means,
                     account,
+                    write,
                 }
             })
             .collect()

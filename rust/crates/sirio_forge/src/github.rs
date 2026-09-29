@@ -12,9 +12,11 @@ use crate::action::{Action, ActionContext, ActionOutcome, ReviewVerdict, check_a
 use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, execute_mutation, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping;
+use crate::scopes::TokenScopes;
+use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
     Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -707,4 +709,16 @@ pub(crate) fn act(
         },
     }
     Ok(ActionOutcome::default())
+}
+
+/// A classic token lists its scopes in `X-OAuth-Scopes` on any answer; the
+/// cheapest is `GET user`. A fine-grained token sends no such header.
+pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
+    let request = RestRequest {
+        method: RestMethod::Get,
+        path: "user".to_string(),
+        body: None,
+    };
+    let response = execute_rest(client, &request).ok()?;
+    response.header("x-oauth-scopes").map(TokenScopes::from_header)
 }

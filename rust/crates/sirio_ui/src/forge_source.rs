@@ -40,6 +40,17 @@ pub struct ReadyConnection {
     pub source_owner: Option<String>,
 }
 
+/// Whether the token Sirio holds for a host may write, as far as the forge
+/// says (spec §9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenWrite {
+    Yes,
+    No,
+    /// A fine-grained GitHub token, or a GitLab that keeps no record of its
+    /// tokens: the forge does not say.
+    NotReported,
+}
+
 /// One host as Settings → Git hosting shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRow {
@@ -51,6 +62,8 @@ pub struct HostRow {
     /// The means the user pinned in Settings; `None` means "detect".
     pub pinned_means: Option<Means>,
     pub account: Option<String>,
+    /// `None` unless the host is on a token.
+    pub write: Option<TokenWrite>,
     pub has_token: bool,
     /// The user configured this host (it has a `forge.hosts` entry).
     pub configured: bool,

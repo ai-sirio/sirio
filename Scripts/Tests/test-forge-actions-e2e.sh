@@ -15,7 +15,7 @@ set -euo pipefail
 # have gone through.
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
-# `--stage NAME` runs one: wire-github, wire-gitlab, failures, cli, ui. Nothing
+# `--stage NAME` runs one: wire-github, wire-gitlab, failures, cli, scopes, ui. Nothing
 # is published and the user's own gh/glab configuration is never read.
 #
 # The `ui` stage launches a real, isolated Sirio (debug build) against the
@@ -448,6 +448,29 @@ probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token lim
 expect_code 20 "a rate limited host"
 expect_line "ERR RateLimited"
 [ "$(sent_count github AddComment)" = "$before" ] || fail "a comment was sent to a rate limited host"
+fi
+
+if wanted scopes; then
+echo "stage scopes: what a token says it may do, for Settings"
+probe "${GH[@]}" scopes
+expect_code 0 "the scopes of a classic github token"
+expect_line "SCOPES repo,read:org"
+expect_line "CAN_WRITE yes"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token readonly scopes
+expect_line "SCOPES read:org"
+expect_line "CAN_WRITE no"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token finegrained scopes
+expect_line "SCOPES not-reported"
+probe "${GL[@]}" scopes
+expect_line "SCOPES api,read_api"
+expect_line "CAN_WRITE yes"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token readonly scopes
+expect_line "SCOPES read_api"
+expect_line "CAN_WRITE no"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token finegrained scopes
+expect_line "SCOPES not-reported"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token expired scopes
+expect_line "SCOPES not-reported"
 fi
 
 if wanted cli; then

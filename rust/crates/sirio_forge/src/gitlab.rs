@@ -26,6 +26,7 @@ use crate::mapping::{self, SystemNote};
 use crate::model::{
     Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef, CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
+use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 
 macro_rules! full {
@@ -716,4 +717,23 @@ pub(crate) fn act(
         )?,
     }
     Ok(ActionOutcome::default())
+}
+
+/// A personal access token describes itself at `personal_access_tokens/self`.
+pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
+    let request = RestRequest {
+        method: RestMethod::Get,
+        path: "personal_access_tokens/self".to_string(),
+        body: None,
+    };
+    let response = execute_rest(client, &request).ok()?;
+    let value: Value = serde_json::from_slice(&response.body).ok()?;
+    let scopes = value.get("scopes")?.as_array()?;
+    Some(TokenScopes(
+        scopes
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    ))
 }

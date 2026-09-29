@@ -13,7 +13,7 @@ use sirio_forge::{Forge, Means, known_forge};
 
 use super::*;
 use crate::change_request_style as style;
-use crate::forge_source::{self, ChangeRequestSource, HostRow};
+use crate::forge_source::{self, ChangeRequestSource, HostRow, TokenWrite};
 use crate::text_selection::selectable_text;
 
 pub(crate) enum GitHostStatus {
@@ -189,7 +189,15 @@ fn means_text(row: &HostRow) -> String {
         (Some(forge), Some(Means::Cli)) => {
             format!("Signed in with {}{account}", style::cli_name(forge))
         }
-        (Some(_), Some(Means::Token)) => format!("Token{account}"),
+        (Some(_), Some(Means::Token)) => format!(
+            "Token{account}{}",
+            match row.write {
+                Some(TokenWrite::Yes) => " · can read and write",
+                Some(TokenWrite::No) => " · read-only",
+                Some(TokenWrite::NotReported) => " · scopes not reported",
+                None => "",
+            }
+        ),
         (Some(_), None) => "Not connected".to_string(),
         (None, _) => "Unknown forge".to_string(),
     }
@@ -443,4 +451,36 @@ mod tests {
             "the page hands the paste over as typed; the host trims it (Task 3)"
         );
     }
+
+    fn token_row(write: Option<TokenWrite>) -> HostRow {
+        HostRow {
+            host: "git.corp".to_string(),
+            forge: Some(Forge::GitLab),
+            means: Some(Means::Token),
+            pinned_means: None,
+            account: Some("me".to_string()),
+            write,
+            has_token: true,
+            configured: true,
+        }
+    }
+
+    #[test]
+    fn a_token_row_says_whether_its_token_may_write() {
+        assert_eq!(means_text(&token_row(Some(TokenWrite::Yes))), "Token as me · can read and write");
+        assert_eq!(means_text(&token_row(Some(TokenWrite::No))), "Token as me · read-only");
+        assert_eq!(means_text(&token_row(Some(TokenWrite::NotReported))), "Token as me · scopes not reported");
+        assert_eq!(means_text(&token_row(None)), "Token as me");
+    }
+
+    #[test]
+    fn a_cli_row_says_nothing_about_scopes() {
+        let row = HostRow {
+            means: Some(Means::Cli),
+            write: None,
+            ..token_row(None)
+        };
+        assert_eq!(means_text(&row), "Signed in with glab as me");
+    }
+
 }

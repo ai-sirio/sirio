@@ -278,6 +278,14 @@ fn run(args: &Args) -> Result<(), Failure> {
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }
         "act" => act_command(&client, args)?,
+        "scopes" => match client.token_scopes() {
+            Some(scopes) => {
+                let listed = if scopes.0.is_empty() { "-".to_string() } else { scopes.0.join(",") };
+                println!("SCOPES {listed}");
+                println!("CAN_WRITE {}", yes_no(scopes.allows_writing(client.forge())));
+            }
+            None => println!("SCOPES not-reported"),
+        },
         "create-url" => {
             let branch = args
                 .words

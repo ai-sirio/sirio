@@ -15,6 +15,7 @@ mod graphql;
 mod mapping;
 mod model;
 mod resolve;
+mod scopes;
 mod target;
 mod transport;
 
@@ -28,6 +29,7 @@ pub use model::{
     FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
     ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem,
 };
+pub use scopes::TokenScopes;
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};
 pub use target::{ForgeTarget, parse_remote_url};
 pub use transport::{

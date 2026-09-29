@@ -10,6 +10,7 @@ use crate::model::{
     FileChange, Forge, ListQuery, Listing, PageCursor,
 };
 use crate::target::ForgeTarget;
+use crate::scopes::TokenScopes;
 use crate::transport::Transport;
 use crate::{github, gitlab};
 
@@ -159,6 +160,18 @@ impl ForgeClient {
             Forge::GitHub => github::act(self, number, action),
             Forge::GitLab => gitlab::act(self, number, action),
         }
+    }
+
+    /// The scopes the signed-in token reports for itself, for Settings. `None`
+    /// where the forge does not say — a fine-grained GitHub token sends no
+    /// `X-OAuth-Scopes`, and a GitLab OAuth token has no personal access token
+    /// record — and on any failure: a question about a token's scopes never
+    /// becomes an error of its own.
+    pub fn token_scopes(&self) -> Option<TokenScopes> {
+        match self.forge {
+            Forge::GitHub => github::token_scopes(self),
+            Forge::GitLab => gitlab::token_scopes(self),
+          }
     }
 
     /// The forge's own page for opening a change request from `branch`,

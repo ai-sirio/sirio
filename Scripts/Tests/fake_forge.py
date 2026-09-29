@@ -42,8 +42,9 @@ normal -- so one server covers every error path of an action:
                the reason in the payload's `errors`; REST: 409
     dropped    the request is read, then the connection is closed unanswered
     slow       the answer is held back 1.5 s, so two sends overlap
-    readonly   reads serve `<Operation>.readonly.json` where it exists (a
-               viewer who may not act)
+     readonly   reads serve `<Operation>.readonly.json` where it exists (a
+                viewer who may not act); its token lists only read scopes
+    finegrained  a token that reports no scopes at all
 
 A write that succeeded is remembered, and a read then serves
 `<Operation>.after.<Mutation>.json` when it exists (the newest write that has
@@ -252,16 +253,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.flavor == "github":
                 return self.answer(200, {"installed_version": "3.17.0"})
             return self.answer(404, {"message": "404 Not Found"})
-        signed_in = (self.flavor == "github" and path in ("/", "/user")) or (
+        signed_in = (self.flavor == "github" and path in ("/", "/user", "/api/v3/user")) or (
             self.flavor == "gitlab" and path == "/api/v4/user"
         )
+        if self.flavor == "gitlab" and path == "/api/v4/personal_access_tokens/self":
+            error = self.scenario_error()
+            if error:
+                return self.answer(error[0], error[1], error[2])
+            scopes = {"good": ["api", "read_api"], "readonly": ["read_api"]}.get(self.credential())
+            if scopes is None:  # a token with no record of itself: an OAuth token
+                return self.answer(404, {"message": "404 Not Found"})
+            return self.answer(200, {"id": 1, "name": "fake", "scopes": scopes})
         if not signed_in:
             return self.answer(404, {"message": "Not Found"})
         error = self.scenario_error()
         if error:
             return self.answer(error[0], error[1], error[2])
         who = {"login": "fake-user"} if self.flavor == "github" else {"username": "fake-user"}
-        return self.answer(200, who, [("X-OAuth-Scopes", "repo, read:org")])
+        # A classic token lists its scopes; `readonly` has only read ones; a
+        # fine-grained token (`finegrained`) sends no such header at all.
+        scopes = {"readonly": "read:org", "finegrained": None}.get(self.credential(), "repo, read:org")
+        return self.answer(200, who, [("X-OAuth-Scopes", scopes)] if scopes is not None else [])
 
     def do_POST(self):
         path = self.plain_path()
