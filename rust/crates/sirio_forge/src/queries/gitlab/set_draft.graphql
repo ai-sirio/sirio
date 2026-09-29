@@ -1,0 +1,3 @@
+mutation MergeRequestSetDraft($input: MergeRequestSetDraftInput!) {
+  mergeRequestSetDraft(input: $input) { errors mergeRequest { iid } }
+}

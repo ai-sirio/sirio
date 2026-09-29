@@ -1,0 +1,3 @@
+mutation MergeRequestRequestChanges($input: MergeRequestRequestChangesInput!) {
+  mergeRequestRequestChanges(input: $input) { errors mergeRequest { iid } }
+}

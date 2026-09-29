@@ -157,10 +157,7 @@ impl ForgeClient {
         let _perf = sirio_perf::span("forge.act", 0);
         match self.forge {
             Forge::GitHub => github::act(self, number, action),
-            Forge::GitLab => Err(ForgeError::Unsupported {
-                host: self.host.clone(),
-                what: "writing to GitLab".to_string(),
-            }),
+            Forge::GitLab => gitlab::act(self, number, action),
         }
     }
 
@@ -254,7 +251,7 @@ pub(crate) fn paged<T>(
 
 /// Percent-encodes everything but RFC 3986's unreserved characters, and
 /// `/` when `keep_slash`.
-fn percent_encode(text: &str, keep_slash: bool) -> String {
+pub(crate) fn percent_encode(text: &str, keep_slash: bool) -> String {
     let mut encoded = String::with_capacity(text.len());
     for byte in text.bytes() {
         let keep = byte.is_ascii_alphanumeric()

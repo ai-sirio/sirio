@@ -1,0 +1,8 @@
+query MergeRequestActionContext($fullPath: ID!, $iid: String!) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) {
+      id state draft discussionLocked
+      userPermissions { createNote updateMergeRequest }
+    }
+  }
+}
