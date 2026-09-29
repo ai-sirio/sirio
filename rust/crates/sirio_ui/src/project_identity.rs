@@ -22,6 +22,7 @@ use crate::caret;
 use crate::controls;
 use crate::settings::AgentAccentColor;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 /// F-PRJ-15: a curated subset of this app's own shipped glyphs offered as
 /// project icons — not [`crate::sidebar::icons::ALL_ICONS`]. Most of that
@@ -767,10 +768,7 @@ impl ProjectIconPicker {
             .on_key_down(move |event, window, cx| {
                 key_entity.update(cx, |picker, cx| picker.on_emoji_key(event, window, cx));
             })
-            .child(text!(
-                id = "project-icon-emoji-draft",
-                self.emoji_draft.clone()
-            ))
+            .child(selectable_text(self.emoji_draft.clone()).id("project-icon-emoji-draft"))
             .child(
                 div()
                     .debug_selector(|| "project-icon-emoji-caret".into())
@@ -816,7 +814,7 @@ impl ProjectIconPicker {
                     .debug_selector(|| "project-icon-emoji-error".into())
                     .text_size(theme.typography.footnote)
                     .text_color(theme.diff_del)
-                    .child(text!(id = "project-icon-emoji-error-text", error.clone())),
+                    .child(selectable_text(error.clone()).id("project-icon-emoji-error-text")),
             );
         }
         if self.emoji_grid_open {
@@ -1022,7 +1020,7 @@ impl ProjectIconPicker {
                     .debug_selector(|| "project-icon-png-error".into())
                     .text_size(theme.typography.footnote)
                     .text_color(theme.diff_del)
-                    .child(text!(id = "project-icon-png-error-text", error.clone())),
+                    .child(selectable_text(error.clone()).id("project-icon-png-error-text")),
             );
         }
 
@@ -1077,7 +1075,7 @@ impl ProjectIconPicker {
                     .debug_selector(|| "project-icon-avatar-current".into())
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!(id = "project-icon-avatar-current-text", label)),
+                    .child(selectable_text(label).id("project-icon-avatar-current-text")),
             );
         }
         column
@@ -1185,7 +1183,7 @@ impl ProjectIconPicker {
                     .debug_selector(move || error_id.clone())
                     .text_size(theme.typography.footnote)
                     .text_color(theme.diff_del)
-                    .child(message.clone()),
+                    .child(selectable_text(message.clone())),
             );
         }
         div().child(row)

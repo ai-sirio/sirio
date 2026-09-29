@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 pub(crate) const HEIGHT: f32 = 40.0;
 
@@ -579,7 +580,7 @@ impl Render for StatusBar {
                         .opacity(if dimmed { DIM_OPACITY } else { 1.0 })
                         .child(loading::progress(meter, &theme)),
                 )
-                .child(text!(id = text_id, text))
+                .child(selectable_text(text).id(text_id))
         };
 
         // The segments follow the settings surface's "Show in usage bar"
@@ -693,7 +694,14 @@ impl Render for StatusBar {
             .text_color(status_text_color)
             .child(left)
             .child(div().flex_1())
-            .child(text!(format!("{} · {}", self.data.branch, self.data.path)))
+            .child(
+                div()
+                    .debug_selector(|| "status-bar-location".into())
+                    .child(selectable_text(format!(
+                        "{} · {}",
+                        self.data.branch, self.data.path
+                    ))),
+            )
     }
 }
 

@@ -43,6 +43,7 @@ pub mod project_settings;
 
 use self::icons::{Icon, IconElement, IconSize};
 use crate::status::ActivityStatus;
+use crate::text_selection::selectable_text;
 
 mod fade;
 mod row;
@@ -4224,7 +4225,7 @@ impl Render for Sidebar {
                         .py(px(6.0))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.diff_del)
-                        .child(notice.unwrap_or_default()),
+                        .child(selectable_text(notice.unwrap_or_default())),
                 )
             })
             .when(prompt.is_some(), |this| {
@@ -4373,7 +4374,9 @@ impl Render for Sidebar {
                                         div()
                                             .text_size(theme.typography.footnote)
                                             .text_color(theme.diff_del)
-                                            .child(prompt.error.clone().unwrap_or_default()),
+                                            .child(selectable_text(
+                                                prompt.error.clone().unwrap_or_default(),
+                                            )),
                                     )
                                 })
                                 .child(

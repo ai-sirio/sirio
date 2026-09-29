@@ -19,6 +19,7 @@
 //! events to the caller's `on_key_down`, so callers keep their own editing
 //! rules (trim-and-no-op-on-empty, in both current uses) in one place.
 
+use crate::text_selection::selectable_text;
 use bezel::theme::Theme as BezelTheme;
 use gpui::{
     AnyElement, App, ClickEvent, FocusHandle, FontWeight, KeyDownEvent, MouseButton, Window, div,
@@ -148,6 +149,8 @@ pub struct ModalSpec {
 /// used before it was rebuilt on this primitive.
 pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
     let backdrop_id = spec.id.to_string();
+    let title_id = format!("{}-title", spec.id);
+    let body_id = format!("{}-body", spec.id);
 
     let mut sheet = div()
         .flex()
@@ -158,13 +161,15 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(spec.title),
+                .debug_selector(move || title_id.clone())
+                .child(selectable_text(spec.title)),
         )
         .child(
             div()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text_muted)
-                .child(spec.body),
+                .debug_selector(move || body_id.clone())
+                .child(selectable_text(spec.body)),
         );
 
     if let Some(field) = spec.text_field {

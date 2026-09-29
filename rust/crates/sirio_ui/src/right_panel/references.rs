@@ -5,6 +5,7 @@
 //! and the protocol does the converting. Nothing here knows what a UTF-16
 //! column is, and nothing here reads a file.
 
+use crate::text_selection::selectable_text;
 use std::path::PathBuf;
 
 use gpui::{Context, EventEmitter, Render, Window, div, prelude::*, px, uniform_list};
@@ -135,7 +136,7 @@ impl Render for ReferencesList {
                     .py(px(6.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_faint)
-                    .child(message),
+                    .child(selectable_text(message)),
             );
         }
 

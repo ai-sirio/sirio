@@ -12,6 +12,7 @@ use gpui::{
 use sirio_git::{GitRemote, clone_repository};
 
 use crate::loading;
+use crate::text_selection::selectable_text;
 use sirio_project::create_project;
 use sirio_theme::Theme;
 
@@ -398,7 +399,7 @@ impl Render for CloneForm {
                     .id("clone-status")
                     .text_size(theme.typography.footnote)
                     .text_color(status_color)
-                    .child(status_line),
+                    .child(selectable_text(status_line)),
             )
     }
 }
@@ -694,7 +695,7 @@ impl Render for CreateForm {
                     .id("create-status")
                     .text_size(theme.typography.footnote)
                     .text_color(status_color)
-                    .child(status_line),
+                    .child(selectable_text(status_line)),
             )
     }
 }

@@ -23,6 +23,7 @@ use sirio_theme::Theme;
 use crate::change_request_style as style;
 use crate::forge_source::{self, Connection, ReadyConnection};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -759,13 +760,13 @@ fn notice(id: &'static str, title: String, hint: Option<String>, theme: &Theme) 
         .p(theme.spacing.card_gap)
         .text_size(theme.typography.headline)
         .text_color(theme.text)
-        .child(title)
+        .child(selectable_text(title))
         .when_some(hint, |this, hint| {
             this.child(
                 div()
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_faint)
-                    .child(hint),
+                    .child(selectable_text(hint)),
             )
         })
 }
@@ -890,7 +891,7 @@ impl ChangeRequestList {
                     .items_center()
                     .gap(px(8.0))
                     .text_color(theme.text_muted)
-                    .child(format!("No {noun} for {branch}"))
+                    .child(selectable_text(format!("No {noun} for {branch}")))
                     .child(icon_button(
                         "change-requests-create",
                         Icon::Plus,
@@ -906,7 +907,7 @@ impl ChangeRequestList {
                 .into_any_element(),
             Card::Failed(error) => div()
                 .text_color(theme.danger)
-                .child(error_text(error))
+                .child(selectable_text(error_text(error)))
                 .into_any_element(),
         };
         let found = matches!(self.card, Card::Found(_));
@@ -1193,7 +1194,10 @@ impl ChangeRequestList {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(format!("Refresh failed · {}", error_text(error))),
+                                .child(selectable_text(format!(
+                                    "Refresh failed · {}",
+                                    error_text(error)
+                                ))),
                         )
                         .child(text_button(
                             "change-requests-refresh-retry",
@@ -1275,7 +1279,10 @@ impl ChangeRequestList {
             div()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text_muted)
-                .child(format!("Sign in with the {} CLI:", forge.name())),
+                .child(selectable_text(format!(
+                    "Sign in with the {} CLI:",
+                    forge.name()
+                ))),
         )
         .child(
             div()
@@ -1287,7 +1294,7 @@ impl ChangeRequestList {
                 .rounded(theme.radii.control)
                 .bg(theme.code_wash)
                 .text_size(theme.typography.footnote)
-                .child(command)
+                .child(selectable_text(command))
                 .child(icon_button(
                     "change-requests-copy-login",
                     Icon::Copy,
@@ -1300,7 +1307,9 @@ impl ChangeRequestList {
             div()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text_muted)
-                .child(format!("or paste a personal access token with {scopes}:")),
+                .child(selectable_text(format!(
+                    "or paste a personal access token with {scopes}:"
+                ))),
         )
         .child(
             div()
@@ -1336,7 +1345,7 @@ impl ChangeRequestList {
                     div()
                         .text_size(theme.typography.footnote)
                         .text_color(tone)
-                        .child(text),
+                        .child(selectable_text(text)),
                 )
             },
         )

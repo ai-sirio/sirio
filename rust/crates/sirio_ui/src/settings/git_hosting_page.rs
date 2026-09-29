@@ -14,6 +14,7 @@ use sirio_forge::{Forge, Means, known_forge};
 use super::*;
 use crate::change_request_style as style;
 use crate::forge_source::{self, ChangeRequestSource, HostRow};
+use crate::text_selection::selectable_text;
 
 pub(crate) enum GitHostStatus {
     Working,
@@ -230,11 +231,11 @@ impl Settings {
                             div()
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.text_muted)
-                                .child(format!(
+                                .child(selectable_text(format!(
                                     "{} · {}",
                                     row.forge.map_or("Unknown forge", Forge::name),
                                     means_text(row)
-                                )),
+                                ))),
                         ),
                 );
             let mut tail = div().flex().flex_wrap().items_center().gap(px(6.0));
@@ -312,7 +313,10 @@ impl Settings {
                         div()
                             .text_size(theme.typography.footnote)
                             .text_color(theme.text_muted)
-                            .child(format!("Needs {}", style::token_scopes(forge))),
+                            .child(selectable_text(format!(
+                                "Needs {}",
+                                style::token_scopes(forge)
+                            ))),
                     );
                 }
                 if row.has_token {
@@ -352,7 +356,7 @@ impl Settings {
                                 .mt(px(6.0))
                                 .text_size(theme.typography.footnote)
                                 .text_color(tone)
-                                .child(text),
+                                .child(selectable_text(text)),
                         )
                     }),
             );
