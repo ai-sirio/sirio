@@ -20,6 +20,7 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 mod actions;
+mod composer;
 mod edit;
 
 use crate::change_request_style as style;
@@ -244,7 +245,12 @@ impl ChangeRequestTab {
         worktree: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx;
+        let composer = composer::new_field(cx);
+        cx.observe(&composer, |tab: &mut Self, field, cx| {
+            tab.actions.composer_blank = field.read(cx).content().trim().is_empty();
+            cx.notify();
+        })
+        .detach();
         Self {
             reference,
             title,
@@ -276,7 +282,7 @@ impl ChangeRequestTab {
             pending_reveal: None,
             commit_error: None,
             commit_task: None,
-            actions: actions::ActionsState::new(),
+            actions: actions::ActionsState::new(composer),
         }
     }
 
@@ -908,6 +914,10 @@ impl ChangeRequestTab {
             ),
             ("caps".to_string(), self.caps_words()),
             (
+                "composer_len".to_string(),
+                self.actions.composer.read(cx).content().len().to_string(),
+            ),
+            (
                 "editing".to_string(),
                 if self.actions.edit.is_some() { "yes" } else { "no" }.to_string(),
             ),
@@ -1399,6 +1409,9 @@ impl ChangeRequestTab {
                 }
                 for (index, item) in header.timeline.iter().enumerate() {
                     column = column.child(self.render_timeline_item(index, item, theme, entity));
+                }
+                if let Some(composer) = self.render_composer(theme, entity) {
+                    column = column.child(composer);
                 }
                 column.into_any_element()
             },

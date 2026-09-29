@@ -626,6 +626,33 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   local comment_mutation="AddComment" review_mutation="AddPullRequestReview"
   if [ "$flavour" = gitlab ]; then comment_mutation="CreateNote"; fi
 
+  echo "  [$flavour] the composer: words go out exactly, and only success clears them"
+  ctl surface change-request act compose --text $'He said "ok" \\ naïve café ☕\n\ttabbed' >/dev/null
+  [ "$(key composer_len surface change-request read)" != 0 ] || fail "the composer took no text"
+  ctl surface change-request act send --how comment >/dev/null
+  wait_for action idle surface change-request read
+  wait_for composer_len 0 surface change-request read
+  expect_sent "$flavour" "$comment_mutation" 1
+  "$PYTHON" - "$WORK/$flavour-requests.log" "$comment_mutation" <<'PY' || fail "the comment reached the forge changed"
+import json, re, sys
+last = None
+for line in open(sys.argv[1], encoding="utf-8"):
+    found = re.match(r"^POST \S+ (\S+) interaction=\w+ vars=(.*)$", line)
+    if found and found.group(1) == sys.argv[2]:
+        last = json.loads(found.group(2))["input"]["body"]
+sys.exit(0 if last == 'He said "ok" \\ naïve café ☕\n\ttabbed' else 1)
+PY
+  echo "  [$flavour] an approval needs no words; its own button, its own request"
+  ctl surface change-request act send --how approve >/dev/null
+  wait_for action idle surface change-request read
+  if [ "$flavour" = gitlab ]; then expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/approve"; else expect_sent github "$review_mutation" 1; fi
+  echo "  [$flavour] a comment with no words is refused, and nothing is sent"
+  before=$(sent "$comment_mutation")
+  ctl surface change-request act send --how comment >/dev/null
+  wait_for action failed surface change-request read
+  wait_for action_message "A comment needs some text." surface change-request read
+  [ "$(sent "$comment_mutation")" = "$before" ] || fail "an empty comment reached the forge"
+
   echo "  [$flavour] the state comes back from the forge: close, reopen, draft, ready"
   reset_forge "$flavour" "$port"
   ctl surface change-request act close >/dev/null
@@ -651,6 +678,54 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   wait_for editing no surface change-request read
   wait_for title "$([ "$flavour" = gitlab ] && echo Better || echo 'A better title')" surface change-request read
 
+  echo "  [$flavour] a double send while the first is in flight is one request; words typed meanwhile stay"
+  saved_token "$host" "$flavour" slow
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act compose --text "Once" >/dev/null
+  ctl surface change-request act send --how comment >/dev/null
+  if ctl surface change-request act send --how comment >/dev/null 2>&1; then fail "a second send was accepted while the first was in flight"; fi
+  # The first send is still in flight (this forge answers after 1.5 s): what is
+  # typed now is not what was sent, so success must not wipe it.
+  ctl surface change-request act compose --text "typed meanwhile" >/dev/null
+  wait_for action idle surface change-request read
+  wait_for composer_len 15 surface change-request read
+  expect_sent "$flavour" "$comment_mutation" 1
+
+  echo "  [$flavour] a token that cannot write: the reason is shown and the words stay"
+  saved_token "$host" "$flavour" scopeless
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act compose --text "keep me" >/dev/null
+  ctl surface change-request act send --how comment >/dev/null
+  wait_for action failed surface change-request read
+  case "$(key action_message surface change-request read)" in *"cannot write here"*) ;; *) fail "the write scope was not named" ;; esac
+  wait_for composer_len 7 surface change-request read
+  capture "$flavour-failed"
+
+  echo "  [$flavour] a connection dropped after the send: it is looked at, never resent"
+  saved_token "$host" "$flavour" dropped
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act compose --text "maybe sent" >/dev/null
+  ctl surface change-request act send --how comment >/dev/null
+  wait_for action unconfirmed surface change-request read
+  wait_for composer_len 10 surface change-request read
+  expect_sent "$flavour" "$comment_mutation" 1
+  # The header was read again before the tab said anything.
+  [ "$(sent_count "$flavour" "$([ "$flavour" = gitlab ] && echo MergeRequestHeader || echo ChangeRequestHeader)")" -ge 1 ] || fail "the tab did not look again after an unconfirmed write"
+
+  echo "  [$flavour] a viewer who may not act sees no action, and one forced is refused unsent"
+  saved_token "$host" "$flavour" readonly
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  wait_for caps "-" surface change-request read
+  ctl surface change-request act compose --text "not allowed" >/dev/null
+  ctl surface change-request act send --how comment >/dev/null
+  wait_for action failed surface change-request read
+  wait_for action_message "You cannot comment on this change request." surface change-request read
+  expect_sent "$flavour" "$comment_mutation" 0
+  capture "$flavour-readonly"
   stop_app
   cp "$run_dir/app.log" "$OUT_DIR/app-$flavour.log" 2>/dev/null || true
   rm -rf "$run_dir"

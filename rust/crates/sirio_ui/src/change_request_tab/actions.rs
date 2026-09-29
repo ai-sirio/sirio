@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use bezel::ui::input::TextField;
 use sirio_forge::{Action, ActionOutcome, ChangeState};
 
+use super::composer::ComposerSend;
 use super::*;
 
 /// The one write in flight, or how the last one ended. One at a time per
@@ -60,14 +61,25 @@ pub(crate) struct ActionsState {
     pub(crate) state: ActionState,
     task: Option<Task<()>>,
     pub(crate) edit: Option<EditFields>,
+    /// The composer's field, and whether it holds only blanks (kept by an
+    /// observer, so a render never has to read it).
+    pub(crate) composer: Entity<TextField>,
+    pub(crate) composer_blank: bool,
+    /// What the composer held when it was sent: on success the field is
+    /// cleared only if it still holds exactly that, so words typed while the
+    /// request was in flight are never wiped.
+    pub(crate) sent: Option<String>,
 }
 
 impl ActionsState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(composer: Entity<TextField>) -> Self {
         Self {
             state: ActionState::Idle,
             task: None,
             edit: None,
+            composer,
+            composer_blank: true,
+            sent: None,
         }
     }
 }
@@ -176,7 +188,7 @@ impl ChangeRequestTab {
         match result {
             Ok(outcome) => {
                 self.actions.state = outcome.warning.map_or(ActionState::Idle, ActionState::Warning);
-                self.action_succeeded(kind);
+                self.action_succeeded(kind, cx);
                 self.reread_after_write(cx);
             }
             // The request may have gone through: look before saying anything,
@@ -206,9 +218,17 @@ impl ChangeRequestTab {
     }
 
     /// Text is cleared only when its write succeeded; a failure keeps it.
-    fn action_succeeded(&mut self, kind: &'static str) {
-        if kind == "edit" {
-            self.actions.edit = None;
+    fn action_succeeded(&mut self, kind: &'static str, cx: &mut Context<Self>) {
+        match kind {
+            "edit" => self.actions.edit = None,
+            "comment" | "approve" | "request-changes" => {
+                let sent = self.actions.sent.take();
+                let composer = self.actions.composer.clone();
+                if sent.is_some_and(|sent| composer.read(cx).content().as_ref() == sent) {
+                    composer.update(cx, |field, cx| field.clear(cx));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -349,6 +369,19 @@ impl ChangeRequestTab {
             "reopen" => self.perform(Action::Reopen, cx),
             "ready" => self.perform(Action::MarkReady, cx),
             "draft" => self.perform(Action::ConvertToDraft, cx),
+            "compose" => {
+                let words = text("text").ok_or("compose needs text")?;
+                self.actions
+                    .composer
+                    .update(cx, |field, cx| field.set_content(words, cx));
+                Ok(())
+            }
+            "send" => match text("how").as_deref() {
+                Some("comment") => self.send_composer(ComposerSend::Comment, cx),
+                Some("approve") => self.send_composer(ComposerSend::Approve, cx),
+                Some("request-changes") => self.send_composer(ComposerSend::RequestChanges, cx),
+                _ => Err("send needs how: comment, approve or request-changes".to_string()),
+            },
             "edit" => {
                 self.start_edit(cx);
                 let fields = self.actions.edit.as_ref().ok_or("the change request is not loaded")?;
