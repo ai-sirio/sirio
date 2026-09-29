@@ -31,6 +31,27 @@ The credential picks the scenario, so one server covers every error path:
 a server older than the newest fields. The credential is read from
 `Authorization: Bearer|token <t>` (sirio_forge, gh) or `PRIVATE-TOKEN` (glab).
 
+Writes (test-forge-actions-e2e.sh). A GraphQL mutation answers its own
+fixture, `<Operation>.json`, or else a generic success naming the mutation's
+field; GitLab's REST `POST /api/v4/projects/<id>/merge_requests/<iid>/approve`
+answers 201. The credential picks a failure for a write only -- reads stay
+normal -- so one server covers every error path of an action:
+
+    scopeless  GitHub: 200 + INSUFFICIENT_SCOPES; GitLab: 403 insufficient_scope
+    rejected   GitHub: 200 + UNPROCESSABLE and a null payload; GitLab: 200 and
+               the reason in the payload's `errors`; REST: 409
+    dropped    the request is read, then the connection is closed unanswered
+    slow       the answer is held back 1.5 s, so two sends overlap
+    readonly   reads serve `<Operation>.readonly.json` where it exists (a
+               viewer who may not act)
+
+A write that succeeded is remembered, and a read then serves
+`<Operation>.after.<Mutation>.json` when it exists (the newest write that has
+one wins): a change request closed by a mutation reads as closed. GitLab's
+`MergeRequestUpdate` and `MergeRequestSetDraft` are told apart by their input,
+`<Mutation>.CLOSED`, `<Mutation>.OPEN`, `<Mutation>.true`, `<Mutation>.false`;
+the REST approval is `approve`. `POST /__reset` forgets every write.
+
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
 2.100 and glab 1.119), so chunked bodies are decoded here.
 
@@ -43,7 +64,10 @@ import argparse
 import http.server
 import json
 import os
+import re
 import sys
+import threading
+import time
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forge-fixtures")
 
@@ -64,8 +88,10 @@ def load_fixtures(root):
 
 
 # Operations that have a baseline variant, and the fields those variants omit.
-BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader"}
-NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount"}
+BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext"}
+NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove"}
+# The newer fields a query can name, and the type an older GitLab would say lacks them.
+NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"))
 
 
 def strip_newer(value, parent=None):
@@ -86,6 +112,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     flavor = "github"
     log_path = None
     fixture_files = {}
+    applied = []
+    applied_lock = threading.Lock()
 
     def credential(self):
         auth = self.headers.get("Authorization") or ""
@@ -148,6 +176,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return 429, {"message": "Retry later"}, [("Retry-After", "30")]
         return None
 
+    def remember(self, key):
+        with self.applied_lock:
+            self.applied.append(key)
+
+    def fixture_for(self, name):
+        """The fixture a read answers: the newest applied write that has an
+        `after` overlay for it, else the plain fixture, else `None`."""
+        fixtures = self.fixture_files.get(self.flavor, {})
+        with self.applied_lock:
+            applied = list(self.applied)
+        for key in reversed(applied):
+            overlay = fixtures.get(f"{name}.after.{key}")
+            if overlay:
+                return overlay
+        if self.credential() == "readonly" and fixtures.get(f"{name}.readonly"):
+            return fixtures[f"{name}.readonly"]
+        return fixtures.get(name)
+
+    def write_failure(self, field):
+        """A failure for a write, chosen by the credential; `None` for a
+        write that goes through (after a pause, for `slow`)."""
+        credential = self.credential()
+        if credential == "scopeless":
+            if self.flavor == "github":
+                return 200, {
+                    "data": {field: None},
+                    "errors": [{"type": "INSUFFICIENT_SCOPES", "path": [field],
+                                "message": "Your token has not been granted the required scopes to execute this query."}],
+                }, []
+            return 403, {"error": "insufficient_scope", "scope": "api",
+                         "error_description": "The request requires higher privileges than provided by the access token."}, []
+        if credential == "rejected":
+            if self.flavor == "github":
+                return 200, {
+                    "data": {field: None},
+                    "errors": [{"type": "UNPROCESSABLE", "path": [field], "message": "Pull request is not mergeable"}],
+                }, []
+            return 200, {"data": {field: {"errors": ["Validation failed: title is invalid"]}}}, []
+        if credential == "slow":
+            time.sleep(1.5)
+        return None
+
+    def rest_write(self, path):
+        """GitLab's approval: the only REST write B2a sends."""
+        self.record("POST", path, None, None, None)
+        if self.flavor != "gitlab" or not re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/approve", path):
+            return self.answer(404, {"message": "404 Not Found"})
+        error = self.scenario_error()
+        if error:
+            return self.answer(error[0], error[1], error[2])
+        credential = self.credential()
+        if credential == "dropped":
+            self.close_connection = True
+            return
+        if credential == "scopeless":
+            return self.answer(403, {"error": "insufficient_scope", "scope": "api",
+                                     "error_description": "The request requires higher privileges than provided by the access token."})
+        if credential == "rejected":
+            return self.answer(409, {"message": "SHA does not match HEAD of source branch"})
+        if credential == "slow":
+            time.sleep(1.5)
+        self.remember("approve")
+        return self.answer(201, {"id": 201, "iid": 201, "approved_by": [{"user": {"username": "fake-user"}}]})
+
     def do_GET(self):
         path = self.plain_path()
         self.body()
@@ -174,6 +266,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.plain_path()
         raw = self.body()
+        if path == "/__reset":
+            with self.applied_lock:
+                del self.applied[:]
+            return self.answer(200, {"reset": True})
+        if self.flavor != "none" and path.startswith("/api/v4/"):
+            return self.rest_write(path)
         if self.flavor == "none" or path not in ("/graphql", "/api/graphql"):
             self.record("POST", path, None, None, None)
             return self.answer(404, {"message": "Not Found"})
@@ -185,15 +283,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         error = self.scenario_error()
         if error:
             return self.answer(error[0], error[1], error[2])
+        if query.lstrip().startswith("mutation"):
+            return self.mutation(operation, query, variables)
         old = self.flavor == "gitlab" and self.credential() == "old"
-        if old and "mergeRequestInteraction" in query:
-            return self.answer(200, {"errors": [{"message": "Field 'mergeRequestInteraction' doesn't exist on type 'MergeRequestReviewer'"}]})
+        for field, owner in NEWER_QUERY_FIELDS if old else ():
+            if field in query:
+                return self.answer(200, {"errors": [{"message": f"Field '{field}' doesn't exist on type '{owner}'"}]})
         name = operation
         if any(key.startswith("after") and value for key, value in variables.items()):
             name += ".page2"
         if variables.get("number") == 404 or variables.get("iid") == "404":
             name = "NotFound"
-        path = self.fixture_files.get(self.flavor, {}).get(name)
+        path = self.fixture_for(name)
         if path is None:
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})
         with open(path, encoding="utf-8") as fixture:
@@ -201,6 +302,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if old and operation in BASELINE_OPERATIONS:
             payload = strip_newer(payload)
         return self.answer(200, payload, [("X-RateLimit-Remaining", "4999")])
+
+    def mutation(self, operation, query, variables):
+        found = re.search(r"mutation\s+\w+\s*(?:\([^)]*\))?\s*\{\s*(\w+)", query)
+        field = found.group(1) if found else "mutation"
+        if self.credential() == "dropped":
+            self.close_connection = True
+            return
+        failure = self.write_failure(field)
+        if failure:
+            return self.answer(failure[0], failure[1], failure[2])
+        given = (variables.get("input") or {}) if isinstance(variables.get("input"), dict) else {}
+        key = operation
+        for discriminator in ("state", "draft"):
+            if discriminator in given:
+                key = f"{operation}.{str(given[discriminator]).lower() if isinstance(given[discriminator], bool) else given[discriminator]}"
+        self.remember(key)
+        path = self.fixture_files.get(self.flavor, {}).get(operation)
+        if path:
+            with open(path, encoding="utf-8") as fixture:
+                return self.answer(200, json.load(fixture))
+        if self.flavor == "github":
+            return self.answer(200, {"data": {field: {"clientMutationId": None}}})
+        return self.answer(200, {"data": {field: {"errors": []}}})
 
     def log_message(self, *args):
         pass

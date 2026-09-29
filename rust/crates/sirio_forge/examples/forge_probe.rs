@@ -12,15 +12,20 @@
 //!
 //! ```text
 //! forge_probe --forge github|gitlab --host H --project P (--cli | --token T) <command> [args]
+//! forge_probe ... act N <action> [--body TEXT | --body-file PATH] [--title T] [--target BRANCH] [--id ID --kind comment|review]
 //! ```
+//!
+//! `act`'s actions: `comment`, `approve`, `request-changes`, `review-comment`,
+//! `close`, `reopen`, `ready`, `draft`, `edit`, `edit-comment`. It prints
+//! `ACT ok`, then `WARNING <text>` when a second step failed.
 
 use std::process::ExitCode;
 
 use sirio_forge::{
-    ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport, EventKind,
-    FileChangeKind, Filter, Forge, ForgeClient, ForgeError, ForgeTarget, HostSetting, ListQuery,
-    Means, Resolution, ReviewOutcome, ReviewState, SystemProbes, TimelineItem, TokenTransport,
-    Transport, resolve,
+    Action, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
+    CommentKind, CommentRef, EventKind, FileChangeKind, Filter, Forge, ForgeClient, ForgeError,
+    ForgeTarget, HostSetting, ListQuery, Means, Resolution, ReviewOutcome, ReviewState,
+    ReviewVerdict, SystemProbes, TimelineItem, TokenTransport, Transport, resolve,
 };
 
 enum Failure {
@@ -56,6 +61,12 @@ fn main() -> ExitCode {
                     reset_at: Some(reset),
                     ..
                 } => println!("RESET {reset}"),
+                _ => {}
+            }
+            match &error {
+                ForgeError::Forbidden { detail, .. } => println!("DETAIL {detail}"),
+                ForgeError::Rejected { message, .. } => println!("MESSAGE {message}"),
+                ForgeError::Unsupported { what, .. } => println!("WHAT {what}"),
                 _ => {}
             }
             ExitCode::from(20)
@@ -213,6 +224,12 @@ fn run(args: &Args) -> Result<(), Failure> {
                 None => println!("REVISIONS none"),
             }
             println!("BODY {}", header.body.lines().next().unwrap_or(""));
+            println!("CAPS {}", caps_words(&header.capabilities));
+            for item in &header.timeline {
+                if let Some(edit) = edit_of(item) {
+                    println!("EDITABLE {} {}", kind_name(edit.kind), edit.id);
+                }
+            }
             for reviewer in &header.reviewers {
                 println!(
                     "REVIEWER {} {}",
@@ -260,6 +277,7 @@ fn run(args: &Args) -> Result<(), Failure> {
             }
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }
+        "act" => act_command(&client, args)?,
         "create-url" => {
             let branch = args
                 .words
@@ -463,4 +481,91 @@ fn timeline_line(item: &TimelineItem) -> String {
             }
         ),
     }
+}
+
+fn caps_words(caps: &Capabilities) -> String {
+    let words: Vec<&str> = [
+        (caps.can_comment, "comment"),
+        (caps.can_approve, "approve"),
+        (caps.can_request_changes, "request-changes"),
+        (caps.can_edit, "edit"),
+        (caps.can_change_state, "state"),
+        (caps.can_toggle_draft, "draft"),
+    ]
+    .into_iter()
+    .filter_map(|(on, word)| on.then_some(word))
+    .collect();
+    if words.is_empty() {
+        "-".to_string()
+    } else {
+        words.join(",")
+    }
+}
+
+fn edit_of(item: &TimelineItem) -> Option<&CommentRef> {
+    match item {
+        TimelineItem::Comment { edit, .. } | TimelineItem::Review { edit, .. } => edit.as_ref(),
+        _ => None,
+    }
+}
+
+fn kind_name(kind: CommentKind) -> &'static str {
+    match kind {
+        CommentKind::Comment => "comment",
+        CommentKind::Review => "review",
+    }
+}
+
+/// The body of an action: `--body-file` (read as it is, newlines and all) or
+/// `--body`, or nothing.
+fn body_of(args: &Args) -> Result<String, Failure> {
+    if let Some(path) = args.flag("body-file") {
+        return std::fs::read_to_string(path).map_err(|error| usage(&format!("--body-file: {error}")));
+    }
+    Ok(args.flag("body").unwrap_or_default().to_string())
+}
+
+/// `act N <action> ...` — one write, then what came of it.
+fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
+    let number = number(args)?;
+    let name = args
+        .words
+        .get(2)
+        .ok_or_else(|| usage("act N <action>"))?
+        .as_str();
+    let action = match name {
+        "comment" => Action::Comment { body: body_of(args)? },
+        "approve" => Action::Review { verdict: ReviewVerdict::Approve, body: body_of(args)? },
+        "request-changes" => Action::Review { verdict: ReviewVerdict::RequestChanges, body: body_of(args)? },
+        "review-comment" => Action::Review { verdict: ReviewVerdict::Comment, body: body_of(args)? },
+        "close" => Action::Close,
+        "reopen" => Action::Reopen,
+        "ready" => Action::MarkReady,
+        "draft" => Action::ConvertToDraft,
+        "edit" => Action::Edit {
+            title: args.flag("title").map(str::to_string),
+            body: match (args.flag("body"), args.flag("body-file")) {
+                (None, None) => None,
+                _ => Some(body_of(args)?),
+            },
+            target_branch: args.flag("target").map(str::to_string),
+        },
+        "edit-comment" => Action::EditComment {
+            comment: CommentRef {
+                id: args.flag("id").ok_or_else(|| usage("edit-comment needs --id"))?.to_string(),
+                kind: match args.flag("kind") {
+                    Some("review") => CommentKind::Review,
+                    _ => CommentKind::Comment,
+                },
+            },
+            body: body_of(args)?,
+        },
+        other => return Err(usage(&format!("unknown action {other}"))),
+    };
+    let outcome = client.act(number, &action)?;
+    println!("ACT ok");
+    if let Some(warning) = outcome.warning {
+        println!("WARNING {warning}");
+    }
+    Ok(())
 }
