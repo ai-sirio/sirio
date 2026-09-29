@@ -1,10 +1,11 @@
 //! Edit in place (spec §7.1): the title, the target branch and the
-//! description as fields at the top of the Conversation.
+//! description as fields at the top of the Conversation, and one of the
+//! viewer's own comments turned into a field where it stands.
 
 use bezel::ui::input::{Shape, TextField, normalize};
-use sirio_forge::Action;
+use sirio_forge::{Action, CommentRef};
 
-use super::actions::{ActionState, EditFields, action_button};
+use super::actions::{ActionState, CommentEdit, EditFields, action_button, indexed_button};
 use super::*;
 
 /// A description or a comment: wraps, grows, then scrolls.
@@ -94,6 +95,55 @@ impl ChangeRequestTab {
         )
     }
 
+    /// The pencil on one of the viewer's own comments.
+    pub(crate) fn start_comment_edit(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.action_busy() {
+            return;
+        }
+        let Some(header) = self.header.value() else {
+            return;
+        };
+        let (comment, body) = match header.timeline.get(index) {
+            Some(
+                TimelineItem::Comment {
+                    edit: Some(edit),
+                    body,
+                    ..
+                }
+                | TimelineItem::Review {
+                    edit: Some(edit),
+                    body,
+                    ..
+                },
+            ) => (edit.clone(), body.clone()),
+            _ => return,
+        };
+        self.actions.comment_edit = Some(CommentEdit {
+            comment,
+            field: field(cx, &body, BODY_SHAPE, "Comment"),
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_comment_edit(&mut self, cx: &mut Context<Self>) {
+        self.actions.comment_edit = None;
+        if self.actions.state.kind() == "edit-comment" {
+            self.actions.state = ActionState::Idle;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn save_comment_edit(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let edit = self
+            .actions
+            .comment_edit
+            .as_ref()
+            .ok_or("no comment is being edited")?;
+        let body = edit.field.read(cx).content().to_string();
+        let comment = edit.comment.clone();
+        self.perform(Action::EditComment { comment, body }, cx)
+    }
+
     /// The card at the top of the Conversation while the change request is
     /// being edited.
     pub(crate) fn render_edit_card(&self, theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
@@ -144,5 +194,91 @@ impl ChangeRequestTab {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The open editor of this timeline entry, when the viewer is editing it.
+    pub(crate) fn editor_for(
+        &self,
+        own: Option<&CommentRef>,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> Option<AnyElement> {
+        let open = self.actions.comment_edit.as_ref()?;
+        (own?.id == open.comment.id).then(|| self.render_comment_editor(open, theme, entity))
+    }
+
+    /// The *Edit* button on an entry the viewer may edit and is not editing.
+    pub(crate) fn edit_pencil(
+        &self,
+        index: usize,
+        own: Option<&CommentRef>,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> Option<AnyElement> {
+        let own = own?;
+        if self
+            .actions
+            .comment_edit
+            .as_ref()
+            .is_some_and(|open| open.comment.id == own.id)
+        {
+            return None;
+        }
+        let entity = entity.clone();
+        Some(
+            indexed_button(
+                "change-request-comment-edit",
+                index,
+                "Edit",
+                theme,
+                !self.action_busy(),
+                move |cx| entity.update(cx, |tab, cx| tab.start_comment_edit(index, cx)),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// One of the viewer's own comments, open: its field with *Save* and
+    /// *Cancel*, in the place of its rendered text.
+    pub(crate) fn render_comment_editor(
+        &self,
+        edit: &CommentEdit,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
+        let enabled = !self.action_busy();
+        let (save, cancel) = (entity.clone(), entity.clone());
+        div()
+            .id("change-request-comment-editor")
+            .debug_selector(|| "change-request-comment-editor".into())
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(edit.field.clone())
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(action_button(
+                        "change-request-comment-edit-cancel",
+                        "Cancel",
+                        theme,
+                        enabled,
+                        move |cx| cancel.update(cx, |tab, cx| tab.cancel_comment_edit(cx)),
+                    ))
+                    .child(action_button(
+                        "change-request-comment-edit-save",
+                        "Save",
+                        theme,
+                        enabled,
+                        move |cx| {
+                            save.update(cx, |tab, cx| {
+                                let _ = tab.save_comment_edit(cx);
+                            })
+                        },
+                    )),
+            )
+            .into_any_element()
     }
 }

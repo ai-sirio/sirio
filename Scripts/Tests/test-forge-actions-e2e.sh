@@ -678,6 +678,14 @@ PY
   wait_for editing no surface change-request read
   wait_for title "$([ "$flavour" = gitlab ] && echo Better || echo 'A better title')" surface change-request read
 
+  echo "  [$flavour] one's own comment can be edited; another's cannot"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act edit-comment --index "$comment_index" --text "Edited comment" >/dev/null
+  wait_for action idle surface change-request read
+  wait_for comment_editing "" surface change-request read
+  expect_sent "$flavour" "$comment_op" 1
+  if ctl surface change-request act edit-comment --index 0 --text "no" >/dev/null 2>&1; then fail "an event was edited"; fi
+
   echo "  [$flavour] a double send while the first is in flight is one request; words typed meanwhile stay"
   saved_token "$host" "$flavour" slow
   reopen_tab "$number"

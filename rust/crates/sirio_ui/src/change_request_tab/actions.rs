@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use bezel::ui::input::TextField;
-use sirio_forge::{Action, ActionOutcome, ChangeState};
+use sirio_forge::{Action, ActionOutcome, ChangeState, CommentRef};
 
 use super::composer::ComposerSend;
 use super::*;
@@ -57,10 +57,17 @@ pub(crate) struct EditFields {
     pub(crate) body: Entity<TextField>,
 }
 
+/// One of the viewer's own timeline entries, open for editing.
+pub(crate) struct CommentEdit {
+    pub(crate) comment: CommentRef,
+    pub(crate) field: Entity<TextField>,
+}
+
 pub(crate) struct ActionsState {
     pub(crate) state: ActionState,
     task: Option<Task<()>>,
     pub(crate) edit: Option<EditFields>,
+    pub(crate) comment_edit: Option<CommentEdit>,
     /// The composer's field, and whether it holds only blanks (kept by an
     /// observer, so a render never has to read it).
     pub(crate) composer: Entity<TextField>,
@@ -77,6 +84,7 @@ impl ActionsState {
             state: ActionState::Idle,
             task: None,
             edit: None,
+            comment_edit: None,
             composer,
             composer_blank: true,
             sent: None,
@@ -132,6 +140,38 @@ pub(crate) fn action_button(
         .items_center()
         .px(px(8.0))
         .py(px(4.0))
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.footnote)
+        .text_color(if enabled {
+            theme.text_muted
+        } else {
+            theme.text_faint
+        })
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(move |_, _, cx| on_click(cx))
+        })
+        .child(label)
+}
+
+/// `action_button` for one of many: the timeline's *Edit* on entry `index`.
+pub(crate) fn indexed_button(
+    name: &'static str,
+    index: usize,
+    label: &'static str,
+    theme: &Theme,
+    enabled: bool,
+    on_click: impl Fn(&mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let hover = theme.element_hover;
+    div()
+        .id((name, index))
+        .debug_selector(move || format!("{name}-{index}"))
+        .flex()
+        .flex_none()
+        .items_center()
+        .px(px(6.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if enabled {
@@ -221,6 +261,7 @@ impl ChangeRequestTab {
     fn action_succeeded(&mut self, kind: &'static str, cx: &mut Context<Self>) {
         match kind {
             "edit" => self.actions.edit = None,
+            "edit-comment" => self.actions.comment_edit = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();
                 let composer = self.actions.composer.clone();
@@ -395,6 +436,20 @@ impl ChangeRequestTab {
                     }
                 }
                 self.save_edit(cx)
+            }
+            "edit-comment" => {
+                let index = text("index")
+                    .and_then(|index| index.parse().ok())
+                    .ok_or("edit-comment needs index")?;
+                self.start_comment_edit(index, cx);
+                let edit = self
+                    .actions
+                    .comment_edit
+                    .as_ref()
+                    .ok_or("that timeline entry cannot be edited")?;
+                let words = text("text").ok_or("edit-comment needs text")?;
+                edit.field.update(cx, |field, cx| field.set_content(words, cx));
+                self.save_comment_edit(cx)
             }
             other => Err(format!("unknown action {other}")),
         }

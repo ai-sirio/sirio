@@ -921,6 +921,14 @@ impl ChangeRequestTab {
                 "editing".to_string(),
                 if self.actions.edit.is_some() { "yes" } else { "no" }.to_string(),
             ),
+            (
+                "comment_editing".to_string(),
+                self.actions
+                    .comment_edit
+                    .as_ref()
+                    .map(|edit| edit.comment.id.clone())
+                    .unwrap_or_default(),
+            ),
             ("action".to_string(), self.actions.state.word().to_string()),
             ("action_kind".to_string(), self.actions.state.kind().to_string()),
             ("action_message".to_string(), self.action_message()),
@@ -1457,13 +1465,25 @@ impl ChangeRequestTab {
                     open_links(),
                 ))
         });
+        let own = match item {
+            TimelineItem::Comment { edit, .. } | TimelineItem::Review { edit, .. } => edit.as_ref(),
+            _ => None,
+        };
+        // Where the viewer is editing this entry, its field takes the place of
+        // its text.
+        let editor = self.editor_for(own, theme, entity);
+        let pencil = self.edit_pencil(index, own, theme, entity);
+        let body: Option<AnyElement> = editor.or_else(|| body.map(IntoElement::into_any_element));
         match item {
             TimelineItem::Comment { author, at, .. } => div()
                 .id(("change-request-timeline-item", index))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(line(author.clone(), "commented".to_string(), *at))
+                .child(
+                    line(author.clone(), "commented".to_string(), *at)
+                        .when_some(pencil, |row, pencil| row.child(pencil)),
+                )
                 .when_some(body, |this, body| this.child(body))
                 .into_any_element(),
             TimelineItem::Review {
@@ -1485,7 +1505,10 @@ impl ChangeRequestTab {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(line(author.clone(), verb.to_string(), *at))
+                    .child(
+                        line(author.clone(), verb.to_string(), *at)
+                            .when_some(pencil, |row, pencil| row.child(pencil)),
+                    )
                     .when_some(body, |this, body| this.child(body))
                     .children(line_comments.iter().enumerate().map(|(position, comment)| {
                         div()
