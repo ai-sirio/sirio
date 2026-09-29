@@ -20,6 +20,7 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 mod actions;
+mod edit;
 
 use crate::change_request_style as style;
 use crate::changes::{ChangesTab, ChangesTabEvent};
@@ -906,6 +907,10 @@ impl ChangeRequestTab {
                     .unwrap_or_default(),
             ),
             ("caps".to_string(), self.caps_words()),
+            (
+                "editing".to_string(),
+                if self.actions.edit.is_some() { "yes" } else { "no" }.to_string(),
+            ),
             ("action".to_string(), self.actions.state.word().to_string()),
             ("action_kind".to_string(), self.actions.state.kind().to_string()),
             ("action_message".to_string(), self.action_message()),
@@ -1359,6 +1364,9 @@ impl ChangeRequestTab {
             Some(Self::close_handle(entity)),
             |header| {
                 let mut column = div().flex().flex_col().gap(px(12.0));
+                if let Some(card) = self.render_edit_card(theme, entity) {
+                    column = column.child(card);
+                }
                 if header.timeline_truncated {
                     let url = header.summary.web_url.clone();
                     column = column.child(button(

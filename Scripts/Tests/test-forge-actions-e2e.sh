@@ -641,6 +641,16 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   ctl surface change-request act ready >/dev/null
   wait_for cr_state open surface change-request read
 
+  echo "  [$flavour] Edit: only what changed is sent, and the tab's title follows the forge"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act edit --title "$(key title surface change-request read)" >/dev/null
+  wait_for editing no surface change-request read
+  [ "$(sent UpdatePullRequest)$(sent MergeRequestUpdate)" = "00" ] || fail "saving an untouched edit sent something"
+  ctl surface change-request act edit --title "Better" --body "New description" --target develop >/dev/null
+  wait_for action idle surface change-request read
+  wait_for editing no surface change-request read
+  wait_for title "$([ "$flavour" = gitlab ] && echo Better || echo 'A better title')" surface change-request read
+
   stop_app
   cp "$run_dir/app.log" "$OUT_DIR/app-$flavour.log" 2>/dev/null || true
   rm -rf "$run_dir"

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use bezel::ui::input::TextField;
 use sirio_forge::{Action, ActionOutcome, ChangeState};
 
 use super::*;
@@ -48,9 +49,17 @@ impl ActionState {
     }
 }
 
+/// The title, target branch and description of an edit in progress.
+pub(crate) struct EditFields {
+    pub(crate) title: Entity<TextField>,
+    pub(crate) target: Entity<TextField>,
+    pub(crate) body: Entity<TextField>,
+}
+
 pub(crate) struct ActionsState {
     pub(crate) state: ActionState,
     task: Option<Task<()>>,
+    pub(crate) edit: Option<EditFields>,
 }
 
 impl ActionsState {
@@ -58,8 +67,15 @@ impl ActionsState {
         Self {
             state: ActionState::Idle,
             task: None,
+            edit: None,
         }
     }
+}
+
+/// What a header button does.
+enum HeaderAction {
+    Edit,
+    Do(Action),
 }
 
 /// What the user reads when a write fails: the forge's own reason where it
@@ -160,6 +176,7 @@ impl ChangeRequestTab {
         match result {
             Ok(outcome) => {
                 self.actions.state = outcome.warning.map_or(ActionState::Idle, ActionState::Warning);
+                self.action_succeeded(kind);
                 self.reread_after_write(cx);
             }
             // The request may have gone through: look before saying anything,
@@ -188,24 +205,34 @@ impl ChangeRequestTab {
         cx.emit(ChangeRequestTabEvent::Changed);
     }
 
-    /// The header's own buttons: whichever of draft ↔ ready and close ↔
-    /// reopen the forge says the viewer may use on this state.
+    /// Text is cleared only when its write succeeded; a failure keeps it.
+    fn action_succeeded(&mut self, kind: &'static str) {
+        if kind == "edit" {
+            self.actions.edit = None;
+        }
+    }
+
+    /// The header's own buttons: whichever of *Edit*, draft ↔ ready and
+    /// close ↔ reopen the forge says the viewer may use on this state.
     pub(crate) fn render_action_bar(&self, theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
         let header = self.header.value()?;
         let caps = header.capabilities;
         let state = header.summary.state;
-        let mut items: Vec<(&'static str, &'static str, Action)> = Vec::new();
+        let mut items: Vec<(&'static str, &'static str, HeaderAction)> = Vec::new();
+        if caps.can_edit {
+            items.push(("change-request-edit", "Edit", HeaderAction::Edit));
+        }
         if caps.can_toggle_draft {
             match state {
                 ChangeState::Draft => items.push((
                     "change-request-ready",
                     "Ready for review",
-                    Action::MarkReady,
+                    HeaderAction::Do(Action::MarkReady),
                 )),
                 ChangeState::Open => items.push((
                     "change-request-draft",
                     "Convert to draft",
-                    Action::ConvertToDraft,
+                    HeaderAction::Do(Action::ConvertToDraft),
                 )),
                 ChangeState::Closed | ChangeState::Merged => {}
             }
@@ -215,12 +242,12 @@ impl ChangeRequestTab {
                 ChangeState::Open | ChangeState::Draft => items.push((
                     "change-request-close-request",
                     "Close",
-                    Action::Close,
+                    HeaderAction::Do(Action::Close),
                 )),
                 ChangeState::Closed => items.push((
                     "change-request-reopen",
                     "Reopen",
-                    Action::Reopen,
+                    HeaderAction::Do(Action::Reopen),
                 )),
                 ChangeState::Merged => {}
             }
@@ -228,18 +255,21 @@ impl ChangeRequestTab {
         if items.is_empty() {
             return None;
         }
-        let enabled = !self.action_busy();
+        let enabled = !self.action_busy() && self.actions.edit.is_none();
         Some(
             div()
                 .flex()
                 .items_center()
                 .gap(px(4.0))
-                .children(items.into_iter().map(|(id, label, action)| {
+                .children(items.into_iter().map(|(id, label, what)| {
                     let entity = entity.clone();
                     action_button(id, label, theme, enabled, move |cx| {
-                        entity.update(cx, |tab, cx| {
-                            let _ = tab.perform(action.clone(), cx);
-                        })
+                        entity.update(cx, |tab, cx| match &what {
+                            HeaderAction::Edit => tab.start_edit(cx),
+                            HeaderAction::Do(action) => {
+                                let _ = tab.perform(action.clone(), cx);
+                            }
+                          })
                     })
                 }))
                 .into_any_element(),
@@ -310,14 +340,29 @@ impl ChangeRequestTab {
     pub fn control_act(
         &mut self,
         name: &str,
-        _params: &BTreeMap<String, String>,
+        params: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let text = |key: &str| params.get(key).cloned();
         match name {
             "close" => self.perform(Action::Close, cx),
             "reopen" => self.perform(Action::Reopen, cx),
             "ready" => self.perform(Action::MarkReady, cx),
             "draft" => self.perform(Action::ConvertToDraft, cx),
+            "edit" => {
+                self.start_edit(cx);
+                let fields = self.actions.edit.as_ref().ok_or("the change request is not loaded")?;
+                for (key, field) in [
+                    ("title", fields.title.clone()),
+                    ("target", fields.target.clone()),
+                    ("body", fields.body.clone()),
+                ] {
+                    if let Some(words) = text(key) {
+                        field.update(cx, |field, cx| field.set_content(words, cx));
+                    }
+                }
+                self.save_edit(cx)
+            }
             other => Err(format!("unknown action {other}")),
         }
     }
