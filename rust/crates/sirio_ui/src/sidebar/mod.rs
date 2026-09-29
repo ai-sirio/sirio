@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use bezel::motion::{Fade, Painter};
 use bezel::ui::popover::{self, Popup};
+use bezel::ui::tooltip::Tooltip;
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
@@ -2310,6 +2311,27 @@ impl Sidebar {
         row.expanded = expanded;
     }
 
+    /// Folds or opens every project at once, for the header's two bulk
+    /// controls. Unlike [`Self::toggle_project`] it selects nothing: a person
+    /// folding the whole list has not chosen a worktree, and the one they are
+    /// working in stays the selected one even while its row is hidden. A
+    /// filter still wins over the flags, as it does for a single project.
+    fn set_all_projects_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        let to_change: Vec<usize> = self
+            .rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Project && row.expanded != expanded)
+            .map(|row| row.id)
+            .collect();
+        if to_change.is_empty() {
+            return;
+        }
+        for id in to_change {
+            self.set_row_expanded(id, RowKind::Project, expanded);
+        }
+        cx.notify();
+    }
+
     // ------------------------------------------------------------------
     // Worktree creation and removal
     // ------------------------------------------------------------------
@@ -3576,6 +3598,30 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
         })
 }
 
+/// A 20px icon control in the header strip, the size and hover of the `+`
+/// beside it. The icon says what it does only by shape, so the words live in
+/// the tooltip. The caller attaches the click.
+fn header_icon_button(
+    id: &'static str,
+    icon: Icon,
+    tooltip: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex_none()
+        .w(px(20.0))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
+        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .child(IconElement::new(icon, IconSize::Small).text_color(theme.text_faint))
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("Sidebar.render", cx.entity_id().as_u64());
@@ -3966,27 +4012,60 @@ impl Render for Sidebar {
                             )
                     })
                     .when(view == SidebarView::Projects, |this| {
+                        // Fold and open the whole list, then the `+`. They
+                        // are icons, so the tooltip is the only place the
+                        // words appear; like the `+` they never give way to
+                        // the tab labels.
                         this.child(
                             div()
-                                .id("add-project")
-                                .debug_selector(|| "add-project".to_string())
-                                .flex_none()
-                                .w(px(20.0))
-                                .h(px(20.0))
                                 .flex()
+                                .flex_none()
                                 .items_center()
-                                .justify_center()
-                                .text_size(theme.typography.scaled(17.0))
-                                .text_color(theme.text_faint)
-                                .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
-                                    this.add_project_menu.note_trigger_press();
-                                }))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_add_project(cx);
-                                }))
-                                .child("+")
-                                .when_some(add_project_menu, |this, menu| this.child(menu)),
+                                .gap(px(2.0))
+                                .child(
+                                    header_icon_button(
+                                        "sidebar-expand-all",
+                                        Icon::ExpandVertical,
+                                        "Expand all projects",
+                                        &theme,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_all_projects_expanded(true, cx);
+                                    })),
+                                )
+                                .child(
+                                    header_icon_button(
+                                        "sidebar-collapse-all",
+                                        Icon::FoldVertical,
+                                        "Collapse all projects",
+                                        &theme,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_all_projects_expanded(false, cx);
+                                    })),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project")
+                                        .debug_selector(|| "add-project".to_string())
+                                        .flex_none()
+                                        .w(px(20.0))
+                                        .h(px(20.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(theme.typography.scaled(17.0))
+                                        .text_color(theme.text_faint)
+                                        .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
+                                            this.add_project_menu.note_trigger_press();
+                                        }))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.start_add_project(cx);
+                                        }))
+                                        .child("+")
+                                        .when_some(add_project_menu, |this, menu| this.child(menu)),
+                                ),
                         )
                     }),
             )
@@ -7309,6 +7388,230 @@ mod tests {
             expanded_status, None,
             "an expanded project row does not carry the aggregated badge"
         );
+    }
+
+    /// Two git projects with two worktrees each: rows 0 and 1000 are the
+    /// projects, 1-2 and 1001-1002 their worktrees, and the first worktree
+    /// starts selected. The shape the bulk fold buttons are proven against.
+    fn two_projects(cx: &mut Context<Sidebar>) -> Sidebar {
+        let project = |id: &str| SidebarProject {
+            id: id.to_string(),
+            name: id.to_string(),
+            is_git: true,
+            root_path: PathBuf::from(format!("/tmp/{id}")),
+            worktrees: vec![
+                SidebarWorktree {
+                    branch: "main".to_string(),
+                    path: PathBuf::from(format!("/tmp/{id}")),
+                    is_primary: true,
+                    comment: None,
+                },
+                SidebarWorktree {
+                    branch: "feat/x".to_string(),
+                    path: PathBuf::from(format!("/tmp/{id}-feat-x")),
+                    is_primary: false,
+                    comment: None,
+                },
+            ],
+        };
+        Sidebar::from_projects(vec![project("alpha"), project("beta")], cx)
+    }
+
+    fn row_drawn(cx: &mut VisualTestContext, id: usize) -> bool {
+        let selector: &'static str = Box::leak(format!("sidebar-row-{id}").into_boxed_str());
+        cx.debug_bounds(selector).is_some()
+    }
+
+    fn click_control(cx: &mut VisualTestContext, selector: &'static str) {
+        let control = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(control.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Folds or opens one project the way the host restoring a session
+    /// does — no click, so no selection rides along with the setup.
+    fn set_project_open(
+        sidebar: &gpui::Entity<Sidebar>,
+        cx: &mut VisualTestContext,
+        id: usize,
+        open: bool,
+    ) {
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_row_expanded(id, RowKind::Project, open);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// The header's two bulk controls fold and open every project at once,
+    /// whatever mix of open and folded they find — one click each, no
+    /// per-project toggling.
+    #[gpui::test]
+    async fn collapse_all_folds_every_project_and_expand_all_opens_them_again(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        // Mixed start: alpha open, beta folded.
+        set_project_open(&sidebar, &mut cx, 1000, false);
+        assert!(row_drawn(&mut cx, 1) && !row_drawn(&mut cx, 1001), "the fixture starts mixed");
+
+        click_control(&mut cx, "sidebar-collapse-all");
+        for id in [1, 2, 1001, 1002] {
+            assert!(!row_drawn(&mut cx, id), "worktree row {id} is hidden once every project is folded");
+        }
+        for id in [0, 1000] {
+            assert!(row_drawn(&mut cx, id), "project row {id} stays drawn while folded");
+        }
+
+        // Mixed again the other way round: alpha open, beta still folded.
+        set_project_open(&sidebar, &mut cx, 0, true);
+        assert!(row_drawn(&mut cx, 1) && !row_drawn(&mut cx, 1001), "the fixture is mixed again");
+
+        click_control(&mut cx, "sidebar-expand-all");
+        for id in [1, 2, 1001, 1002] {
+            assert!(row_drawn(&mut cx, id), "worktree row {id} is back once every project is open");
+        }
+    }
+
+    /// A bulk fold is not a selection: the worktree a person is working in
+    /// stays the selected one, folded away or not, and the host hears
+    /// nothing that would switch it.
+    #[gpui::test]
+    async fn the_bulk_fold_buttons_neither_select_nor_switch_worktree(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+
+        click_control(&mut cx, "sidebar-collapse-all");
+        click_control(&mut cx, "sidebar-expand-all");
+        click_control(&mut cx, "sidebar-collapse-all");
+
+        assert!(
+            !events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::SelectWorktree(_)
+                    | SidebarEvent::SelectParkedTab { .. }
+                    | SidebarEvent::SelectTab(_)
+            )),
+            "folding must not ask the host to switch anything"
+        );
+        let selected = cx.read(|cx| {
+            sidebar
+                .read(cx)
+                .rows
+                .iter()
+                .filter(|row| row.selected)
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(selected, vec![1], "the selected worktree is still the first one");
+    }
+
+    /// With a filter typed, the filter decides what is drawn — a fold
+    /// underneath it must neither clear it nor be lost: the projects the
+    /// filter reaches stay open, and clearing it shows the fold that
+    /// happened meanwhile.
+    #[gpui::test]
+    async fn the_filter_still_decides_what_a_bulk_fold_shows(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.filter = "feat/x".to_string();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        click_control(&mut cx, "sidebar-collapse-all");
+        assert_eq!(
+            cx.read(|cx| sidebar.read(cx).filter.clone()),
+            "feat/x",
+            "the bulk fold leaves the filter alone"
+        );
+        for id in [2, 1002] {
+            assert!(row_drawn(&mut cx, id), "the filter still opens the project it reaches: row {id}");
+        }
+
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.filter.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for id in [1, 2, 1001, 1002] {
+            assert!(!row_drawn(&mut cx, id), "the fold happened under the filter: row {id}");
+        }
+    }
+
+    /// The controls belong to the project list: the Sessions view has no
+    /// projects to fold, exactly as it has no `+`.
+    #[gpui::test]
+    async fn the_bulk_fold_buttons_exist_only_in_the_projects_view(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        for selector in ["sidebar-collapse-all", "sidebar-expand-all"] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector} in the Projects view");
+        }
+
+        sidebar.update(&mut cx, |sidebar, cx| sidebar.set_view(SidebarView::Sessions, cx));
+        cx.run_until_parked();
+        for selector in ["sidebar-collapse-all", "sidebar-expand-all"] {
+            assert!(cx.debug_bounds(selector).is_none(), "no {selector} in the Sessions view");
+        }
+    }
+
+    /// At the narrowest sidebar the tab labels give way, never a control:
+    /// the `+` and both bulk buttons stay whole inside the strip, to the
+    /// right of the Sessions tab.
+    #[gpui::test]
+    async fn at_the_narrowest_sidebar_the_header_controls_stay_whole(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut cx, |sidebar, _, cx| sidebar.set_panel_width(220.0, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the header strip");
+        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions tab");
+        for selector in ["sidebar-collapse-all", "sidebar-expand-all", "add-project"] {
+            let control = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"));
+            assert!(
+                control.right() <= strip.right(),
+                "{selector} ends at {} inside the strip ending at {}",
+                control.right(),
+                strip.right()
+            );
+            assert!(
+                control.left() >= sessions.right(),
+                "{selector} starts at {} clear of the Sessions tab ending at {}",
+                control.left(),
+                sessions.right()
+            );
+        }
     }
 
     /// F-SID-10: the context menu's Remove Project asks the platform for
