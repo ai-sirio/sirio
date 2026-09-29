@@ -45,6 +45,8 @@ normal -- so one server covers every error path of an action:
      readonly   reads serve `<Operation>.readonly.json` where it exists (a
                 viewer who may not act); its token lists only read scopes
     finegrained  a token that reports no scopes at all
+    notefails    GitLab only: `createNote` is refused with the reason in the
+                 payload's `errors`, while the REST approval still answers 201
 
 A write that succeeded is remembered, and a read then serves
 `<Operation>.after.<Mutation>.json` when it exists (the newest write that has
@@ -321,6 +323,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.credential() == "dropped":
             self.close_connection = True
             return
+        if self.credential() == "notefails" and self.flavor == "gitlab" and operation == "CreateNote":
+            return self.answer(200, {"data": {field: {"errors": ["Note creation failed"]}}})
         failure = self.write_failure(field)
         if failure:
             return self.answer(failure[0], failure[1], failure[2])

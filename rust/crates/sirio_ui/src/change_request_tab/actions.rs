@@ -227,8 +227,9 @@ impl ChangeRequestTab {
         self.actions.task = None;
         match result {
             Ok(outcome) => {
+                let warned = outcome.warning.is_some();
                 self.actions.state = outcome.warning.map_or(ActionState::Idle, ActionState::Warning);
-                self.action_succeeded(kind, cx);
+                self.action_succeeded(kind, warned, cx);
                 self.reread_after_write(cx);
             }
             // The request may have gone through: look before saying anything,
@@ -257,15 +258,18 @@ impl ChangeRequestTab {
         cx.emit(ChangeRequestTabEvent::Changed);
     }
 
-    /// Text is cleared only when its write succeeded; a failure keeps it.
-    fn action_succeeded(&mut self, kind: &'static str, cx: &mut Context<Self>) {
+    /// Text is cleared only when its write succeeded; a failure keeps it,
+    /// and so does a warning — the words never reached the forge (spec §7.1).
+    /// A warning still forgets what was sent, so a later edit cannot clear
+    /// the composer by mistake.
+    fn action_succeeded(&mut self, kind: &'static str, warned: bool, cx: &mut Context<Self>) {
         match kind {
             "edit" => self.actions.edit = None,
             "edit-comment" => self.actions.comment_edit = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();
                 let composer = self.actions.composer.clone();
-                if sent.is_some_and(|sent| composer.read(cx).content().as_ref() == sent) {
+                if !warned && sent.is_some_and(|sent| composer.read(cx).content().as_ref() == sent) {
                     composer.update(cx, |field, cx| field.clear(cx));
                 }
             }

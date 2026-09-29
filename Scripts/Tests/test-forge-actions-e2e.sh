@@ -768,6 +768,18 @@ PY
   wait_for action_message "You cannot comment on this change request." surface change-request read
   expect_sent "$flavour" "$comment_mutation" 0
   capture "$flavour-readonly"
+  if [ "$flavour" = gitlab ]; then
+  echo "  [$flavour] an approval whose comment is refused keeps the words"
+  saved_token "$host" "$flavour" notefails
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act compose --text "words that stay" >/dev/null
+  ctl surface change-request act send --how approve >/dev/null
+  wait_for action warning surface change-request read
+  wait_for composer_len 15 surface change-request read
+  [ "$(grep -cF "POST /api/v4/projects/team%2Fapp/merge_requests/201/approve " "$WORK/gitlab-requests.log")" = 1 ] || fail "the approval did not reach GitLab exactly once"
+  expect_sent gitlab CreateNote 1
+  fi
   stop_app
   cp "$run_dir/app.log" "$OUT_DIR/app-$flavour.log" 2>/dev/null || true
   rm -rf "$run_dir"
