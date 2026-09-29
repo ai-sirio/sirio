@@ -309,6 +309,11 @@ pub(crate) fn u32_at(value: &Value, pointer: &str) -> u32 {
     opt_u32(value, pointer).unwrap_or(0)
 }
 
+/// `None` when the field is absent or `null` — "the server did not say".
+pub(crate) fn opt_bool(value: &Value, pointer: &str) -> Option<bool> {
+    value.pointer(pointer).and_then(Value::as_bool)
+}
+
 pub(crate) fn bool_at(value: &Value, pointer: &str) -> bool {
     value
         .pointer(pointer)

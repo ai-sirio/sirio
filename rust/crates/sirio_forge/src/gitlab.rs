@@ -19,13 +19,11 @@ use serde_json::{Value, json};
 use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32,
-    revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_bool, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
-    ChangeHeader, ChangePage, ChangeSummary, Check, CommitSummary, FileChange, Filter, LineComment,
-    ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
+    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef, CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
 
 macro_rules! full {
@@ -341,6 +339,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
     })?;
     Ok(ChangeHeader {
         summary,
+        capabilities: capabilities(client, node),
         body: str_at(node, "/description"),
         reviewers: reviewers(node),
         additions: opt_u32(node, "/diffStatsSummary/additions"),
@@ -354,6 +353,30 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
             opt_str(node, "/diffRefs/headSha"),
             opt_str(node, "/diffRefs/startSha"),
         ),
+    })
+}
+
+/// What the viewer may do. A baseline query leaves the fields an old server
+/// lacks unasked, and the mapping reads "not reported" as "not offered".
+fn capabilities(client: &ForgeClient, node: &Value) -> Capabilities {
+    mapping::gitlab_capabilities(mapping::GitLabFacts {
+        state: opt_str(node, "/state").unwrap_or(""),
+        locked: bool_at(node, "/discussionLocked"),
+        can_create_note: opt_bool(node, "/userPermissions/createNote"),
+        can_update: opt_bool(node, "/userPermissions/updateMergeRequest"),
+        can_approve: opt_bool(node, "/userPermissions/canApprove"),
+        reports_review_state: !client.baseline.load(Ordering::Relaxed),
+    })
+}
+
+/// An edit handle for a note the viewer may administer.
+fn note_edit(note: &Value) -> Option<CommentRef> {
+    if !bool_at(note, "/userPermissions/adminNote") {
+        return None;
+    }
+    opt_str(note, "/id").map(|id| CommentRef {
+        id: id.to_string(),
+        kind: CommentKind::Comment,
     })
 }
 
@@ -408,6 +431,7 @@ fn timeline(notes: &[&Value]) -> Vec<TimelineItem> {
                         body: String::new(),
                         at,
                         line_comments: Vec::new(),
+                        edit: None,
                     },
                     SystemNote::Event(kind) => TimelineItem::Event {
                         actor: Some(author),
@@ -425,7 +449,12 @@ fn timeline(notes: &[&Value]) -> Vec<TimelineItem> {
                     body,
                     at,
                 }),
-                None => TimelineItem::Comment { author, body, at },
+                None => TimelineItem::Comment {
+                    author,
+                    body,
+                    at,
+                    edit: note_edit(note),
+                },
             }
         })
         .collect()

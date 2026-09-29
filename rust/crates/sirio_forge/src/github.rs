@@ -11,13 +11,11 @@ use serde_json::{Value, json};
 use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32,
-    revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping;
 use crate::model::{
-    ChangeHeader, ChangePage, ChangeSummary, Check, CiState, CommitSummary, EventKind, FileChange,
-    Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
+    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
 
 macro_rules! with_summary {
@@ -299,6 +297,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
     let reviewers = reviewers(&timeline, &array_at(node, "/reviewRequests/nodes"));
     Ok(ChangeHeader {
         summary,
+        capabilities: capabilities(node),
         body: str_at(node, "/body"),
         reviewers,
         additions: opt_u32(node, "/additions"),
@@ -308,6 +307,29 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         timeline_truncated: has_previous_page(node, "/timelineItems"),
         timeline,
         revisions: revisions(opt_str(node, "/baseRefOid"), opt_str(node, "/headRefOid"), None),
+    })
+}
+
+/// What the viewer may do, from the `viewerCan…` fields the header asks for.
+fn capabilities(node: &Value) -> Capabilities {
+    mapping::github_capabilities(mapping::GitHubFacts {
+        state: opt_str(node, "/state").unwrap_or(""),
+        locked: bool_at(node, "/locked"),
+        viewer_did_author: bool_at(node, "/viewerDidAuthor"),
+        viewer_can_update: bool_at(node, "/viewerCanUpdate"),
+        viewer_can_close: bool_at(node, "/viewerCanClose"),
+        viewer_can_reopen: bool_at(node, "/viewerCanReopen"),
+    })
+}
+
+/// An edit handle, only where the forge says the viewer may use it.
+fn comment_ref(node: &Value, kind: CommentKind) -> Option<CommentRef> {
+    if !bool_at(node, "/viewerCanUpdate") {
+        return None;
+    }
+    opt_str(node, "/id").map(|id| CommentRef {
+        id: id.to_string(),
+        kind,
     })
 }
 
@@ -348,6 +370,7 @@ fn timeline(nodes: &[&Value]) -> Vec<TimelineItem> {
                 author: login_or_ghost(node, "/author/login"),
                 body: str_at(node, "/body"),
                 at: time_at(node, "/createdAt"),
+                edit: comment_ref(node, CommentKind::Comment),
             }),
             "PullRequestReview" => {
                 let Some(outcome) = mapping::github_review_outcome(&str_at(node, "/state")) else {
@@ -372,6 +395,7 @@ fn timeline(nodes: &[&Value]) -> Vec<TimelineItem> {
                     body: str_at(node, "/body"),
                     at: when,
                     line_comments,
+                    edit: comment_ref(node, CommentKind::Review),
                 });
             }
             "ReviewRequestedEvent" => {

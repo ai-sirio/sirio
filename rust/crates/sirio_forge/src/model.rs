@@ -222,12 +222,30 @@ pub enum EventKind {
     Other(String),
 }
 
+/// Which of the forge's two kinds of text an edit of one's own words
+/// changes. GitHub edits a comment and a review's body through different
+/// mutations; GitLab has notes only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentKind {
+    Comment,
+    Review,
+}
+
+/// What an edit points at. A timeline entry carries one only where the
+/// forge says the signed-in user may edit it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommentRef {
+    pub id: String,
+    pub kind: CommentKind,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimelineItem {
     Comment {
         author: String,
         body: String,
         at: Option<i64>,
+        edit: Option<CommentRef>,
     },
     Review {
         author: String,
@@ -235,6 +253,7 @@ pub enum TimelineItem {
         body: String,
         at: Option<i64>,
         line_comments: Vec<LineComment>,
+        edit: Option<CommentRef>,
     },
     LineComment(LineComment),
     Event {
@@ -244,10 +263,30 @@ pub enum TimelineItem {
     },
 }
 
+/// What the forge says the signed-in user may do to one change request
+/// now (spec §6). A capability the forge did not report is `false` — a
+/// button Sirio is unsure of is not offered — except commenting, which is
+/// offered unless the conversation is locked. The forge's refusal is shown
+/// either way: this is a courtesy, the server has the last word.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub can_comment: bool,
+    pub can_approve: bool,
+    pub can_request_changes: bool,
+    /// Title, description and target branch.
+    pub can_edit: bool,
+    /// Close an open change request, or reopen a closed one — whichever
+    /// applies to its state.
+    pub can_change_state: bool,
+    /// Draft ↔ ready, on an open change request.
+    pub can_toggle_draft: bool,
+}
+
 /// The detail tab's header and Conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeHeader {
     pub summary: ChangeSummary,
+    pub capabilities: Capabilities,
     pub body: String,
     pub reviewers: Vec<Reviewer>,
     /// `None` where the forge did not say (a GitLab on the baseline query).
