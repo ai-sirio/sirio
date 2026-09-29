@@ -101,6 +101,16 @@ pub(crate) fn token_scopes(forge: Forge) -> &'static str {
     }
 }
 
+/// What a token needs to act, in the words the forge uses.
+pub(crate) fn write_scopes(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => {
+            "write access to pull requests (`repo` on a classic token, Pull requests: Read and write on a fine-grained one)"
+        }
+        Forge::GitLab => "the api scope",
+    }
+}
+
 pub(crate) fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
