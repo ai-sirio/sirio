@@ -35,6 +35,7 @@ use sirio_theme::Theme;
 use std::num::NonZeroIsize;
 
 use sirio_ui::loading;
+use sirio_ui::text_selection::selectable_text;
 use wry::{
     NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
@@ -2601,7 +2602,7 @@ impl Render for BrowserSurface {
                             .bg(theme.danger)
                             .text_color(theme.bg)
                             .text_size(theme.typography.footnote)
-                            .child(error),
+                            .child(selectable_text(error)),
                     )
                 },
             )
@@ -2616,7 +2617,7 @@ impl Render for BrowserSurface {
                         .bg(theme.danger)
                         .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
-                        .child(error),
+                        .child(selectable_text(error)),
                 )
             })
             .when_some(permission, |this, prompt| {
@@ -2635,10 +2636,10 @@ impl Render for BrowserSurface {
                         .bg(theme.warning)
                         .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
-                        .child(format!(
+                        .child(selectable_text(format!(
                             "Allow agent browser access to {}?",
                             prompt.origin()
-                        ))
+                        )))
                         .child(browser_button(
                             "browser-permission-allow",
                             "Allow",

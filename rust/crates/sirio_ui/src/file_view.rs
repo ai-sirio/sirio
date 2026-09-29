@@ -53,6 +53,7 @@ use crate::markdown_preview::{
     self, DiagramRequest, DiagramSettings, DiagramState, Diagrams, PlantUmlQueue,
 };
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
@@ -3175,6 +3176,7 @@ fn message_card(
 }
 
 fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
+    let message: String = message.into();
     div()
         .id("file-view-notice")
         .debug_selector(|| "file-view-notice".into())
@@ -3185,7 +3187,7 @@ fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
         .p(px(24.0))
         .text_size(theme.typography.headline)
         .text_color(theme.text_muted)
-        .child(message.into())
+        .child(selectable_text(message))
         .into_any_element()
 }
 
@@ -5586,6 +5588,63 @@ mod tests {
              emit FileViewEvent::OpenFile, not fall through to cx.open_url"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A README rendered in Preview was a picture of text: it could be read
+    /// and its links followed, but no sentence of it could be copied. Drives
+    /// the real view under the shell-shaped root, with a real drag.
+    #[gpui::test]
+    async fn text_in_the_markdown_preview_can_be_selected_and_copied(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::text_selection::testing;
+
+        let dir = std::env::temp_dir().join(format!(
+            "sirio-file-view-preview-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create worktree dir");
+        let note = dir.join("note.md");
+        std::fs::write(&note, "# Notes\n\nSelect this paragraph.\n").expect("write file");
+
+        cx.update(::editor::init);
+        let path = note.clone();
+        let (view, _, cx) = testing::host(cx, move |_, cx| FileView::new(path, cx));
+        cx.cx.executor().allow_parking();
+        for _ in 0..600 {
+            if view.read_with(&cx.cx, |view, _| view.editor().is_some()) {
+                break;
+            }
+            cx.cx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+        cx.run_until_parked();
+
+        let scroll = cx
+            .debug_bounds("file-markdown-scroll")
+            .expect("Preview renders the markdown document");
+        let column_left =
+            scroll.origin.x + ((scroll.size.width - px(MARKDOWN_COLUMN_WIDTH)) / 2.0).max(px(0.0));
+        testing::reset_clipboard(cx);
+        testing::drag(
+            cx,
+            gpui::point(column_left + px(25.0), scroll.origin.y + px(30.0)),
+            gpui::point(scroll.right() - px(1.0), scroll.bottom() - px(1.0)),
+        );
+        cx.simulate_keystrokes("ctrl-c");
+
+        assert_eq!(
+            testing::clipboard(cx).as_deref(),
+            Some("Notes\n\nSelect this paragraph.")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

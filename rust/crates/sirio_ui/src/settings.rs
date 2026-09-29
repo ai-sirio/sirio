@@ -5,6 +5,7 @@ use crate::controls;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
+use crate::text_selection::selectable_text;
 use bezel::theme::Theme as BezelTheme;
 use bezel::ui::input::TextField;
 use bezel::ui::widgets::status_dot;
@@ -86,7 +87,7 @@ fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl 
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(text!(id = format!("settings-section-title-{title}"), title)),
+                .child(selectable_text(title).id(format!("settings-section-title-{title}"))),
         )
         .child(card)
 }
@@ -2335,7 +2336,7 @@ impl Settings {
                     .text_size(theme.typography.title3)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(text!("Settings")),
+                    .child(selectable_text("Settings")),
             )
     }
 
@@ -2537,10 +2538,7 @@ impl Settings {
                         IconElement::new(provider.icon(), IconSize::Medium).text_color(glyph_color),
                     ),
             )
-            .child(text!(
-                id = format!("settings-provider-status-label-{title}"),
-                "Status"
-            ));
+            .child(selectable_text("Status").id(format!("settings-provider-status-label-{title}")));
         // The status value is the derived account state — signed in, not
         // signed in, or honestly unknown — never a hardcoded "Active" that
         // claimed a working account without checking. Green only when real
@@ -2565,7 +2563,7 @@ impl Settings {
                         theme.text_faint
                     }),
             )
-            .child(text!(status.label));
+            .child(selectable_text(status.label));
         if let Some(identity) = status.identity.clone() {
             status_value = status_value.child(
                 div()
@@ -2573,7 +2571,7 @@ impl Settings {
                     .debug_selector(move || format!("settings-provider-account-identity-{title}"))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!(identity)),
+                    .child(selectable_text(identity)),
             );
         }
 
@@ -2695,7 +2693,7 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.danger)
-                    .child(text!(error.clone())),
+                    .child(selectable_text(error.clone())),
             );
         }
         // F-SET-14: while this card's login is spawned and being waited on,
@@ -2716,7 +2714,7 @@ impl Settings {
                         .debug_selector(move || format!("account-login-pending-{title}"))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.text_muted)
-                        .child(text!("Signing in…")),
+                        .child(selectable_text("Signing in…")),
                 )
                 .child(controls::button(
                     match provider {
@@ -2913,7 +2911,7 @@ impl Settings {
             .pb(px(BezelTheme::SPACE_XS))
             .text_size(theme.typography.footnote)
             .text_color(theme.text_muted)
-            .child(text!(caption))
+            .child(selectable_text(caption))
     }
 
     /// The OpenCode Go card's session-cookie and workspace-override rows
@@ -3005,7 +3003,7 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.danger)
-                    .child(text!(error)),
+                    .child(selectable_text(error)),
             );
         }
         card = card.child(controls::separator(theme));
@@ -3147,7 +3145,7 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.danger)
-                    .child(text!(error)),
+                    .child(selectable_text(error)),
             );
         }
         card.child(controls::separator(theme))
@@ -3468,7 +3466,7 @@ impl Settings {
                     .debug_selector(|| "settings-version".into())
                     .text_size(theme.typography.callout)
                     .text_color(theme.text_muted)
-                    .child(text!(self.version.clone())),
+                    .child(selectable_text(self.version.clone())),
                 theme,
             ))
             .child(controls::row(
@@ -3478,7 +3476,7 @@ impl Settings {
                     .debug_selector(|| "settings-channel".into())
                     .text_size(theme.typography.callout)
                     .text_color(theme.text_muted)
-                    .child(text!(self.channel.clone())),
+                    .child(selectable_text(self.channel.clone())),
                 theme,
             ));
         if let Some(status) = self.update_status_text() {
@@ -3492,7 +3490,7 @@ impl Settings {
                     .child(
                         div()
                             .debug_selector(|| "settings-update-status".into())
-                            .child(text!(status)),
+                            .child(selectable_text(status)),
                     ),
                 theme,
             ));
@@ -3581,17 +3579,14 @@ impl Settings {
             .flex_1()
             .text_size(theme.typography.headline)
             .text_color(theme.text)
-            .child(text!(
-                id = "settings-control-socket-title",
-                "Control socket"
-            ))
+            .child(selectable_text("Control socket").id("settings-control-socket-title"))
             .child(
                 div()
                     .debug_selector(|| "settings-control-socket-path".into())
                     .mt(px(2.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!(format!("{socket_kind}: {}", self.socket_path))),
+                    .child(selectable_text(format!("{socket_kind}: {}", self.socket_path))),
             );
         // The sirioctl card shows the bundled binary's name. "Copy install
         // command" is not offered: no install mechanism exists on this
@@ -3611,7 +3606,7 @@ impl Settings {
                 div()
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!("sirioctl")),
+                    .child(selectable_text("sirioctl")),
                 theme,
             ));
         // F-SET-09: the provisioner (`agent_skill_install_command`) is
@@ -3646,7 +3641,7 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!("Installing… running in a new terminal tab.")),
+                    .child(selectable_text("Installing… running in a new terminal tab.")),
             );
         }
 
@@ -3678,9 +3673,9 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!(
+                    .child(selectable_text(
                         "Adds Sirio's sirioctl lifecycle hooks to each agent's user-level config, \
-                         for agents you start yourself inside a Sirio terminal."
+                         for agents you start yourself inside a Sirio terminal.",
                     )),
             );
         if let Some(report) = &self.hooks_install_report {
@@ -3695,7 +3690,7 @@ impl Settings {
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text_muted);
             for line in report.lines() {
-                lines = lines.child(text!(line.to_string()));
+                lines = lines.child(selectable_text(line.to_string()));
             }
             hooks = hooks.child(lines);
         } else if self.hooks_install_launched {
@@ -3707,8 +3702,8 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!(
-                        "Installing… writing each agent's user-level hook config."
+                    .child(selectable_text(
+                        "Installing… writing each agent's user-level hook config.",
                     )),
             );
         }
@@ -3742,7 +3737,7 @@ impl Settings {
                                 .debug_selector(|| "settings-update-version".into())
                                 .text_size(theme.typography.callout)
                                 .text_color(theme.text_muted)
-                                .child(text!(version.clone())),
+                                .child(selectable_text(version.clone())),
                             theme,
                         ));
                     if self.update_channel().eq_ignore_ascii_case("nightly") {
@@ -3754,7 +3749,7 @@ impl Settings {
                                 .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.text_muted)
-                                .child(text!("Nightly builds track main")),
+                                .child(selectable_text("Nightly builds track main")),
                         );
                     } else if !notes.trim().is_empty() {
                         updates = updates.child(
@@ -3765,7 +3760,7 @@ impl Settings {
                                 .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.text_muted)
-                                .child(text!(notes.clone())),
+                                .child(selectable_text(notes.clone())),
                         );
                     }
                     updates = updates.child(controls::action_row(
@@ -3821,7 +3816,7 @@ impl Settings {
                     .debug_selector(|| "settings-plantuml-status".into())
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(plantuml_status),
+                    .child(selectable_text(plantuml_status)),
                 theme,
             ))
             .child(controls::separator(theme))
@@ -3885,19 +3880,19 @@ impl Settings {
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(text!(
-                        id = format!("settings-permission-title-{slug}"),
-                        kind.title()
-                    )),
+                    .child(
+                        selectable_text(kind.title())
+                            .id(format!("settings-permission-title-{slug}")),
+                    ),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
-                    .child(text!(
-                        id = format!("settings-permission-description-{slug}"),
-                        kind.detail()
-                    )),
+                    .child(
+                        selectable_text(kind.detail())
+                            .id(format!("settings-permission-description-{slug}")),
+                    ),
             );
 
         // The bead and the quiet word the Language Servers rows carry for
@@ -3926,10 +3921,7 @@ impl Settings {
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
-                    .child(text!(
-                        id = format!("settings-permission-state-{slug}"),
-                        word
-                    )),
+                    .child(selectable_text(word).id(format!("settings-permission-state-{slug}"))),
             );
 
         let mut tail = div()
@@ -4002,7 +3994,7 @@ impl Settings {
                     .items_center()
                     .text_size(theme.typography.callout)
                     .text_color(theme.text_muted)
-                    .child(text!("No browser origins have been granted.")),
+                    .child(selectable_text("No browser origins have been granted.")),
             );
         }
 
@@ -4044,10 +4036,10 @@ impl Settings {
                             .flex_1()
                             .text_size(theme.typography.callout)
                             .text_color(theme.text)
-                            .child(text!(
-                                id = ("settings-browser-origin", index),
-                                display_origin
-                            )),
+                            .child(
+                                selectable_text(display_origin)
+                                    .id(("settings-browser-origin", index)),
+                            ),
                     )
                     .child(revoke),
             );

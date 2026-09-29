@@ -5595,7 +5595,13 @@ impl SirioWorkspace {
             palette_selected: 0,
             palette_focus: cx.focus_handle(),
             palette_previous_focus: None,
-            root_focus: cx.focus_handle(),
+            // The handle a text selection takes keyboard focus into, and the
+            // only focus its Copy answers to (`sirio_ui::text_selection`).
+            root_focus: {
+                let sink = cx.focus_handle();
+                sirio_ui::text_selection::set_sink(sink.clone(), cx);
+                sink
+            },
             activity,
             terminal_shell_evidence,
             activity_dirty: true,
@@ -19338,7 +19344,7 @@ impl SirioWorkspace {
                                 .flex_1()
                                 .text_size(theme.typography.footnote)
                                 .text_color(message_tone)
-                                .child(message),
+                                .child(sirio_ui::text_selection::selectable_text(message)),
                         )
                         .child(
                             div()
@@ -19611,6 +19617,7 @@ impl Render for SirioWorkspace {
                 // sidebar that carry none of their own.
                 .key_context("Workspace")
                 .track_focus(&self.root_focus)
+                .on_action(sirio_ui::text_selection::on_copy)
                 .capture_key_down(cx.listener(Self::handle_root_key_down))
                 // #369 follow-up: any GPUI click must take Win32 keyboard
                 // focus back from the native WebView2 child, which otherwise
@@ -19694,6 +19701,7 @@ impl Render for SirioWorkspace {
             // sidebar that carry none of their own.
             .key_context("Workspace")
             .track_focus(&self.root_focus)
+            .on_action(sirio_ui::text_selection::on_copy)
             .capture_key_down(cx.listener(Self::handle_root_key_down))
             // #369 follow-up: any GPUI click must take Win32 keyboard focus
             // back from the native WebView2 child (see the settings branch
@@ -21897,6 +21905,7 @@ fn main() {
         bezel::ui::combobox::init(cx);
         bezel::ui::tree::init(cx);
         sirio_ui::chat::init(cx);
+        sirio_ui::text_selection::init(cx);
         sirio_ui::file_view::init(cx);
 
         // Restore the stored layout; a missing, corrupt or newer-schema
@@ -24975,6 +24984,7 @@ done
     ) -> SirioWorkspace {
         bezel::ui::input::init(cx);
         bezel::ui::combobox::init(cx);
+        sirio_ui::text_selection::init(cx);
         sirio_ui::file_view::init(cx);
         if let Some(theme) = cx.try_global::<Theme>().copied() {
             theme.install_into_bezel(cx);
@@ -32505,6 +32515,118 @@ done
         assert_eq!(
             typed, "wrkdemo",
             "keystrokes must reach the override field through the real shell dispatch path"
+        );
+    }
+
+    /// Text selection reaches the user only through three host wires — the
+    /// key binding `main()` installs, the root's focus handle registered as
+    /// the selection's sink, and the copy action on the root of each render
+    /// branch. `sirio_ui`'s own tests stand in for the host with a stub root,
+    /// so this is the test that goes red when one of them is missing: it
+    /// drags across a line of Settings in the real shell and copies it with
+    /// the real Ctrl+C.
+    #[gpui::test]
+    async fn text_selected_in_settings_is_copied_by_the_real_shell(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| workspace.open_settings(None, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let socket_path = workspace.read_with(&cx, |workspace, cx| {
+            workspace.settings.read(cx).snapshot().socket_path
+        });
+        let kind = if cfg!(windows) { "Named pipe" } else { "Socket path" };
+        let line = cx
+            .debug_bounds("settings-control-socket-path")
+            .expect("the control socket line is drawn");
+        let y = line.center().y;
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("clipboard untouched".into()));
+        cx.simulate_mouse_down(
+            gpui::point(line.left() + px(1.0), y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        for x in [line.center().x, line.right() + px(200.0)] {
+            cx.simulate_mouse_move(
+                gpui::point(x, y),
+                gpui::MouseButton::Left,
+                Modifiers::none(),
+            );
+        }
+        cx.simulate_mouse_up(
+            gpui::point(line.right() + px(200.0), y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_keystrokes("ctrl-c");
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+            Some(format!("{kind}: {socket_path}").as_str()),
+            "Ctrl+C in the real shell copies the line that was dragged over"
+        );
+    }
+
+    /// The Settings test above goes through the Settings render branch; the
+    /// shell has a second, and each carries its own copy action. This one
+    /// drives the main branch — the status bar's `branch · path` line, which
+    /// is where a user goes to grab a worktree's path.
+    #[gpui::test]
+    async fn text_selected_in_the_main_shell_is_copied_by_the_real_shell(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        let line = cx
+            .debug_bounds("status-bar-location")
+            .expect("the status bar shows the branch and path");
+        let y = line.center().y;
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("clipboard untouched".into()));
+        cx.simulate_mouse_down(
+            gpui::point(line.left() + px(1.0), y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        for x in [line.center().x, line.right() + px(200.0)] {
+            cx.simulate_mouse_move(gpui::point(x, y), gpui::MouseButton::Left, Modifiers::none());
+        }
+        cx.simulate_mouse_up(
+            gpui::point(line.right() + px(200.0), y),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_keystrokes("ctrl-c");
+
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .expect("the clipboard is readable");
+        assert!(
+            copied.contains(" · ") && copied != "clipboard untouched",
+            "Ctrl+C in the main branch copies the status bar line, got {copied:?}"
         );
     }
 

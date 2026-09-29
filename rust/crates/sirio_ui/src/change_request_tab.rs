@@ -24,6 +24,7 @@ use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::text_selection::selectable_text;
 
 /// The inner tab a change request shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1021,7 +1022,11 @@ fn error_panel(
         .items_center()
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
-        .child(div().text_color(theme.danger).child(message))
+        .child(
+            div()
+                .text_color(theme.danger)
+                .child(selectable_text(message)),
+        )
         .child(
             div()
                 .flex()
@@ -1158,19 +1163,20 @@ impl ChangeRequestTab {
                             .gap(px(6.0))
                             .child(
                                 div()
+                                    .debug_selector(|| "change-request-title".into())
                                     .min_w_0()
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
                                     .text_size(theme.typography.title3)
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(self.title.clone()),
+                                    .child(selectable_text(self.title.clone())),
                             )
                             .child(
                                 div()
                                     .flex_none()
                                     .text_color(theme.text_faint)
-                                    .child(self.reference.label()),
+                                    .child(selectable_text(self.reference.label())),
                             ),
                     )
                     .when_some(web_url, |this, url| {
@@ -1216,11 +1222,12 @@ impl ChangeRequestTab {
                         ))
                         .child(
                             div()
+                                .debug_selector(|| "change-request-meta".into())
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(meta),
+                                .child(selectable_text(meta)),
                         ),
                 )
             })
@@ -1348,6 +1355,7 @@ impl ChangeRequestTab {
                 {
                     column = column.child(
                         div()
+                            .debug_selector(|| "change-request-description".into())
                             .p(px(12.0))
                             .rounded(theme.radii.control)
                             .border_1()
@@ -1387,13 +1395,13 @@ impl ChangeRequestTab {
                     div()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
-                        .child(who),
+                        .child(selectable_text(who)),
                 )
-                .child(what)
+                .child(selectable_text(what))
                 .child(
                     div()
                         .text_color(theme.text_faint)
-                        .child(style::age(now, at)),
+                        .child(selectable_text(style::age(now, at))),
                 )
         };
         let body = self.bodies.get(index).cloned().flatten().map(|doc| {
@@ -1409,6 +1417,7 @@ impl ChangeRequestTab {
         });
         match item {
             TimelineItem::Comment { author, at, .. } => div()
+                .id(("change-request-timeline-item", index))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
@@ -1430,6 +1439,7 @@ impl ChangeRequestTab {
                     ReviewOutcome::Requested => "was asked to review",
                 };
                 div()
+                    .id(("change-request-timeline-item", index))
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
@@ -1456,11 +1466,12 @@ impl ChangeRequestTab {
                                 theme,
                                 entity.clone(),
                             ))
-                            .child(format!("— {}", comment.body))
+                            .child(selectable_text(format!("— {}", comment.body)))
                     }))
                     .into_any_element()
             }
             TimelineItem::LineComment(comment) => div()
+                .id(("change-request-timeline-item", index))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
@@ -1501,7 +1512,9 @@ impl ChangeRequestTab {
                     EventKind::ConvertedToDraft => "marked it as a draft".to_string(),
                     EventKind::Other(text) => text.clone(),
                 };
-                line(actor.clone().unwrap_or_default(), what, *at).into_any_element()
+                line(actor.clone().unwrap_or_default(), what, *at)
+                    .id(("change-request-timeline-item", index))
+                    .into_any_element()
             }
         }
     }
@@ -1919,7 +1932,7 @@ impl ChangeRequestTab {
                 div()
                     .max_w(px(520.0))
                     .text_color(theme.text_muted)
-                    .child(message),
+                    .child(selectable_text(message)),
             )
             .child(
                 div()
@@ -2119,6 +2132,73 @@ mod tests {
             );
         });
         assert_eq!(*titles.borrow(), vec!["Fix the login redirect".to_string()]);
+    }
+
+    /// The title of a change request is the first thing a reviewer wants to
+    /// paste into a message; it and the meta line under it were painted but
+    /// not selectable. Drives the real tab, loaded from the fake forge.
+    #[gpui::test]
+    fn the_title_and_meta_line_of_a_change_request_can_be_copied(cx: &mut TestAppContext) {
+        let forge = forge_with_header();
+        let source = FakeSource::ready(testing::github_client(forge), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let executor = cx.executor();
+        let (tab, _, cx) = crate::text_selection::testing::host(cx, |_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        executor.allow_parking();
+        for _ in 0..600 {
+            if tab.read_with(cx, |tab, _| tab.header.value().is_some()) {
+                break;
+            }
+            executor.advance_clock(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        cx.run_until_parked();
+
+        assert_eq!(
+            crate::text_selection::testing::copy_line(cx, "change-request-title").as_deref(),
+            Some("Fix the login redirect")
+        );
+        let meta = crate::text_selection::testing::copy_line(cx, "change-request-meta")
+            .expect("the clipboard is readable");
+        assert!(
+            meta.contains(" → ") && meta.contains("updated"),
+            "the meta line copied whole: {meta:?}"
+        );
+    }
+
+    /// A pull request's description is prose a reviewer quotes. It is
+    /// rendered Markdown, which had no selection at all outside the chat.
+    #[gpui::test]
+    fn the_description_of_a_change_request_can_be_selected_and_copied(cx: &mut TestAppContext) {
+        let forge = forge_with_header();
+        let source = FakeSource::ready(testing::github_client(forge), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let executor = cx.executor();
+        let (tab, _, cx) = crate::text_selection::testing::host(cx, |_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        executor.allow_parking();
+        for _ in 0..600 {
+            if tab.read_with(cx, |tab, _| tab.header.value().is_some()) {
+                break;
+            }
+            executor.advance_clock(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        cx.run_until_parked();
+
+        // The heading and the paragraph, joined the way the page reads.
+        assert_eq!(
+            crate::text_selection::testing::copy_span(cx, "change-request-description", px(13.0))
+                .as_deref(),
+            Some("What\n\nFixes it.")
+        );
     }
 
     #[gpui::test]

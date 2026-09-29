@@ -29,6 +29,7 @@ mod horizontal_scroll;
 pub mod git_status_style;
 pub mod loading;
 pub mod markdown_preview;
+mod selectable_markdown;
 pub mod modal;
 pub mod orbit;
 pub mod outline;
@@ -42,6 +43,7 @@ pub mod sidebar;
 pub mod status;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod text_selection;
 pub mod titlebar;
 pub mod worktree_picker;
 
