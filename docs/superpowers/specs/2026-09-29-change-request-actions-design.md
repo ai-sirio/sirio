@@ -562,6 +562,16 @@ built and run; §14.2 lists what was not.
     GitHub's `X-OAuth-Scopes` (`GET user`) and GitLab's
     `personal_access_tokens/self`; a token that reports none is "scopes not
     reported".
+11. **The `edit-comment` control verb drops any open comment editor before
+    starting one**, so a refused start leaves nothing to reuse (the first
+    shape let a refused edit of a non-editable entry save the wrong
+    comment).
+12. **A send whose outcome carries a warning keeps the words in the
+    composer.** On GitLab the approval or the request for changes went
+    through while the comment beside it did not; §7.1 clears text only when
+    its write succeeded.
+13. **Saving a comment edit whose text is unchanged sends nothing**,
+    compared after `normalize` as the header edit is (§7.1).
 
 ### §14.2 Not verified
 
@@ -571,7 +581,13 @@ built and run; §14.2 lists what was not.
 - No window frame was captured (no display): the header buttons, the edit card,
   the composer and the status line were seen only through the control socket's
   report keys, and the Cmd/Ctrl+Enter chord was bound but never pressed.
-- A release build's absence of `surface.change_request.act` was checked once by hand (2026-09-29, Task 8): after `cargo build --release -p sirio --bin sirio -p sirio_control --bin sirioctl`, `sirioctl capabilities --json` lists 79 methods without it and `sirioctl surface change-request act close` answers `unknown control method` (exit 1).
+- A release build's absence of `surface.change_request.act` was checked once
+  by hand (2026-09-29, Task 8): after `cargo build --release -p sirio --bin
+  sirio -p sirio_control --bin sirioctl`, `sirioctl capabilities --json` lists
+  79 methods without it and `sirioctl surface change-request act close`
+  answers `unknown control method` (exit 1).
 - The GitLab live test skips without `glab` or `SIRIO_FORGE_LIVE_GITLAB_TOKEN`;
   its documents were sent by hand to gitlab.com on 2026-09-29 and accepted.
-- The two `ActChangeRequest` enforcement arms in `sirio`'s `#[cfg(windows)]` test helpers were added by hand; they neither compile nor run on Linux, so they are checked only by the macOS/Windows CI.
+- The two `ActChangeRequest` enforcement arms in `sirio`'s `#[cfg(windows)]`
+  test helpers were added by hand; they neither compile nor run on Linux, so
+  they are checked only by the macOS/Windows CI.
