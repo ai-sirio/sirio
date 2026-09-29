@@ -9,8 +9,8 @@ use crate::model::{
     ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CommitSummary,
     FileChange, Forge, ListQuery, Listing, PageCursor,
 };
-use crate::target::ForgeTarget;
 use crate::scopes::TokenScopes;
+use crate::target::ForgeTarget;
 use crate::transport::Transport;
 use crate::{github, gitlab};
 
@@ -171,7 +171,7 @@ impl ForgeClient {
         match self.forge {
             Forge::GitHub => github::token_scopes(self),
             Forge::GitLab => gitlab::token_scopes(self),
-          }
+        }
     }
 
     /// The forge's own page for opening a change request from `branch`,

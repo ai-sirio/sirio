@@ -482,5 +482,4 @@ mod tests {
         };
         assert_eq!(means_text(&row), "Signed in with glab as me");
     }
-
 }

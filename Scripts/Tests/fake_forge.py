@@ -42,8 +42,8 @@ normal -- so one server covers every error path of an action:
                the reason in the payload's `errors`; REST: 409
     dropped    the request is read, then the connection is closed unanswered
     slow       the answer is held back 1.5 s, so two sends overlap
-     readonly   reads serve `<Operation>.readonly.json` where it exists (a
-                viewer who may not act); its token lists only read scopes
+    readonly   reads serve `<Operation>.readonly.json` where it exists (a
+               viewer who may not act); its token lists only read scopes
     finegrained  a token that reports no scopes at all
     notefails    GitLab only: `createNote` is refused with the reason in the
                  payload's `errors`, while the REST approval still answers 201

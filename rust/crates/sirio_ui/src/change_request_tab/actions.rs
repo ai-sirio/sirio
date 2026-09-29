@@ -334,7 +334,7 @@ impl ChangeRequestTab {
                             HeaderAction::Do(action) => {
                                 let _ = tab.perform(action.clone(), cx);
                             }
-                          })
+                        })
                     })
                 }))
                 .into_any_element(),
