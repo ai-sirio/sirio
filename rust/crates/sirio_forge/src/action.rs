@@ -5,7 +5,7 @@
 //! [`ForgeClient::act`]: crate::ForgeClient::act
 
 use crate::error::ForgeError;
-use crate::model::{Capabilities, ChangeState, CommentRef};
+use crate::model::{Capabilities, ChangeState, CommentRef, Forge};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewVerdict {
@@ -183,6 +183,28 @@ pub(crate) fn check_action(
     Ok(())
 }
 
+/// One GraphQL document Sirio writes with, for the live conformance test.
+#[doc(hidden)]
+pub struct LiveProbe {
+    pub operation: &'static str,
+    pub document: &'static str,
+    pub variables: serde_json::Value,
+}
+
+/// Every document `act` sends and every pre-flight read it makes, each with
+/// variables that change nothing anywhere: a mutation's input names an id no
+/// forge holds (a GitHub node id nobody minted, GitLab's global id and iid
+/// `0`, which no row has), and a read names a public change request. The live
+/// test sends each as it is and requires the forge to accept the *document* —
+/// a schema or input error would carry `extensions` — whatever it thinks of
+/// the ids.
+#[doc(hidden)]
+pub fn live_probes(forge: Forge) -> Vec<LiveProbe> {
+    match forge {
+        Forge::GitHub => crate::github::live_probes(),
+        Forge::GitLab => crate::gitlab::live_probes(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

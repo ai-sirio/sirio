@@ -322,6 +322,16 @@ run_root_stage "test-update-e2e.sh"            bash Scripts/Tests/test-update-e2
 # SKIP line inside the stage's own transcript; the stage still passes.
 run_root_stage "test-forge-e2e.sh"             bash Scripts/Tests/test-forge-e2e.sh --out-dir "$RUN_DIR/forge-e2e"
 
+# Acting on a change request: every write of `sirio_forge` on the wire, through
+# the real transports, then the tab's actions in a real, isolated Sirio driven
+# by the debug-only `surface change-request act` verb. Without a display the
+# `ui` stage is state-only, which still proves every socket-visible fact.
+if [ -n "${DISPLAY:-}" ]; then
+    run_root_stage "test-forge-actions-e2e.sh" bash Scripts/Tests/test-forge-actions-e2e.sh --out-dir "$RUN_DIR/forge-actions-e2e"
+else
+    run_root_stage "test-forge-actions-e2e.sh" bash Scripts/Tests/test-forge-actions-e2e.sh --state-only --out-dir "$RUN_DIR/forge-actions-e2e"
+fi
+
 # The change request surfaces in a real, isolated Sirio against the fake
 # forge, over the control socket, then a change request's diff, snapshots and
 # fetch against a real bare repository standing in for the forge's git side.

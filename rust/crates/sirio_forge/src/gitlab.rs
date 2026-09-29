@@ -16,15 +16,20 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{Value, json};
 
-use crate::action::{Action, ActionContext, ActionOutcome, ReviewVerdict, check_action};
+use crate::action::{
+    Action, ActionContext, ActionOutcome, LiveProbe, ReviewVerdict, check_action,
+};
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor, no_unknown_field, opt_bool, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor,
+    no_unknown_field, opt_bool, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef, CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
+    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef,
+    CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
+    ReviewOutcome, Reviewer, TimelineItem,
 };
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
@@ -736,4 +741,52 @@ pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
             .map(str::to_string)
             .collect(),
     ))
+}
+
+/// See [`crate::action::live_probes`]. GitLab's iids start at 1 and its ids at
+/// 1, so `0` names nothing, in any project.
+pub(crate) fn live_probes() -> Vec<LiveProbe> {
+    let project = "gitlab-org/cli";
+    let write = |operation, document, input: Value| LiveProbe {
+        operation,
+        document,
+        variables: json!({ "input": input }),
+    };
+    vec![
+        LiveProbe {
+            operation: "MergeRequestActionContext",
+            document: ACTION_CONTEXT.0,
+            variables: json!({ "fullPath": project, "iid": "2000" }),
+        },
+        LiveProbe {
+            operation: "MergeRequestActionContext",
+            document: ACTION_CONTEXT.1,
+            variables: json!({ "fullPath": project, "iid": "2000" }),
+        },
+        write(
+            "CreateNote",
+            CREATE_NOTE,
+            json!({ "noteableId": "gid://gitlab/MergeRequest/0", "body": "x" }),
+        ),
+        write(
+            "UpdateNote",
+            UPDATE_NOTE,
+            json!({ "id": "gid://gitlab/Note/0", "body": "x" }),
+        ),
+        write(
+            "MergeRequestUpdate",
+            UPDATE,
+            json!({ "projectPath": project, "iid": "0", "title": "x", "description": "x", "targetBranch": "x", "state": "OPEN" }),
+        ),
+        write(
+            "MergeRequestSetDraft",
+            SET_DRAFT,
+            json!({ "projectPath": project, "iid": "0", "draft": true }),
+        ),
+        write(
+            "MergeRequestRequestChanges",
+            REQUEST_CHANGES,
+            json!({ "projectPath": project, "iid": "0" }),
+        ),
+    ]
 }

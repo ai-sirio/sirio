@@ -19,6 +19,8 @@ mod scopes;
 mod target;
 mod transport;
 
+#[doc(hidden)]
+pub use action::{LiveProbe, live_probes};
 pub use action::{Action, ActionOutcome, ReviewVerdict};
 pub use client::ForgeClient;
 pub use error::ForgeError;

@@ -8,17 +8,22 @@
 
 use serde_json::{Value, json};
 
-use crate::action::{Action, ActionContext, ActionOutcome, ReviewVerdict, check_action};
+use crate::action::{
+    Action, ActionContext, ActionOutcome, LiveProbe, ReviewVerdict, check_action,
+};
 use crate::client::{ForgeClient, page, paged, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor,
+    no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping;
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
+    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CiState, CommentKind,
+    CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
+    PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
 
 macro_rules! with_summary {
@@ -721,4 +726,46 @@ pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
     };
     let response = execute_rest(client, &request).ok()?;
     response.header("x-oauth-scopes").map(TokenScopes::from_header)
+}
+
+/// See [`crate::action::live_probes`].
+pub(crate) fn live_probes() -> Vec<LiveProbe> {
+    let id = "PR_sirio_live_check_0";
+    let write = |operation, document, input: Value| LiveProbe {
+        operation,
+        document,
+        variables: json!({ "input": input }),
+    };
+    vec![
+        LiveProbe {
+            operation: "ChangeRequestActionContext",
+            document: ACTION_CONTEXT,
+            variables: json!({ "owner": "ai-sirio", "name": "sirio", "number": 588 }),
+        },
+        write("AddComment", ADD_COMMENT, json!({ "subjectId": id, "body": "x" })),
+        write(
+            "AddPullRequestReview",
+            ADD_REVIEW,
+            json!({ "pullRequestId": id, "event": "COMMENT", "body": "x" }),
+        ),
+        write("ClosePullRequest", CLOSE, json!({ "pullRequestId": id })),
+        write("ReopenPullRequest", REOPEN, json!({ "pullRequestId": id })),
+        write("MarkPullRequestReadyForReview", READY, json!({ "pullRequestId": id })),
+        write("ConvertPullRequestToDraft", DRAFT, json!({ "pullRequestId": id })),
+        write(
+            "UpdatePullRequest",
+            UPDATE,
+            json!({ "pullRequestId": id, "title": "x", "body": "x", "baseRefName": "x" }),
+        ),
+        write(
+            "UpdateIssueComment",
+            UPDATE_COMMENT,
+            json!({ "id": "IC_sirio_live_check_0", "body": "x" }),
+        ),
+        write(
+            "UpdatePullRequestReview",
+            UPDATE_REVIEW,
+            json!({ "pullRequestReviewId": "PRR_sirio_live_check_0", "body": "x" }),
+        ),
+    ]
 }

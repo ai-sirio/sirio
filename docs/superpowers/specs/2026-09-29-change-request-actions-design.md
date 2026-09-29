@@ -520,3 +520,58 @@ Each slice is planned and merged on its own, and leaves Sirio working.
 | `requestReviews(union: false)` removes a reviewer on GitHub | REST `DELETE …/requested_reviewers` |
 | Which permission fields the GitLab baseline queries can keep | the ones it cannot are "not reported" and their buttons hidden (§6) |
 | A log of a hundred thousand lines scrolls in the virtualised list | the cap is lowered until it does, and stays stated in the tab |
+
+## §14 Revised while planning and building slice B2a (2026-09-29)
+
+Each item supersedes the sentence of the spec it names. Everything here was
+built and run; §14.2 lists what was not.
+
+### §14.1 What changed
+
+1. **GitLab's approval is REST.** §5's row says "GraphQL if the server has it,
+   else REST". gitlab.com's schema has no `mergeRequestApprove` (checked
+   2026-09-29), so the approval is `POST projects/:id/merge_requests/:iid/approve`
+   through `Transport::request`. `mergeRequestRequestChanges` does exist there.
+2. **Buttons, not icons, and three buttons, not a split button.** §7.1's icons
+   with tooltips and the composer's split button: the vendored Zed icon set has no
+   pencil or draft glyph and bezel has no menu. The header's actions are labelled
+   buttons, and the composer has *Comment*, *Approve* and *Request changes*.
+3. **Edit is a card at the top of the Conversation**, with the three fields,
+   *Save* and *Cancel* — not in place under the header (§7.1).
+4. **One write in flight per tab**, not per action kind (§5): stricter, and it
+   keeps a *Close* from racing a *Comment*.
+5. **`Capabilities.can_change_state`** is one flag whose meaning follows the
+   state (close on an open change request, reopen on a closed one), and each
+   action is checked against the *state* as well (§6). `ForgeError::HeadMoved`
+   exists, and nothing produces it until B2b's merge.
+6. **Every action pre-flights.** `act` reads the change request's node id, state
+   and permissions with one small query before it checks and sends
+   (`ChangeRequestActionContext`, `MergeRequestActionContext`, with a baseline
+   variant on GitLab); the header's own capabilities only decide what is drawn.
+7. **The UI's modules are children of `change_request_tab`**
+   (`change_request_tab/{actions,edit,composer}.rs`), not siblings (§4): they
+   need the tab's private fields.
+8. **The debug-only verb is guarded at dispatch** with `cfg!(debug_assertions)`
+   — compiled in, unreachable in a release build, which answers "unknown
+   method" and does not list it — rather than removed with `#[cfg]` (§10).
+9. **The live test sends the documents**, with variables that name nothing, and
+   requires no error to carry `extensions` (a validation error does; a runtime
+   "not found" does not) — instead of introspecting the schema (§10.2, §13).
+   GitLab's probes use iid and id `0`, which no row has.
+10. **Settings reports the saved token's scopes** (§9): `TokenScopes`, read from
+    GitHub's `X-OAuth-Scopes` (`GET user`) and GitLab's
+    `personal_access_tokens/self`; a token that reports none is "scopes not
+    reported".
+
+### §14.2 Not verified
+
+- `glab` is not installed on the machine this was built on: the `cli` stage's
+  GitLab half (a GraphQL comment through `glab api`, and the REST approval)
+  printed `SKIP:`. `gh` ran for real.
+- No window frame was captured (no display): the header buttons, the edit card,
+  the composer and the status line were seen only through the control socket's
+  report keys, and the Cmd/Ctrl+Enter chord was bound but never pressed.
+- A release build's absence of `surface.change_request.act` was checked once by hand (2026-09-29, Task 8): after `cargo build --release -p sirio --bin sirio -p sirio_control --bin sirioctl`, `sirioctl capabilities --json` lists 79 methods without it and `sirioctl surface change-request act close` answers `unknown control method` (exit 1).
+- The GitLab live test skips without `glab` or `SIRIO_FORGE_LIVE_GITLAB_TOKEN`;
+  its documents were sent by hand to gitlab.com on 2026-09-29 and accepted.
+- The two `ActChangeRequest` enforcement arms in `sirio`'s `#[cfg(windows)]` test helpers were added by hand; they neither compile nor run on Linux, so they are checked only by the macOS/Windows CI.
