@@ -6,6 +6,7 @@
 //! blocks; the app runs them on GPUI's background executor. A token, when
 //! there is one, is handed in by the caller and never stored or logged here.
 
+mod action;
 mod client;
 mod error;
 mod github;
@@ -14,17 +15,25 @@ mod graphql;
 mod mapping;
 mod model;
 mod resolve;
+mod scopes;
 mod target;
 mod transport;
 
+#[doc(hidden)]
+pub use action::{LiveProbe, live_probes};
+pub use action::{Action, ActionOutcome, ReviewVerdict};
 pub use client::ForgeClient;
 pub use error::ForgeError;
 
 pub use model::{
-    ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckStatus, CiState,
-    CommitSummary, EventKind, FileChange, FileChangeKind, Filter, Forge, LineComment, ListQuery,
-    Listing, PageCursor, Progress, ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem,
+    Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check,
+    CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
+    FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
+    ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem,
 };
+pub use scopes::TokenScopes;
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};
 pub use target::{ForgeTarget, parse_remote_url};
-pub use transport::{ApiResponse, CliProgram, CliTransport, TokenTransport, Transport};
+pub use transport::{
+    ApiResponse, CliProgram, CliTransport, RestMethod, RestRequest, TokenTransport, Transport,
+};

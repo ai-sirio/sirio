@@ -1,0 +1,3 @@
+mutation AddComment($input: AddCommentInput!) {
+  addComment(input: $input) { clientMutationId }
+}

@@ -30,10 +30,43 @@ impl ApiResponse {
     }
 }
 
-/// Sends a GraphQL request body — `{"operationName", "query", "variables"}`
-/// as JSON — to one forge host.
+/// The verbs a REST call uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+}
+
+impl RestMethod {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// One REST call, for what GraphQL does not carry: approving a GitLab merge
+/// request, re-running a GitHub job, reading a job's log. `path` is relative
+/// to the forge's API root — `repos/acme/widgets/actions/jobs/7/rerun`,
+/// `projects/team%2Fapp/merge_requests/7/approve` — and is built by Sirio,
+/// never taken from what a forge said. `body`, when there is one, is JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestRequest {
+    pub method: RestMethod,
+    pub path: String,
+    pub body: Option<Vec<u8>>,
+}
+
+/// Sends requests to one forge host: a GraphQL body — `{"operationName",
+/// "query", "variables"}` as JSON — or one REST call.
 pub trait Transport: Send + Sync {
     fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError>;
+    fn request(&self, request: &RestRequest) -> Result<ApiResponse, ForgeError>;
 }
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -42,6 +75,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// which both forges accept for one.
 pub struct TokenTransport {
     endpoint: String,
+    forge: Forge,
     host: String,
     token: String,
     agent: ureq::Agent,
@@ -51,6 +85,7 @@ impl TokenTransport {
     pub fn new(forge: Forge, host: &str, token: String) -> Self {
         Self {
             endpoint: graphql_endpoint(forge, host),
+            forge,
             host: host.to_string(),
             token,
             agent: http_agent(HTTP_TIMEOUT),
@@ -68,17 +103,10 @@ impl std::fmt::Debug for TokenTransport {
     }
 }
 
-impl Transport for TokenTransport {
-    fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError> {
-        let _perf = sirio_perf::span("forge.http_request", 0);
-        let response = self
-            .agent
-            .post(&self.endpoint)
-            .header("Authorization", &format!("Bearer {}", self.token))
-            .header("Content-Type", "application/json")
-            .header("User-Agent", "Sirio")
-            .send(body)
-            .map_err(|error| classify(&self.host, error))?;
+impl TokenTransport {
+    /// Reads whatever the forge answered, whatever its status: a status is
+    /// an answer here, and `interpret` decides what it means.
+    fn read(&self, response: ureq::http::Response<ureq::Body>) -> Result<ApiResponse, ForgeError> {
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -99,6 +127,46 @@ impl Transport for TokenTransport {
             headers,
             body,
         })
+    }
+}
+
+impl Transport for TokenTransport {
+    fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError> {
+        let _perf = sirio_perf::span("forge.http_request", 0);
+        let response = self
+            .agent
+            .post(&self.endpoint)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "Sirio")
+            .send(body)
+            .map_err(|error| classify(&self.host, error))?;
+        self.read(response)
+    }
+
+    fn request(&self, request: &RestRequest) -> Result<ApiResponse, ForgeError> {
+        let _perf = sirio_perf::span("forge.http_rest", 0);
+        let builder = ureq::http::Request::builder()
+            .method(request.method.as_str())
+            .uri(rest_endpoint(self.forge, &self.host, &request.path))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/json")
+            .header("User-Agent", "Sirio");
+        let built = match &request.body {
+            Some(body) => builder
+                .header("Content-Type", "application/json")
+                .body(body.clone()),
+            None => builder.body(Vec::new()),
+        };
+        let http_request = built.map_err(|error| ForgeError::Network {
+            host: self.host.clone(),
+            detail: format!("an unusable request: {error}"),
+        })?;
+        let response = self
+            .agent
+            .run(http_request)
+            .map_err(|error| classify(&self.host, error))?;
+        self.read(response)
     }
 }
 
@@ -154,6 +222,21 @@ pub(crate) fn graphql_endpoint(forge: Forge, host: &str) -> String {
         return format!("{base}/graphql");
     }
     format!("{}/api/graphql", web_base(host))
+}
+
+/// Where a REST `path` lives: `https://api.github.com/` for github.com,
+/// `https://H/api/v3/` on GitHub Enterprise Server, `https://H/api/v4/` on
+/// GitLab.
+pub(crate) fn rest_endpoint(forge: Forge, host: &str, path: &str) -> String {
+    if forge == Forge::GitHub && host == "github.com" {
+        let base = test_base(host).unwrap_or_else(|| "https://api.github.com".to_string());
+        return format!("{base}/{path}");
+    }
+    let root = match forge {
+        Forge::GitHub => "api/v3",
+        Forge::GitLab => "api/v4",
+    };
+    format!("{}/{root}/{path}", web_base(host))
 }
 
 /// `https://<host>`, or the test endpoint standing in for it.
@@ -225,30 +308,63 @@ impl CliTransport {
     }
 }
 
+impl CliTransport {
+    fn run_error(&self, error: RunError) -> ForgeError {
+        match error {
+            RunError::NotInstalled => ForgeError::NotInstalled {
+                program: self.program.command(),
+            },
+            RunError::TimedOut => ForgeError::Network {
+                host: self.host.clone(),
+                detail: format!(
+                    "{} did not answer within {} s",
+                    self.program.command(),
+                    CLI_TIMEOUT.as_secs()
+                ),
+            },
+            RunError::Io(detail) => ForgeError::Network {
+                host: self.host.clone(),
+                detail,
+            },
+        }
+    }
+}
+
 impl Transport for CliTransport {
     fn post_graphql(&self, body: &[u8]) -> Result<ApiResponse, ForgeError> {
         let _perf = sirio_perf::span("forge.cli_request", 0);
         let args = graphql_args(self.program, &self.host);
-        let output =
-            run(self.program, &args, Some(body), CLI_TIMEOUT).map_err(|error| match error {
-                RunError::NotInstalled => ForgeError::NotInstalled {
-                    program: self.program.command(),
-                },
-                RunError::TimedOut => ForgeError::Network {
-                    host: self.host.clone(),
-                    detail: format!(
-                        "{} did not answer within {} s",
-                        self.program.command(),
-                        CLI_TIMEOUT.as_secs()
-                    ),
-                },
-                RunError::Io(detail) => ForgeError::Network {
-                    host: self.host.clone(),
-                    detail,
-                },
-            })?;
+        let output = run(self.program, &args, Some(body), CLI_TIMEOUT)
+            .map_err(|error| self.run_error(error))?;
         interpret_cli(self.program, &self.host, &output)
     }
+
+    fn request(&self, request: &RestRequest) -> Result<ApiResponse, ForgeError> {
+        let _perf = sirio_perf::span("forge.cli_rest", 0);
+        let args = rest_args(self.program, &self.host, request);
+        let output = run(self.program, &args, request.body.as_deref(), CLI_TIMEOUT)
+            .map_err(|error| self.run_error(error))?;
+        interpret_cli(self.program, &self.host, &output)
+    }
+}
+
+fn rest_args<'a>(program: CliProgram, host: &'a str, request: &'a RestRequest) -> Vec<&'a str> {
+    let mut args = vec![
+        "api",
+        "--hostname",
+        host,
+        "--include",
+        "--method",
+        request.method.as_str(),
+        request.path.as_str(),
+    ];
+    if request.body.is_some() {
+        args.extend(["--input", "-"]);
+        if program == CliProgram::Glab {
+            args.extend(["-H", "Content-Type: application/json"]);
+        }
+    }
+    args
 }
 
 fn graphql_args<'a>(program: CliProgram, host: &'a str) -> Vec<&'a str> {

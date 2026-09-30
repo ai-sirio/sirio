@@ -16,17 +16,23 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{Value, json};
 
-use crate::client::{ForgeClient, page, paged, pick_for_branch};
+use crate::action::{
+    Action, ActionContext, ActionOutcome, LiveProbe, ReviewVerdict, check_action,
+};
+use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, has_previous_page, next_cursor, no_unknown_field, opt_str, opt_u32,
-    revisions, str_at, time_at, u32_at,
+    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor,
+    no_unknown_field, opt_bool, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
-    ChangeHeader, ChangePage, ChangeSummary, Check, CommitSummary, FileChange, Filter, LineComment,
-    ListQuery, Listing, PageCursor, ReviewOutcome, Reviewer, TimelineItem,
+    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef,
+    CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
+    ReviewOutcome, Reviewer, TimelineItem,
 };
+use crate::scopes::TokenScopes;
+use crate::transport::{RestMethod, RestRequest};
 
 macro_rules! full {
     ($file:literal) => {
@@ -65,6 +71,15 @@ const HEADER: (&str, &str) = (
     full!("queries/gitlab/header.graphql"),
     baseline!("queries/gitlab/header_baseline.graphql"),
 );
+const ACTION_CONTEXT: (&str, &str) = (
+    include_str!("queries/gitlab/action_context.graphql"),
+    include_str!("queries/gitlab/action_context_baseline.graphql"),
+);
+const CREATE_NOTE: &str = include_str!("queries/gitlab/create_note.graphql");
+const UPDATE_NOTE: &str = include_str!("queries/gitlab/update_note.graphql");
+const UPDATE: &str = include_str!("queries/gitlab/update.graphql");
+const SET_DRAFT: &str = include_str!("queries/gitlab/set_draft.graphql");
+const REQUEST_CHANGES: &str = include_str!("queries/gitlab/request_changes.graphql");
 const COUNT: &str = include_str!("queries/gitlab/count.graphql");
 const COMMITS: &str = include_str!("queries/gitlab/commits.graphql");
 const CHECKS: &str = include_str!("queries/gitlab/checks.graphql");
@@ -341,6 +356,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
     })?;
     Ok(ChangeHeader {
         summary,
+        capabilities: capabilities(client, node),
         body: str_at(node, "/description"),
         reviewers: reviewers(node),
         additions: opt_u32(node, "/diffStatsSummary/additions"),
@@ -354,6 +370,30 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
             opt_str(node, "/diffRefs/headSha"),
             opt_str(node, "/diffRefs/startSha"),
         ),
+    })
+}
+
+/// What the viewer may do. A baseline query leaves the fields an old server
+/// lacks unasked, and the mapping reads "not reported" as "not offered".
+fn capabilities(client: &ForgeClient, node: &Value) -> Capabilities {
+    mapping::gitlab_capabilities(mapping::GitLabFacts {
+        state: opt_str(node, "/state").unwrap_or(""),
+        locked: bool_at(node, "/discussionLocked"),
+        can_create_note: opt_bool(node, "/userPermissions/createNote"),
+        can_update: opt_bool(node, "/userPermissions/updateMergeRequest"),
+        can_approve: opt_bool(node, "/userPermissions/canApprove"),
+        reports_review_state: !client.baseline.load(Ordering::Relaxed),
+    })
+}
+
+/// An edit handle for a note the viewer may administer.
+fn note_edit(note: &Value) -> Option<CommentRef> {
+    if !bool_at(note, "/userPermissions/adminNote") {
+        return None;
+    }
+    opt_str(note, "/id").map(|id| CommentRef {
+        id: id.to_string(),
+        kind: CommentKind::Comment,
     })
 }
 
@@ -408,6 +448,7 @@ fn timeline(notes: &[&Value]) -> Vec<TimelineItem> {
                         body: String::new(),
                         at,
                         line_comments: Vec::new(),
+                        edit: None,
                     },
                     SystemNote::Event(kind) => TimelineItem::Event {
                         actor: Some(author),
@@ -425,7 +466,12 @@ fn timeline(notes: &[&Value]) -> Vec<TimelineItem> {
                     body,
                     at,
                 }),
-                None => TimelineItem::Comment { author, body, at },
+                None => TimelineItem::Comment {
+                    author,
+                    body,
+                    at,
+                    edit: note_edit(note),
+                },
             }
         })
         .collect()
@@ -515,4 +561,232 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
         items,
         truncated: false,
     })
+}
+
+/// The pre-flight read of one merge request: its global id (what a note is
+/// attached to), its state and what the viewer may do to it now. On a server
+/// that lacks `canApprove` the baseline query is used, and approving reads
+/// as "not reported".
+fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, ForgeError> {
+    let data = run(
+        client,
+        "MergeRequestActionContext",
+        ACTION_CONTEXT,
+        json!({ "fullPath": client.project, "iid": number.to_string() }),
+    )?;
+    let node = merge_request(client, &data)?;
+    let node_id = opt_str(node, "/id")
+        .ok_or_else(|| ForgeError::UnexpectedResponse {
+            host: client.host.clone(),
+            detail: "a merge request without an id".to_string(),
+        })?
+        .to_string();
+    let state = mapping::gitlab_change_state(&str_at(node, "/state"), bool_at(node, "/draft"));
+    Ok(ActionContext {
+        node_id,
+        state,
+        capabilities: capabilities(client, node),
+    })
+}
+
+fn mutate(
+    client: &ForgeClient,
+    operation: &str,
+    document: &str,
+    input: Value,
+) -> Result<(), ForgeError> {
+    execute_mutation(client, operation, document, json!({ "input": input })).map(|_| ())
+}
+
+fn create_note(client: &ForgeClient, noteable: &str, body: &str) -> Result<(), ForgeError> {
+    mutate(
+        client,
+        "CreateNote",
+        CREATE_NOTE,
+        json!({ "noteableId": noteable, "body": body }),
+    )
+}
+
+/// GitLab has no approve mutation in GraphQL (checked against gitlab.com on
+/// 2026-09-29): approving is the REST call.
+fn approve(client: &ForgeClient, number: u64) -> Result<(), ForgeError> {
+    let request = RestRequest {
+        method: RestMethod::Post,
+        path: format!(
+            "projects/{}/merge_requests/{number}/approve",
+            percent_encode(&client.project, false)
+        ),
+        body: None,
+    };
+    execute_rest(client, &request).map(|_| ())
+}
+
+/// `mergeRequestUpdate` with only the fields the action changes.
+fn update(client: &ForgeClient, number: u64, fields: Value) -> Result<(), ForgeError> {
+    let mut input = json!({ "projectPath": client.project, "iid": number.to_string() });
+    if let (Some(input), Some(fields)) = (input.as_object_mut(), fields.as_object()) {
+        input.extend(fields.clone());
+    }
+    mutate(client, "MergeRequestUpdate", UPDATE, input)
+}
+
+/// The action's first step decided it; a second step (the comment beside an
+/// approval) that fails leaves the first standing, and says so.
+fn then_comment(
+    client: &ForgeClient,
+    noteable: &str,
+    body: &str,
+    done: &str,
+) -> ActionOutcome {
+    if body.trim().is_empty() {
+        return ActionOutcome::default();
+    }
+    match create_note(client, noteable, body) {
+        Ok(()) => ActionOutcome::default(),
+        Err(error) => ActionOutcome {
+            warning: Some(format!("{done}, but the comment could not be posted: {error}")),
+        },
+    }
+}
+
+pub(crate) fn act(
+    client: &ForgeClient,
+    number: u64,
+    action: &Action,
+) -> Result<ActionOutcome, ForgeError> {
+    let context = action_context(client, number)?;
+    check_action(&client.host, action, &context)?;
+    let noteable = context.node_id.as_str();
+    let iid = number.to_string();
+    match action {
+        Action::Comment { body }
+        | Action::Review {
+            verdict: ReviewVerdict::Comment,
+            body,
+        } => create_note(client, noteable, body)?,
+        Action::Review {
+            verdict: ReviewVerdict::Approve,
+            body,
+        } => {
+            approve(client, number)?;
+            return Ok(then_comment(client, noteable, body, "Approved"));
+        }
+        Action::Review {
+            verdict: ReviewVerdict::RequestChanges,
+            body,
+        } => {
+            mutate(
+                client,
+                "MergeRequestRequestChanges",
+                REQUEST_CHANGES,
+                json!({ "projectPath": client.project, "iid": iid }),
+            )?;
+            return Ok(then_comment(client, noteable, body, "Changes requested"));
+        }
+        Action::Close => update(client, number, json!({ "state": "CLOSED" }))?,
+        Action::Reopen => update(client, number, json!({ "state": "OPEN" }))?,
+        Action::MarkReady => mutate(
+            client,
+            "MergeRequestSetDraft",
+            SET_DRAFT,
+            json!({ "projectPath": client.project, "iid": iid, "draft": false }),
+        )?,
+        Action::ConvertToDraft => mutate(
+            client,
+            "MergeRequestSetDraft",
+            SET_DRAFT,
+            json!({ "projectPath": client.project, "iid": iid, "draft": true }),
+        )?,
+        Action::Edit {
+            title,
+            body,
+            target_branch,
+        } => {
+            let mut fields = json!({});
+            if let Some(title) = title {
+                fields["title"] = json!(title);
+            }
+            if let Some(body) = body {
+                fields["description"] = json!(body);
+            }
+            if let Some(branch) = target_branch {
+                fields["targetBranch"] = json!(branch);
+            }
+            update(client, number, fields)?
+        }
+        Action::EditComment { comment, body } => mutate(
+            client,
+            "UpdateNote",
+            UPDATE_NOTE,
+            json!({ "id": comment.id, "body": body }),
+        )?,
+    }
+    Ok(ActionOutcome::default())
+}
+
+/// A personal access token describes itself at `personal_access_tokens/self`.
+pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
+    let request = RestRequest {
+        method: RestMethod::Get,
+        path: "personal_access_tokens/self".to_string(),
+        body: None,
+    };
+    let response = execute_rest(client, &request).ok()?;
+    let value: Value = serde_json::from_slice(&response.body).ok()?;
+    let scopes = value.get("scopes")?.as_array()?;
+    Some(TokenScopes(
+        scopes
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    ))
+}
+
+/// See [`crate::action::live_probes`]. GitLab's iids start at 1 and its ids at
+/// 1, so `0` names nothing, in any project.
+pub(crate) fn live_probes() -> Vec<LiveProbe> {
+    let project = "gitlab-org/cli";
+    let write = |operation, document, input: Value| LiveProbe {
+        operation,
+        document,
+        variables: json!({ "input": input }),
+    };
+    vec![
+        LiveProbe {
+            operation: "MergeRequestActionContext",
+            document: ACTION_CONTEXT.0,
+            variables: json!({ "fullPath": project, "iid": "2000" }),
+        },
+        LiveProbe {
+            operation: "MergeRequestActionContext",
+            document: ACTION_CONTEXT.1,
+            variables: json!({ "fullPath": project, "iid": "2000" }),
+        },
+        write(
+            "CreateNote",
+            CREATE_NOTE,
+            json!({ "noteableId": "gid://gitlab/MergeRequest/0", "body": "x" }),
+        ),
+        write(
+            "UpdateNote",
+            UPDATE_NOTE,
+            json!({ "id": "gid://gitlab/Note/0", "body": "x" }),
+        ),
+        write(
+            "MergeRequestUpdate",
+            UPDATE,
+            json!({ "projectPath": project, "iid": "0", "title": "x", "description": "x", "targetBranch": "x", "state": "OPEN" }),
+        ),
+        write(
+            "MergeRequestSetDraft",
+            SET_DRAFT,
+            json!({ "projectPath": project, "iid": "0", "draft": true }),
+        ),
+        write(
+            "MergeRequestRequestChanges",
+            REQUEST_CHANGES,
+            json!({ "projectPath": project, "iid": "0" }),
+        ),
+    ]
 }

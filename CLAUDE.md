@@ -46,6 +46,13 @@ Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
 # against a bare repository and the fake forge; same flags as above.
 Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 
+# Acting on a change request: every write of sirio_forge on the wire (the token
+# transport and the real gh/glab), then the tab's actions in a real, isolated
+# Sirio driven by the debug-only `surface change-request act` verb. --stage NAME
+# runs one stage (wire-github, wire-gitlab, failures, cli, scopes, ui);
+# --state-only skips the ui stage's window captures.
+Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -237,6 +244,27 @@ a read-only snapshot tab otherwise; a persisted snapshot's sha and path are
 refused before they reach a label or a path.
 `docs/superpowers/specs/2026-09-28-change-request-diff-design.md` has the
 design; `Scripts/Tests/test-forge-diff-e2e.sh` proves it.
+
+**Acting on a change request** goes through one door, `ForgeClient::act(number,
+&Action)` (`sirio_forge::action`). It reads the change request's id, state and
+permissions afresh, refuses in `check_action` — a pure function — whatever the
+forge would refuse, and only then sends the mutation: GraphQL on both forges,
+and GitLab's approval as REST (`Transport::request`; GitLab has no approve
+mutation). The answer is read as a *write's*: GitHub refuses with HTTP 200 and
+a `null` payload, GitLab with the reason in the payload's `errors`, and the
+interpreter that reads queries would call either a success. Sirio never
+retries a write; after any write the tab re-reads the forge instead of patching
+its own state, and a connection dropped after the send reads as "could not
+confirm". In the UI, `ChangeRequestTab::perform` is the one function the
+buttons, the composer and the edit fields call, and the control socket's
+`surface change-request act` verb calls it too — **in debug builds only**: a
+release build answers "unknown method" and does not list it, so nothing that
+writes to a forge is reachable over the socket. Two live tests, the
+`…_accepts_every_document_sirio_writes_with` pair, notice a mutation that stops
+matching the forge's schema: they send every document with an id that names
+nothing.
+`docs/superpowers/specs/2026-09-29-change-request-actions-design.md` has the
+design; `Scripts/Tests/test-forge-actions-e2e.sh` proves it.
 
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 

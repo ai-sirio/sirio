@@ -137,6 +137,7 @@ fn usage() {
          \x20 surface change-requests token --host h --forge github|gitlab --token t\n\
          \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
+         \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
@@ -824,6 +825,10 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             let path = parsed.positional.get(2).ok_or_else(|| "Missing path".to_string())?;
             let line = parsed.positional.get(3).map(String::as_str);
             require_ok(socket, &sirio_control::protocol::request::change_request_open_file(path, line))
+        }
+        ("change-request", "act") => {
+            let action = parsed.positional.get(2).ok_or_else(|| "Missing action".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_request_act(action, &parsed.values))
         }
         ("change-request", "open-commit") => {
             let sha = parsed.positional.get(2).ok_or_else(|| "Missing commit sha".to_string())?;

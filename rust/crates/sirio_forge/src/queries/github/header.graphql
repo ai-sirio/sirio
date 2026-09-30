@@ -3,6 +3,7 @@ query ChangeRequestHeader($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       ...ChangeSummary
       body baseRefOid headRefOid
+      id locked viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor
       additions
       deletions
       changedFiles
@@ -11,8 +12,8 @@ query ChangeRequestHeader($owner: String!, $name: String!, $number: Int!) {
         pageInfo { hasPreviousPage startCursor }
         nodes {
           __typename
-          ... on IssueComment { author { login } body createdAt }
-          ... on PullRequestReview { author { login } state body submittedAt comments(first: 50) { nodes { path line originalLine body } } }
+          ... on IssueComment { id viewerCanUpdate author { login } body createdAt }
+          ... on PullRequestReview { id viewerCanUpdate author { login } state body submittedAt comments(first: 50) { nodes { path line originalLine body } } }
           ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { __typename ... on User { login } ... on Team { slug } } }
           ... on PullRequestCommit { commit { oid committedDate } }
           ... on MergedEvent { actor { login } createdAt }

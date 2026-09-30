@@ -117,13 +117,28 @@ filtro o ricerca.
 
 A service hosting a project's remote, identified by its host: github.com,
 gitlab.com, a GitHub Enterprise Server or a self-managed GitLab. Sirio reads
-change requests from GitHub and GitLab forges only.
+and acts on change requests on GitHub and GitLab forges only.
 
 ### Change request
 
 The code's word for a GitHub pull request and a GitLab merge request alike.
 The UI keeps each forge's own: *PR* and `#578` on GitHub, *MR* and `!231` on
 GitLab.
+
+### Action
+
+One write a user asks of a forge about one change request — a comment, a
+review, a close, an edit — as `sirio_forge::Action` names it. Every action goes
+through `ForgeClient::act`, which reads what the forge lets the user do first
+and sends nothing the forge would refuse.
+
+### Capabilities
+
+What the forge says the signed-in user may do to one change request right now:
+comment, approve, request changes, edit, close or reopen, turn to draft or
+ready. A capability the forge did not report is not offered — except
+commenting, unless the conversation is locked — and the forge's own refusal is
+shown whatever Sirio offered.
 
 ### Means
 

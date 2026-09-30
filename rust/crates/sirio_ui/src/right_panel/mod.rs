@@ -768,6 +768,13 @@ impl RightPanel {
         self.change_requests.as_ref().and_then(|list| list.read(cx).reference_for(number))
     }
 
+    /// Reads the list again now: a write just changed what it shows.
+    pub fn refresh_change_requests(&mut self, cx: &mut Context<Self>) {
+        if let Some(list) = self.change_requests.clone() {
+            list.update(cx, |list, cx| list.refresh(cx));
+        }
+    }
+
     pub fn reconnect_change_requests(&mut self, cx: &mut Context<Self>) {
         if let Some(list) = self.change_requests.clone() {
             list.update(cx, |list, cx| list.reconnect(cx));

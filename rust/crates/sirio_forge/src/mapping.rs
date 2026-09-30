@@ -3,8 +3,8 @@
 //! never make a list fail to draw.
 
 use crate::model::{
-    ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress, ReviewOutcome,
-    ReviewState,
+    Capabilities, ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress,
+    ReviewOutcome, ReviewState,
 };
 
 pub(crate) fn github_change_state(state: &str, is_draft: bool) -> ChangeState {
@@ -267,6 +267,65 @@ pub(crate) fn gitlab_system_note(body: &str) -> SystemNote {
         _ => EventKind::Other(first.to_string()),
     };
     SystemNote::Event(kind)
+}
+
+/// The facts `github_capabilities` reads, so the mapping is one pure step.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitHubFacts<'a> {
+    pub state: &'a str,
+    pub locked: bool,
+    pub viewer_did_author: bool,
+    pub viewer_can_update: bool,
+    pub viewer_can_close: bool,
+    pub viewer_can_reopen: bool,
+}
+
+/// GitHub says what the viewer may do in `viewerCan…` fields; what a state
+/// makes meaningless is Sirio's to remove. Nobody reviews their own pull
+/// request, and a finished one takes no review, close or draft toggle.
+pub(crate) fn github_capabilities(facts: GitHubFacts<'_>) -> Capabilities {
+    let open = facts.state == "OPEN";
+    let reviewable = open && !facts.viewer_did_author;
+    Capabilities {
+        can_comment: !facts.locked,
+        can_approve: reviewable,
+        can_request_changes: reviewable,
+        can_edit: facts.viewer_can_update,
+        can_change_state: match facts.state {
+            "OPEN" => facts.viewer_can_close,
+            "CLOSED" => facts.viewer_can_reopen,
+            _ => false,
+        },
+        can_toggle_draft: open && facts.viewer_can_update,
+    }
+}
+
+/// The facts `gitlab_capabilities` reads. `None` is "the server did not
+/// report it" — a baseline query never asks, and an old server never knew.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitLabFacts<'a> {
+    pub state: &'a str,
+    pub locked: bool,
+    pub can_create_note: Option<bool>,
+    pub can_update: Option<bool>,
+    pub can_approve: Option<bool>,
+    /// Reviewers carry a review state on this server — the same generation
+    /// of GitLab that can request changes.
+    pub reports_review_state: bool,
+}
+
+pub(crate) fn gitlab_capabilities(facts: GitLabFacts<'_>) -> Capabilities {
+    let opened = facts.state == "opened";
+    let can_update = facts.can_update == Some(true);
+    let can_approve = opened && facts.can_approve == Some(true);
+    Capabilities {
+        can_comment: !facts.locked && facts.can_create_note != Some(false),
+        can_approve,
+        can_request_changes: can_approve && facts.reports_review_state,
+        can_edit: can_update,
+        can_change_state: can_update && matches!(facts.state, "opened" | "closed"),
+        can_toggle_draft: can_update && opened,
+    }
 }
 
 pub(crate) fn unix_seconds(timestamp: &str) -> Option<i64> {
@@ -603,5 +662,165 @@ mod tests {
         assert_eq!(file_change_kind("RENAMED"), Some(FileChangeKind::Renamed));
         assert_eq!(file_change_kind("CHANGED"), Some(FileChangeKind::Modified));
         assert_eq!(file_change_kind("SOMETHING_NEW"), None);
+    }
+
+    fn github_facts(state: &'static str) -> GitHubFacts<'static> {
+        GitHubFacts {
+            state,
+            locked: false,
+            viewer_did_author: false,
+            viewer_can_update: true,
+            viewer_can_close: true,
+            viewer_can_reopen: true,
+        }
+    }
+
+    /// A merged pull request is finished: nothing about its state, its draft
+    /// flag or a review applies, whatever the viewer could otherwise do.
+    #[test]
+    fn a_merged_github_pull_request_offers_no_state_change_review_or_draft_toggle() {
+        let caps = github_capabilities(github_facts("MERGED"));
+        assert!(!caps.can_change_state);
+        assert!(!caps.can_toggle_draft);
+        assert!(!caps.can_approve);
+        assert!(!caps.can_request_changes);
+        assert!(caps.can_edit, "the title and description of a merged pull request can still be fixed");
+        assert!(caps.can_comment);
+    }
+
+    #[test]
+    fn nobody_reviews_their_own_github_pull_request() {
+        let caps = github_capabilities(GitHubFacts {
+            viewer_did_author: true,
+            ..github_facts("OPEN")
+        });
+        assert!(!caps.can_approve);
+        assert!(!caps.can_request_changes);
+        assert!(caps.can_toggle_draft && caps.can_change_state);
+    }
+
+    #[test]
+    fn a_locked_github_conversation_takes_the_composer_away_and_nothing_else() {
+        let caps = github_capabilities(GitHubFacts {
+            locked: true,
+            ..github_facts("OPEN")
+        });
+        assert!(!caps.can_comment);
+        assert!(caps.can_approve && caps.can_edit);
+    }
+
+    #[test]
+    fn a_closed_github_pull_request_can_be_reopened_only_when_the_forge_says_so() {
+        let allowed = github_capabilities(github_facts("CLOSED"));
+        assert!(allowed.can_change_state);
+        assert!(!allowed.can_toggle_draft && !allowed.can_approve);
+        let refused = github_capabilities(GitHubFacts {
+            viewer_can_reopen: false,
+            ..github_facts("CLOSED")
+        });
+        assert!(!refused.can_change_state, "closed by a maintainer, the author cannot reopen it");
+    }
+
+    #[test]
+    fn an_open_github_pull_request_is_closed_by_whoever_the_forge_allows() {
+        let refused = github_capabilities(GitHubFacts {
+            viewer_can_close: false,
+            ..github_facts("OPEN")
+        });
+        assert!(!refused.can_change_state);
+    }
+
+    #[test]
+    fn a_github_pull_request_the_viewer_may_not_update_offers_a_review_and_a_comment_only() {
+        let caps = github_capabilities(GitHubFacts {
+            viewer_can_update: false,
+            viewer_can_close: false,
+            viewer_can_reopen: false,
+            ..github_facts("OPEN")
+        });
+        assert!(!caps.can_edit && !caps.can_toggle_draft && !caps.can_change_state);
+        assert!(caps.can_comment && caps.can_approve && caps.can_request_changes);
+    }
+
+    #[test]
+    fn an_unknown_github_state_is_treated_as_finished() {
+        let caps = github_capabilities(github_facts("SOMETHING_NEW"));
+        assert!(!caps.can_change_state && !caps.can_toggle_draft && !caps.can_approve);
+        assert!(caps.can_comment);
+    }
+
+    fn gitlab_facts(state: &'static str) -> GitLabFacts<'static> {
+        GitLabFacts {
+            state,
+            locked: false,
+            can_create_note: Some(true),
+            can_update: Some(true),
+            can_approve: Some(true),
+            reports_review_state: true,
+        }
+    }
+
+    #[test]
+    fn a_gitlab_that_reports_nothing_offers_a_comment_and_nothing_else() {
+        let caps = gitlab_capabilities(GitLabFacts {
+            state: "opened",
+            locked: false,
+            can_create_note: None,
+            can_update: None,
+            can_approve: None,
+            reports_review_state: false,
+        });
+        assert_eq!(
+            caps,
+            Capabilities {
+                can_comment: true,
+                ..Capabilities::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_gitlab_user_who_may_not_create_notes_cannot_comment() {
+        let caps = gitlab_capabilities(GitLabFacts {
+            can_create_note: Some(false),
+            ..gitlab_facts("opened")
+        });
+        assert!(!caps.can_comment);
+        let locked = gitlab_capabilities(GitLabFacts {
+            locked: true,
+            ..gitlab_facts("opened")
+        });
+        assert!(!locked.can_comment);
+    }
+
+    #[test]
+    fn requesting_changes_needs_a_server_that_reports_review_states() {
+        let old = gitlab_capabilities(GitLabFacts {
+            reports_review_state: false,
+            ..gitlab_facts("opened")
+        });
+        assert!(old.can_approve && !old.can_request_changes);
+        assert!(gitlab_capabilities(gitlab_facts("opened")).can_request_changes);
+    }
+
+    #[test]
+    fn a_merged_or_closed_gitlab_merge_request_offers_no_review_and_no_draft_toggle() {
+        for state in ["merged", "closed", "locked", "something_new"] {
+            let caps = gitlab_capabilities(gitlab_facts(state));
+            assert!(!caps.can_approve && !caps.can_request_changes && !caps.can_toggle_draft, "{state}");
+        }
+        assert!(gitlab_capabilities(gitlab_facts("closed")).can_change_state, "a closed merge request can be reopened");
+        assert!(!gitlab_capabilities(gitlab_facts("merged")).can_change_state);
+        assert!(!gitlab_capabilities(gitlab_facts("locked")).can_change_state);
+    }
+
+    #[test]
+    fn a_gitlab_user_who_may_not_update_edits_and_changes_nothing() {
+        let caps = gitlab_capabilities(GitLabFacts {
+            can_update: Some(false),
+            ..gitlab_facts("opened")
+        });
+        assert!(!caps.can_edit && !caps.can_change_state && !caps.can_toggle_draft);
+        assert!(caps.can_approve, "approving is its own permission");
     }
 }

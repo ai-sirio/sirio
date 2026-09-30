@@ -1,0 +1,3 @@
+mutation ReopenPullRequest($input: ReopenPullRequestInput!) {
+  reopenPullRequest(input: $input) { clientMutationId }
+}

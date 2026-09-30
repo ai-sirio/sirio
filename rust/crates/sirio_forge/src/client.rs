@@ -3,11 +3,13 @@
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
+use crate::action::{Action, ActionOutcome};
 use crate::error::ForgeError;
 use crate::model::{
     ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CommitSummary,
     FileChange, Forge, ListQuery, Listing, PageCursor,
 };
+use crate::scopes::TokenScopes;
 use crate::target::ForgeTarget;
 use crate::transport::Transport;
 use crate::{github, gitlab};
@@ -148,6 +150,30 @@ impl ForgeClient {
         }
     }
 
+    /// The one door for a write (spec §5). Reads the change request's
+    /// permissions afresh, refuses what the forge would refuse, sends the
+    /// rest — and never retries it: a write that may have been sent is not
+    /// sent again by anything but the user.
+    pub fn act(&self, number: u64, action: &Action) -> Result<ActionOutcome, ForgeError> {
+        let _perf = sirio_perf::span("forge.act", 0);
+        match self.forge {
+            Forge::GitHub => github::act(self, number, action),
+            Forge::GitLab => gitlab::act(self, number, action),
+        }
+    }
+
+    /// The scopes the signed-in token reports for itself, for Settings. `None`
+    /// where the forge does not say — a fine-grained GitHub token sends no
+    /// `X-OAuth-Scopes`, and a GitLab OAuth token has no personal access token
+    /// record — and on any failure: a question about a token's scopes never
+    /// becomes an error of its own.
+    pub fn token_scopes(&self) -> Option<TokenScopes> {
+        match self.forge {
+            Forge::GitHub => github::token_scopes(self),
+            Forge::GitLab => gitlab::token_scopes(self),
+        }
+    }
+
     /// The forge's own page for opening a change request from `branch`,
     /// prefilled. A browser link: it never goes through the test endpoint.
     pub fn creation_url(&self, branch: &str) -> String {
@@ -238,7 +264,7 @@ pub(crate) fn paged<T>(
 
 /// Percent-encodes everything but RFC 3986's unreserved characters, and
 /// `/` when `keep_slash`.
-fn percent_encode(text: &str, keep_slash: bool) -> String {
+pub(crate) fn percent_encode(text: &str, keep_slash: bool) -> String {
     let mut encoded = String::with_capacity(text.len());
     for byte in text.bytes() {
         let keep = byte.is_ascii_alphanumeric()

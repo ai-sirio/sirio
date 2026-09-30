@@ -38,6 +38,18 @@ pub enum ForgeError {
     /// An answer Sirio cannot read.
     #[error("unexpected answer from {host}: {detail}")]
     UnexpectedResponse { host: String, detail: String },
+    /// The forge understood a write and refused it, and said why: a
+    /// conflict, a required review, a protected branch, a validation. The
+    /// message is the forge's own.
+    #[error("{host} refused it: {message}")]
+    Rejected { host: String, message: String },
+    /// A merge was asked for a head that is no longer the branch's head.
+    #[error("the branch on {host} changed since it was read")]
+    HeadMoved { host: String },
+    /// The server lacks what the action needs — an older GitLab without a
+    /// mutation. `what` names it.
+    #[error("{host} does not support {what}")]
+    Unsupported { host: String, what: String },
 }
 
 impl ForgeError {
@@ -53,6 +65,9 @@ impl ForgeError {
             Self::Network { .. } => "Network",
             Self::UnknownField { .. } => "UnknownField",
             Self::UnexpectedResponse { .. } => "UnexpectedResponse",
+            Self::Rejected { .. } => "Rejected",
+            Self::HeadMoved { .. } => "HeadMoved",
+            Self::Unsupported { .. } => "Unsupported",
         }
     }
 }

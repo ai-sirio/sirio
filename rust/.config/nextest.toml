@@ -52,8 +52,11 @@ retries = 2
 # `github_answers_every_query_sirio_sends` and
 # `gitlab_answers_every_query_sirio_sends` join them for the same reason:
 # they call the live forges over the network, and a release must not depend
-# on the network.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends)'
+# on the network. So do `github_accepts_every_document_sirio_writes_with` and
+# `gitlab_accepts_every_document_sirio_writes_with`, which send each mutation
+# Sirio writes with, against ids that name nothing, to see the live schema
+# still accepts the document.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with)'
 
 [profile.pr]
 # .github/workflows/pr.yml selects this profile, by way of Scripts/ci.sh mapping
@@ -86,7 +89,7 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # once. A pull request is the last run where the developer who caused a flake
 # can still see it, so hiding it here would cost exactly what the retries
 # elsewhere are worth.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends)'
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with)'
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 3 }
 

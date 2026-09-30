@@ -19,6 +19,10 @@ use sirio_forge::{
 };
 use sirio_theme::Theme;
 
+mod actions;
+mod composer;
+mod edit;
+
 use crate::change_request_style as style;
 use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
@@ -88,6 +92,9 @@ pub enum ChangeRequestTabEvent {
     },
     /// The user closed a tab that can no longer reach its change request.
     Close,
+    /// A write reached the forge and the tab re-read it: the host refreshes
+    /// the right panel's list now instead of at its next tick.
+    Changed,
 }
 
 /// One piece of what the tab shows.
@@ -215,6 +222,8 @@ pub struct ChangeRequestTab {
     /// A commit whose revisions could not be made local, with its forge URL.
     commit_error: Option<(RevisionError, String)>,
     commit_task: Option<Task<()>>,
+    /// The write in flight, and the fields of an edit in progress.
+    actions: actions::ActionsState,
 }
 
 impl ChangeRequestTab {
@@ -236,7 +245,12 @@ impl ChangeRequestTab {
         worktree: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let _ = cx;
+        let composer = composer::new_field(cx);
+        cx.observe(&composer, |tab: &mut Self, field, cx| {
+            tab.actions.composer_blank = field.read(cx).content().trim().is_empty();
+            cx.notify();
+        })
+        .detach();
         Self {
             reference,
             title,
@@ -268,6 +282,7 @@ impl ChangeRequestTab {
             pending_reveal: None,
             commit_error: None,
             commit_task: None,
+            actions: actions::ActionsState::new(composer),
         }
     }
 
@@ -890,6 +905,33 @@ impl ChangeRequestTab {
                     .map_or(0, |list| list.items.len())
                     .to_string(),
             ),
+            (
+                "cr_state".to_string(),
+                self.header
+                    .value()
+                    .map(|header| style::state_label(header.summary.state).to_lowercase())
+                    .unwrap_or_default(),
+            ),
+            ("caps".to_string(), self.caps_words()),
+            (
+                "composer_len".to_string(),
+                self.actions.composer.read(cx).content().len().to_string(),
+            ),
+            (
+                "editing".to_string(),
+                if self.actions.edit.is_some() { "yes" } else { "no" }.to_string(),
+            ),
+            (
+                "comment_editing".to_string(),
+                self.actions
+                    .comment_edit
+                    .as_ref()
+                    .map(|edit| edit.comment.id.clone())
+                    .unwrap_or_default(),
+            ),
+            ("action".to_string(), self.actions.state.word().to_string()),
+            ("action_kind".to_string(), self.actions.state.kind().to_string()),
+            ("action_message".to_string(), self.action_message()),
         ]
     }
 }
@@ -1200,6 +1242,7 @@ impl ChangeRequestTab {
                         move |cx| refresh.update(cx, |tab, cx| tab.refresh(cx)),
                     )),
             )
+            .when_some(self.render_action_bar(theme, entity), |this, bar| this.child(bar))
             .when_some(summary, |this, summary| {
                 let meta = format!(
                     "{} · {} → {} · updated {}",
@@ -1231,6 +1274,7 @@ impl ChangeRequestTab {
                         ),
                 )
             })
+            .when_some(self.render_action_status(theme), |this, status| this.child(status))
     }
 
     fn inner_count(&self, inner: InnerTab) -> Option<String> {
@@ -1338,6 +1382,9 @@ impl ChangeRequestTab {
             Some(Self::close_handle(entity)),
             |header| {
                 let mut column = div().flex().flex_col().gap(px(12.0));
+                if let Some(card) = self.render_edit_card(theme, entity) {
+                    column = column.child(card);
+                }
                 if header.timeline_truncated {
                     let url = header.summary.web_url.clone();
                     column = column.child(button(
@@ -1370,6 +1417,9 @@ impl ChangeRequestTab {
                 }
                 for (index, item) in header.timeline.iter().enumerate() {
                     column = column.child(self.render_timeline_item(index, item, theme, entity));
+                }
+                if let Some(composer) = self.render_composer(theme, entity) {
+                    column = column.child(composer);
                 }
                 column.into_any_element()
             },
@@ -1415,13 +1465,25 @@ impl ChangeRequestTab {
                     open_links(),
                 ))
         });
+        let own = match item {
+            TimelineItem::Comment { edit, .. } | TimelineItem::Review { edit, .. } => edit.as_ref(),
+            _ => None,
+        };
+        // Where the viewer is editing this entry, its field takes the place of
+        // its text.
+        let editor = self.editor_for(own, theme, entity);
+        let pencil = self.edit_pencil(index, own, theme, entity);
+        let body: Option<AnyElement> = editor.or_else(|| body.map(IntoElement::into_any_element));
         match item {
             TimelineItem::Comment { author, at, .. } => div()
                 .id(("change-request-timeline-item", index))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(line(author.clone(), "commented".to_string(), *at))
+                .child(
+                    line(author.clone(), "commented".to_string(), *at)
+                        .when_some(pencil, |row, pencil| row.child(pencil)),
+                )
                 .when_some(body, |this, body| this.child(body))
                 .into_any_element(),
             TimelineItem::Review {
@@ -1443,7 +1505,10 @@ impl ChangeRequestTab {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(line(author.clone(), verb.to_string(), *at))
+                    .child(
+                        line(author.clone(), verb.to_string(), *at)
+                            .when_some(pencil, |row, pencil| row.child(pencil)),
+                    )
                     .when_some(body, |this, body| this.child(body))
                     .children(line_comments.iter().enumerate().map(|(position, comment)| {
                         div()

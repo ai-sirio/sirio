@@ -2,11 +2,14 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
       ...MergeRequestSummary
+      id
+      discussionLocked
+      userPermissions { createNote updateMergeRequest }
       description
       diffRefs { baseSha headSha startSha }
       notes(last: 100) {
         pageInfo { hasPreviousPage }
-        nodes { author { username } body createdAt system position { filePath newLine oldLine } }
+        nodes { id userPermissions { adminNote } author { username } body createdAt system position { filePath newLine oldLine } }
       }
     }
   }

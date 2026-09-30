@@ -94,10 +94,25 @@ pub(crate) fn cli_name(forge: Forge) -> &'static str {
     }
 }
 
+/// What a token needs, to read and to act: the two are different scopes on
+/// both forges, and a token saved for reading alone is refused on its first
+/// write.
 pub(crate) fn token_scopes(forge: Forge) -> &'static str {
     match forge {
-        Forge::GitHub => "read access to pull requests, checks and metadata",
-        Forge::GitLab => "the read_api scope",
+        Forge::GitHub => {
+            "read access to pull requests, checks and metadata to read, and write access to pull requests to comment, review and edit"
+        }
+        Forge::GitLab => "the read_api scope to read, and the api scope to comment, review and edit",
+    }
+}
+
+/// What a token needs to act, in the words the forge uses.
+pub(crate) fn write_scopes(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => {
+            "write access to pull requests (`repo` on a classic token, Pull requests: Read and write on a fine-grained one)"
+        }
+        Forge::GitLab => "the api scope",
     }
 }
 
