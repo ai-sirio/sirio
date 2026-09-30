@@ -52,12 +52,20 @@ The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local depen
 | `sirio_control` | `ControlServer` (unix socket) + `PaneRegistry` + the `sirioctl` CLI |
 | `sirio_agents` | Adapters for the 5 supported agents, with lifecycle hooks |
 | `sirio_acp` | Agent Client Protocol transport for chat-hosted agents |
+| `sirio_claude` | Claude Code's own stdio protocol, for native Claude chats, as types and pure functions |
 | `sirio_registry` | ACP agent registry: which agents exist, which are installed, how to install one |
 | `sirio_git` | Shell-out to git for local worktrees |
+| `sirio_forge` | GitHub pull requests and GitLab merge requests over one GraphQL layer, through `gh` / `glab` or a personal token |
 | `sirio_persistence` | SQLite (`rusqlite`) schema, migrations, records |
 | `sirio_project` | Domain model of projects, worktrees and tabs, discovered from disk |
 | `sirio_theme` | Theme tokens derived from `bezel::theme` (see `docs/THEME-PROVENANCE.md`) |
 | `sirio_markdown` | Markdown parsing/rendering for the editor and chat |
+| `sirio_diagram` | Mermaid and PlantUML source to SVG for the Markdown preview, with no GPUI dependency |
+| `sirio_syntax` | The grammars Sirio highlights beyond the seven `bezel-syntax` carries |
+| `sirio_lsp` | Language Server Protocol client over a child process's stdio |
+| `sirio_icons` | The Material icon theme for files and folders |
+| `sirio_privacy` | The macOS privacy (TCC) permissions a pane's tools depend on |
+| `sirio_perf` | Opt-in local performance trace, with no application content |
 | `sirio_usage` | Provider usage tracking (Claude / Codex / OpenCode / Ollama) |
 | `sirio_release` | Signed-artifact format: channel manifest, accepted Ed25519 keys, verification |
 | `sirio_update` | Discovers, downloads and verifies an update, then stops at `VerifiedUpdate` |
