@@ -14,8 +14,8 @@
 
 <p align="center">
   <strong>Every coding agent. One native window.</strong><br/>
-  Run Claude Code, Codex, OpenCode, Pi and Oh-My-Pi side by side — one sidebar per project,<br/>
-  one terminal per git worktree, one glance at who needs you.
+  Run Claude Code, Codex, OpenCode, Pi and Oh-My-Pi side by side: one sidebar for every project and session,<br/>
+  terminals and chats in every git worktree, one glance at who needs you.
 </p>
 
 <h3 align="center">
@@ -27,7 +27,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/hero.png" />
-    <img src="assets/readme/sirio-promo.gif" alt="A short tour of Sirio: live worktree status in the sidebar, Claude Code, OpenCode and Pi side by side, a native Claude chat, the Changes review, a Markdown preview that follows its file, and Claude splitting the window with sirioctl" width="960" />
+    <img src="assets/readme/sirio-promo.gif" alt="A short tour of Sirio: live status in the sidebar and every agent session in one list, OpenCode and Pi in terminals beside a native Claude Code chat, an agent's question you answer above the composer, the Changes review, a pull request's diff you read inside Sirio, a Markdown plan drawing its diagram, and Claude splitting the window with sirioctl" width="960" />
   </picture>
 </p>
 
@@ -39,13 +39,13 @@
 
 ### One sidebar, every worktree
 
-Each project lists its git worktrees, one row per branch, sorted by who needs you. Agents appear under the worktree they run in with a live status dot — running, idle, waiting for input — and selecting a row switches the centre column while the terminals underneath keep running.
+Each project lists its git worktrees, one row per branch, sorted by who needs you. Agents appear under the worktree they run in with a live status dot — running, idle, waiting for input — and selecting a row switches the centre column while the terminals underneath keep running. A Sessions tab lists every agent session across your projects, most recent first, and carries a badge when one needs you. A chat you close waits under Closed, ready to reopen.
 
-[Docs →](https://sirioai.app/docs/agents/activity-states)
+[Docs →](https://sirioai.app/docs/workspace/sidebar)
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/agents/activity-states"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-sidebar.png" /><img src="assets/readme/feature-sidebar.gif" alt="Sirio's window zooming onto the sidebar, where main waits for input" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/sidebar"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-sidebar.png" /><img src="assets/readme/feature-sidebar.gif" alt="Sirio's window zooming onto the sidebar's Sessions tab, with main's Claude Code session waiting for input at the top" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -53,13 +53,27 @@ Each project lists its git worktrees, one row per branch, sorted by who needs yo
 
 ### A real terminal, split any way
 
-Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the VT core behind Ghostty, with tabs and recursive splits per worktree. Closing the window flushes state and nothing else: agent PTYs live on until you quit.
+Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the VT core behind Ghostty, with tabs and recursive splits per worktree. The centre holds two panes: drag a terminal or a chat across, use its right-click menu, or press `Ctrl+Shift+M`, and it keeps running. A scrollbar follows the scrollback. On macOS and Linux, the close button minimizes the window, so agent PTYs live on until you quit. On Windows it quits Sirio.
 
 [Docs →](https://sirioai.app/docs/workspace/tabs)
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/tabs"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-terminal.png" /><img src="assets/readme/feature-terminal.gif" alt="Claude Code, Pi and OpenCode in terminal panes split right and then down, zooming onto Claude Code's pane" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/tabs"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-terminal.png" /><img src="assets/readme/feature-terminal.gif" alt="Pi over OpenCode in a split terminal beside a native Claude Code chat, zooming onto Pi's pane" width="100%" /></picture></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Chat natively
+
+Run an agent in a chat tab instead of a terminal. Claude Code speaks its own protocol when your `claude` is new enough, and the others speak ACP, so a chat carries the agent's real tool calls, permissions and plan approvals. When the agent asks something, the question opens in a panel above the composer: move with the arrows, pick with Enter or its number.
+
+[Docs →](https://sirioai.app/docs/agents/chats)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/agents/chats"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-chat.png" /><img src="assets/readme/feature-chat.gif" alt="Sirio's window zooming onto a Claude Code chat whose request to edit PLAN.md waits in a panel above the composer" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -67,13 +81,13 @@ Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the V
 
 ### Markdown that keeps up with your agents
 
-Click a `.md` link in the terminal, drag a file in, or press `Ctrl+O`: it opens in a tab as a rendered preview or in code mode, and reloads live while an agent is still writing to it.
+Click a `.md` link in the terminal, drag a file in, or press `Ctrl+O`: it opens in a tab as a rendered preview or in code mode, and reloads live while an agent is still writing to it. The preview reads a README's HTML and draws Mermaid diagrams in place, and PlantUML diagrams with the `plantuml` on your `PATH`.
 
-[Docs →](https://sirioai.app/docs/workspace/surfaces)
+[Docs →](https://sirioai.app/docs/editor/markdown-preview)
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/surfaces"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-markdown.png" /><img src="assets/readme/feature-markdown.gif" alt="Sirio's window zooming onto PLAN.md rendered in a tab, with headings, a checklist, a table and a code block" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/editor/markdown-preview"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-markdown.png" /><img src="assets/readme/feature-markdown.gif" alt="Sirio's window zooming onto PLAN.md rendered in a tab, with its checklist and a flow diagram" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -83,11 +97,25 @@ Click a `.md` link in the terminal, drag a file in, or press `Ctrl+O`: it opens 
 
 A git-status-aware Changes surface for every worktree: stage, unstage, discard, and open a path-specific diff tab — without leaving the window or the agent's terminal.
 
-[Docs →](https://sirioai.app/docs/workspace/surfaces)
+[Docs →](https://sirioai.app/docs/workspace/right-panel)
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/surfaces"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-changes.png" /><img src="assets/readme/feature-changes.gif" alt="Sirio's window zooming onto the Changes surface, with README.md open to its diff and Discard and Stage beside it" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/right-panel"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-changes.png" /><img src="assets/readme/feature-changes.gif" alt="Sirio's window zooming onto the Changes surface, with PLAN.md open to its diff and Discard and Stage beside it" width="100%" /></picture></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Pull requests, read in place
+
+Your pull and merge requests from github.com, GitHub Enterprise Server, gitlab.com and self-managed GitLab sit in the right panel: this worktree's own on top, then Mine, To review, All open and Closed & merged. Open one in a tab to read its conversation, commits and checks, and its diff inside Sirio. Sirio signs in with the `gh` or `glab` you already use, or a read-only token.
+
+[Docs →](https://sirioai.app/docs/workspace/pull-requests)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/workspace/pull-requests"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-pull-requests.png" /><img src="assets/readme/feature-pull-requests.gif" alt="Sirio's window zooming onto a pull request of ai-sirio/sirio open on its diff, beside the list of open pull requests" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -95,7 +123,7 @@ A git-status-aware Changes surface for every worktree: stage, unstage, discard, 
 
 ### Agents drive Sirio too
 
-`sirioctl` talks to Sirio over its control socket: create a pane, write a prompt, wait for the agent to finish, read what it printed. It is also how agent lifecycle hooks report status back — and the [`skills/sirio`](skills/sirio/SKILL.md) skill provisioned in every launched worktree teaches agents to use it.
+`sirioctl` talks to Sirio over its control socket: run an agent in a background panel, wait for it to exit, read what it printed, or split the window you are looking at with `sirioctl pane split`. `sirioctl surface` opens and reads Changes, Settings, pull requests and every open tab. It is also how agent lifecycle hooks report status back, and the [`skills/sirio`](skills/sirio/SKILL.md) skill that Sirio provisions for Claude Code, OpenCode and Oh-My-Pi teaches them to use it.
 
 [Docs →](https://sirioai.app/docs/sirioctl/overview)
 
@@ -103,9 +131,8 @@ A git-status-aware Changes surface for every worktree: stage, unstage, discard, 
 <td width="50%">
 
 ```bash
-WORKER=$(sirioctl panel create --cmd 'claude')
-sirioctl panel write --id "$WORKER" \
-  --input 'Implement the parser change' --enter
+WORKER=$(sirioctl panel create \
+  --cmd "claude -p 'Implement the parser change'")
 sirioctl panel wait --id "$WORKER"
 sirioctl panel read --id "$WORKER"
 sirioctl panel close --id "$WORKER"
@@ -118,10 +145,13 @@ sirioctl panel close --id "$WORKER"
 **Also in the box:**
 
 - **[Embedded browser](https://sirioai.app/docs/workspace/surfaces)** — a native web view beside the terminal, for previewing a dev server without leaving the window.
-- **[Tray roster](https://sirioai.app/docs/workspace/tray)** — a tray icon that reflects the worst status across every active agent; click to land in the right worktree, even with the window closed.
+- **[Tray roster](https://sirioai.app/docs/workspace/tray)** — a tray icon that switches to an attention mark when an agent needs input, and a menu with a row for each worktree whose agent is running, waiting, done or failed; click to land in the right worktree, even with the window closed on macOS and Linux.
 - **Desktop notifications** — a heads-up when an agent finishes or stalls.
-- **Sessions that survive restarts** — SQLite-backed: reopen Sirio and your projects, worktrees and tabs are back.
-- **Usage at a glance** — Claude, Codex, OpenCode and Ollama usage in the status bar.
+- **Sessions that survive restarts** — SQLite-backed: reopen Sirio and your projects, worktrees and tabs are back, each tab in the pane you left it in, and a closed chat stays ready to reopen.
+- **Usage at a glance** — Claude, Codex, OpenCode Go and Ollama Cloud usage in the status bar.
+- **Select and copy** — text in Settings, dialogs, diffs, Markdown previews and tool output selects with the mouse and copies with `Ctrl+C`, or `Cmd+C` on macOS.
+- **[Onice](https://sirioai.app/docs/settings/appearance)** — a base colour with no hue whose dark mode starts at pure black, beside Neutral and the rest.
+- **[macOS permissions](https://sirioai.app/docs/settings/permissions)** — Settings → Permissions shows each permission's real state and asks for the ones you choose.
 - **[Signed updates](https://sirioai.app/docs/settings/updates)** — Ed25519-signed release manifests, verified before anything touches the install.
 
 **Deliberately not doing:** remote SSH, mobile relay, scheduling. Sirio is a terminal and agent hub, not an IDE.
@@ -160,7 +190,7 @@ curl -fsSL https://dl.sirioai.app/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://dl.sirioai.app/install.ps1 | iex"
 ```
 
-The script downloads the release for your platform and puts it where the OS expects it: `Sirio.app` in `/Applications`, the AppImage in `~/.local/bin`, the per-user installer under `%LOCALAPPDATA%\Programs\Sirio` — no elevated access anywhere. Pin a version with `SIRIO_VERSION=0.9.6`, and pick the Linux directory with `SIRIO_INSTALL_DIR`. Both scripts live in this repo ([`install.sh`](install.sh), [`install.ps1`](install.ps1)) if you would rather read before piping.
+The script downloads the release for your platform and puts it where the OS expects it: `Sirio.app` in `/Applications`, the AppImage in `~/.local/bin`, the per-user installer under `%LOCALAPPDATA%\Programs\Sirio` — no elevated access anywhere. Pin a version with `SIRIO_VERSION=0.28.0`, and pick the Linux directory with `SIRIO_INSTALL_DIR`. Both scripts live in this repo ([`install.sh`](install.sh), [`install.ps1`](install.ps1)) if you would rather read before piping.
 
 Or build from source:
 
@@ -172,7 +202,7 @@ cargo run -p sirio --release
 
 You need a stable Rust toolchain and **Zig exactly 0.15.2** (libghostty-vt pins it — a newer Zig fails too), plus the MSVC toolchain on Windows or GTK 3 + WebKitGTK 4.1 headers on Linux. Full details in [CONTRIBUTING.md](CONTRIBUTING.md) and the [build guide](https://sirioai.app/docs/contributing/build-from-source).
 
-Sirio asks for no elevated access and sends no telemetry. The only network calls it makes on its own are the signed update check on release builds, which you can switch off in Settings.
+Sirio asks for no elevated access and sends no telemetry. On its own it goes online for the signed update check on release builds, which you can switch off in Settings, for the usage meters, and to refresh the list of installable agents, which it caches for a day. The rest happens when you ask: a Markdown preview loads its remote images, the pull request view talks to GitHub or GitLab once you open it, a pull request's diff fetches its commits with git, and a PlantUML server receives a diagram only if you name one in Settings.
 
 ---
 
@@ -180,16 +210,21 @@ Sirio asks for no elevated access and sends no telemetry. The only network calls
 
 | Action | Shortcut |
 |--------|----------|
+| Command palette | `Ctrl+Shift+P` |
 | New terminal tab | `Ctrl+T` |
-| Close active tab | `Ctrl+W` |
+| Close active tab | `Ctrl+Shift+W` |
+| Move tab to the other pane | `Ctrl+Shift+M` |
 | Open file | `Ctrl+O` |
 | Save file | `Ctrl+S` |
 | Toggle sidebar | `Ctrl+Shift+S` |
 | Toggle right panel | `Ctrl+Shift+I` |
+| Toggle right pane | `Ctrl+Shift+B` |
 | New browser tab | `Ctrl+Shift+L` |
 | Focus browser address bar | `Ctrl+L` |
 | Restore previous launch | `Ctrl+Shift+O` |
 | Settings | `Ctrl+,` |
+
+While a terminal has focus, `Ctrl+T`, `Ctrl+O`, `Ctrl+S`, `Ctrl+L` and `Ctrl+W` go to the program running in it; the `Ctrl+Shift` chords work everywhere. On macOS these are Control chords too, and `Cmd+W` also closes the active tab.
 
 On Windows three chords move one family over, because the originals are system-wide hotkeys there: toggle sidebar is `Ctrl+Shift+D`, toggle right panel `Ctrl+Shift+R`, restore previous launch `Ctrl+Shift+H`. The command palette always shows the chord that works on your platform.
 
@@ -206,7 +241,7 @@ On Windows three chords move one family over, because the originals are system-w
 
 ## Developing
 
-Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the toolchain, the 17-crate workspace layout, the verification gate and the rules a change has to follow. The architecture notes an agent needs live in [`CLAUDE.md`](CLAUDE.md).
+Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the toolchain, the 25-crate workspace layout, the verification gate and the rules a change has to follow. The architecture notes an agent needs live in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
