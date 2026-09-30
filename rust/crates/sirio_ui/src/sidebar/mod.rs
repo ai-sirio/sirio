@@ -1087,7 +1087,29 @@ impl Sidebar {
 
     pub fn set_projects(&mut self, projects: Vec<SidebarProject>, cx: &mut Context<Self>) {
         let filter = std::mem::take(&mut self.filter);
-        let replacement = Self::from_projects(projects, cx);
+        // The host hands the catalog over again after every worktree switch,
+        // on window focus and when a project is added or reordered, and
+        // `from_projects` builds every project open. Which ones the person
+        // had folded is carried across by catalog id: row ids are positions,
+        // so they would follow the slot rather than the project through a
+        // reorder. A project not seen before keeps the open default.
+        let folded: std::collections::HashSet<&String> = self
+            .rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Project && !row.expanded)
+            .filter_map(|row| self.project_ids.get(&row.id))
+            .collect();
+        let mut replacement = Self::from_projects(projects, cx);
+        for row in &mut replacement.rows {
+            if row.kind == RowKind::Project
+                && replacement
+                    .project_ids
+                    .get(&row.id)
+                    .is_some_and(|id| folded.contains(id))
+            {
+                row.expanded = false;
+            }
+        }
         self.rows = replacement.rows;
         self.project_ids = replacement.project_ids;
         self.project_names = replacement.project_names;
@@ -7393,8 +7415,8 @@ mod tests {
     /// Two git projects with two worktrees each: rows 0 and 1000 are the
     /// projects, 1-2 and 1001-1002 their worktrees, and the first worktree
     /// starts selected. The shape the bulk fold buttons are proven against.
-    fn two_projects(cx: &mut Context<Sidebar>) -> Sidebar {
-        let project = |id: &str| SidebarProject {
+    fn fixture_project(id: &str) -> SidebarProject {
+        SidebarProject {
             id: id.to_string(),
             name: id.to_string(),
             is_git: true,
@@ -7413,8 +7435,14 @@ mod tests {
                     comment: None,
                 },
             ],
-        };
-        Sidebar::from_projects(vec![project("alpha"), project("beta")], cx)
+        }
+    }
+
+    fn two_projects(cx: &mut Context<Sidebar>) -> Sidebar {
+        Sidebar::from_projects(
+            vec![fixture_project("alpha"), fixture_project("beta")],
+            cx,
+        )
     }
 
     fn row_drawn(cx: &mut VisualTestContext, id: usize) -> bool {
@@ -7478,6 +7506,76 @@ mod tests {
         click_control(&mut cx, "sidebar-expand-all");
         for id in [1, 2, 1001, 1002] {
             assert!(row_drawn(&mut cx, id), "worktree row {id} is back once every project is open");
+        }
+    }
+
+    /// Hands the sidebar a fresh catalog, the way the host does after every
+    /// worktree switch (the rescan that lands in the background), on window
+    /// focus, and when a project is added or reordered.
+    fn refresh_catalog(
+        sidebar: &gpui::Entity<Sidebar>,
+        cx: &mut VisualTestContext,
+        ids: &[&str],
+    ) {
+        let projects = ids.iter().map(|id| fixture_project(id)).collect();
+        sidebar.update(cx, |sidebar, cx| sidebar.set_projects(projects, cx));
+        cx.run_until_parked();
+    }
+
+    /// Rebuilding the rows from the catalog is not a request to fold or open
+    /// anything. With every project folded and one opened, clicking a
+    /// worktree in it made the host rescan and hand the sidebar the catalog
+    /// again — and every folded project sprang open. Each project comes back
+    /// as the person left it, tracked by its catalog id (row ids are
+    /// positions, so a reorder moves them), and a project the sidebar has
+    /// never shown starts open, as it does at boot.
+    #[gpui::test]
+    async fn a_catalog_refresh_leaves_every_project_as_the_person_left_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| two_projects(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        // Everything folded, then alpha opened: where the person is standing
+        // when they click one of its worktrees.
+        set_project_open(&sidebar, &mut cx, 0, false);
+        set_project_open(&sidebar, &mut cx, 1000, false);
+        set_project_open(&sidebar, &mut cx, 0, true);
+        refresh_catalog(&sidebar, &mut cx, &["alpha", "beta"]);
+        for id in [1, 2] {
+            assert!(row_drawn(&mut cx, id), "alpha stays open: worktree row {id} is drawn");
+        }
+        for id in [1001, 1002] {
+            assert!(
+                !row_drawn(&mut cx, id),
+                "beta stays folded: worktree row {id} must not spring open"
+            );
+        }
+
+        // The catalog now lists beta first: the folded state follows the
+        // project, not row 0.
+        refresh_catalog(&sidebar, &mut cx, &["beta", "alpha"]);
+        for id in [1, 2] {
+            assert!(!row_drawn(&mut cx, id), "beta, now first, is still folded: row {id} is hidden");
+        }
+        for id in [1001, 1002] {
+            assert!(row_drawn(&mut cx, id), "alpha, now second, is still open: row {id} is drawn");
+        }
+
+        // A project the sidebar has never shown opens, and leaves the others be.
+        refresh_catalog(&sidebar, &mut cx, &["beta", "alpha", "gamma"]);
+        for id in [2001, 2002] {
+            assert!(row_drawn(&mut cx, id), "a newly added project starts open: row {id} is drawn");
+        }
+        for id in [1, 2] {
+            assert!(!row_drawn(&mut cx, id), "adding gamma did not open beta: row {id} is hidden");
+        }
+        for id in [1001, 1002] {
+            assert!(row_drawn(&mut cx, id), "adding gamma did not fold alpha: row {id} is drawn");
         }
     }
 
