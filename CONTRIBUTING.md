@@ -41,7 +41,7 @@ Scripts/ci-linux.sh                        # stricter tier: fmt, clippy, cross-t
 
 ## Repository layout
 
-The Rust workspace is 17 crates under `rust/crates/`. Leaves have no local dependencies; `sirio` (the app) is the only crate that depends on everything, and nothing underneath depends back up.
+The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local dependencies; `sirio` (the app) is the only crate that depends on everything, and nothing underneath depends back up.
 
 | Crate | Role |
 |-------|------|
