@@ -5125,6 +5125,35 @@ fn key_input(event: &KeyDownEvent) -> Option<KeyInput> {
         mods |= key::Mods::CTRL;
     }
 
+    let mut consumed_mods = if modifiers.shift && utf8.is_some() {
+        key::Mods::SHIFT
+    } else {
+        key::Mods::empty()
+    };
+    // AltGr/Option character input (e.g. the Italian @ is AltGr+ò on
+    // Linux/Windows and Option+ò on macOS): when Alt types a printable
+    // character different from the base key, the modifiers produced text
+    // rather than a Meta/Ctrl shortcut. Alt reads as consumed so the
+    // encoder emits the text instead of an ESC prefix; Ctrl still folds
+    // the byte (Ctrl+@ is NUL) even when consumed, so an AltGr chord
+    // drops both from the effective mods instead. A shortcut whose
+    // character matches its base key (Alt+x) keeps its Meta encoding.
+    if modifiers.alt
+        && let Some(text) = utf8.as_deref()
+    {
+        let mut chars = text.chars();
+        if let (Some(c), None) = (chars.next(), chars.next())
+            && !c.is_control()
+            && text.to_lowercase() != name
+        {
+            consumed_mods |= key::Mods::ALT;
+            if modifiers.control {
+                mods &= !(key::Mods::CTRL | key::Mods::ALT);
+                consumed_mods |= key::Mods::CTRL;
+            }
+        }
+    }
+
     Some(KeyInput {
         // GPUI currently delivers key-down only. Key release remains out of
         // scope until a hosted CLI requests Kitty REPORT_EVENTS.
@@ -5135,11 +5164,7 @@ fn key_input(event: &KeyDownEvent) -> Option<KeyInput> {
         },
         key: mapped.unwrap_or(key::Key::Unidentified),
         mods,
-        consumed_mods: if modifiers.shift && utf8.is_some() {
-            key::Mods::SHIFT
-        } else {
-            key::Mods::empty()
-        },
+        consumed_mods,
         utf8,
         unshifted_codepoint,
     })
@@ -6562,6 +6587,62 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn altgr_and_option_at_sign_reach_the_guest_as_text() {
+        let term = headless_term(80, 24);
+        let plain = gpui::Modifiers::default();
+        // Plain @ (Linux ISO-Level3 path) already worked; lock it in.
+        assert_eq!(
+            encoded_key(&term, &key_event("@", Some("@"), plain)),
+            b"@".as_slice(),
+        );
+        // Italian @ on macOS is Option+ò: the base key differs from the
+        // typed character, so Option must read as text, not Meta.
+        assert_eq!(
+            encoded_key(
+                &term,
+                &key_event("ò", Some("@"), gpui::Modifiers { alt: true, ..plain })
+            ),
+            b"@".as_slice(),
+        );
+        // Italian @ on Windows is AltGr+ò (Ctrl+Alt): same expectation.
+        assert_eq!(
+            encoded_key(
+                &term,
+                &key_event(
+                    "ò",
+                    Some("@"),
+                    gpui::Modifiers {
+                        alt: true,
+                        control: true,
+                        ..plain
+                    }
+                )
+            ),
+            b"@".as_slice(),
+        );
+    }
+
+    #[test]
+    fn genuine_alt_shortcut_still_sends_meta_prefix() {
+        let term = headless_term(80, 24);
+        // Alt+x where the character equals the base key stays Meta.
+        assert_eq!(
+            encoded_key(
+                &term,
+                &key_event(
+                    "x",
+                    Some("x"),
+                    gpui::Modifiers {
+                        alt: true,
+                        ..gpui::Modifiers::default()
+                    }
+                )
+            ),
+            b"\x1bx".as_slice(),
+        );
     }
 
     #[test]
