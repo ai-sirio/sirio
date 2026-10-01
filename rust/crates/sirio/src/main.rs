@@ -8103,19 +8103,26 @@ impl SirioWorkspace {
             }
             SidebarEvent::SelectTab(id) => self.activate_tab(*id, None, cx),
             SidebarEvent::SelectParkedTab { path, index } => {
-                // Bring the worktree back first — that restores its strip —
-                // then activate the tab at the clicked position, counted the
-                // way the parked list was built (sidebar-visible tabs only).
+                // The index names a position in the parked list the row came
+                // from, but the restored strip is not in that order: a live
+                // terminal that outlived the switch is put first. Pin the
+                // tab's persistence id now, before the switch rewrites the
+                // list, and find it again after.
+                let persistence_id = self
+                    .parked_sidebar_tabs_for(path)
+                    .get(*index)
+                    .map(|tab| tab.persistence_id.clone());
+                // Bring the worktree back first — that restores its strip.
                 if self.select_worktree(path.clone(), None, cx).is_err() {
                     self.restore_sidebar_selection(cx);
                     return;
                 }
-                let tab_id = self
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.kind.appears_in_sidebar())
-                    .nth(*index)
-                    .map(|tab| tab.id);
+                let tab_id = persistence_id.and_then(|persistence_id| {
+                    self.tabs
+                        .iter()
+                        .find(|tab| tab.persistence_id == persistence_id)
+                        .map(|tab| tab.id)
+                });
                 if let Some(tab_id) = tab_id {
                     self.select_tab(tab_id, None, cx);
                 }
@@ -26665,6 +26672,8 @@ done
                     persisted_chat("other-b", "Other B", false),
                 ],
             ));
+            // The row being clicked was listed from this strip.
+            workspace.parked_sidebar_tabs.clear();
             workspace.handle_sidebar_event(
                 &SidebarEvent::SelectParkedTab {
                     path: other.clone(),
@@ -26685,6 +26694,94 @@ done
                 "and the tab at the clicked strip position is active, not the persisted active one"
             );
         });
+    }
+
+    /// A parked row names its tab by position in the persisted strip, but a
+    /// worktree that still has a live terminal comes back with that terminal
+    /// first (`restore_tabs_for_mounted_worktree`). The click must land on the
+    /// tab the row showed, not on whatever now sits at that position.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    async fn selecting_a_parked_tab_beside_a_live_terminal_activates_the_clicked_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("parked-beside-live");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let (wt0, wt1) = (worktrees[0].clone(), worktrees[1].clone());
+
+        // Park wt-0: its terminal stays alive in the cache.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt1.clone(), None, cx)
+                .expect("select wt-1");
+        });
+        cx.run_until_parked();
+
+        // wt-0's persisted strip holds a chat *before* the terminal, and the
+        // sidebar lists exactly that strip.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // The chat's root pane must differ from the live terminal's (0),
+            // or the mounted restore reads it as already represented.
+            let mut layout = persisted_layout(
+                &wt0,
+                "branch-0",
+                vec![
+                    persisted_chat("wt0-chat", "Resumed session", false),
+                    SessionTab {
+                        id: "urgency-terminal".into(),
+                        title: "Terminal".into(),
+                        kind: "terminal".into(),
+                        agent_id: None,
+                        agent_session_id: None,
+                        active: true,
+                    },
+                ],
+            );
+            layout.tab_states = vec![
+                SessionTabState::with_root(7),
+                SessionTabState::with_root(0),
+            ];
+            workspace.session.save_layout_now(&layout);
+            workspace.parked_sidebar_tabs.clear();
+            assert_eq!(
+                workspace.parked_sidebar_tabs_for(&wt0)[0].persistence_id,
+                "wt0-chat",
+                "the parked row at position 0 is the chat"
+            );
+            workspace.handle_sidebar_event(
+                &SidebarEvent::SelectParkedTab {
+                    path: wt0.clone(),
+                    index: 0,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                paths_name_the_same_document(&workspace.working_directory, &wt0),
+                "the parked tab's worktree is selected"
+            );
+            assert_eq!(
+                workspace.tabs[workspace.active_tab].persistence_id, "wt0-chat",
+                "the clicked chat is active, not the live terminal that now leads the strip"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A needs-input tab no longer pins its worktree to the screen. It used
