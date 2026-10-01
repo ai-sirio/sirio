@@ -7,6 +7,7 @@ resolver = "2"
 # (which conflicts with its own `[workspace]` table).
 exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/libghostty-vt-sys"]
 members = [
+    "vendor/ely-gpui-component",
     "crates/sirio_perf",
     "crates/sirio",
     "crates/sirio_theme",
@@ -40,6 +41,7 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+ely-gpui-component = { path = "vendor/ely-gpui-component", default-features = false, features = ["sirio-chat"] }
 # GPUI used to be an absolute path into a zed checkout on one particular Mac, which meant the
 # workspace failed to resolve — not to build, to *resolve* — anywhere else, taking all thirteen
 # crates down with it even though only four of them touch GPUI. Now that Sirio targets Linux as
