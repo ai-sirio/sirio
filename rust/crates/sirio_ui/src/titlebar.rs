@@ -99,7 +99,7 @@
 
 use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
-    Hsla, SharedString, Window, WindowControlArea, div, prelude::*, px,
+    Hsla, Rgba, SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
 use bezel::theme::Theme as BezelTheme;
 use sirio_theme::{BrowserChrome, Theme, WindowsCaption};
@@ -508,20 +508,13 @@ fn maximize_glyph(is_maximized: bool) -> &'static str {
 const LIGHT_HOVER_SHADE: f32 = 0.88;
 
 fn darkened(color: Hsla, factor: f32) -> Hsla {
-    let lightness = color.l * factor;
-    let chroma = color.s * (1.0 - (2.0 * color.l - 1.0).abs());
-    let scaled_chroma = factor * chroma;
-    let lightness_chroma = 1.0 - (2.0 * lightness - 1.0).abs();
-    let saturation = if lightness_chroma == 0.0 {
-        0.0
-    } else {
-        scaled_chroma / lightness_chroma
-    };
-    Hsla {
-        s: saturation,
-        l: lightness,
-        ..color
-    }
+    let rgb = Rgba::from(color);
+    Hsla::from(Rgba {
+        r: rgb.r * factor,
+        g: rgb.g * factor,
+        b: rgb.b * factor,
+        a: rgb.a,
+    })
 }
 
 /// One traffic-light dot: a real, circular window control, not a decoration.

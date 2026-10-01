@@ -1808,12 +1808,12 @@ impl ChangeRequestTab {
             .flex_col()
             .children(listing.items.iter().enumerate().map(|(index, file)| {
                 let (letter, tint): (&str, Hsla) = match file.kind {
-                    Some(FileChangeKind::Added) => ("A", theme.ely.success.into()),
-                    Some(FileChangeKind::Deleted) => ("D", theme.ely.danger.into()),
-                    Some(FileChangeKind::Renamed) => ("R", theme.sirio.quantity.into()),
-                    Some(FileChangeKind::Copied) => ("C", theme.sirio.quantity.into()),
-                    Some(FileChangeKind::Modified) => ("M", theme.ely.warning.into()),
-                    None => ("·", theme.ely.fg_subtle.into()),
+                    Some(FileChangeKind::Added) => ("A", theme.ely.success),
+                    Some(FileChangeKind::Deleted) => ("D", theme.ely.danger),
+                    Some(FileChangeKind::Renamed) => ("R", theme.sirio.quantity),
+                    Some(FileChangeKind::Copied) => ("C", theme.sirio.quantity),
+                    Some(FileChangeKind::Modified) => ("M", theme.ely.warning),
+                    None => ("·", theme.ely.fg_subtle),
                 };
                 let url = files_url.clone();
                 div()
