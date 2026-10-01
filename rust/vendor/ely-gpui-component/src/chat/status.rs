@@ -321,6 +321,10 @@ pub struct ThinkingBlock {
     reasoning: SharedString,
     thinking: bool,
     took: Duration,
+    body: Option<gpui::AnyElement>,
+    controlled: Option<(bool, crate::expansion::Toggle)>,
+    header_selector: Option<SharedString>,
+    label: Option<SharedString>,
 }
 
 impl ThinkingBlock {
@@ -336,18 +340,47 @@ impl ThinkingBlock {
             reasoning: reasoning.into(),
             thinking,
             took,
+            body: None,
+            controlled: None,
+            header_selector: None,
+            label: None,
         }
+    }
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+    pub fn expanded(
+        mut self,
+        open: bool,
+        toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.controlled = Some((open, Rc::new(toggle)));
+        self
+    }
+    pub fn header_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.header_selector = Some(selector.into());
+        self
+    }
+    /// An honest host label when no duration was measured.
+    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }
 
 impl RenderOnce for ThinkingBlock {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let open = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
-        let opened = *open.read(cx);
+        let (opened, press) = crate::expansion::resolve(&self.id, self.controlled, window, cx);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let header: gpui::AnyElement = if self.thinking {
             ThinkingIndicator::new((self.id.clone(), "thinking")).into_any_element()
+        } else if let Some(label) = self.label {
+            div()
+                .text_color(colors.fg_muted)
+                .child(label)
+                .into_any_element()
         } else {
             ThinkingDuration::new(self.took).into_any_element()
         };
@@ -370,19 +403,19 @@ impl RenderOnce for ThinkingBlock {
                     .focus_ring(cx)
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(move |_, _, cx| {
-                        open.update(cx, |open, cx| {
-                            *open = !*open;
-                            log::info!("thinking block: open {open}");
-                            cx.notify();
-                        })
+                    .when_some(self.header_selector, |row, selector| {
+                        row.debug_selector(move || selector.to_string())
                     })
+                    .on_click(move |_, window, cx| press(window, cx))
                     .child(header)
                     .child(
                         Disclosure::new((self.id.clone(), "chevron"), opened).size(IconSize::Sm),
                     ),
             )
             .when(opened, |block| {
+                if let Some(body) = self.body {
+                    return block.child(body);
+                }
                 block.child(
                     div()
                         .pl_3()

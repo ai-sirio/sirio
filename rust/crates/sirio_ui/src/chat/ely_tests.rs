@@ -211,3 +211,274 @@ async fn ely_unicode_selection_survives_row_remeasurement(cx: &mut TestAppContex
     );
     assert!(!chat.read_with(&cx.cx, |v, _| v.list_state.is_following_tail()));
 }
+
+struct ActivityProbe {
+    chat: Entity<Chat>,
+}
+impl Render for ActivityProbe {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use ely_gpui_component::{
+            agent::ToolCallCard,
+            chat::{StepState, ThinkingBlock},
+        };
+        let (tool_open, thought_open) = self.chat.read_with(cx, |v, _| {
+            (
+                matches!(
+                    v.entries.get(1),
+                    Some(Entry::ToolCall { expanded: true, .. })
+                ),
+                matches!(v.entries.first(), Some(Entry::Thought { open, .. }) if open.get(false)),
+            )
+        });
+        let tool_owner = self.chat.clone();
+        let thought_owner = self.chat.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                ToolCallCard::new("host-tool", "Read", StepState::Done)
+                    .header_selector("host-tool-toggle")
+                    .body(
+                        div()
+                            .debug_selector(|| "host-tool-body".into())
+                            .child("host body"),
+                    )
+                    .expanded(tool_open, move |desired, _, cx| {
+                        tool_owner.update(cx, |v, cx| {
+                            if let Some(Entry::ToolCall { expanded, .. }) = v.entries.get_mut(1) {
+                                if *expanded != desired {
+                                    v.toggle_tool_call_expanded(1, cx);
+                                }
+                            }
+                        })
+                    }),
+            )
+            .child(
+                ThinkingBlock::new("host-thought", "", false, std::time::Duration::ZERO)
+                    .header_selector("host-thought-toggle")
+                    .body(
+                        div()
+                            .debug_selector(|| "host-thought-body".into())
+                            .child("host reasoning"),
+                    )
+                    .expanded(thought_open, move |desired, _, cx| {
+                        thought_owner.update(cx, |v, cx| {
+                            if let Some(Entry::Thought { open, .. }) = v.entries.first() {
+                                if open.get(false) != desired {
+                                    v.toggle_thought(0, cx);
+                                }
+                            }
+                        })
+                    }),
+            )
+            .child(div().w_full().flex_1().min_h_0().child(self.chat.clone()))
+    }
+}
+
+#[gpui::test]
+async fn ely_tool_and_thought_expansion_survives_virtualization(cx: &mut TestAppContext) {
+    cx.update(Theme::init);
+    cx.update(bezel::ui::input::init);
+    cx.update(init);
+    let (host, cx) = cx.add_window_view(|_, cx| {
+        let chat = cx.new(|cx| {
+            let mut v = Chat::new(None, std::env::temp_dir(), cx);
+            v.push_entry(Entry::Thought {
+                text: "Analisi 🌙 α".into(),
+                open: Default::default(),
+                started: None,
+                duration_ms: None,
+            });
+            v.push_entry(unicode_tool());
+            for _ in 0..40 {
+                v.push_entry(Entry::Assistant {
+                    text: "long row\n".repeat(6),
+                    document: parse_chat_markdown(&"long row\n".repeat(6)),
+                });
+            }
+            v.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            v.transcript_selection = Some(TranscriptSelection {
+                anchor: 0,
+                head: "Analisi 🌙 α".len(),
+            });
+            v
+        });
+        cx.observe(&chat, |_, _, cx| cx.notify()).detach();
+        ActivityProbe { chat }
+    });
+    let chat = host.read_with(&cx.cx, |v, _| v.chat.clone());
+    cx.simulate_resize(size(px(700.0), px(650.0)));
+    refresh_frame(cx);
+    let selection_before = chat.read_with(&cx.cx, |v, _| v.selected_transcript_text());
+    for selector in ["host-tool-toggle", "host-thought-toggle"] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .expect("controlled header rendered");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+    }
+    assert!(cx.debug_bounds("host-tool-body").is_some());
+    assert!(cx.debug_bounds("host-thought-body").is_some());
+    chat.update(cx, |v, cx| {
+        v.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 35,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    });
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("thought-body-0").is_none());
+    chat.update(cx, |v, cx| {
+        v.handle_event(AcpEvent::AgentMessageChunk("final chunk".into()), cx);
+        v.handle_event(
+            AcpEvent::TurnEnded {
+                stop_reason: "EndTurn".into(),
+            },
+            cx,
+        );
+        v.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    });
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("thought-body-0").is_some());
+    assert!(cx.debug_bounds("tool-output-1-0").is_some());
+    chat.read_with(&cx.cx, |v, _| {
+        assert!(matches!(
+            &v.entries[1],
+            Entry::ToolCall { expanded: true, .. }
+        ));
+        assert!(matches!(&v.entries[0], Entry::Thought { open, .. } if open.get(false)));
+        assert_eq!(v.selected_transcript_text(), selection_before);
+    });
+    chat.update(cx, |v, cx| {
+        v.new_conversation(cx);
+        v.push_entry(Entry::Thought {
+            text: "New thought".into(),
+            open: Default::default(),
+            started: None,
+            duration_ms: None,
+        });
+        v.push_entry(unicode_tool());
+        cx.notify();
+    });
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("host-tool-body").is_none());
+    assert!(cx.debug_bounds("host-thought-body").is_none());
+    assert!(chat.read_with(&cx.cx, |v, _| matches!(
+        &v.entries[1],
+        Entry::ToolCall {
+            expanded: false,
+            ..
+        }
+    )));
+}
+
+#[gpui::test]
+async fn ely_raw_arguments_share_the_rich_tool_selection_projection(cx: &mut TestAppContext) {
+    let (chat, cx) = super::tests::offline_chat_view(cx);
+    chat.update(cx, |v, cx| {
+        let mut tool = unicode_tool();
+        if let Entry::ToolCall {
+            raw_input,
+            raw_output,
+            content,
+            expanded,
+            ..
+        } = &mut tool
+        {
+            *raw_input = Some(
+                serde_json::to_string_pretty(&serde_json::json!({"path":"src/α.rs"})).unwrap(),
+            );
+            *raw_output = Some("{\"exitCode\":0}".into());
+            *expanded = true;
+            content.push(ToolCallContentInfo::Diff(ToolCallDiff {
+                path: "src/α.rs".into(),
+                old_text: Some("old 🌙\n".into()),
+                new_text: "new β\n".into(),
+            }));
+        }
+        v.push_entry(tool);
+        cx.notify();
+    });
+    refresh_frame(cx);
+    let projection = chat.read_with(&cx.cx, |v, _| v.entries[0].plain_text());
+    assert!(
+        projection.contains("\"path\": \"src/α.rs\""),
+        "reported arguments must be selectable alongside the rich diff"
+    );
+    assert!(
+        projection.contains("exitCode"),
+        "reported raw result remains available alongside rich output"
+    );
+    assert!(projection.contains("old 🌙") && projection.contains("new β"));
+    assert!(cx.debug_bounds("tool-output-0-0").is_some());
+}
+
+#[gpui::test]
+async fn ely_rich_diff_drag_and_copy_includes_raw_projection_offsets(cx: &mut TestAppContext) {
+    let (chat, cx) = super::tests::offline_chat_view(cx);
+    chat.update(cx, |v, cx| {
+        let mut tool = unicode_tool();
+        if let Entry::ToolCall {
+            raw_input,
+            raw_output,
+            expanded,
+            content,
+            ..
+        } = &mut tool
+        {
+            *raw_input = Some("{\"path\":\"src/α.rs\"}".into());
+            *raw_output = Some("{\"exitCode\":0}".into());
+            *expanded = true;
+            content.push(ToolCallContentInfo::Diff(ToolCallDiff {
+                path: "src/α.rs".into(),
+                old_text: Some("old 🌙\n".into()),
+                new_text: "new β\n".into(),
+            }));
+        }
+        v.push_entry(tool);
+        cx.notify();
+    });
+    cx.simulate_resize(size(px(700.0), px(700.0)));
+    refresh_frame(cx);
+    let from = cx.debug_bounds("tool-diff-0-0-text-0").unwrap();
+    let to = cx.debug_bounds("tool-diff-0-0-text-1").unwrap();
+    let start = point(from.left() + px(1.0), from.center().y);
+    let end = point(to.right() - px(1.0), to.center().y);
+    cx.simulate_event(MouseDownEvent {
+        position: start,
+        button: MouseButton::Left,
+        modifiers: gpui::Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseMoveEvent {
+        position: end,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: gpui::Modifiers::none(),
+    });
+    cx.simulate_event(MouseUpEvent {
+        position: end,
+        button: MouseButton::Left,
+        modifiers: gpui::Modifiers::none(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+    let selected = chat
+        .read_with(&cx.cx, |v, _| v.selected_transcript_text())
+        .unwrap();
+    assert!(
+        selected.starts_with("old 🌙\nnew"),
+        "diff drag must address the rich row after raw argument bytes: {selected:?}"
+    );
+    cx.update(|window, cx| chat.update(cx, |v, cx| v.copy_transcript(&CopyTranscript, window, cx)));
+    assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), selected);
+}

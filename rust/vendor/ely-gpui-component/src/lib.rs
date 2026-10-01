@@ -5,6 +5,7 @@ pub mod buttons;
 pub mod chat;
 mod compat;
 pub mod data_display;
+mod expansion;
 pub mod feedback;
 pub mod forms;
 pub mod layout;

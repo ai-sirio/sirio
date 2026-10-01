@@ -426,12 +426,13 @@ impl RenderOnce for Icon {
 #[cfg(test)]
 mod tests {
     use super::IconName;
+    use gpui::AssetSource;
 
     #[test]
     fn every_icon_ships_in_the_bundle() {
         for icon in IconName::ALL {
             assert!(
-                crate::Assets::get(icon.path()).is_some(),
+                crate::Assets.load(icon.path()).unwrap().is_some(),
                 "{icon:?} missing at {}",
                 icon.path()
             );

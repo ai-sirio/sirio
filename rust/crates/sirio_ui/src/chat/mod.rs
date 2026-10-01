@@ -15,10 +15,10 @@ use gpui::{
     quad, relative, rgb, transparent_black,
 };
 use sirio_acp::{
-    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, FastMode,
-    THINKING_DISPLAYS, ThinkingDisplay,
-    EffortChoice, EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
-    ModelOption, SessionNotice, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
+    EffortChoice, EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
+    ModelOption, SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo,
+    ToolCallDiff, ToolCallLocationInfo,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -39,9 +39,9 @@ use std::rc::Rc;
 use crate::caret;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
+mod ely;
 #[cfg(test)]
 mod ely_tests;
-mod ely;
 mod identity;
 pub use ely::ChatAssets;
 mod composer_view;
@@ -51,7 +51,6 @@ mod thought;
 mod tool_calls;
 mod transcript;
 mod turn_rail;
-use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use bezel::ui::widgets::{Controls, SliderDrag, slider_fraction};
@@ -59,6 +58,7 @@ use composer_view::{
     EFFORT_RESET, TokenPopup, assemble_prompt, effort_fraction_for_stop, effort_stop_for_fraction,
     effort_stop_share, effort_stops, mention_token, slash_token,
 };
+use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -482,8 +482,8 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 text: bezel_text(&inline),
             }
         })),
-        LegacyBlock::Paragraph { inline } => out.push(at(
-            if let Some((url, alt, width)) = lone_image(&inline) {
+        LegacyBlock::Paragraph { inline } => {
+            out.push(at(if let Some((url, alt, width)) = lone_image(&inline) {
                 // Before the quote check: bezel's quote block holds text
                 // only, and a picture inside a quote is still a picture.
                 markdown::BlockKind::Image {
@@ -495,8 +495,8 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 markdown::BlockKind::Quote(bezel_text(&inline))
             } else {
                 markdown::BlockKind::Paragraph(bezel_text(&inline))
-            },
-        )),
+            }))
+        }
         LegacyBlock::List { kind, items, .. } => {
             for (index, item) in items.into_iter().enumerate() {
                 let mut item_blocks = item.blocks.into_iter();
@@ -658,7 +658,10 @@ actions!(
     ]
 );
 
-actions!(chat_question_answer, [SendAnswer, CancelAnswer, LeaveAnswer]);
+actions!(
+    chat_question_answer,
+    [SendAnswer, CancelAnswer, LeaveAnswer]
+);
 
 /// One option offered by an open question, drawn as a row of the dock.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -914,8 +917,16 @@ impl Entry {
                 status,
                 content,
                 locations,
+                raw_input,
+                raw_output,
                 ..
-            } => tool_call_plain_text(title, status, content, locations).text(),
+            } => tool_call_plain_text(
+                title,
+                status,
+                &project_tool_content(content, raw_input.as_deref(), raw_output.as_deref()),
+                locations,
+            )
+            .text(),
             Self::SubagentTask {
                 title,
                 status,
@@ -1170,7 +1181,11 @@ fn thousands(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
     }
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let thousands = (tokens as f64 / 1_000.0).round() as u64;
     format!("{thousands}k")
 }
@@ -2995,12 +3010,10 @@ impl Chat {
                             // plain permission with no choices is different:
                             // its wire request has no renderable answer, so it
                             // gets Dismiss below instead of a fake option.
-                            (is_question && answer_options.is_empty()).then_some(
-                                AnswerTextInput {
-                                    placeholder: None,
-                                    prefill: None,
-                                },
-                            )
+                            (is_question && answer_options.is_empty()).then_some(AnswerTextInput {
+                                placeholder: None,
+                                prefill: None,
+                            })
                         });
                     self.push_entry(Entry::Permission {
                         request_id,
@@ -6449,8 +6462,7 @@ impl Chat {
                 .text_size(typography.ui_size)
                 .hover(|style| style.bg(bezel_theme.element_hover))
                 .on_click(move |_, window, cx| {
-                    thinking_entity
-                        .update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
+                    thinking_entity.update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
                 })
                 .child(div().text_color(theme.text_faint).child("Thinking"))
                 .when_some(chosen, |chip, chosen| {
@@ -8453,17 +8465,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                         // `Thinking`, same paddings — so a run in progress has one
                         // shape whether or not a thought has arrived. `usize::MAX`
                         // only feeds the row's marker ids; nothing reads them.
-                        .child(Self::render_thought_header(
-                            usize::MAX,
-                            true,
-                            false,
-                            None,
-                            &theme,
-                            &bezel_theme,
-                            window,
-                            cx,
-                            None,
-                        )),
+                        .child(ely_gpui_component::chat::ThinkingIndicator::new("chat-generating-indicator")),
                 )
             })
 
@@ -8545,7 +8547,6 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
             .children(transcript_context_menu)
     }
 }
-
 
 fn now_hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
@@ -8928,6 +8929,27 @@ impl ToolCallPlainText {
     }
 }
 
+/// The same reported data feeds painting and Unicode selection offsets.
+fn project_tool_content(
+    content: &[ToolCallContentInfo],
+    raw_input: Option<&str>,
+    raw_output: Option<&str>,
+) -> Vec<ToolCallContentInfo> {
+    let mut projected = Vec::with_capacity(content.len() + 2);
+    if let Some(arguments) = raw_input.filter(|text| !text.is_empty()) {
+        projected.push(ToolCallContentInfo::Text(arguments.to_owned()));
+    }
+    projected.extend_from_slice(content);
+    if let Some(result) = raw_output.filter(|text| !text.is_empty())
+        && !content
+            .iter()
+            .any(|item| matches!(item, ToolCallContentInfo::Text(text) if text == result))
+    {
+        projected.push(ToolCallContentInfo::Text(result.to_owned()));
+    }
+    projected
+}
+
 fn tool_call_plain_text(
     title: &str,
     status: &str,
@@ -9104,7 +9126,9 @@ mod tests {
                 trace.matches("\tevent\tnotify.Chat.acp_thought\t").count(),
                 2
             );
-            assert!(trace.contains("\tevent\tmotion.Chat.woken\t"));
+            // Ely indicators use GPUI animations, not Bezel's Painter lease.
+            // Keep observing real Bezel wakes when present; the redraw/content
+            // contract below does not require that retired indicator engine.
             assert_eq!(
                 trace
                     .matches("\tevent\trequest_frame.Chat.thought_follow\t")
@@ -9385,7 +9409,9 @@ mod tests {
     /// A drawn chat that never connects: no subprocess, so nothing expires
     /// the questions a test pushes and no connection error lands in the
     /// transcript.
-    pub(super) fn offline_chat_view(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+    pub(super) fn offline_chat_view(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         cx.update(init);
@@ -11482,7 +11508,8 @@ two"
         let allow = cx
             .debug_bounds("permission-option-allow")
             .expect("allow button");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(allow.center(), Modifiers::none());
         cx.run_until_parked();
@@ -11503,7 +11530,8 @@ two"
         let deny = cx
             .debug_bounds("permission-option-deny")
             .expect("deny button");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(deny.center(), Modifiers::none());
         cx.run_until_parked();
@@ -11663,9 +11691,7 @@ two"
     /// never re-driven when a later pass touched an unrelated part of the
     /// row.
     #[gpui::test]
-    async fn a_listed_option_leaves_the_surface_and_clears_the_dock(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_listed_option_leaves_the_surface_and_clears_the_dock(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["question-options"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         refresh_frame(cx);
@@ -11714,7 +11740,8 @@ two"
         let blue = cx
             .debug_bounds("permission-option-blue")
             .expect("the Blue pill is drawn");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(blue.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12089,7 +12116,8 @@ two"
         let approve = cx
             .debug_bounds("permission-option-approve")
             .expect("approve button");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(approve.center(), Modifiers::none());
         cx.run_until_parked();
@@ -14396,9 +14424,7 @@ two"
     /// Review focus: a forty-line command must not push the composer off
     /// the pane — the body stops at its cap and scrolls.
     #[gpui::test]
-    async fn a_long_command_scrolls_inside_the_dock_instead_of_growing_it(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_long_command_scrolls_inside_the_dock_instead_of_growing_it(cx: &mut TestAppContext) {
         let (chat, cx) = offline_chat_view(cx);
         let command = (0..40)
             .map(|line| format!("echo line {line}"))
@@ -14457,7 +14483,8 @@ two"
             assert_eq!(chat.question_dock.selected, 0);
         });
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -14485,7 +14512,8 @@ two"
             cx.notify();
         });
         refresh_frame(cx);
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.update(|window, cx| {
             chat.update(cx, |chat, cx| {
                 chat.activate_dock_row(0, window, cx);
@@ -14500,17 +14528,23 @@ two"
                 Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
             ));
             assert!(matches!(
-                chat.entries.iter().find(|entry| {
-                    matches!(entry, Entry::Permission { request_id: 2, .. })
-                }),
+                chat.entries
+                    .iter()
+                    .find(|entry| { matches!(entry, Entry::Permission { request_id: 2, .. }) }),
                 Some(Entry::Permission { resolved: None, .. })
             ));
-            assert_eq!(question_dock::question_view(&chat.entries).unwrap().request_id, 2);
+            assert_eq!(
+                question_dock::question_view(&chat.entries)
+                    .unwrap()
+                    .request_id,
+                2
+            );
         });
 
         refresh_frame(cx);
         refresh_frame(cx);
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(0, window, cx)));
         assert!(chat.read_with(&cx.cx, |chat, _| matches!(
@@ -14544,7 +14578,8 @@ two"
             Some(Entry::Permission { resolved: None, .. })
         )));
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -14560,7 +14595,11 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         focus_composer(&chat, cx);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
@@ -14575,7 +14614,11 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         cx.update(|window, cx| window.blur(cx));
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
@@ -14584,7 +14627,10 @@ two"
             cx.debug_bounds("question-dock").is_some(),
             "the dock is drawn all the same"
         );
-        assert!(!dock_is_focused(&chat, cx), "but it does not take the keyboard");
+        assert!(
+            !dock_is_focused(&chat, cx),
+            "but it does not take the keyboard"
+        );
     }
 
     /// Down then Enter answers with the second option, end to end, and the
@@ -14604,9 +14650,13 @@ two"
         });
         refresh_frame(cx);
         refresh_frame(cx);
-        assert!(dock_is_focused(&chat, cx), "the question takes the keyboard");
+        assert!(
+            dock_is_focused(&chat, cx),
+            "the question takes the keyboard"
+        );
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
@@ -14640,7 +14690,8 @@ two"
         refresh_frame(cx);
         refresh_frame(cx);
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("2");
         cx.run_until_parked();
@@ -14673,7 +14724,14 @@ two"
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
-                matches!(entry, Entry::Permission { resolved: None, expired: true, .. })
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: true,
+                        ..
+                    }
+                )
             }) && chat.has_completed_turn
         });
     }
@@ -14695,7 +14753,8 @@ two"
         cx.simulate_input("Bl");
         cx.run_until_parked();
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         let blue = cx
             .debug_bounds("permission-option-blue")
@@ -14785,7 +14844,10 @@ two"
         cx.run_until_parked();
         refresh_frame(cx);
         assert!(dock_is_focused(&chat, cx));
-        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 1);
+        assert_eq!(
+            chat.read_with(&*cx, |chat, _| chat.question_dock.selected),
+            1
+        );
     }
 
     /// Review focus: two questions open at once — the second follows the
@@ -14795,13 +14857,22 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         focus_composer(&chat, cx);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
-            chat.push_entry(question_dock::open_permission(2, "/repo/b.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
+            chat.push_entry(question_dock::open_permission(
+                2,
+                "/repo/b.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
         refresh_frame(cx);
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
@@ -14812,7 +14883,10 @@ two"
                 question_dock::question_view(&chat.entries).map(|view| view.request_id),
                 Some(2)
             );
-            assert_eq!(chat.question_dock.selected, 0, "a new question starts on row 1");
+            assert_eq!(
+                chat.question_dock.selected, 0,
+                "a new question starts on row 1"
+            );
         });
         assert!(dock_is_focused(&chat, cx), "the keyboard stays on the dock");
     }
@@ -14836,7 +14910,10 @@ two"
             .expect("the third answer is drawn");
         cx.simulate_mouse_move(reject.center(), None, Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 2);
+        assert_eq!(
+            chat.read_with(&*cx, |chat, _| chat.question_dock.selected),
+            2
+        );
     }
 
     /// Review focus: a question closed from outside the dock (the turn
@@ -14846,7 +14923,11 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         focus_composer(&chat, cx);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);

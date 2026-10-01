@@ -126,8 +126,8 @@ impl Chat {
         entry: Entry,
         row: TranscriptRowContext<'_>,
         theme: &Theme,
-        window: &mut Window,
-        cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) -> AnyElement {
         let TranscriptRowContext {
             index: entry_index,
@@ -296,21 +296,28 @@ impl Chat {
             } => {
                 let streaming = thought_streaming;
                 let is_open = open.get(streaming);
-                let mut column = div().w_full().flex().flex_col().gap(px(4.0)).child(
-                    Self::render_thought_header(
-                        entry_index,
-                        streaming,
-                        is_open,
-                        duration_ms,
-                        theme,
-                        &bezel_theme,
-                        window,
-                        cx,
-                        Some(entity.clone()),
-                    ),
-                );
+                let toggle_entity = entity.clone();
+                let mut block = ely_gpui_component::chat::ThinkingBlock::new(
+                    id.clone(),
+                    "",
+                    streaming,
+                    std::time::Duration::from_millis(duration_ms.unwrap_or(0)),
+                )
+                .header_selector(format!("thought-toggle-{entry_index}"))
+                .expanded(is_open, move |desired, _, cx| {
+                    toggle_entity.update(cx, |chat, cx| {
+                        if let Some(Entry::Thought { open, .. }) = chat.entries.get(entry_index) {
+                            if open.get(chat.thought_is_streaming(entry_index)) != desired {
+                                chat.toggle_thought(entry_index, cx);
+                            }
+                        }
+                    })
+                });
+                if duration_ms.is_none() {
+                    block = block.label("Thought");
+                }
                 if is_open && let Some(scroll) = thought_scroll.get(&entry_index) {
-                    column = column.child(Self::render_thought_body(
+                    block = block.body(Self::render_thought_body(
                         entry_index,
                         &text,
                         source_start,
@@ -320,7 +327,23 @@ impl Chat {
                         &bezel_theme,
                     ));
                 }
-                column.into_any_element()
+                div()
+                    .w_full()
+                    .child(block)
+                    .child(div().size_0().debug_selector(move || {
+                        format!(
+                            "thought-{}-{entry_index}",
+                            if streaming { "streaming" } else { "settled" }
+                        )
+                    }))
+                    .when(duration_ms.is_some() && !streaming, |row| {
+                        row.child(
+                            div()
+                                .size_0()
+                                .debug_selector(move || format!("thought-took-{entry_index}")),
+                        )
+                    })
+                    .into_any_element()
             }
             Entry::ToolCall {
                 title,
@@ -330,16 +353,19 @@ impl Chat {
                 locations,
                 expanded,
                 duration_ms,
+                raw_input,
+                raw_output,
                 ..
             } => Self::render_tool_row(
                 entry_index,
+                id.clone(),
                 None,
                 true,
                 &title,
                 &status,
                 &kind,
                 duration_ms,
-                content,
+                project_tool_content(&content, raw_input.as_deref(), raw_output.as_deref()),
                 locations,
                 expanded,
                 edit_summary,
@@ -358,6 +384,7 @@ impl Chat {
                 ..
             } => Self::render_subagent_task(
                 entry_index,
+                id.clone(),
                 title,
                 status,
                 tool_calls,
@@ -430,50 +457,17 @@ impl Chat {
                 .into_any_element()
             }
             Entry::Plan { entries, approval } => {
-                let completed = entries
-                    .iter()
-                    .filter(|entry| entry.status == "completed")
-                    .count();
                 let mut card = div()
                     .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(theme.border_strong)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(typography.caption2)
-                            .child(div().text_color(theme.text).child("Plan"))
-                            .child(
-                                div()
-                                    .text_color(theme.text_faint)
-                                    .child(format!("{completed}/{}", entries.len())),
-                            ),
-                    );
-                for row in entries {
-                    let (glyph, tint) = match row.status.as_str() {
-                        "completed" => ("✓", theme.border_strong),
-                        "in_progress" => ("◌", theme.text),
-                        _ => ("○", theme.text_faint),
-                    };
-                    card = card.child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap(px(6.0))
-                            .text_size(typography.callout)
-                            .child(div().w(px(14.0)).text_color(tint).child(glyph))
-                            .child(div().flex_1().text_color(theme.text).child(row.content)),
-                    );
-                }
+                    .child(ely_gpui_component::agent::AgentPlan::new(
+                        id.clone(),
+                        "Plan",
+                        entries.into_iter().map(|row| {
+                            (row.content, super::tool_calls::activity_state(&row.status))
+                        }),
+                    ));
                 if let Some(approval) = approval {
                     // Approved from the dock above the composer; the card
                     // keeps the plan and says what became of the approval.

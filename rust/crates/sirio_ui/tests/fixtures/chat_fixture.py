@@ -421,6 +421,24 @@ def main():
                         names.append(kind)
                 message_chunk("blocks: " + ",".join(names))
                 response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-activity":
+                thought_chunk("Analisi 🌙 del risultato e delle modifiche.\n" * 12)
+                for tool_id, kind, status, title in [
+                    ("shell", "execute", "completed", "Inspect Unicode output"),
+                    ("read-failed", "read", "failed", "missing.rs"),
+                    ("read-running", "read", "in_progress", "src/α.rs"),
+                ]:
+                    update = {"sessionUpdate": "tool_call", "toolCallId": tool_id,
+                              "title": title, "kind": kind, "status": status}
+                    if tool_id == "shell":
+                        update["rawInput"] = {"command": "inspect src/α.rs"}
+                        update["content"] = [
+                            {"type": "content", "content": {"type": "text", "text": "".join(f"line {n:03}: risultato 🌙\n" for n in range(80))}},
+                            {"type": "diff", "path": "src/α.rs", "oldText": "old 🌙\n", "newText": "new β\n"},
+                        ]
+                    notification(update)
+                message_chunk("Verifica native dei tool e del diff Unicode.")
+                response(request["id"], {"stopReason": "end_turn"})
             if mode == "permission":
                 request_permission()
                 sys.stdin.readline()  # the client's answer to the permission

@@ -64,3 +64,9 @@ physical Wayland session and native macOS/Windows input are unverified.
 - Sirio uses Ely's `ChatContainer` with its existing `ListState`, not Ely's
   private `MessageList` feed. Row IDs are scoped to Chat entity, transcript
   generation and row index; streamed chunks retain identity.
+
+- `src/expansion.rs`, `agent/tools.rs`, `chat/status.rs`: optional host-owned
+  expansion bypasses keyed widget state; custom rich bodies and actual header
+  selectors preserve virtualized interaction. Tool groups accept reported
+  status, and thoughts accept an honest label when no duration was measured.
+  The default Gallery constructors retain their original uncontrolled behavior.
