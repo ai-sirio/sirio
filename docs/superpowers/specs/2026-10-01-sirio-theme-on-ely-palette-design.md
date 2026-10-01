@@ -76,8 +76,10 @@ those files move with them.
 ### `sirio_theme`'s colour model
 
 `sirio_theme` depends on `gpui`, `ely-palette` and `bezel-theme`.
-`bezel-theme` is used only for `HighlightKind`, `SyntaxPalette` and
-`AppearanceMode`. The crate no longer depends on `bezel`, and it does not
+`bezel-theme` is used for `HighlightKind`, `SyntaxPalette`,
+`AppearanceMode`, and the `Theme::branded` derivation behind the pure
+`Theme::to_bezel_theme` value (§2, "One source, two consumers"). The crate
+no longer depends on `bezel`, and it does not
 depend on `ely-gpui-component`, so `sirio_terminal` and the other
 dependants do not compile Ely's components.
 
@@ -95,6 +97,12 @@ pub struct ThemeColors {
 `Theme` keeps its `Deref` to `ThemeColors`, so a call site reads
 `theme.ely.fg` or `theme.sirio.terminal_surface`. The 38 old names are
 removed.
+
+Every token is a `gpui::Hsla`, `Palette`'s own type, including those in
+`SirioColors`. Today's `Rgba` tokens reach the screen as
+`Hsla::from(rgba)`, and that conversion carries alpha unchanged, so a
+frozen `Hsla::from(rgba)` paints exactly what the `Rgba` painted, faded or
+not.
 
 ### One source, two consumers
 
@@ -115,14 +123,20 @@ observes the `Theme` global and, on each change:
    because Sirio switches themes instantly today. It also sets the mode,
    `ThemeMetrics` (text sizes and radii, as today), the font families and
    reduced motion.
-2. Runs the inverse adapter. It builds `bezel_theme::Theme::branded(Brand { tint })`
-   with the preset's tint, overwrites every field that has a Sirio
-   equivalent (§3.3), then calls `install_custom` and `set_current_appearance`.
+2. Runs the inverse adapter, `theme.install_into_bezel(cx)`. It installs
+   `theme.to_bezel_theme()` with `install_custom`, then calls
+   `set_current_appearance`. `to_bezel_theme` is today's derivation,
+   unchanged: `branded(tint)` plus the hand-written ladders (§3.3).
 
-`sirio_theme` loses `to_bezel_theme`, `install_into_bezel` and
-`sync_appearance`. Bezel synchronisation becomes a consequence of the
-global changing, not a duty of every installer. The fallback install at
-`sirio/src/main.rs:16842` goes away. `ChatAssets` becomes
+`sirio_theme` keeps `to_bezel_theme`, `install_into_bezel` and
+`sync_appearance`. They need only `bezel-theme`, and its installers keep
+calling them: 46 files of tests build a theme with `Theme::init`/`install`
+and render bezel widgets on the strength of it. The observer installs as
+well, so a path that swaps the global without an installer — the portal
+follower's kind of path — still reaches bezel. A redundant install sets
+the same value twice. The render-time fallbacks for isolated fixtures
+(`sirio/src/main.rs`, the sidebar, the file view, project settings) are
+unchanged. `ChatAssets` becomes
 `sirio_ui::ely::AppAssets` with the same namespaces (`ely/`, `sirio-chat/`,
 falling back to bezel's icons until sub-project 2).
 
@@ -210,12 +224,13 @@ Sirio's own source-code colours stay in the 24-kind
 the highlighting boundary chosen for the migration; Ely's `Syntax` has 13
 fields and cannot hold them.
 
-The inverse adapter writes the bezel fields with a Sirio equivalent: the
-surfaces, text ladder, borders, hover and active, selection, `code_wash`,
-`solid`/`on_solid`, the semantic hues, `danger_muted` and `ring`. Other
-bezel fields (glass, frost, shadows) keep `branded(tint)`'s values, so the
-bezel widgets still alive until sub-project 7 render as today. The tint
-is kept in each preset for this purpose only.
+The inverse adapter installs today's derivation and writes no Sirio token
+into it. A frozen Sirio token is bezel's `Hsla` converted to `Rgba` and
+back, which matches the original on screen but not in its last float
+bits. Writing it back would make bezel's installed theme differ from
+today's in exactly those bits. Bezel's tokens and Sirio's agree in this
+sub-project as they agree today, by construction. Sub-project 7 revisits
+the adapter, when `bezel-markdown` is its only reader.
 
 ### 3.4 Presets
 
@@ -268,20 +283,33 @@ change.
 
 ### 6.1 Token identity artefact
 
-The branch's first commit adds `sirio_theme/examples/dump_tokens.rs`. It
-prints a TSV of every resolved token for the 14 base × appearance
-combinations, with and without translucency, plus the 72 fields installed
-into `bezel-theme` and the `Palette` installed into Ely. Each value is
-read after a flush. Run on that commit, it records the baseline in today's
-vocabulary. After the migration the same example prints the new
-vocabulary. A script maps the names with §3.2/§3.3, and the diff must be
-empty. The TSVs, the diff and the commands are committed under
-`docs/testing/` so anyone can re-run them.
+The branch's first commit adds `sirio_ui/examples/theme_dump.rs`. It lives
+in `sirio_ui` because it reads both consumers. It prints every resolved
+token for the 14 base × appearance combinations, with and without
+translucency, as three files:
+
+- `sirio.tsv`, Sirio's own tokens, each as the exact `Hsla` floats gpui
+  paints;
+- `ely.tsv`, the `Palette` in Ely's global;
+- `bezel.txt`, bezel-theme's installed `Theme`, Debug-printed.
+
+Each value is read after a flush. Run on that commit, the example records
+the baseline in today's vocabulary. After the migration it prints the new
+vocabulary. `Scripts/theme/compare-theme-dumps.py` maps `sirio.tsv`'s
+names with §3.2 (`docs/testing/theme-ely-palette/rename.tsv`) and requires
+all three files to be equal; `ely.tsv` and `bezel.txt` must be
+byte-identical. The dumps, the comparison output and the commands are
+committed under `docs/testing/theme-ely-palette/` so anyone can re-run them.
 
 ### 6.2 Visual artefact
 
-`Scripts/visual-sweep.sh` captures an isolated real instance in the 14
-themes before and after on X11. Native macOS and Windows rendering is not
+`Scripts/Tests/test-theme-sweep.sh` drives `Scripts/visual-sweep.sh` once
+per theme (7 bases × light and dark), seeding the persisted
+`appearance.theme` and `appearance.baseColor` settings. It runs against
+the baseline binary and the migrated one on X11, and the captures are
+compared side by side. They are visual evidence for a person to look at,
+not a pixel-exact check: spinners and the clock move between runs. The
+pixel-exact proof is §6.1. Native macOS and Windows rendering is not
 claimed. Their compilation is covered by `macos-check.yml` and the pull
 request's CI.
 
@@ -292,8 +320,8 @@ request's CI.
   translucency.
 - `dark_palette_comes_from_bezel` and `light_palette_comes_from_bezel` are
   removed. The behaviour they proved ceases to exist by design.
-- `conformance.rs`'s bezel installation test is rewritten against the
-  observer.
+- `conformance.rs`'s bezel installation test stays, because `install_into_bezel`
+  stays.
 - `ely_theme_change_preserves_chat_state_and_bezel_palette` keeps its intent.
 - A theme change must reach both consumers. Write the failure modes of the
   observer first:
