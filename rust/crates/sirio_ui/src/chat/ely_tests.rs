@@ -1,6 +1,7 @@
 //! Regression tests at the host/component boundaries.
 use super::tests::{CHAT_FIXTURE, TempDir, pump_chat_until, refresh_frame};
 use super::*;
+use bezel::ui::widgets::{ButtonStyle, Buttons};
 use gpui::{TestAppContext, size};
 
 struct ThemeProbe {
@@ -122,4 +123,91 @@ async fn ely_theme_change_preserves_chat_state_and_bezel_palette(cx: &mut TestAp
             gpui::rems(f32::from(resolved.typography.base_size) / 16.0)
         );
     });
+}
+
+fn unicode_tool() -> Entry {
+    Entry::ToolCall {
+        id: "reused-tool".into(),
+        title: "Read α.rs".into(),
+        status: "Completed".into(),
+        kind: "Read".into(),
+        content: vec![ToolCallContentInfo::Text("risultato 🌙 Unicode".into())],
+        locations: vec![],
+        raw_input: None,
+        raw_output: None,
+        expanded: false,
+        duration_ms: None,
+    }
+}
+
+#[gpui::test]
+async fn ely_row_identity_changes_only_when_transcript_is_replaced(cx: &mut TestAppContext) {
+    let (chat, cx) = super::tests::offline_chat_view(cx);
+    let (before, after_chunk, before_replace, after_replace) = chat.update(cx, |v, cx| {
+        v.streaming = true;
+        v.handle_event(AcpEvent::AgentMessageChunk("ciao 🌙".into()), cx);
+        let before = v.row_id(0, cx);
+        v.handle_event(AcpEvent::AgentMessageChunk(" ancora".into()), cx);
+        let after_chunk = v.row_id(0, cx);
+        v.push_entry(unicode_tool());
+        let before_replace = v.row_id(1, cx);
+        v.new_conversation(cx);
+        v.handle_event(AcpEvent::AgentMessageChunk("nuova".into()), cx);
+        v.push_entry(unicode_tool());
+        (before, after_chunk, before_replace, v.row_id(1, cx))
+    });
+    assert_eq!(before, after_chunk);
+    assert_ne!(before_replace, after_replace);
+}
+
+#[gpui::test]
+async fn ely_unicode_selection_survives_row_remeasurement(cx: &mut TestAppContext) {
+    let (chat, cx) = super::tests::offline_chat_view(cx);
+    chat.update(cx, |v, cx| {
+        v.push_entry(Entry::User {
+            text: "Domanda 🌙 α".into(),
+            at: None,
+        });
+        v.push_entry(Entry::Assistant {
+            text: "Risposta **Unicode β**".into(),
+            document: parse_chat_markdown("Risposta **Unicode β**"),
+        });
+        v.push_entry(unicode_tool());
+        for _ in 0..18 {
+            v.push_entry(Entry::Assistant {
+                text: "continuazione\n".repeat(8),
+                document: parse_chat_markdown(&"continuazione\n".repeat(8)),
+            });
+        }
+        let end = v.transcript_entry_ranges()[2].end;
+        v.transcript_selection = Some(TranscriptSelection {
+            anchor: 0,
+            head: end,
+        });
+        v.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    });
+    refresh_frame(cx);
+    let before = chat.read_with(&cx.cx, |v, _| v.selected_transcript_text());
+    cx.simulate_resize(size(px(430.0), px(500.0)));
+    chat.update(cx, |v, cx| v.toggle_tool_call_expanded(2, cx));
+    refresh_frame(cx);
+    cx.update(|window, cx| {
+        chat.update(cx, |v, cx| {
+            v.transcript_focus.focus(window, cx);
+            v.copy_transcript(&CopyTranscript, window, cx);
+        });
+    });
+    assert_eq!(
+        chat.read_with(&cx.cx, |v, _| v.selected_transcript_text()),
+        before
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())),
+        before
+    );
+    assert!(!chat.read_with(&cx.cx, |v, _| v.list_state.is_following_tail()));
 }

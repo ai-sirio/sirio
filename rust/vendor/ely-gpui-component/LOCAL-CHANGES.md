@@ -58,3 +58,9 @@ Linux compatibility evidence: the native probe rendered under an isolated
 Xvfb X11 display (Mesa software rendering), edited/copied/pasted multiline
 text, submitted via Enter, and expanded the tool card via pointer. The
 physical Wayland session and native macOS/Windows input are unverified.
+
+- `feedback/messages.rs`: `Alert::content` accepts Sirio's selectable error
+  guidance and host actions; the original text-body API remains supported.
+- Sirio uses Ely's `ChatContainer` with its existing `ListState`, not Ely's
+  private `MessageList` feed. Row IDs are scoped to Chat entity, transcript
+  generation and row index; streamed chunks retain identity.

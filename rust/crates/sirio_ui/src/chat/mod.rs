@@ -54,7 +54,7 @@ mod turn_rail;
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
-use bezel::ui::widgets::{ButtonStyle, Buttons, Controls, SliderDrag, slider_fraction};
+use bezel::ui::widgets::{Controls, SliderDrag, slider_fraction};
 use composer_view::{
     EFFORT_RESET, TokenPopup, assemble_prompt, effort_fraction_for_stop, effort_stop_for_fraction,
     effort_stop_share, effort_stops, mention_token, slash_token,
@@ -437,11 +437,8 @@ impl IntoElement for MarkdownBody {
     }
 }
 
-/// The transcript's content column maximum — the Bezel Transcript pattern's
-/// 700 (spec §2). Settings and the markdown column keep waku's 720; this one
-/// column follows Bezel because the live transcript is what the migration
-/// copies.
-pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
+/// The Ely chat reading column at the default Sirio scale.
+pub(crate) const TRANSCRIPT_WIDTH: f32 = 760.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 /// The tallest the queue's entry list grows before it scrolls (D-CHAT-03):
 /// about five rows, Zed's `max_h_40`, so a long queue never pushes the
@@ -449,12 +446,6 @@ pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const QUEUE_MAX_HEIGHT: f32 = 160.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 
-/// The user turn's bubble: rounded, right-aligned, capped at the Bezel
-/// Activity pattern's 440. The assistant reply has no container at all.
-pub(crate) const USER_PILL_MAX_WIDTH: f32 = 440.0;
-pub(crate) const USER_PILL_H_PADDING: f32 = 14.0;
-pub(crate) const USER_PILL_V_PADDING: f32 = 9.0;
-pub(crate) const USER_PILL_TEXT_SIZE: f32 = 13.5;
 pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
 
 /// Ten megabytes: past this point a stray drop or paste would stall a turn
@@ -1879,6 +1870,7 @@ pub struct Chat {
     /// `None` when there is nothing to launch — see [`Chat::unavailable`].
     agent_launch: Option<LaunchSpec>,
     /// Display name shown in the empty composer placeholder when known.
+    transcript_generation: u64,
     agent_id: Option<String>,
     agent_name: Option<String>,
     agent_cwd: PathBuf,
@@ -2260,6 +2252,7 @@ impl Chat {
         Self {
             client: None,
             agent_launch: launch,
+            transcript_generation: 0,
             agent_id: None,
             agent_name: None,
             agent_cwd: cwd,
@@ -3497,6 +3490,7 @@ impl Chat {
             }
         };
         persistence.tab_id = tab_id;
+        self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.entries.clear();
         self.turn_message_ids.clear();
         // F-CHAT-22: `unfolded_turns` is keyed by entry index, so anything
@@ -3619,6 +3613,7 @@ impl Chat {
     /// the exact visible transcript is more important than pretending the
     /// ACP event boundaries survived after the session was retained.
     pub fn restore_transcript(&mut self, transcript: &str, cx: &mut Context<Self>) {
+        self.transcript_generation = self.transcript_generation.wrapping_add(1);
         if transcript.is_empty() {
             return;
         }
@@ -4496,6 +4491,7 @@ impl Chat {
     /// is dropped and the ACP session is relaunched.
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
+        self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.entries.clear();
         self.turn_message_ids.clear();
         self.pending_rewind = None;
@@ -5861,654 +5857,6 @@ impl Chat {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_entry(
-        entry: Entry,
-        entry_index: usize,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-        transcript_focus: FocusHandle,
-        source_start: usize,
-        copied_target: Option<CopyTarget>,
-        edit_summary: Option<EditSummaryState>,
-        thought_streaming: bool,
-        thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
-        tool_output_scroll: &HashMap<String, ScrollHandle>,
-        day_heading: Option<&str>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let _perf = sirio_perf::span("Chat.render_entry", entry_index as u64);
-        let typography = theme.typography;
-        let bezel_theme = theme.to_bezel_theme();
-        let interaction = TranscriptInteraction {
-            chat: entity.clone(),
-            focus: transcript_focus,
-        };
-        match entry {
-            Entry::User { text, .. } => {
-                let bubble = div()
-                    .w_full()
-                    .flex()
-                    .justify_end()
-                    // #173: without this the row's flex child keeps its content
-                    // width as a floor, so a message wider than the pane refuses
-                    // to shrink and — being end-justified — spills off the *left*
-                    // edge, where nothing can scroll to it. `max_w` never binds in
-                    // that case, because the pane is already narrower than the cap.
-                    .min_w_0()
-                    .child(
-                        div()
-                            .debug_selector(move || format!("user-bubble-{entry_index}"))
-                            .min_w_0()
-                            .max_w(px(USER_PILL_MAX_WIDTH))
-                            .rounded(theme.radii.user_pill)
-                            .bg(theme.surface_raised)
-                            .px(px(USER_PILL_H_PADDING))
-                            .py(px(USER_PILL_V_PADDING))
-                            .text_size(typography.scaled(USER_PILL_TEXT_SIZE))
-                            .text_color(theme.text)
-                            .child(Self::render_plain_text(
-                                text,
-                                theme,
-                                format!("user-entry-{entry_index}"),
-                                source_start,
-                                Some(&interaction),
-                            )),
-                    )
-                    .into_any_element();
-                // The heading row belongs to the `User` entry's row, so no
-                // extra list index is needed: it sits above the question.
-                match day_heading {
-                    Some(label) => div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .child(Chat::render_day_heading(
-                            entry_index,
-                            label,
-                            theme,
-                            &bezel_theme,
-                        ))
-                        .child(bubble)
-                        .into_any_element(),
-                    None => bubble,
-                }
-            }
-            Entry::Assistant { text, document } => {
-                let target = CopyTarget::Assistant(entry_index);
-                let copied = copied_target.as_ref() == Some(&target);
-                let hover_group = format!("assistant-response-{entry_index}");
-                let copy_entity = entity.clone();
-                let copy_target = target.clone();
-                let copy_text = text;
-                let mut copy = div()
-                    .id(("assistant-copy", entry_index))
-                    .debug_selector(move || format!("assistant-copy-{entry_index}"))
-                    .absolute()
-                    .top(px(0.0))
-                    .right(px(0.0))
-                    .px(px(7.0))
-                    .py(px(4.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.surface_raised)
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        copy_entity.update(cx, |chat, cx| {
-                            chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
-                        });
-                    });
-                if copied {
-                    copy = copy.child(
-                        div()
-                            .id(("assistant-copy-confirmed", entry_index))
-                            .debug_selector(move || {
-                                format!("assistant-copy-confirmed-{entry_index}")
-                            })
-                            .child("Copied ✓"),
-                    );
-                } else {
-                    copy = copy
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .child("Copy");
-                }
-                // Every prose entry is an answer, whether it closes the turn
-                // or sits between tool calls: same markdown, same colour.
-                div()
-                    .id(("assistant-response", entry_index))
-                    .debug_selector(move || format!("assistant-response-{entry_index}"))
-                    .relative()
-                    .group(hover_group)
-                    .w_full()
-                    .child(MarkdownBody::selectable(
-                        document,
-                        interaction.clone(),
-                        source_start,
-                    ))
-                    .child(copy)
-                    .child(
-                        div()
-                            .size_0()
-                            .debug_selector(move || format!("answer-{entry_index}")),
-                    )
-                    .into_any_element()
-            }
-            Entry::Thought {
-                text,
-                open,
-                duration_ms,
-                ..
-            } => {
-                let streaming = thought_streaming;
-                let is_open = open.get(streaming);
-                let mut column = div().w_full().flex().flex_col().gap(px(4.0)).child(
-                    Self::render_thought_header(
-                        entry_index,
-                        streaming,
-                        is_open,
-                        duration_ms,
-                        theme,
-                        &bezel_theme,
-                        window,
-                        cx,
-                        Some(entity.clone()),
-                    ),
-                );
-                if is_open && let Some(scroll) = thought_scroll.get(&entry_index) {
-                    column = column.child(Self::render_thought_body(
-                        entry_index,
-                        &text,
-                        source_start,
-                        &interaction,
-                        scroll,
-                        theme,
-                        &bezel_theme,
-                    ));
-                }
-                column.into_any_element()
-            }
-            Entry::ToolCall {
-                title,
-                status,
-                kind,
-                content,
-                locations,
-                expanded,
-                duration_ms,
-                ..
-            } => Self::render_tool_row(
-                entry_index,
-                None,
-                true,
-                &title,
-                &status,
-                &kind,
-                duration_ms,
-                content,
-                locations,
-                expanded,
-                edit_summary,
-                source_start,
-                Some(interaction.clone()),
-                theme,
-                &bezel_theme,
-                entity.clone(),
-                tool_output_scroll,
-            ),
-            Entry::SubagentTask {
-                title,
-                status,
-                tool_calls,
-                expanded,
-                ..
-            } => Self::render_subagent_task(
-                entry_index,
-                title,
-                status,
-                tool_calls,
-                expanded,
-                theme,
-                &bezel_theme,
-                entity.clone(),
-                tool_output_scroll,
-            ),
-            Entry::Permission {
-                request_id,
-                title,
-                prompt,
-                resolved,
-                expired,
-                dismissed,
-                ..
-            } => {
-                // The record of a question: what was asked and what became
-                // of it. It is answered from the dock above the composer,
-                // so it carries no buttons in any state.
-                let header = if title.is_empty() {
-                    "Permission requested".to_string()
-                } else {
-                    title
-                };
-                let status = if let Some(choice) = resolved {
-                    format!("Answered: {choice}")
-                } else if dismissed {
-                    "Dismissed — request cancelled".to_string()
-                } else if expired {
-                    // F-CHAT-27: the turn ended unanswered.
-                    "No answer — the turn ended".to_string()
-                } else {
-                    "Waiting for your answer below".to_string()
-                };
-                let mut card = div()
-                    .id(("permission-card", request_id as usize))
-                    .debug_selector(move || format!("permission-card-{request_id}"))
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(permission_card_accent(theme))
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(typography.callout)
-                            .text_color(theme.text)
-                            .child(header),
-                    );
-                if !prompt.is_empty() {
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_muted)
-                            .child(prompt),
-                    );
-                }
-                card.child(
-                    div()
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_faint)
-                        .child(status),
-                )
-                .into_any_element()
-            }
-            Entry::Plan { entries, approval } => {
-                let completed = entries
-                    .iter()
-                    .filter(|entry| entry.status == "completed")
-                    .count();
-                let mut card = div()
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(theme.border_strong)
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(typography.caption2)
-                            .child(div().text_color(theme.text).child("Plan"))
-                            .child(
-                                div()
-                                    .text_color(theme.text_faint)
-                                    .child(format!("{completed}/{}", entries.len())),
-                            ),
-                    );
-                for row in entries {
-                    let (glyph, tint) = match row.status.as_str() {
-                        "completed" => ("✓", theme.border_strong),
-                        "in_progress" => ("◌", theme.text),
-                        _ => ("○", theme.text_faint),
-                    };
-                    card = card.child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap(px(6.0))
-                            .text_size(typography.callout)
-                            .child(div().w(px(14.0)).text_color(tint).child(glyph))
-                            .child(div().flex_1().text_color(theme.text).child(row.content)),
-                    );
-                }
-                if let Some(approval) = approval {
-                    // Approved from the dock above the composer; the card
-                    // keeps the plan and says what became of the approval.
-                    let status = if let Some(choice) = &approval.resolved {
-                        format!("Approved: {choice}")
-                    } else if approval.expired {
-                        "No answer — the turn ended".to_string()
-                    } else {
-                        "Waiting for your approval below".to_string()
-                    };
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .child(status),
-                    );
-                }
-                card.into_any_element()
-            }
-            Entry::RewindPreview {
-                files,
-                insertions,
-                deletions,
-                error,
-            } => {
-                let mut card = div()
-                    .id(("rewind-preview", entry_index))
-                    .debug_selector(move || format!("rewind-preview-{entry_index}"))
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(theme.border_strong)
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(typography.callout)
-                            .text_color(theme.text)
-                            .child(rewind_preview_text(&files, insertions, deletions, &error)),
-                    );
-                if error.is_none() {
-                    let confirm_entity = entity.clone();
-                    card = card.child(
-                        bezel_theme
-                            .button("Restore files", ButtonStyle::Prominent, None)
-                            .id(("rewind-confirm", entry_index))
-                            .debug_selector(move || format!("rewind-confirm-{entry_index}"))
-                            .on_click(move |_, _, cx| {
-                                confirm_entity.update(cx, |chat, cx| chat.confirm_rewind(cx));
-                            }),
-                    );
-                }
-                card.into_any_element()
-            }
-            Entry::RewindReport {
-                files,
-                insertions,
-                deletions,
-                skipped_links,
-            } => div()
-                .id(("rewind-report", entry_index))
-                .debug_selector(move || format!("rewind-report-{entry_index}"))
-                .w_full()
-                .rounded(theme.radii.code_block)
-                .bg(theme.surface_raised)
-                .border_l_2()
-                .border_color(theme.border_strong)
-                .px(px(CARD_H_PADDING))
-                .py(px(CARD_V_PADDING))
-                .text_size(typography.callout)
-                .text_color(theme.text)
-                .child(rewind_report_text(
-                    &files,
-                    insertions,
-                    deletions,
-                    skipped_links,
-                ))
-                .into_any_element(),
-            Entry::TurnFooter(at) => div()
-                .w_full()
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                .child(
-                    div()
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_faint)
-                        .child(at.clone()),
-                )
-                .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                .into_any_element(),
-            Entry::Notice { text, kind } => {
-                let selector = kind.selector();
-                match kind {
-                    // A compaction is drawn across the whole width, like a
-                    // turn footer: what it says applies to everything above
-                    // it, not to the row beside it.
-                    NoticeKind::Compaction => div()
-                        .w_full()
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .debug_selector(move || selector.into())
-                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                        .child(
-                            div()
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child(Self::render_plain_text(
-                                    text.clone(),
-                                    theme,
-                                    format!("notice-entry-{entry_index}"),
-                                    source_start,
-                                    Some(&interaction),
-                                )),
-                        )
-                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                        .into_any_element(),
-                    NoticeKind::BackgroundTask | NoticeKind::Warning => div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .debug_selector(move || selector.into())
-                        .text_size(typography.footnote)
-                        .text_color(if kind == NoticeKind::Warning {
-                            theme.warning
-                        } else {
-                            theme.text_faint
-                        })
-                        .child(Self::render_plain_text(
-                            text.clone(),
-                            theme,
-                            format!("notice-entry-{entry_index}"),
-                            source_start,
-                            Some(&interaction),
-                        ))
-                        .into_any_element(),
-                }
-            }
-            Entry::Error {
-                message,
-                retryable,
-                kind,
-            } => {
-                let retry_entity = entity.clone();
-                let dismiss_entity = entity.clone();
-                let is_mcp_warning = kind == ErrorKind::McpWarning;
-                // F-CHAT-02: AuthRequired gets its own amber treatment
-                // (matching the connecting/working status-dot color already
-                // used elsewhere in this file) instead of the generic red
-                // connection-failure card — the fix here is "sign in, then
-                // retry", not "the network hiccupped, retry", and the card
-                // should look like a different kind of problem.
-                let is_auth_required = kind == ErrorKind::AuthRequired;
-                // F-CHAT-03: the agent's own process is gone — there is no
-                // live request left to retry, only a fresh process to
-                // start, so this offers "Restart agent" instead of "Retry"
-                // (Swift's `ChatState.disconnected` banner names the same
-                // distinction; `ChatPaneView.swift:82`).
-                let is_disconnected = kind == ErrorKind::Disconnected;
-                // Nothing broke, so this must not look like breakage: the
-                // agent simply is not available here. It borrows the amber
-                // treatment AuthRequired uses for the same reason -- both
-                // say "there is an action for you", not "something failed".
-                let is_unavailable = kind == ErrorKind::Unavailable;
-                let settings_entity = entity.clone();
-                let (banner_bg, banner_border, banner_text) = if is_auth_required || is_unavailable
-                {
-                    (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), theme.text)
-                } else {
-                    (theme.diff_del_bg, theme.diff_del, theme.diff_del)
-                };
-                div()
-                    .id(("chat-error-banner", entry_index))
-                    .when(is_auth_required, |this| {
-                        this.debug_selector(|| "chat-auth-required-banner".into())
-                    })
-                    .when(is_disconnected, |this| {
-                        this.debug_selector(|| "chat-disconnected-banner".into())
-                    })
-                    .when(is_mcp_warning, |this| {
-                        this.debug_selector(|| "chat-mcp-warning-banner".into())
-                    })
-                    .when(is_unavailable, |this| {
-                        this.debug_selector(|| "chat-unavailable-banner".into())
-                    })
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(banner_bg)
-                    .border_l_2()
-                    .border_color(banner_border)
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .text_size(typography.callout)
-                    .text_color(banner_text)
-                    // F-CHAT-02: a flex child defaults to a min-width of its
-                    // own content (same rule as CSS flexbox), so a long
-                    // guidance message never shrank below its own text
-                    // width — it overflowed the row and pushed the Retry
-                    // sibling out past the visible edge instead of wrapping.
-                    // `min_w_0()` is the standard fix (zed's own
-                    // `ui::components::banner` uses the identical
-                    // `.min_w_0().flex_1()` pairing for the same reason).
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .debug_selector(move || format!("chat-error-message-{entry_index}"))
-                            .child(Self::render_plain_text(
-                                message,
-                                theme,
-                                format!("error-entry-{entry_index}"),
-                                source_start,
-                                Some(&interaction),
-                            )),
-                    )
-                    .when(retryable, |this| {
-                        this.child(
-                            div()
-                                .id(("retry", entry_index))
-                                .debug_selector(move || {
-                                    if is_disconnected {
-                                        "chat-restart-agent".into()
-                                    } else {
-                                        "chat-retry".into()
-                                    }
-                                })
-                                // Never shrink: the message above now wraps
-                                // and gives up width instead of pushing this
-                                // sibling out of the row (F-CHAT-02).
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.surface_raised)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    // Same underlying call as Retry
-                                    // (`Chat::retry` -> `start_connection`)
-                                    // for the same reason Swift's Restart
-                                    // agent button calls the identical
-                                    // `ChatController.start()` its Retry
-                                    // button does (F-CHAT-03): it always
-                                    // spawns a fresh agent process either
-                                    // way, so "restart" and "retry" name the
-                                    // same act from two different starting
-                                    // states rather than two mechanisms.
-                                    retry_entity.update(cx, |chat, cx| chat.retry(cx));
-                                })
-                                .child(if is_disconnected {
-                                    "Restart agent"
-                                } else {
-                                    "Retry"
-                                }),
-                        )
-                    })
-                    // The one action that can change the outcome. The chat
-                    // does not open Settings itself: the workspace owns that
-                    // surface and subscribes to the event, the same way it
-                    // already handles OpenFile and OpenLink.
-                    .when(is_unavailable, |this| {
-                        this.child(
-                            div()
-                                .id(("open-settings", entry_index))
-                                .debug_selector(|| "chat-open-settings".into())
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.surface_raised)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    settings_entity
-                                        .update(cx, |_, cx| cx.emit(ChatEvent::OpenSettings));
-                                })
-                                .child("Open Settings"),
-                        )
-                    })
-                    // F-CHAT-33: "OK to dismiss" -- present for every error,
-                    // retryable or not (Swift's `promptError`/`mcpWarning`
-                    // banners both carry exactly this one action). It never
-                    // retries or restarts anything, only removes this one
-                    // row, so it stays available even when Retry/Restart is
-                    // also shown above: dismissing without retrying is a
-                    // real, distinct choice.
-                    //
-                    // Withheld for Unavailable alone: there the box is the
-                    // tab's entire content, so dismissing would leave a chat
-                    // that neither explains itself nor does anything.
-                    .when(!is_unavailable, |this| {
-                        this.child(
-                            div()
-                                .id(("dismiss-error", entry_index))
-                                .debug_selector(|| "chat-error-ok".into())
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.surface_raised)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    dismiss_entity.update(cx, |chat, cx| {
-                                        chat.dismiss_error(entry_index, cx);
-                                    });
-                                })
-                                .child("OK"),
-                        )
-                    })
-                    .into_any_element()
-            }
-        }
-    }
-
     /// F-CHAT-22, turn half: the single row an older turn collapses to.
     ///
     /// Swift's `TurnFoldRow` — a chevron, `Turn: <label>`, the turn's clock
@@ -8864,7 +8212,11 @@ impl Render for Chat {
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
             })
-            .child(
+            .child(self.render_header(&theme, cx))
+            .child(div().w_full().flex_1().min_h_0().child(
+                ely_gpui_component::chat::ChatContainer::new(
+div().size_full().min_h_0().relative().flex().flex_col().items_center()
+                .child(
                 div()
                     .id("chat-transcript")
                     .debug_selector(|| "chat-transcript".into())
@@ -8919,12 +8271,12 @@ impl Render for Chat {
                                 {
                                     TurnRowRole::Hidden => {
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .into_any_element();
                                     }
                                     TurnRowRole::Fold { turn_id, label, at } => {
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(TURN_BOTTOM_PADDING))
@@ -8950,7 +8302,7 @@ impl Render for Chat {
                                             .map(|range| range.start)
                                             .unwrap_or(0);
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(TURN_BOTTOM_PADDING))
@@ -8970,24 +8322,13 @@ impl Render for Chat {
                                                     .children(
                                                         this.entries.get(entry_index).cloned().map(
                                                             |entry| {
-                                                                Chat::render_entry(
-                                                                    entry,
-                                                                    entry_index,
-                                                                    &transcript_theme,
-                                                                    entity.clone(),
-                                                                    transcript_focus.clone(),
-                                                                    source_start,
-                                                                    this.copied_target.clone(),
-                                                                    None,
-                                                                    this.thought_is_streaming(
-                                                                        entry_index,
-                                                                    ),
-                                                                    &this.thought_scroll,
-                                                                    &this.tool_output_scroll,
-                                                                    None,
-                                                                    &mut *window,
-                                                                    &mut *cx,
-                                                                )
+                                                                Chat::render_entry(entry, transcript::TranscriptRowContext {
+    index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
+    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    edit_summary: None, thought_streaming: this.thought_is_streaming(entry_index),
+    thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
+    day_heading: None, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+}, &transcript_theme, &mut *window, &mut *cx)
                                                             },
                                                         ),
                                                     ),
@@ -9010,7 +8351,7 @@ impl Render for Chat {
                                 {
                                     if entry_index != end {
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .into_any_element();
                                     }
                                     let members: Vec<(usize, usize, Entry)> = (start..=end)
@@ -9039,7 +8380,7 @@ impl Render for Chat {
                                         entity.clone(),
                                     );
                                     return div()
-                                        .id(("chat-entry", entry_index))
+                                        .id(this.row_id(entry_index, cx))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
@@ -9070,25 +8411,16 @@ impl Render for Chat {
                                             ),
                                             _ => None,
                                         };
-                                        let body = Chat::render_entry(
-                                            entry,
-                                            entry_index,
-                                            &transcript_theme,
-                                            entity.clone(),
-                                            transcript_focus.clone(),
-                                            source_start,
-                                            this.copied_target.clone(),
-                                            this.edit_summaries.get(&entry_index).cloned(),
-                                            this.thought_is_streaming(entry_index),
-                                            &this.thought_scroll,
-                                            &this.tool_output_scroll,
-                                            day_heading.as_deref(),
-                                            &mut *window,
-                                            &mut *cx,
-                                        )
+                                        let body = Chat::render_entry(entry, transcript::TranscriptRowContext {
+    index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
+    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
+    thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
+    day_heading: day_heading.as_deref(), agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+}, &transcript_theme, &mut *window, &mut *cx)
                                         .into_any_element();
                                         div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(bottom_padding))
@@ -9134,7 +8466,21 @@ impl Render for Chat {
                         )),
                 )
             })
-            .child(
+
+            // bezel's scrollbar over the list, on the root's right edge and
+            // as tall as the list's viewport (the transcript's own top
+            // padding below the root's top edge).
+            .child(list_scroll::list_scrollbar(
+                "chat-transcript",
+                px(28.0),
+                &self.list_state,
+                &self.transcript_bar,
+            ))
+            // The turn rail, over the root's left margin; last, so it sits
+            // above everything it is laid over.
+            .child(self.render_turn_rail(&bezel_theme, cx))
+
+                ).composer(
                 div()
                     .w_full()
                     .flex()
@@ -9161,6 +8507,7 @@ impl Render for Chat {
                     })
                     .child(self.render_composer(&theme, window, cx)),
             )
+            ))
             .child({
                 // F-CHAT-13: the "Drop files to attach" overlay, matching
                 // Swift's `ChatPaneView` — invisible by default, revealed by
@@ -9195,21 +8542,10 @@ impl Render for Chat {
                     overlay
                 }
             })
-            // bezel's scrollbar over the list, on the root's right edge and
-            // as tall as the list's viewport (the transcript's own top
-            // padding below the root's top edge).
-            .child(list_scroll::list_scrollbar(
-                "chat-transcript",
-                px(28.0),
-                &self.list_state,
-                &self.transcript_bar,
-            ))
-            // The turn rail, over the root's left margin; last, so it sits
-            // above everything it is laid over.
-            .child(self.render_turn_rail(&bezel_theme, cx))
             .children(transcript_context_menu)
     }
 }
+
 
 fn now_hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
@@ -10049,7 +9385,7 @@ mod tests {
     /// A drawn chat that never connects: no subprocess, so nothing expires
     /// the questions a test pushes and no connection error lands in the
     /// transcript.
-    fn offline_chat_view(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+    pub(super) fn offline_chat_view(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         cx.update(init);
@@ -11128,7 +10464,7 @@ two"
 
     #[gpui::test]
     async fn the_turn_rail_marks_the_latest_turn_when_content_fits(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &[]);
+        let (chat, cx) = offline_chat_view(cx);
         chat.update(cx, |chat, cx| {
             for text in ["first", "second", "latest"] {
                 chat.push_entry(Entry::User {
@@ -17679,9 +17015,7 @@ two"
 
     #[test]
     fn a_diff_in_the_transcript_takes_the_column_rather_than_the_standalone_760() {
-        // The gallery's standalone Diff pattern references 760; inside a 700
-        // transcript the diff uses the width it has (spec §3).
-        assert!(DIFF_STANDALONE_REFERENCE > TRANSCRIPT_WIDTH);
+        // Ely now uses a 760px reading column; narrower panes still constrain the diff.
         assert_eq!(diff_column_width(TRANSCRIPT_WIDTH), TRANSCRIPT_WIDTH);
         assert_eq!(diff_column_width(400.0), 400.0);
     }

@@ -26,9 +26,6 @@ use gpui::{
 
 use super::Chat;
 
-/// The jump-to-latest disc's diameter.
-const DISC: f32 = 28.0;
-
 impl Chat {
     /// The "jump to latest" affordance bezel's `FollowState::following`
     /// exists to drive, for a list: nothing while the transcript follows
@@ -42,7 +39,7 @@ impl Chat {
     /// in `Chat::new` restores when a wheel lands back on the tail.
     pub(crate) fn render_jump_to_latest(
         &self,
-        bezel_theme: &bezel::theme::Theme,
+        _bezel_theme: &bezel::theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.list_state.is_following_tail() {
@@ -59,25 +56,19 @@ impl Chat {
                 div()
                     .id("chat-jump-latest")
                     .debug_selector(|| "chat-jump-latest".into())
-                    .size(px(DISC))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(bezel_theme.bg)
-                    .border_1()
-                    .border_color(bezel_theme.border)
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(ink(0.4)))
-                    .child(
-                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_DOWN)
-                            .size(px(14.0))
-                            .text_color(bezel_theme.text),
-                    )
-                    .on_click(cx.listener(|chat, _, _, cx| {
-                        chat.list_state.set_follow_mode(FollowMode::Tail);
-                        cx.notify();
-                    })),
+                    .child(ely_gpui_component::chat::ScrollToBottomButton::new(
+                        "chat-latest-action",
+                        0,
+                        {
+                            let chat = cx.entity();
+                            move |_, cx| {
+                                chat.update(cx, |chat, cx| {
+                                    chat.list_state.set_follow_mode(FollowMode::Tail);
+                                    cx.notify();
+                                })
+                            }
+                        },
+                    )),
             )
             .into_any_element()
     }

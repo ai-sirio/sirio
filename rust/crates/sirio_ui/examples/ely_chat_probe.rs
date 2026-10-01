@@ -136,18 +136,66 @@ fn main() {
                     .is_some()
             );
             let bounds = Bounds::centered(None, size(px(820.0), px(700.0)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    sirio_ui::chat::init(cx);
-                    window.set_window_title("Ely Chat Probe");
-                    cx.new(|cx| Probe::new(window, cx))
-                },
-            )
-            .unwrap();
+            if std::env::var_os("ELY_PROBE_CHAT").is_some() {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        bezel::ui::input::init(cx);
+                        sirio_ui::chat::init(cx);
+                        window.set_window_title("Sirio Ely Chat Probe");
+                        let chat = cx.new(|cx| {
+                            let fixture = concat!(
+                                env!("CARGO_MANIFEST_DIR"),
+                                "/tests/fixtures/chat_fixture.py"
+                            );
+                            let mode = std::env::var("ELY_PROBE_FIXTURE_MODE")
+                                .unwrap_or_else(|_| "plain".into());
+                            let mut command = sirio_acp::AgentCommand::new("python3")
+                                .arg(fixture)
+                                .arg(mode);
+                            if let Ok(extra) = std::env::var("ELY_PROBE_FIXTURE_DIR") {
+                                command = command.arg(extra);
+                            }
+                            let mut chat = sirio_ui::chat::Chat::launch_with_command(
+                                sirio_acp::LaunchSpec::Acp(command),
+                                std::env::temp_dir(),
+                                cx,
+                            );
+                            let agent = std::env::var("ELY_PROBE_AGENT")
+                                .unwrap_or_else(|_| "claude".into());
+                            let name = if agent == "codex" {
+                                "Codex"
+                            } else {
+                                "Claude Code"
+                            };
+                            chat.set_agent_identity(Some(agent), Some(name.into()));
+                            if let Ok(history) = std::env::var("ELY_PROBE_HISTORY") {
+                                chat.restore_transcript(&history, cx);
+                            }
+                            chat
+                        });
+                        window.focus(&chat.focus_handle(cx), cx);
+                        chat
+                    },
+                )
+                .unwrap();
+            } else {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        sirio_ui::chat::init(cx);
+                        window.set_window_title("Ely Chat Probe");
+                        cx.new(|cx| Probe::new(window, cx))
+                    },
+                )
+                .unwrap();
+            }
             cx.activate(true);
         });
 }

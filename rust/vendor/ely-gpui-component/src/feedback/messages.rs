@@ -31,6 +31,7 @@ pub struct Alert {
     severity: Severity,
     title: SharedString,
     body: Option<SharedString>,
+    content: Option<AnyElement>,
     actions: SmallVec<[AnyElement; 2]>,
     on_dismiss: Option<Run>,
 }
@@ -46,9 +47,16 @@ impl Alert {
             severity,
             title: title.into(),
             body: None,
+            content: None,
             actions: SmallVec::new(),
             on_dismiss: None,
         }
+    }
+
+    /// Host-owned selectable body; actions and dismissal retain their callbacks.
+    pub fn content(mut self, content: impl IntoElement) -> Self {
+        self.content = Some(content.into_any_element());
+        self
     }
 
     pub fn body(mut self, text: impl Into<SharedString>) -> Self {
@@ -95,12 +103,15 @@ impl RenderOnce for Alert {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.fg)
-                            .child(self.title),
-                    )
+                    .children(self.content)
+                    .when(!self.title.is_empty(), |text| {
+                        text.child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors.fg)
+                                .child(self.title),
+                        )
+                    })
                     .when_some(self.body, |text, body| {
                         text.child(div().text_color(colors.fg_muted).child(body))
                     })
