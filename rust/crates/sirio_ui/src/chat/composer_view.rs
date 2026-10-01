@@ -1143,7 +1143,7 @@ impl Chat {
                         .id("attach-error")
                         .debug_selector(|| "attach-error".into())
                         .text_size(typography.caption2)
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child(message),
                 )
             });

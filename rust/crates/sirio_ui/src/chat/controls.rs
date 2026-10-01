@@ -80,7 +80,7 @@ impl Chat {
                     }))
             })
             .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(div().text_color(theme.text).child(label))
+            .child(div().text_color(theme.ely.fg).child(label))
             .when(mode_selectable, |this| this.child(picker_chevron(theme)));
 
         let selected_model_name = self
@@ -147,7 +147,7 @@ impl Chat {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
                 }))
-                .child(div().text_color(theme.text_faint).child("Model"))
+                .child(div().text_color(theme.ely.fg_subtle).child("Model"))
                 .child(
                     div()
                         .id(model_selection_id.clone())
@@ -163,7 +163,7 @@ impl Chat {
                         // truncating a long name when the row is tight.
                         .min_w_0()
                         .text_ellipsis()
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .child(selected_model_name.clone()),
                 )
                 .child(
@@ -202,7 +202,7 @@ impl Chat {
                     div()
                         .min_w_0()
                         .text_ellipsis()
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .child(agent_badge_name),
                 )
         };
@@ -233,12 +233,12 @@ impl Chat {
                     .on_click(move |_, window, cx| {
                         effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
                     })
-                    .child(div().text_color(theme.text_faint).child("Effort"))
+                    .child(div().text_color(theme.ely.fg_subtle).child("Effort"))
                     .child(
                         div()
                             .id("model-effort-label")
                             .debug_selector(|| "model-effort-label".into())
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(label),
                     )
                     .child(
@@ -270,12 +270,12 @@ impl Chat {
                     "fast-mode-chip"
                 };
                 let label_colour: gpui::Hsla = match (&blocked, fast.enabled) {
-                    (Some(_), _) => theme.text_faint.into(),
+                    (Some(_), _) => theme.ely.fg_subtle.into(),
                     // On, the chip is filled with the theme's own accent
                     // pair rather than a colour of Sirio's: the palette is
                     // bezel's, all of it.
                     (None, true) => bezel_theme.on_solid,
-                    (None, false) => theme.text.into(),
+                    (None, false) => theme.ely.fg.into(),
                 };
                 div()
                     .id("fast-mode-chip")
@@ -322,7 +322,7 @@ impl Chat {
                 .px(px(7.0))
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .tooltip(move |window, cx| {
                     Tooltip::text(
                         SharedString::from(if running == 1 {
@@ -365,12 +365,12 @@ impl Chat {
                 .on_click(move |_, window, cx| {
                     thinking_entity.update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
                 })
-                .child(div().text_color(theme.text_faint).child("Thinking"))
+                .child(div().text_color(theme.ely.fg_subtle).child("Thinking"))
                 .when_some(chosen, |chip, chosen| {
                     chip.child(
                         div()
                             .debug_selector(|| "thinking-chip-value".into())
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(thinking_display_name(&chosen).to_string()),
                     )
                 })
@@ -539,7 +539,7 @@ impl Chat {
                     .items_center()
                     .justify_between()
                     .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(
                         stops
                             .first()
@@ -560,7 +560,7 @@ impl Chat {
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .child(div().h(px(1.0)).w_full().bg(theme.border))
+                        .child(div().h(px(1.0)).w_full().bg(theme.ely.border))
                         .child(
                             div()
                                 .id("effort-reset")
@@ -571,9 +571,9 @@ impl Chat {
                                 .items_center()
                                 .rounded(theme.radii.control)
                                 .text_size(typography.caption2)
-                                .text_color(theme.text)
-                                .when(selected.is_none(), |this| this.bg(theme.element_active))
-                                .hover(|style| style.bg(theme.overlay))
+                                .text_color(theme.ely.fg)
+                                .when(selected.is_none(), |this| this.bg(theme.ely.active))
+                                .hover(|style| style.bg(theme.sirio.overlay))
                                 .on_click(move |_, _, cx| {
                                     reset_entity.update(cx, |chat, cx| {
                                         chat.select_effort(reset_value.clone(), cx);
@@ -618,9 +618,9 @@ impl Chat {
                         .items_center()
                         .rounded(theme.radii.control)
                         .text_size(typography.caption2)
-                        .text_color(theme.text)
-                        .when(selected.is_some(), |this| this.bg(theme.element_active))
-                        .hover(|style| style.bg(theme.overlay))
+                        .text_color(theme.ely.fg)
+                        .when(selected.is_some(), |this| this.bg(theme.ely.active))
+                        .hover(|style| style.bg(theme.sirio.overlay))
                         .on_click(move |_, _, cx| {
                             lone_entity
                                 .update(cx, |chat, cx| chat.select_effort(value.clone(), cx));
@@ -656,7 +656,7 @@ impl Chat {
                                             .gap(px(8.0))
                                             .text_size(typography.caption2)
                                             .child(
-                                                div().text_color(theme.text_faint).child(heading),
+                                                div().text_color(theme.ely.fg_subtle).child(heading),
                                             )
                                             .child(
                                                 div()
@@ -669,9 +669,9 @@ impl Chat {
                                                         }
                                                     })
                                                     .text_color(if selected.is_some() {
-                                                        theme.text
+                                                        theme.ely.fg
                                                     } else {
-                                                        theme.text_faint
+                                                        theme.ely.fg_subtle
                                                     })
                                                     .child(current_name),
                                             ),
@@ -725,7 +725,7 @@ impl Chat {
                     .px_2()
                     .py_1p5()
                     .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("The connected agent did not report any models.")
                     .into_any_element()
             } else {
@@ -735,7 +735,7 @@ impl Chat {
                     .px_2()
                     .py_1p5()
                     .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("No models match")
                     .into_any_element()
             };
@@ -822,7 +822,7 @@ impl Chat {
                                     .px_2()
                                     .py_1p5()
                                     .text_size(typography.footnote)
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child("No modes offered"),
                             ),
                     ),
@@ -854,8 +854,8 @@ impl Chat {
             .h(px(16.0))
             .rounded(px(8.0))
             .border_1()
-            .border_color(theme.border)
-            .hover(|style| style.bg(theme.overlay))
+            .border_color(theme.ely.border)
+            .hover(|style| style.bg(theme.sirio.overlay))
             .on_click(move |_, window, cx| {
                 context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
             })
@@ -869,8 +869,8 @@ impl Chat {
                     .child({
                         // The paint closure is `'static`, so it cannot borrow
                         // `theme`; copy out the two colours it draws with.
-                        let ring_danger = theme.danger;
-                        let ring_accent = theme.accent;
+                        let ring_danger = theme.ely.danger;
+                        let ring_accent = theme.sirio.quantity;
                         canvas(
                             move |_, _, _| {},
                             move |bounds, _, window, _| {
@@ -987,14 +987,14 @@ impl Chat {
                                             )
                                         })
                                         .text_size(typography.footnote)
-                                        .text_color(theme.text)
+                                        .text_color(theme.ely.fg)
                                         .child(format!("{percent}% of context used")),
                                 )
                                 .child(
                                     div()
                                         .mt(px(4.0))
                                         .text_size(typography.caption2)
-                                        .text_color(theme.text_faint)
+                                        .text_color(theme.ely.fg_subtle)
                                         .child(format!("{} / {} tokens", usage.used, usage.size)),
                                 ),
                             // A partial update — the breakdown merged in
@@ -1007,7 +1007,7 @@ impl Chat {
                                     .id("context-usage-unreported")
                                     .debug_selector(|| "context-usage-unreported".into())
                                     .text_size(typography.footnote)
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child("The agent has not reported its context window size."),
                             ),
                         };
@@ -1016,7 +1016,7 @@ impl Chat {
                                             div()
                                                 .mt(px(4.0))
                                                 .text_size(typography.caption2)
-                                                .text_color(theme.text_faint)
+                                                .text_color(theme.ely.fg_subtle)
                                                 .child(cost),
                                         )
                                     })
@@ -1039,7 +1039,7 @@ impl Chat {
                                                     .mt(px(6.0))
                                                     .pt(px(6.0))
                                                     .border_t_1()
-                                                    .border_color(theme.border)
+                                                    .border_color(theme.ely.border)
                                                     .flex()
                                                     .flex_col()
                                                     .gap(px(2.0))
@@ -1049,7 +1049,7 @@ impl Chat {
                                                             this.child(
                                                                 div()
                                                                     .text_size(typography.caption2)
-                                                                    .text_color(theme.text_faint)
+                                                                    .text_color(theme.ely.fg_subtle)
                                                                     .child(format!(
                                                                         "Input: {tokens} tokens"
                                                                     )),
@@ -1062,7 +1062,7 @@ impl Chat {
                                                             this.child(
                                                                 div()
                                                                     .text_size(typography.caption2)
-                                                                    .text_color(theme.text_faint)
+                                                                    .text_color(theme.ely.fg_subtle)
                                                                     .child(format!(
                                                                         "Output: {tokens} tokens"
                                                                     )),
@@ -1075,7 +1075,7 @@ impl Chat {
                                                             this.child(
                                                 div()
                                                     .text_size(typography.caption2)
-                                                    .text_color(theme.text_faint)
+                                                    .text_color(theme.ely.fg_subtle)
                                                     .child(format!("Cache read: {tokens} tokens")),
                                             )
                                                         },
@@ -1092,7 +1092,7 @@ impl Chat {
                                                 "context-usage-never-reported".into()
                                             })
                                             .text_size(typography.footnote)
-                                            .text_color(theme.text_faint)
+                                            .text_color(theme.ely.fg_subtle)
                                             .child("The agent has not reported context usage yet."),
                                     )
                                 }),
@@ -1152,7 +1152,7 @@ impl Chat {
                         div()
                             .id("context-label")
                             .debug_selector(|| "context-label".into())
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child("Context"),
                     )
                     .children(context_popover),

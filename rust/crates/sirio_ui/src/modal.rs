@@ -160,14 +160,14 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
             div()
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .debug_selector(move || title_id.clone())
                 .child(selectable_text(spec.title)),
         )
         .child(
             div()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .debug_selector(move || body_id.clone())
                 .child(selectable_text(spec.body)),
         );
@@ -187,11 +187,11 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .flex()
                 .items_center()
                 .rounded(theme.radii.control)
-                .bg(theme.input_bg)
+                .bg(theme.ely.sunken)
                 .border_1()
-                .border_color(theme.text)
+                .border_color(theme.ely.fg)
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .cursor(gpui::CursorStyle::IBeam)
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     focus_for_click.focus(window, cx);
@@ -208,7 +208,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 )
                 // End-of-text insertion caret; laid out even when invisible
                 // so the bar never shifts the value while blinking.
-                .child(crate::caret::bar(px(14.0), theme.text, field.caret_visible)),
+                .child(crate::caret::bar(px(14.0), theme.ely.fg, field.caret_visible)),
         );
     }
 
@@ -216,14 +216,13 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
     for button in spec.buttons {
         let button_id = format!("{}-{}", spec.id, button.id);
         let on_click = button.on_click;
-        // `gpui::white()` returns `Hsla`; every other branch here is the
-        // theme's own `Rgba`, so this converts rather than let the tuple's
-        // element type quietly pick whichever arm the compiler saw first.
-        let white: gpui::Rgba = gpui::white().into();
+        // `gpui::white()` and the theme colours all use `Hsla`, so the
+        // destructive branch shares the same colour type as the others.
+        let white: gpui::Hsla = gpui::white();
         let (bg, text_color) = match button.tone {
-            ModalButtonTone::Plain => (theme.surface_raised, theme.text),
-            ModalButtonTone::Accent => (theme.solid, theme.on_solid),
-            ModalButtonTone::Destructive => (theme.danger, white),
+            ModalButtonTone::Plain => (theme.ely.surface, theme.ely.fg),
+            ModalButtonTone::Accent => (theme.sirio.solid, theme.sirio.on_solid),
+            ModalButtonTone::Destructive => (theme.ely.danger, white),
         };
         button_row = button_row.child(
             div()
@@ -267,7 +266,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .w(px(360.0))
                 .rounded(px(BezelTheme::BASE_RADIUS))
                 .overflow_hidden()
-                .bg(theme.floating_surface)
+                .bg(theme.sirio.floating_surface)
                 .p(px(16.0))
                 .child(sheet),
         )

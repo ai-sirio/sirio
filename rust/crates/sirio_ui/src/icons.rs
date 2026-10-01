@@ -33,7 +33,7 @@
 //! for that icon alone.
 
 use gpui::{
-    App, AssetSource, Bounds, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce, Rgba,
+    App, AssetSource, Bounds, Hsla, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce,
     SharedString, StyleRefinement, Styled, SvgSize, Window, canvas, px, size, svg,
 };
 use std::borrow::Cow;
@@ -443,10 +443,10 @@ impl Icon {
     /// the activity-accent table (running dots, worktree badges) whose hues
     /// are chosen to stay distinguishable at sidebar scale, not to quote
     /// the brands.
-    pub fn agent_mark_color(self, theme_title: Rgba) -> Option<Rgba> {
+    pub fn agent_mark_color(self, theme_title: Hsla) -> Option<Hsla> {
         match self {
             Icon::OhMyPi | Icon::Gemini => None,
-            Icon::ClaudeCode => Some(AgentBrandColor::Claude.color()),
+            Icon::ClaudeCode => Some(AgentBrandColor::Claude.color().into()),
             Icon::Codex | Icon::OpenCode | Icon::Pi | Icon::Grok => Some(theme_title),
             _ => None,
         }

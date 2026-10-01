@@ -7,7 +7,7 @@
 use bezel::theme::Theme as BezelTheme;
 use gpui::{
     App, AppContext, Bounds, Context, CursorStyle, Div, Entity, FocusHandle, FontWeight,
-    KeyDownEvent, MouseButton, Render, Rgba, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    Hsla, KeyDownEvent, MouseButton, Render, TitlebarOptions, Window, WindowBounds, WindowOptions,
     div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
@@ -340,10 +340,10 @@ fn agent_icon(id: &str) -> Icon {
     Icon::for_agent_id(id).unwrap_or(Icon::Sparkles)
 }
 
-fn agent_icon_color(theme: Theme, id: &str) -> Rgba {
+fn agent_icon_color(theme: Theme, id: &str) -> Hsla {
     agent_icon(id)
-        .agent_mark_color(theme.text)
-        .unwrap_or(theme.text_faint)
+        .agent_mark_color(theme.ely.fg)
+        .unwrap_or(theme.ely.fg_subtle)
 }
 
 fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoElement {
@@ -364,14 +364,14 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
             FontWeight::NORMAL
         })
         .text_color(if danger {
-            theme.surface
+            theme.ely.bg
         } else {
-            theme.text_muted
+            theme.ely.fg_muted
         })
         .bg(if danger {
-            theme.danger
+            theme.ely.danger
         } else {
-            theme.surface_raised
+            theme.ely.surface
         })
         .child(label)
 }
@@ -387,11 +387,11 @@ fn version_label(id: String, version: Option<&str>, theme: Theme) -> impl IntoEl
         .debug_selector(move || selector.clone())
         .flex_none()
         .text_size(theme.typography.caption2)
-        .text_color(theme.text_faint)
+        .text_color(theme.ely.fg_subtle)
         .when_some(version_text(version), |this, version| this.child(version))
 }
 
-fn agent_name_line(name: String, version: Option<String>, color: Rgba, theme: Theme) -> Div {
+fn agent_name_line(name: String, version: Option<String>, color: Hsla, theme: Theme) -> Div {
     let line_height = theme.typography.ui_line_height;
     let mut line = div()
         .w_full()
@@ -410,14 +410,14 @@ fn agent_name_line(name: String, version: Option<String>, color: Rgba, theme: Th
             div()
                 .flex_none()
                 .text_size(theme.typography.caption2)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(version),
         );
     }
     line
 }
 
-fn agent_description_line(description: String, color: Rgba, theme: Theme) -> Div {
+fn agent_description_line(description: String, color: Hsla, theme: Theme) -> Div {
     let line_height = theme.typography.ui_line_height;
     div()
         .w_full()
@@ -432,7 +432,7 @@ fn agent_description_line(description: String, color: Rgba, theme: Theme) -> Div
 
 fn agent_label(
     icon: Icon,
-    icon_color: Rgba,
+    icon_color: Hsla,
     name: String,
     version: Option<String>,
     description: String,
@@ -441,14 +441,14 @@ fn agent_label(
     theme: Theme,
 ) -> Div {
     let title_color = if enabled {
-        theme.text
+        theme.ely.fg
     } else {
-        theme.text_faint
+        theme.ely.fg_subtle
     };
     let description_color = if enabled {
-        theme.text_muted
+        theme.ely.fg_muted
     } else {
-        theme.text_dim
+        theme.sirio.text_dim
     };
     let mut text = div()
         .flex_1()
@@ -499,8 +499,8 @@ fn action_button_shell(label: &'static str, theme: Theme) -> Div {
         .rounded(theme.radii.row_card)
         .text_size(theme.typography.caption2)
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-        .bg(theme.element_active)
+        .text_color(theme.ely.fg)
+        .bg(theme.ely.active)
         .child(label)
 }
 
@@ -515,7 +515,7 @@ fn action_affordance(
     action_button_shell(label, theme)
         .id(id)
         .debug_selector(move || selector.clone())
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .cursor(CursorStyle::PointingHand)
         .on_click(move |_, _, cx| {
             let message = message.clone();
@@ -650,10 +650,10 @@ impl RegistryBrowseProto {
             .py(px(3.0))
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .text_size(theme.typography.caption2)
-            .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(theme.ely.fg)
+            .hover(|style| style.bg(theme.ely.hover))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx| {
                 install_entity.update(cx, |prototype, cx| {
@@ -673,10 +673,10 @@ impl RegistryBrowseProto {
             .py(px(3.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.caption2)
-            .text_color(theme.text)
-            .bg(theme.element_active)
+            .text_color(theme.ely.fg)
+            .bg(theme.ely.active)
             .border_1()
-            .hover(|style| style.bg(theme.element_hover))
+            .hover(|style| style.bg(theme.ely.hover))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx| {
                 keep_entity.update(cx, |prototype, cx| {
@@ -685,9 +685,9 @@ impl RegistryBrowseProto {
                 });
             })
             .border_color(if keep_focused {
-                theme.text
+                theme.ely.fg
             } else {
-                theme.element_active
+                theme.ely.active
             })
             .child(confirmation_default_focus());
         div()
@@ -697,19 +697,19 @@ impl RegistryBrowseProto {
             .mb(px(8.0))
             .p(px(12.0))
             .rounded(theme.radii.control)
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .border_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .flex()
             .flex_col()
             .gap(px(8.0))
             .text_size(theme.typography.footnote)
-            .text_color(theme.text_muted)
+            .text_color(theme.ely.fg_muted)
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(unverifiable_confirmation_heading(
                         &agent.name,
                         &agent.version,
@@ -755,7 +755,7 @@ impl RegistryBrowseProto {
             version_slot = version_slot.child(
                 div()
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(version),
             );
         }
@@ -764,9 +764,9 @@ impl RegistryBrowseProto {
                 div()
                     .text_size(theme.typography.caption2)
                     .text_color(if marker == "failed" {
-                        theme.danger
+                        theme.ely.danger
                     } else {
-                        theme.warning
+                        theme.ely.warning
                     })
                     .child(marker),
             );
@@ -813,9 +813,9 @@ impl RegistryBrowseProto {
                         div()
                             .text_size(theme.typography.footnote)
                             .text_color(if line_index == 0 {
-                                theme.text
+                                theme.ely.fg
                             } else {
-                                theme.text_muted
+                                theme.ely.fg_muted
                             })
                             .child(line.clone()),
                     );
@@ -835,7 +835,7 @@ impl RegistryBrowseProto {
         let row = controls::row_view(
             agent_label(
                 Icon::Sparkles,
-                theme.text_faint,
+                theme.ely.fg_subtle,
                 agent.name.clone(),
                 None,
                 if demo.state == DemoUpdateState::InstallFailed {
@@ -859,7 +859,7 @@ impl RegistryBrowseProto {
                         .pr(px(12.0))
                         .text_size(theme.typography.footnote)
                         .font_weight(FontWeight::NORMAL)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .child(line),
                 );
             }
@@ -927,7 +927,7 @@ impl RegistryBrowseProto {
             None => div()
                 .flex_none()
                 .text_size(theme.typography.callout)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child("Unavailable")
                 .into_any_element(),
             _ => unreachable!("unknown browse action label"),
@@ -936,9 +936,9 @@ impl RegistryBrowseProto {
             agent_label(
                 Icon::Sparkles,
                 if enabled {
-                    theme.text_faint
+                    theme.ely.fg_subtle
                 } else {
-                    theme.text_dim
+                    theme.sirio.text_dim
                 },
                 agent.name.clone(),
                 Some(format!("v{}", agent.version)),
@@ -976,9 +976,9 @@ impl RegistryBrowseProto {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.input_bg)
+            .bg(theme.ely.sunken)
             .border_1()
-            .border_color(if focused { theme.text } else { theme.border })
+            .border_color(if focused { theme.ely.fg } else { theme.ely.border })
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |_, cx| focus_for_click.focus(window, cx));
@@ -988,9 +988,9 @@ impl RegistryBrowseProto {
             })
             .text_size(theme.typography.callout)
             .text_color(if search.is_empty() {
-                theme.text_faint
+                theme.ely.fg_subtle
             } else {
-                theme.text
+                theme.ely.fg
             })
             .child(if search.is_empty() {
                 "Search agents by name or description".to_owned()
@@ -1013,7 +1013,7 @@ impl RegistryBrowseProto {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_MD))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child("No agents match this search."),
             );
             return card;
@@ -1041,7 +1041,7 @@ impl Render for RegistryBrowseProto {
         div()
             .id("registry-browse-proto")
             .size_full()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .overflow_y_scroll()
             .child(
                 div()
@@ -1054,7 +1054,7 @@ impl Render for RegistryBrowseProto {
                             .mb(px(18.0))
                             .text_size(theme.typography.title)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child("Settings · Agents"),
                     )
                     .when_some(self.notice.clone(), |this, notice| {
@@ -1062,7 +1062,7 @@ impl Render for RegistryBrowseProto {
                             div()
                                 .mb(px(12.0))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(notice),
                         )
                     })

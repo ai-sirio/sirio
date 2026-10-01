@@ -12,7 +12,7 @@
 //! the last good numbers visibly dimmed rather than showing them as
 //! current.
 
-use gpui::{AnyView, Context, Render, Rgba, Window, div, prelude::*, px, text};
+use gpui::{AnyView, Context, Hsla, Render, Window, div, prelude::*, px, text};
 use sirio_theme::Theme;
 use sirio_usage::{
     ClaudeUsageFetcher, CodexUsageFetcher, OllamaCloudUsageFetcher, OpenCodeGoUsageFetcher,
@@ -500,9 +500,9 @@ impl Render for StatusBar {
                 .justify_center()
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text)
-                .hover(|style| style.bg(theme.element_hover))
-                .child(IconElement::new(icon, IconSize::Medium).text_color(theme.text))
+                .text_color(theme.ely.fg)
+                .hover(|style| style.bg(theme.ely.hover))
+                .child(IconElement::new(icon, IconSize::Medium).text_color(theme.ely.fg))
         };
 
         // The four provider segments, in the reference order: Claude,
@@ -519,24 +519,24 @@ impl Render for StatusBar {
             status_text_color
         };
         let codex_color = if codex_dimmed {
-            dim(theme.text)
+            dim(theme.ely.fg)
         } else {
-            theme.text
+            theme.ely.fg
         };
         let opencode_go_color = if opencode_go_dimmed {
-            dim(theme.text)
+            dim(theme.ely.fg)
         } else {
-            theme.text
+            theme.ely.fg
         };
         let ollama_cloud_color = if ollama_cloud_dimmed {
-            dim(theme.text)
+            dim(theme.ely.fg)
         } else {
-            theme.text
+            theme.ely.fg
         };
 
         let provider_segment = move |display_name: &'static str,
                                      mark: Icon,
-                                     text_color: gpui::Rgba,
+                                     text_color: gpui::Hsla,
                                      dimmed: bool,
                                      meter: f32,
                                      text: String| {
@@ -669,7 +669,7 @@ impl Render for StatusBar {
                     .items_center()
                     .gap(px(5.0))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .hover(|style| style.opacity(0.9))
                     .on_click(move |_, _, _| {
                         if let Some(callback) = &update_settings {
@@ -722,30 +722,28 @@ impl Render for StatusBarTooltip {
             .rounded(self.theme.radii.control)
             .bg(self.theme.menu_surface())
             .border_1()
-            .border_color(self.theme.border)
+            .border_color(self.theme.ely.border)
             .text_size(self.theme.typography.caption2)
-            .text_color(self.theme.text)
+            .text_color(self.theme.ely.fg)
             .child(self.text.clone())
     }
 }
 
 /// Halves the alpha of a color so stale/unavailable text reads as dimmed.
-fn dim(color: Rgba) -> Rgba {
-    Rgba {
-        r: color.r,
-        g: color.g,
-        b: color.b,
+fn dim(color: Hsla) -> Hsla {
+    Hsla {
         a: color.a * 0.55,
+        ..color
     }
 }
 
 /// Uses Bezel's secondary-text rung for the light status bar, where its
 /// metadata rung is too faint against the light shell surface. Dark keeps the
 /// existing metadata color unchanged.
-fn status_bar_foreground(theme: Theme) -> Rgba {
+fn status_bar_foreground(theme: Theme) -> Hsla {
     match theme.appearance {
-        sirio_theme::Appearance::Light => theme.text_muted,
-        sirio_theme::Appearance::Dark => theme.text_faint,
+        sirio_theme::Appearance::Light => theme.ely.fg_muted,
+        sirio_theme::Appearance::Dark => theme.ely.fg_subtle,
     }
 }
 

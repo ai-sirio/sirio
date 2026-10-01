@@ -298,9 +298,9 @@ impl Render for Outline {
                     .gap(px(8.0))
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
-                    .when(active, |this| this.bg(theme.element_active))
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.ely.fg)
+                    .when(active, |this| this.bg(theme.ely.active))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(cx.listener(move |outline, _event, _window, cx| {
                         if let Some(path) = outline.path.clone() {
                             cx.emit(OutlineEvent::Jump { path, line });
@@ -311,17 +311,17 @@ impl Render for Outline {
                         div()
                             .w(px(44.0))
                             .flex_none()
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(symbol.kind.tag()),
                     )
                     .child(symbol.name.clone())
                     .when_some(symbol.detail.clone(), |this, detail| {
-                        this.child(div().text_color(theme.text_faint).child(detail))
+                        this.child(div().text_color(theme.ely.fg_subtle).child(detail))
                     })
                     .child(
                         div()
                             .ml_auto()
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(format!("{}", symbol.line + 1)),
                     ),
             );
@@ -337,7 +337,7 @@ impl Render for Outline {
                 .flex()
                 .items_center()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(text)
                 .into_any_element(),
             None => rows.into_any_element(),
@@ -372,8 +372,8 @@ impl Render for Outline {
             .p(px(8.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.floating_surface)
+            .border_color(theme.ely.border)
+            .bg(theme.sirio.floating_surface)
             .shadow_lg()
             .child(
                 div()
@@ -385,14 +385,14 @@ impl Render for Outline {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
+                    .bg(theme.ely.sunken)
                     .border_1()
-                    .border_color(theme.text)
+                    .border_color(theme.ely.fg)
                     .text_size(theme.typography.headline)
                     .text_color(if query.is_empty() {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     } else {
-                        theme.text
+                        theme.ely.fg
                     })
                     .child(if query.is_empty() {
                         "Type to filter symbols".to_owned()

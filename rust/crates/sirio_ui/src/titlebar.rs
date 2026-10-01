@@ -99,7 +99,7 @@
 
 use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
-    Rgba, SharedString, Window, WindowControlArea, div, prelude::*, px,
+    Hsla, SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
 use bezel::theme::Theme as BezelTheme;
 use sirio_theme::{BrowserChrome, Theme, WindowsCaption};
@@ -507,12 +507,20 @@ fn maximize_glyph(is_maximized: bool) -> &'static str {
 /// re-picked by eye.
 const LIGHT_HOVER_SHADE: f32 = 0.88;
 
-fn darkened(color: Rgba, factor: f32) -> Rgba {
-    Rgba {
-        r: color.r * factor,
-        g: color.g * factor,
-        b: color.b * factor,
-        a: color.a,
+fn darkened(color: Hsla, factor: f32) -> Hsla {
+    let lightness = color.l * factor;
+    let chroma = color.s * (1.0 - (2.0 * color.l - 1.0).abs());
+    let scaled_chroma = factor * chroma;
+    let lightness_chroma = 1.0 - (2.0 * lightness - 1.0).abs();
+    let saturation = if lightness_chroma == 0.0 {
+        0.0
+    } else {
+        scaled_chroma / lightness_chroma
+    };
+    Hsla {
+        s: saturation,
+        l: lightness,
+        ..color
     }
 }
 
@@ -523,7 +531,7 @@ fn traffic_light(
     id: &'static str,
     area: WindowControlArea,
     diameter: gpui::Pixels,
-    fill: Rgba,
+    fill: Hsla,
     handler: Rc<dyn Fn(&mut Window)>,
 ) -> impl IntoElement {
     div()
@@ -550,11 +558,11 @@ fn traffic_light(
 struct IconButtonColors {
     /// The glyph colour, drawn on the bar itself — these buttons have no
     /// resting fill.
-    on: Rgba,
+    on: Hsla,
     /// Fill on hover.
-    hover: Rgba,
+    hover: Hsla,
     /// Fill while pressed.
-    pressed: Rgba,
+    pressed: Hsla,
 }
 
 /// One cluster-style icon button (sidebar toggle, back, forward, `+`, the
@@ -637,10 +645,10 @@ fn caption_button(
 ) -> impl IntoElement {
     let (hover_bg, hover_on, pressed_bg, pressed_on) = if is_close {
         (
-            caption.close_hover,
-            caption.close_on,
-            caption.close_pressed,
-            caption.close_on,
+            Hsla::from(caption.close_hover),
+            Hsla::from(caption.close_on),
+            Hsla::from(caption.close_pressed),
+            Hsla::from(caption.close_on),
         )
     } else {
         (
@@ -696,11 +704,11 @@ impl Render for Titlebar {
         let theme = Theme::get(cx);
         let chrome = theme.browser_chrome;
         let caption = theme.windows_caption;
-        let bar_on = theme.text;
+        let bar_on = theme.ely.fg;
         let icon_button = IconButtonColors {
-            on: theme.text,
-            hover: theme.element_hover,
-            pressed: theme.element_active,
+            on: theme.ely.fg,
+            hover: theme.ely.hover,
+            pressed: theme.ely.active,
         };
         let control_radius = px(BezelTheme::BASE_RADIUS * 0.5); // 4.0
         let button_size = theme.spacing.compact_action;
@@ -747,21 +755,21 @@ impl Render for Titlebar {
                     "titlebar-close",
                     WindowControlArea::Close,
                     chrome.traffic_light_diameter,
-                    theme.danger,
+                    theme.ely.danger,
                     on_close,
                 ))
                 .child(traffic_light(
                     "titlebar-minimize",
                     WindowControlArea::Min,
                     chrome.traffic_light_diameter,
-                    theme.warning,
+                    theme.ely.warning,
                     on_minimize,
                 ))
                 .child(traffic_light(
                     "titlebar-maximize",
                     WindowControlArea::Max,
                     chrome.traffic_light_diameter,
-                    theme.success,
+                    theme.ely.success,
                     on_maximize,
                 ))
         });

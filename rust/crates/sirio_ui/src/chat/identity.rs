@@ -70,7 +70,7 @@ pub(crate) fn render_mark(
         .flex()
         .items_center()
         .justify_center()
-        .bg(dark.colors.surface_raised)
+        .bg(dark.colors.ely.surface)
         .text_color(rgb(0xffffff));
     match mark_path(agent_id, name) {
         Some(path) => plate

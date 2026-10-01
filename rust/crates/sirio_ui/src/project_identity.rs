@@ -700,8 +700,8 @@ impl ProjectIconPicker {
                     .items_center()
                     .justify_center()
                     .border_2()
-                    .border_color(if active { theme.text } else { theme.border })
-                    .hover(|style| style.bg(theme.element_hover))
+                    .border_color(if active { theme.ely.fg } else { theme.ely.border })
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         glyph_entity.update(cx, |picker, cx| picker.select_glyph(glyph, cx));
                     })
@@ -712,7 +712,7 @@ impl ProjectIconPicker {
             );
         }
 
-        let palette: Vec<(&'static str, gpui::Rgba)> = AgentAccentColor::ALL
+        let palette: Vec<(&'static str, gpui::Hsla)> = AgentAccentColor::ALL
             .iter()
             .map(|choice| (choice.id(), choice.resolve(theme)))
             .collect();
@@ -756,9 +756,9 @@ impl ProjectIconPicker {
             .min_h(px(32.0))
             .px(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
-            .bg(theme.input_bg)
+            .bg(theme.ely.sunken)
             .border_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .text_size(theme.typography.headline)
             .flex()
             .items_center()
@@ -772,7 +772,7 @@ impl ProjectIconPicker {
             .child(
                 div()
                     .debug_selector(|| "project-icon-emoji-caret".into())
-                    .child(caret::bar(px(18.0), theme.text, self.emoji_caret_visible)),
+                    .child(caret::bar(px(18.0), theme.ely.fg, self.emoji_caret_visible)),
             );
 
         let commit_entity = entity.clone();
@@ -813,7 +813,7 @@ impl ProjectIconPicker {
                     .id("project-icon-emoji-error")
                     .debug_selector(|| "project-icon-emoji-error".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_del)
+                    .text_color(theme.sirio.diff_del)
                     .child(selectable_text(error.clone()).id("project-icon-emoji-error-text")),
             );
         }
@@ -861,7 +861,7 @@ impl ProjectIconPicker {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.headline)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         pick_entity.update(cx, |picker, cx| picker.pick_emoji_from_grid(emoji, cx));
                     })
@@ -872,7 +872,7 @@ impl ProjectIconPicker {
             grid = grid.child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("No matching emoji."),
             );
         }
@@ -887,8 +887,8 @@ impl ProjectIconPicker {
             .gap(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
+            .border_color(theme.ely.border)
+            .bg(theme.ely.surface)
             .child(
                 div()
                     .flex()
@@ -906,14 +906,14 @@ impl ProjectIconPicker {
                             .flex()
                             .items_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.input_bg)
+                            .bg(theme.ely.sunken)
                             .border_1()
-                            .border_color(theme.border)
+                            .border_color(theme.ely.border)
                             .text_size(theme.typography.footnote)
                             .text_color(if self.emoji_grid_query.is_empty() {
-                                theme.text_faint
+                                theme.ely.fg_subtle
                             } else {
-                                theme.text
+                                theme.ely.fg
                             })
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 query_focus_entity.update(cx, |picker, cx| {
@@ -933,7 +933,7 @@ impl ProjectIconPicker {
                                     .debug_selector(|| "project-icon-emoji-grid-caret".into())
                                     .child(caret::bar(
                                         px(14.0),
-                                        theme.text,
+                                        theme.ely.fg,
                                         self.emoji_grid_caret_visible,
                                     ))
                                     .into_any_element();
@@ -966,8 +966,8 @@ impl ProjectIconPicker {
                             .debug_selector(|| "project-icon-emoji-grid-close".into())
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_faint)
-                            .hover(|style| style.bg(theme.element_hover))
+                            .text_color(theme.ely.fg_subtle)
+                            .hover(|style| style.bg(theme.ely.hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |picker, cx| picker.close_emoji_grid(cx));
                             })
@@ -1019,7 +1019,7 @@ impl ProjectIconPicker {
                     .id("project-icon-png-error")
                     .debug_selector(|| "project-icon-png-error".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_del)
+                    .text_color(theme.sirio.diff_del)
                     .child(selectable_text(error.clone()).id("project-icon-png-error-text")),
             );
         }
@@ -1074,7 +1074,7 @@ impl ProjectIconPicker {
                     .id("project-icon-avatar-current")
                     .debug_selector(|| "project-icon-avatar-current".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(label).id("project-icon-avatar-current-text")),
             );
         }
@@ -1101,14 +1101,14 @@ impl ProjectIconPicker {
         let key_entity = entity.clone();
         let commit_entity = entity.clone();
         let text_color = if draft.is_empty() {
-            theme.text_muted
+            theme.ely.fg_muted
         } else {
-            theme.text
+            theme.ely.fg
         };
         let caret_id = format!("project-icon-{id_prefix}-caret");
         let bar = div()
             .debug_selector(move || caret_id.clone())
-            .child(caret::bar(px(16.0), theme.text, caret_visible))
+            .child(caret::bar(px(16.0), theme.ely.fg, caret_visible))
             .into_any_element();
         // An empty field shows its placeholder with the bar at its start
         // (bezel's `TextField` convention); a draft has it after its last
@@ -1142,9 +1142,9 @@ impl ProjectIconPicker {
             .min_h(px(32.0))
             .px(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
-            .bg(theme.input_bg)
+            .bg(theme.ely.sunken)
             .border_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .text_size(theme.typography.callout)
             .text_color(text_color)
             .flex()
@@ -1182,7 +1182,7 @@ impl ProjectIconPicker {
                     .id(error_id.clone())
                     .debug_selector(move || error_id.clone())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_del)
+                    .text_color(theme.sirio.diff_del)
                     .child(selectable_text(message.clone())),
             );
         }

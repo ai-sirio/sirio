@@ -451,13 +451,13 @@ impl Chat {
                         .id(SharedString::from(element_id))
                         .debug_selector(move || selector.clone())
                         .text_size(typography.footnote)
-                        .text_color(theme.file_link)
+                        .text_color(theme.ely.link)
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|style| style.text_color(theme.text))
+                        .hover(|style| style.text_color(theme.ely.fg))
                         .on_click(move |_, _, cx| {
                             open_entity.update(cx, |_, cx| {
                                 cx.emit(super::ChatEvent::OpenFile(open_path.clone()));

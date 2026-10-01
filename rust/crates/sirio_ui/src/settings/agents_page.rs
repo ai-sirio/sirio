@@ -535,7 +535,7 @@ impl Settings {
                     .justify_center()
                     .gap(theme.spacing.card_gap)
                     .text_size(theme.typography.headline)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(loading::indeterminate(
                         "settings-agents-loading-orb",
                         loading::GENERIC_ORB,

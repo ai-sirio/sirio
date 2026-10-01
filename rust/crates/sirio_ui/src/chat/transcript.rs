@@ -122,7 +122,7 @@ impl Chat {
             .px(theme.spacing.traffic_light_inset)
             .py(theme.spacing.titlebar_control_spacing)
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .child(super::identity::render_mark(
                 "chat-header-mark".into(),
                 self.agent_id.as_deref(),
@@ -141,7 +141,7 @@ impl Chat {
                     .items_center()
                     .gap(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot.color()))
                     .child(state),
             )
@@ -241,11 +241,11 @@ impl Chat {
                     .px(px(7.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.surface_raised)
+                    .bg(theme.ely.surface)
                     .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(theme.overlay))
+                    .hover(|style| style.bg(theme.sirio.overlay))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         copy_entity.update(cx, |chat, cx| {
@@ -454,21 +454,21 @@ impl Chat {
                     .child(
                         div()
                             .text_size(typography.callout)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(selectable_text(header)),
                     )
                     .when(!prompt.is_empty(), |body| {
                         body.child(
                             div()
                                 .text_size(typography.footnote)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(selectable_text(prompt)),
                         )
                     })
                     .child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(status),
                     );
                 let shell = if is_question {
@@ -515,7 +515,7 @@ impl Chat {
                     card = card.child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(status),
                     );
                 }
@@ -532,9 +532,9 @@ impl Chat {
                     .debug_selector(move || format!("rewind-preview-{entry_index}"))
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
+                    .bg(theme.ely.surface)
                     .border_l_2()
-                    .border_color(theme.border_strong)
+                    .border_color(theme.sirio.border_strong)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
@@ -543,7 +543,7 @@ impl Chat {
                     .child(
                         div()
                             .text_size(typography.callout)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(rewind_preview_text(&files, insertions, deletions, &error)),
                     );
                 if error.is_none() {
@@ -572,13 +572,13 @@ impl Chat {
                 .debug_selector(move || format!("rewind-report-{entry_index}"))
                 .w_full()
                 .rounded(theme.radii.code_block)
-                .bg(theme.surface_raised)
+                .bg(theme.ely.surface)
                 .border_l_2()
-                .border_color(theme.border_strong)
+                .border_color(theme.sirio.border_strong)
                 .px(px(CARD_H_PADDING))
                 .py(px(CARD_V_PADDING))
                 .text_size(typography.callout)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .child(rewind_report_text(
                     &files,
                     insertions,
@@ -605,11 +605,11 @@ impl Chat {
                         .items_center()
                         .gap(px(10.0))
                         .debug_selector(move || selector.into())
-                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
+                        .child(div().h(px(1.0)).flex_1().bg(theme.ely.border))
                         .child(
                             div()
                                 .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
+                                .text_color(theme.ely.fg_subtle)
                                 .child(Self::render_plain_text(
                                     text.clone(),
                                     theme,
@@ -618,7 +618,7 @@ impl Chat {
                                     Some(&interaction),
                                 )),
                         )
-                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
+                        .child(div().h(px(1.0)).flex_1().bg(theme.ely.border))
                         .into_any_element(),
                     NoticeKind::BackgroundTask | NoticeKind::Warning => div()
                         .w_full()
@@ -627,9 +627,9 @@ impl Chat {
                         .debug_selector(move || selector.into())
                         .text_size(typography.footnote)
                         .text_color(if kind == NoticeKind::Warning {
-                            theme.warning
+                            theme.ely.warning
                         } else {
-                            theme.text_faint
+                            theme.ely.fg_subtle
                         })
                         .child(Self::render_plain_text(
                             text.clone(),
@@ -669,9 +669,9 @@ impl Chat {
                 let is_unavailable = kind == ErrorKind::Unavailable;
                 let settings_entity = entity.clone();
                 let banner_text = if is_auth_required || is_unavailable {
-                    theme.text
+                    theme.ely.fg
                 } else {
-                    theme.danger
+                    theme.ely.danger
                 };
                 div()
                     .id(("chat-error-banner", entry_index))

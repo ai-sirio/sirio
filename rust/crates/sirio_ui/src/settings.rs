@@ -11,7 +11,7 @@ use bezel::ui::input::TextField;
 use bezel::ui::widgets::status_dot;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
-    KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, Window, actions, div, point, prelude::*,
+    Hsla, KeyDownEvent, MouseButton, Render, ScrollHandle, Window, actions, div, point, prelude::*,
     px, text,
 };
 use sirio_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
@@ -86,7 +86,7 @@ fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl 
                 .mb(px(9.0))
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .child(selectable_text(title).id(format!("settings-section-title-{title}"))),
         )
         .child(card)
@@ -269,16 +269,16 @@ impl AgentAccentColor {
     }
 
     /// The `Theme` token this project-icon tint draws with.
-    pub fn resolve(self, theme: Theme) -> Rgba {
+    pub fn resolve(self, theme: Theme) -> Hsla {
         match self {
-            Self::Coral => theme.brand_coral,
-            Self::Amber => theme.warning,
-            Self::Green => theme.success,
-            Self::Red => theme.danger,
-            Self::Blue => theme.accent,
-            Self::Purple => theme.border_strong,
-            Self::Gold => theme.favorite,
-            Self::Slate => theme.border_strong,
+            Self::Coral => theme.sirio.brand_coral,
+            Self::Amber => theme.ely.warning,
+            Self::Green => theme.ely.success,
+            Self::Red => theme.ely.danger,
+            Self::Blue => theme.sirio.quantity,
+            Self::Purple => theme.sirio.border_strong,
+            Self::Gold => theme.ely.warning,
+            Self::Slate => theme.sirio.border_strong,
         }
     }
 
@@ -599,12 +599,12 @@ fn provider_icon(id: &str) -> Icon {
 /// the foreground they are authored in. Only an id outside the catalog
 /// (the Sparkles stand-in) keeps a neutral meta tint: it is nobody's
 /// brand, so it must not borrow one.
-fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
+fn provider_glyph_color(theme: Theme, id: &str) -> Hsla {
     match Icon::for_agent_id(id) {
         Some(icon) => icon
-            .agent_mark_color(theme.text)
-            .unwrap_or_else(|| theme.text_faint),
-        None => theme.text_faint,
+            .agent_mark_color(theme.ely.fg)
+            .unwrap_or_else(|| theme.ely.fg_subtle),
+        None => theme.ely.fg_subtle,
     }
 }
 
@@ -979,7 +979,7 @@ pub struct Settings {
 struct ProviderCardView {
     kind: ProviderKind,
     title: &'static str,
-    glyph_color: Rgba,
+    glyph_color: Hsla,
     status: ProviderAccountStatus,
 }
 
@@ -987,7 +987,7 @@ impl ProviderCardView {
     fn new(
         kind: ProviderKind,
         title: &'static str,
-        glyph_color: Rgba,
+        glyph_color: Hsla,
         status: ProviderAccountStatus,
     ) -> Self {
         Self {
@@ -2302,7 +2302,7 @@ impl Settings {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .child(
                 // The arrow is the control: no word beside it, and sized
                 // off `large_title` so it still tracks the interface font
@@ -2316,8 +2316,8 @@ impl Settings {
                     .items_center()
                     .justify_center()
                     .rounded(theme.radii.chip_active)
-                    .text_color(theme.text)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.ely.fg)
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, _| {
                         if let Some(callback) = &back {
                             callback();
@@ -2328,14 +2328,14 @@ impl Settings {
                             Icon::ChevronLeft,
                             IconSize::Custom(theme.typography.large_title),
                         )
-                        .text_color(theme.text),
+                        .text_color(theme.ely.fg),
                     ),
             )
             .child(
                 div()
                     .text_size(theme.typography.title3)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(selectable_text("Settings")),
             )
     }
@@ -2348,7 +2348,7 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .bg(theme.surface);
+            .bg(theme.ely.bg);
 
         for (category_index, category) in SettingsCategory::ALL.into_iter().enumerate() {
             let selected = self.category == category;
@@ -2371,12 +2371,12 @@ impl Settings {
                         FontWeight::NORMAL
                     })
                     .text_color(if selected {
-                        theme.text
+                        theme.ely.fg
                     } else {
-                        theme.text_muted
+                        theme.ely.fg_muted
                     })
-                    .when(selected, |this| this.bg(theme.element_active))
-                    .hover(|style| style.bg(theme.element_hover))
+                    .when(selected, |this| this.bg(theme.ely.active))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| this.select_category(category, cx));
                     })
@@ -2389,9 +2389,9 @@ impl Settings {
                             .child(
                                 IconElement::new(category.glyph(), IconSize::Small).text_color(
                                     if selected {
-                                        theme.text
+                                        theme.ely.fg
                                     } else {
-                                        theme.text_muted
+                                        theme.ely.fg_muted
                                     },
                                 ),
                             ),
@@ -2527,7 +2527,7 @@ impl Settings {
             .items_center()
             .gap(px(8.0))
             .text_size(theme.typography.headline)
-            .text_color(theme.text)
+            .text_color(theme.ely.fg)
             .child(
                 div()
                     .w(px(18.0))
@@ -2551,16 +2551,16 @@ impl Settings {
             .items_center()
             .gap(px(6.0))
             .text_size(theme.typography.callout)
-            .text_color(theme.text)
+            .text_color(theme.ely.fg)
             .child(
                 div()
                     .w(px(8.0))
                     .h(px(8.0))
                     .rounded(px(4.0))
                     .bg(if status.signed_in {
-                        theme.success
+                        theme.ely.success
                     } else {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     }),
             )
             .child(selectable_text(status.label));
@@ -2570,7 +2570,7 @@ impl Settings {
                     .id(format!("settings-provider-account-identity-{title}"))
                     .debug_selector(move || format!("settings-provider-account-identity-{title}"))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(identity)),
             );
         }
@@ -2692,7 +2692,7 @@ impl Settings {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.danger)
+                    .text_color(theme.ely.danger)
                     .child(selectable_text(error.clone())),
             );
         }
@@ -2713,7 +2713,7 @@ impl Settings {
                         .id(format!("account-login-pending-{title}"))
                         .debug_selector(move || format!("account-login-pending-{title}"))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .child(selectable_text("Signing in…")),
                 )
                 .child(controls::button(
@@ -2854,9 +2854,9 @@ impl Settings {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.input_bg)
+            .bg(theme.ely.sunken)
             .border_1()
-            .border_color(if is_focused { theme.ring } else { theme.border })
+            .border_color(if is_focused { theme.sirio.ring } else { theme.ely.border })
             .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |this, cx| on_focus(this, window, cx));
@@ -2866,9 +2866,9 @@ impl Settings {
             })
             .text_size(theme.typography.callout)
             .text_color(if is_empty {
-                theme.text_faint
+                theme.ely.fg_subtle
             } else {
-                theme.text
+                theme.ely.fg
             })
             // #212: clip inside the field rather than drawing past its
             // border. Must shrink without growing: `flex_1` would push
@@ -2880,7 +2880,7 @@ impl Settings {
                     // way bezel's `TextField` paints an empty field.
                     caret::field_placeholder(
                         text!(placeholder.to_string()),
-                        is_focused.then(|| caret::bar(px(16.0), theme.text, caret_visible)),
+                        is_focused.then(|| caret::bar(px(16.0), theme.ely.fg, caret_visible)),
                     )
                 } else {
                     caret::field_value(text!(display_text))
@@ -2893,7 +2893,7 @@ impl Settings {
             // and after a value; an empty field carries it at the hint's
             // start above.
             .when(is_focused && !is_empty, |this| {
-                this.child(caret::bar(px(16.0), theme.text, caret_visible))
+                this.child(caret::bar(px(16.0), theme.ely.fg, caret_visible))
             })
     }
 
@@ -2910,7 +2910,7 @@ impl Settings {
             .px(px(BezelTheme::SPACE_MD))
             .pb(px(BezelTheme::SPACE_XS))
             .text_size(theme.typography.footnote)
-            .text_color(theme.text_muted)
+            .text_color(theme.ely.fg_muted)
             .child(selectable_text(caption))
     }
 
@@ -3002,7 +3002,7 @@ impl Settings {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.danger)
+                    .text_color(theme.ely.danger)
                     .child(selectable_text(error)),
             );
         }
@@ -3144,7 +3144,7 @@ impl Settings {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.danger)
+                    .text_color(theme.ely.danger)
                     .child(selectable_text(error)),
             );
         }
@@ -3159,9 +3159,9 @@ impl Settings {
     ) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
         let claude_mark = Icon::ClaudeCode
-            .agent_mark_color(theme.text)
-            .unwrap_or_else(|| theme.text);
-        let monochrome_mark = theme.text;
+            .agent_mark_color(theme.ely.fg)
+            .unwrap_or_else(|| theme.ely.fg);
+        let monochrome_mark = theme.ely.fg;
         let cards = [
             ProviderCardView::new(
                 ProviderKind::Claude,
@@ -3187,7 +3187,7 @@ impl Settings {
             ProviderCardView::new(
                 ProviderKind::OllamaCloud,
                 "Ollama Cloud",
-                theme.text_muted,
+                theme.ely.fg_muted,
                 accounts.ollama_cloud,
             ),
         ];
@@ -3241,13 +3241,13 @@ impl Settings {
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
             .text_color(if enabled {
-                theme.text
+                theme.ely.fg
             } else {
-                theme.text_faint
+                theme.ely.fg_subtle
             })
-            .bg(theme.surface_raised)
+            .bg(theme.ely.surface)
             .when(enabled, |this| {
-                this.hover(|style| style.bg(theme.element_hover))
+                this.hover(|style| style.bg(theme.ely.hover))
             })
             .on_click(move |_, window, cx| {
                 toggle_entity.update(cx, |this, cx| this.toggle_summarizer_picker(window, cx));
@@ -3255,9 +3255,9 @@ impl Settings {
             .child(text!(selected.title()))
             .child(
                 IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(if enabled {
-                    theme.text
+                    theme.ely.fg
                 } else {
-                    theme.border
+                    theme.ely.border
                 }),
             )
     }
@@ -3290,8 +3290,8 @@ impl Settings {
             .p(px(4.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.floating_surface)
+            .border_color(theme.ely.border)
+            .bg(theme.sirio.floating_surface)
             .shadow_lg();
         for choice in SummarizerChoice::ALL {
             let is_selected = choice == selected;
@@ -3307,9 +3307,9 @@ impl Settings {
                     .justify_between()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.callout)
-                    .text_color(if is_selected { theme.text } else { theme.text })
-                    .when(is_selected, |this| this.bg(theme.element_active))
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(if is_selected { theme.ely.fg } else { theme.ely.fg })
+                    .when(is_selected, |this| this.bg(theme.ely.active))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         choice_entity.update(cx, |this, cx| {
                             this.set_summarizer_agent(choice, cx);
@@ -3320,7 +3320,7 @@ impl Settings {
                         this.child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(theme.text)
+                                .text_color(theme.ely.fg)
                                 .child(text!("✓")),
                         )
                     }),
@@ -3465,7 +3465,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-version".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(self.version.clone())),
                 theme,
             ))
@@ -3475,7 +3475,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-channel".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(self.channel.clone())),
                 theme,
             ));
@@ -3486,7 +3486,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-update-last-checked".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(
                         div()
                             .debug_selector(|| "settings-update-status".into())
@@ -3578,14 +3578,14 @@ impl Settings {
             .justify_center()
             .flex_1()
             .text_size(theme.typography.headline)
-            .text_color(theme.text)
+            .text_color(theme.ely.fg)
             .child(selectable_text("Control socket").id("settings-control-socket-title"))
             .child(
                 div()
                     .debug_selector(|| "settings-control-socket-path".into())
                     .mt(px(2.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(format!("{socket_kind}: {}", self.socket_path))),
             );
         // The sirioctl card shows the bundled binary's name. "Copy install
@@ -3605,7 +3605,7 @@ impl Settings {
                 None,
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text("sirioctl")),
                 theme,
             ));
@@ -3640,7 +3640,7 @@ impl Settings {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text("Installing… running in a new terminal tab.")),
             );
         }
@@ -3672,7 +3672,7 @@ impl Settings {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(
                         "Adds Sirio's sirioctl lifecycle hooks to each agent's user-level config, \
                          for agents you start yourself inside a Sirio terminal.",
@@ -3688,7 +3688,7 @@ impl Settings {
                 .flex_col()
                 .gap(px(2.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted);
+                .text_color(theme.ely.fg_muted);
             for line in report.lines() {
                 lines = lines.child(selectable_text(line.to_string()));
             }
@@ -3701,7 +3701,7 @@ impl Settings {
                     .px(px(BezelTheme::SPACE_MD))
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(
                         "Installing… writing each agent's user-level hook config.",
                     )),
@@ -3736,7 +3736,7 @@ impl Settings {
                             div()
                                 .debug_selector(|| "settings-update-version".into())
                                 .text_size(theme.typography.callout)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(selectable_text(version.clone())),
                             theme,
                         ));
@@ -3748,7 +3748,7 @@ impl Settings {
                                 .px(px(BezelTheme::SPACE_MD))
                                 .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(selectable_text("Nightly builds track main")),
                         );
                     } else if !notes.trim().is_empty() {
@@ -3759,7 +3759,7 @@ impl Settings {
                                 .px(px(BezelTheme::SPACE_MD))
                                 .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(selectable_text(notes.clone())),
                         );
                     }
@@ -3815,7 +3815,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-plantuml-status".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(plantuml_status)),
                 theme,
             ))
@@ -3879,7 +3879,7 @@ impl Settings {
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(
                         selectable_text(kind.title())
                             .id(format!("settings-permission-title-{slug}")),
@@ -3888,7 +3888,7 @@ impl Settings {
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(
                         selectable_text(kind.detail())
                             .id(format!("settings-permission-description-{slug}")),
@@ -3900,15 +3900,15 @@ impl Settings {
         // uses. Colour is kept for the two answers macOS gave; everything
         // short of an answer stays neutral.
         let (tone, word) = match (asking, status) {
-            (true, _) => (theme.text_faint, "asking…"),
+            (true, _) => (theme.ely.fg_subtle, "asking…"),
             (false, Some(PermissionStatus::Granted)) => {
-                (theme.success, PermissionStatus::Granted.label())
+                (theme.ely.success, PermissionStatus::Granted.label())
             }
             (false, Some(PermissionStatus::Denied)) => {
-                (theme.danger, PermissionStatus::Denied.label())
+                (theme.ely.danger, PermissionStatus::Denied.label())
             }
-            (false, Some(other)) => (theme.text_faint, other.label()),
-            (false, None) => (theme.text_faint, "checking…"),
+            (false, Some(other)) => (theme.ely.fg_subtle, other.label()),
+            (false, None) => (theme.ely.fg_subtle, "checking…"),
         };
         let status_view = div()
             .id(format!("settings-permission-status-{slug}"))
@@ -3920,7 +3920,7 @@ impl Settings {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(word).id(format!("settings-permission-state-{slug}"))),
             );
 
@@ -3961,14 +3961,14 @@ impl Settings {
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
             .text_color(if origins.is_empty() {
-                theme.text_faint
+                theme.ely.fg_subtle
             } else {
-                theme.text
+                theme.ely.fg
             })
-            .bg(theme.surface_raised)
+            .bg(theme.ely.surface)
             .child(text!("Revoke all"));
         let revoke_all = revoke_all.when(!origins.is_empty(), move |this| {
-            this.hover(|style| style.bg(theme.element_hover))
+            this.hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| {
                     revoke_all_entity
                         .update(cx, |settings, cx| settings.revoke_all_browser_origins(cx));
@@ -3993,7 +3993,7 @@ impl Settings {
                     .flex()
                     .items_center()
                     .text_size(theme.typography.callout)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text("No browser origins have been granted.")),
             );
         }
@@ -4011,9 +4011,9 @@ impl Settings {
                 .py(px(BezelTheme::SPACE_XS))
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.callout)
-                .text_color(theme.text)
-                .bg(theme.surface_raised)
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(theme.ely.fg)
+                .bg(theme.ely.surface)
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| {
                     origin_entity.update(cx, |settings, cx| {
                         settings.revoke_browser_origin(origin.clone(), cx)
@@ -4035,7 +4035,7 @@ impl Settings {
                         div()
                             .flex_1()
                             .text_size(theme.typography.callout)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(
                                 selectable_text(display_origin)
                                     .id(("settings-browser-origin", index)),
@@ -4147,9 +4147,9 @@ impl Render for Settings {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .child(self.render_header(theme))
-            .child(div().h(px(1.0)).w_full().bg(theme.border))
+            .child(div().h(px(1.0)).w_full().bg(theme.ely.border))
             .child(
                 // `min_h(0)` is what lets this row be shorter than what it
                 // holds. A column flex item takes its content height as its
@@ -4164,7 +4164,7 @@ impl Render for Settings {
                     .w_full()
                     .flex()
                     .child(category_sidebar)
-                    .child(div().w(px(1.0)).h_full().bg(theme.border))
+                    .child(div().w(px(1.0)).h_full().bg(theme.ely.border))
                     .child(
                         // A column, not a row. GPUI derives a scroller's
                         // `content_size` from its children's laid-out bounds,

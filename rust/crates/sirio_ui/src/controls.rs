@@ -20,7 +20,7 @@
 use bezel::theme::Theme as BezelTheme;
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
-    App, ClickEvent, CursorStyle, Div, FontWeight, Rgba, Window, div, prelude::*, px, text,
+    App, ClickEvent, CursorStyle, Div, FontWeight, Hsla, Window, div, prelude::*, px, text,
 };
 use sirio_theme::Theme;
 use std::rc::Rc;
@@ -42,7 +42,7 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
                 .mb(px(BezelTheme::SPACE_SM))
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .child(selectable_text(title).id(format!("settings-section-title-{title}"))),
         )
         .child(card)
@@ -57,7 +57,7 @@ pub fn card(theme: Theme) -> Div {
         .w_full()
         .rounded(px(BezelTheme::BASE_RADIUS)) // 8.0
         .overflow_hidden()
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
 }
 
 /// Creates one labelled row. `description` adds the secondary line used by
@@ -74,7 +74,7 @@ pub fn row(
         .justify_center()
         .flex_1()
         .text_size(theme.typography.headline)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(selectable_text(label).id(format!("settings-row-label-{label}")));
 
     if let Some(description) = description {
@@ -82,7 +82,7 @@ pub fn row(
             div()
                 .mt(px(BezelTheme::SPACE_XS))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(selectable_text(description)),
         );
     }
@@ -125,7 +125,7 @@ pub fn separator(theme: Theme) -> Div {
     div()
         .mx(px(BezelTheme::SPACE_MD))
         .h(theme.spacing.hairline_thickness)
-        .bg(theme.border)
+        .bg(theme.ely.border)
 }
 
 /// A compact on/off switch.
@@ -148,7 +148,7 @@ where
         // rather than the active-chrome tint: `title` and `title_selected`
         // are the same value, which would have put the knob's colour on the
         // track's colour and made the knob vanish.
-        .bg(if on { theme.solid } else { theme.border })
+        .bg(if on { theme.sirio.solid } else { theme.ely.border })
         .hover(|style| style.opacity(0.9))
         .on_click(callback)
         .child(
@@ -159,7 +159,7 @@ where
                 .w(px(14.0))
                 .h(px(14.0))
                 .rounded(px(7.0))
-                .bg(if on { theme.on_solid } else { theme.text }),
+                .bg(if on { theme.sirio.on_solid } else { theme.ely.fg }),
         )
 }
 
@@ -181,7 +181,7 @@ pub fn segmented(
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
         .p(px(2.0));
 
     for (index, label) in options.iter().enumerate() {
@@ -204,9 +204,9 @@ pub fn segmented(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .when(active, |this| this.bg(theme.element_active))
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(if active { theme.ely.fg } else { theme.ely.fg_muted })
+                .when(active, |this| this.bg(theme.ely.active))
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(text!(id = ("segmented-option", index), *label)),
         );
@@ -230,7 +230,7 @@ pub fn segmented_icons(
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
         .p(px(2.0));
 
     for (index, (icon, tooltip)) in options.iter().copied().enumerate() {
@@ -253,9 +253,9 @@ pub fn segmented_icons(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .when(active, |this| this.bg(theme.element_active))
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(if active { theme.ely.fg } else { theme.ely.fg_muted })
+                .when(active, |this| this.bg(theme.ely.active))
+                .hover(|style| style.bg(theme.ely.hover))
                 .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(IconElement::new(icon, IconSize::Small)),
@@ -296,7 +296,7 @@ where
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
         .child(
             div()
                 .id(format!("{id}-decrement"))
@@ -306,8 +306,8 @@ where
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme.text_muted)
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(theme.ely.fg_muted)
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| decrement(value - 1, cx))
                 .child(IconElement::new(Icon::ChevronDown, IconSize::Small)),
         )
@@ -318,7 +318,7 @@ where
                 .flex()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .child(if unit.is_empty() {
                     value.to_string()
                 } else {
@@ -334,15 +334,15 @@ where
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme.text_muted)
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(theme.ely.fg_muted)
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
                 .child(IconElement::new(Icon::ChevronUp, IconSize::Small)),
         )
 }
 
 /// A short status/action badge, matching the pills used by Settings rows.
-pub fn badge(theme: Theme, label: &'static str, background: Rgba, foreground: Rgba) -> Div {
+pub fn badge(theme: Theme, label: &'static str, background: Hsla, foreground: Hsla) -> Div {
     div()
         .px(px(BezelTheme::SPACE_XS))
         .py(px(BezelTheme::SPACE_XS))
@@ -378,7 +378,7 @@ pub fn subsection_header(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(theme.typography.headline)
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .child(
                             selectable_text(title)
                                 .id(format!("settings-subsection-title-{title}")),
@@ -387,7 +387,7 @@ pub fn subsection_header(
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .child(
                             selectable_text(description)
                                 .id(format!("settings-subsection-description-{title}")),
@@ -408,7 +408,7 @@ pub fn action_row(action: impl IntoElement, theme: Theme) -> Div {
         .flex()
         .items_center()
         .child(action)
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
 }
 
 /// A compact, selectable account row with the two status pills used by
@@ -435,11 +435,11 @@ where
         .child(badge(
             theme,
             "This device",
-            theme.surface_raised,
-            theme.text,
+            theme.ely.surface,
+            theme.ely.fg,
         ));
     if active {
-        badges = badges.child(badge(theme, "Active", theme.solid, theme.on_solid));
+        badges = badges.child(badge(theme, "Active", theme.sirio.solid, theme.sirio.on_solid));
     }
 
     div()
@@ -463,7 +463,7 @@ where
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(theme.typography.headline)
-                                .text_color(theme.text)
+                                .text_color(theme.ely.fg)
                                 .child(text!(
                                     id = format!("settings-account-label-{row_id}"),
                                     label.clone()
@@ -474,7 +474,7 @@ where
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .child(text!(
                             id = format!("settings-account-subtitle-{row_id}"),
                             subtitle
@@ -484,7 +484,7 @@ where
         .id(row_id.clone())
         .debug_selector(move || row_id.clone())
         .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(on_select)
 }
 
@@ -505,9 +505,9 @@ where
         .py(px(BezelTheme::SPACE_XS))
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
-        .text_color(theme.text)
-        .bg(theme.surface_raised)
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(theme.ely.fg)
+        .bg(theme.ely.surface)
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(callback)
         .child(text!(id = format!("settings-button-{id}"), label))
 }
@@ -535,15 +535,15 @@ where
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
         .text_color(if enabled {
-            theme.text
+            theme.ely.fg
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         })
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
         .child(text!(id = format!("settings-button-{id}"), label));
     if let Some(callback) = callback {
         element = element
-            .hover(|style| style.bg(theme.element_hover))
+            .hover(|style| style.bg(theme.ely.hover))
             .on_click(callback);
     }
     element
@@ -558,7 +558,7 @@ where
 /// iconography.
 pub fn color_picker(
     id: &'static str,
-    options: &[(&'static str, Rgba)],
+    options: &[(&'static str, Hsla)],
     selected: &'static str,
     theme: Theme,
     callback: impl Fn(&'static str, &mut App) + 'static,
@@ -585,7 +585,7 @@ pub fn color_picker(
                 .rounded(px(10.0))
                 .bg(color)
                 .border_2()
-                .border_color(if active { theme.text } else { theme.border })
+                .border_color(if active { theme.ely.fg } else { theme.ely.border })
                 .cursor(CursorStyle::PointingHand)
                 .on_click(move |_, _, cx| callback(key, cx)),
         );

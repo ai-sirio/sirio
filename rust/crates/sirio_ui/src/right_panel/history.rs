@@ -638,7 +638,7 @@ impl Render for GitHistory {
                 .child(
                     div()
                         .text_size(theme.typography.headline)
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child(format!("History unavailable: {error}")),
                 )
                 .child(
@@ -648,9 +648,9 @@ impl Render for GitHistory {
                         .px(px(10.0))
                         .py(px(5.0))
                         .rounded(theme.radii.control)
-                        .text_color(theme.text)
-                        .bg(theme.element_hover)
-                        .hover(|style| style.bg(theme.element_hover))
+                        .text_color(theme.ely.fg)
+                        .bg(theme.ely.hover)
+                        .hover(|style| style.bg(theme.ely.hover))
                         .on_click(move |_, _, cx| {
                             retry_entity.update(cx, |history, cx| history.retry(cx));
                         })
@@ -669,7 +669,7 @@ impl Render for GitHistory {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(loading::indeterminate(
                     "history-loading-orb",
                     loading::GENERIC_ORB,
@@ -700,7 +700,7 @@ impl Render for GitHistory {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(label)
                 .into_any_element()
         } else {
@@ -830,7 +830,7 @@ impl Render for GitHistory {
                         .items_center()
                         .gap(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child(
                             div()
                                 .flex_1()
@@ -845,8 +845,8 @@ impl Render for GitHistory {
                                 .px(px(6.0))
                                 .py(px(3.0))
                                 .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.element_hover)
+                                .text_color(theme.ely.fg)
+                                .bg(theme.ely.hover)
                                 .on_click(move |_, _, cx| {
                                     retry_entity.update(cx, |history, cx| history.retry(cx));
                                 })
@@ -887,9 +887,9 @@ fn render_history_row(
     // Built before anything is moved out of `commit` below.
     let (tooltip_subject, tooltip_meta) = commit_tooltip_text(&commit);
     let subject_color = if commit.parents.len() > 1 {
-        theme.text_faint
+        theme.ely.fg_subtle
     } else {
-        theme.text
+        theme.ely.fg
     };
     let date = chrono::Local
         .timestamp_opt(commit.timestamp, 0)
@@ -905,7 +905,7 @@ fn render_history_row(
         .items_center()
         .gap(px(ROW_GAP))
         .px(px(8.0))
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .tooltip(move |_, cx| -> gpui::AnyView {
             cx.new(|_| CommitTooltip {
                 theme,
@@ -951,7 +951,7 @@ fn render_history_row(
                         div()
                             .debug_selector(|| "history-body-match".to_owned())
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(format!("└ {line}")),
@@ -967,7 +967,7 @@ fn render_history_row(
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(commit.author),
             )
         })
@@ -980,7 +980,7 @@ fn render_history_row(
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(date),
             )
         })
@@ -1107,17 +1107,17 @@ impl Render for CommitTooltip {
             .rounded(self.theme.radii.control)
             .bg(self.theme.menu_surface())
             .border_1()
-            .border_color(self.theme.border)
+            .border_color(self.theme.ely.border)
             .child(
                 div()
                     .text_size(self.theme.typography.footnote)
-                    .text_color(self.theme.text)
+                    .text_color(self.theme.ely.fg)
                     .child(self.subject.clone()),
             )
             .child(
                 div()
                     .text_size(self.theme.typography.caption2)
-                    .text_color(self.theme.text_faint)
+                    .text_color(self.theme.ely.fg_subtle)
                     .child(self.meta.clone()),
             )
     }

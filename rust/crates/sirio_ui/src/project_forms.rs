@@ -317,18 +317,18 @@ impl Render for CloneForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.dialog_surface)
+            .bg(theme.sirio.dialog_surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child("Clone repository"),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child("Paste a Git URL and choose where its folder should live."),
             )
             .child(form_label("Repository URL", &theme))
@@ -354,7 +354,7 @@ impl Render for CloneForm {
                     .id("clone-destination")
                     .w_full()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(destination),
             )
             .child(
@@ -368,16 +368,16 @@ impl Render for CloneForm {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .bg(if can_submit {
-                        theme.element_active
+                        theme.ely.active
                     } else {
-                        theme.surface_raised
+                        theme.ely.surface
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if can_submit {
-                        theme.text
+                        theme.ely.fg
                     } else {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     })
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
@@ -600,18 +600,18 @@ impl Render for CreateForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.dialog_surface)
+            .bg(theme.sirio.dialog_surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child("Create project"),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child("Make a new folder for a project in the selected location."),
             )
             .child(form_label("Project name", &theme))
@@ -637,7 +637,7 @@ impl Render for CreateForm {
                     .id("create-parent")
                     .w_full()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(parent),
             )
             .child(
@@ -645,7 +645,7 @@ impl Render for CreateForm {
                     .id("create-destination")
                     .w_full()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(format!("Creates {destination}")),
             )
             .child(
@@ -659,16 +659,16 @@ impl Render for CreateForm {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .bg(if can_submit {
-                        theme.element_active
+                        theme.ely.active
                     } else {
-                        theme.surface_raised
+                        theme.ely.surface
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if can_submit {
-                        theme.text
+                        theme.ely.fg
                     } else {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     })
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
@@ -712,14 +712,14 @@ fn destination_for(parent: &Path, url: &str) -> Option<PathBuf> {
     Some(parent.join(name))
 }
 
-fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rgba) {
+fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Hsla) {
     match state.status() {
-        CloneStatus::Ready => ("Ready to clone".to_owned(), theme.text_muted),
+        CloneStatus::Ready => ("Ready to clone".to_owned(), theme.ely.fg_muted),
         CloneStatus::Running { progress } => (
             format!("Cloning… {}%", (progress * 100.0).round() as u8),
-            theme.text,
+            theme.ely.fg,
         ),
-        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.danger),
+        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.ely.danger),
         CloneStatus::Complete {
             destination,
             truncated: true,
@@ -728,25 +728,25 @@ fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rg
                 "Cloned to {} — progress output was truncated (repository is large)",
                 destination.display()
             ),
-            theme.warning,
+            theme.ely.warning,
         ),
         CloneStatus::Complete {
             destination,
             truncated: false,
         } => (
             format!("Cloned to {}", destination.display()),
-            theme.success,
+            theme.ely.success,
         ),
     }
 }
 
-fn create_status_line(state: &CreateFormState, theme: &Theme) -> (String, gpui::Rgba) {
+fn create_status_line(state: &CreateFormState, theme: &Theme) -> (String, gpui::Hsla) {
     match state.status() {
-        CreateStatus::Ready => ("Ready to create".to_owned(), theme.text_muted),
-        CreateStatus::Running => ("Creating project…".to_owned(), theme.text),
-        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.danger),
+        CreateStatus::Ready => ("Ready to create".to_owned(), theme.ely.fg_muted),
+        CreateStatus::Running => ("Creating project…".to_owned(), theme.ely.fg),
+        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.ely.danger),
         CreateStatus::Complete(destination) => {
-            (format!("Created {}", destination.display()), theme.success)
+            (format!("Created {}", destination.display()), theme.ely.success)
         }
     }
 }
@@ -755,7 +755,7 @@ fn form_label(label: &'static str, theme: &Theme) -> impl IntoElement {
     div()
         .text_size(theme.typography.footnote)
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(label)
 }
 

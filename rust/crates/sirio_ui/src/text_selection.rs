@@ -475,7 +475,7 @@ impl Element for SelectableText {
         let layout = self.styled.layout().clone();
 
         if let Some(range) = selected_range(&run, &self.text, cx) {
-            let fill = Theme::get(cx).element_active;
+            let fill = Theme::get(cx).ely.active;
             paint_wrapped_span(&layout, bounds, range, fill, window, |_| {});
         }
         window.set_cursor_style(CursorStyle::IBeam, hitbox);

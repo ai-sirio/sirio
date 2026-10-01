@@ -227,7 +227,7 @@ impl Settings {
                 .when_some(row.forge, |this, forge| {
                     this.child(
                         IconElement::new(style::forge_mark(forge), IconSize::Small)
-                            .text_color(theme.text),
+                            .text_color(theme.ely.fg),
                     )
                 })
                 .child(
@@ -238,7 +238,7 @@ impl Settings {
                         .child(
                             div()
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(selectable_text(format!(
                                     "{} · {}",
                                     row.forge.map_or("Unknown forge", Forge::name),
@@ -320,7 +320,7 @@ impl Settings {
                     tail = tail.child(
                         div()
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(selectable_text(format!(
                                 "Needs {}",
                                 style::token_scopes(forge)
@@ -343,11 +343,11 @@ impl Settings {
                 }
             }
             let status = match self.git_hosting.status.get(&host) {
-                Some(GitHostStatus::Working) => Some(("Working…".to_string(), theme.text_faint)),
+                Some(GitHostStatus::Working) => Some(("Working…".to_string(), theme.ely.fg_subtle)),
                 Some(GitHostStatus::Saved(account)) => {
-                    Some((format!("Token saved for {account}"), theme.success))
+                    Some((format!("Token saved for {account}"), theme.ely.success))
                 }
-                Some(GitHostStatus::Failed(why)) => Some((why.clone(), theme.danger)),
+                Some(GitHostStatus::Failed(why)) => Some((why.clone(), theme.ely.danger)),
                 None => None,
             };
             card = card.child(

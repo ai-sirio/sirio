@@ -6,7 +6,7 @@ use super::*;
 use bezel::motion::{Fade, Painter};
 use bezel::ui::{popover, tooltip::Tooltip};
 use gpui::{
-    AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, uniform_list,
+    AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, uniform_list,
 };
 use sirio_git::{DirectoryGitStatus, IgnoredPaths, directory_statuses, ignored_paths, status};
 use std::collections::HashMap;
@@ -617,12 +617,12 @@ impl RightPanel {
             // and unreadable directories and git-ignored paths dim rather
             // than shout.
             .text_color(if read_error.is_some() || is_ignored {
-                theme.text_muted
+                theme.ely.fg_muted
             } else {
-                theme.text
+                theme.ely.fg
             })
-            .when(selected, |this| this.bg(theme.element_active))
-            .hover(|style| style.bg(theme.element_hover))
+            .when(selected, |this| this.bg(theme.ely.active))
+            .hover(|style| style.bg(theme.ely.hover))
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 file_focus.focus(window, cx);
                 entity.update(cx, |panel, cx| {
@@ -673,7 +673,7 @@ impl RightPanel {
                         .items_center()
                         .justify_center()
                         .child(
-                            IconElement::new(glyph, IconSize::Medium).text_color(theme.text_muted),
+                            IconElement::new(glyph, IconSize::Medium).text_color(theme.ely.fg_muted),
                         ),
                 )
             })
@@ -695,7 +695,7 @@ impl RightPanel {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child("⚠"),
                 )
             })
@@ -821,7 +821,7 @@ impl RightPanel {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(loading::indeterminate(
                     "files-loading-orb",
                     loading::GENERIC_ORB,
@@ -856,7 +856,7 @@ impl RightPanel {
                 .child(
                     div()
                         .text_size(theme.typography.headline)
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child(format!("Files unavailable: {error}")),
                 )
                 .child(files_action_button(
@@ -904,7 +904,7 @@ impl RightPanel {
                             .debug_selector(|| "files-refresh-error".to_owned())
                             .flex_none()
                             .p(theme.spacing.card_gap)
-                            .text_color(theme.danger)
+                            .text_color(theme.ely.danger)
                             .child(format!("Files refresh failed: {error}")),
                     )
                     .child(files_action_button(
@@ -984,9 +984,9 @@ fn hidden_files_option(
         .items_center()
         .justify_center()
         .rounded(theme.radii.chip)
-        .text_color(if active { theme.text } else { theme.text_faint })
-        .when(active, |this| this.bg(theme.element_active))
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(if active { theme.ely.fg } else { theme.ely.fg_subtle })
+        .when(active, |this| this.bg(theme.ely.active))
+        .hover(|style| style.bg(theme.ely.hover))
         .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             ShowHiddenFilesSetting::set(show_hidden, cx);
@@ -1032,8 +1032,8 @@ fn files_action_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.text)
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(theme.ely.fg)
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -1216,7 +1216,7 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
 /// status -> colour mapping, so this and the Changes list cannot drift apart
 /// on precedence again. Kept as a named local so the call sites below read
 /// unchanged.
-fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
+fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> gpui::Hsla {
     crate::git_status_style::status_color(status, theme)
 }
 

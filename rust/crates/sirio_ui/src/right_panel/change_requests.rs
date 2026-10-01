@@ -705,7 +705,7 @@ fn icon_button(
     theme: &Theme,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.element_hover;
+    let hover = theme.ely.hover;
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -716,7 +716,7 @@ fn icon_button(
         .items_center()
         .justify_center()
         .rounded(theme.radii.chip)
-        .text_color(theme.text_muted)
+        .text_color(theme.ely.fg_muted)
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
         .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
@@ -730,7 +730,7 @@ fn text_button(
     theme: &Theme,
     on_click: impl Fn(&mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.element_hover;
+    let hover = theme.ely.hover;
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -738,9 +738,9 @@ fn text_button(
         .px(px(10.0))
         .py(px(5.0))
         .rounded(theme.radii.control)
-        .bg(theme.element_hover)
+        .bg(theme.ely.hover)
         .text_size(theme.typography.footnote)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
         .on_click(move |_, _, cx| on_click(cx))
@@ -759,13 +759,13 @@ fn notice(id: &'static str, title: String, hint: Option<String>, theme: &Theme) 
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
         .text_size(theme.typography.headline)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(selectable_text(title))
         .when_some(hint, |this, hint| {
             this.child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(selectable_text(hint)),
             )
         })
@@ -792,10 +792,10 @@ impl ChangeRequestList {
             .pt(px(9.0))
             .pb(px(6.0))
             .text_size(theme.typography.footnote)
-            .text_color(theme.text_muted)
+            .text_color(theme.ely.fg_muted)
             .child(
                 IconElement::new(style::forge_mark(client.forge()), IconSize::Small)
-                    .text_color(theme.text),
+                    .text_color(theme.ely.fg),
             )
             .child(
                 div()
@@ -822,7 +822,7 @@ impl ChangeRequestList {
             .items_center()
             .gap(px(9.0))
             .text_size(theme.typography.footnote)
-            .text_color(theme.text_muted)
+            .text_color(theme.ely.fg_muted)
             .child(
                 div()
                     .flex()
@@ -878,7 +878,7 @@ impl ChangeRequestList {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .child(format!("{} {}", found.reference.label(), found.title)),
                 )
                 .child(Self::meta_line(found, theme))
@@ -890,7 +890,7 @@ impl ChangeRequestList {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(format!("No {noun} for {branch}")))
                     .child(icon_button(
                         "change-requests-create",
@@ -902,11 +902,11 @@ impl ChangeRequestList {
                     .into_any_element()
             }
             Card::Loading | Card::Hidden => div()
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(format!("Looking for this branch's {noun}…"))
                 .into_any_element(),
             Card::Failed(error) => div()
-                .text_color(theme.danger)
+                .text_color(theme.ely.danger)
                 .child(selectable_text(error_text(error)))
                 .into_any_element(),
         };
@@ -925,8 +925,8 @@ impl ChangeRequestList {
                 .gap(px(4.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_raised)
+                .border_color(theme.ely.border)
+                .bg(theme.ely.surface)
                 .when(found, |this| {
                     this.cursor_pointer()
                         .on_click(move |_, _, cx| open.update(cx, |list, cx| list.open_card(cx)))
@@ -937,7 +937,7 @@ impl ChangeRequestList {
                         .items_center()
                         .gap(px(6.0))
                         .text_size(theme.typography.caption2)
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child(IconElement::new(Icon::GitBranch, IconSize::XSmall))
                         .child(format!("THIS WORKTREE · {branch}")),
                 )
@@ -978,7 +978,7 @@ impl ChangeRequestList {
                 "change-requests-filter-closed",
             ),
         ];
-        let hover = theme.element_hover;
+        let hover = theme.ely.hover;
         let to_review = self.to_review.filter(|count| *count > 0);
         let search = entity.clone();
         div()
@@ -987,10 +987,10 @@ impl ChangeRequestList {
             .flex()
             .items_center()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .children(FILTERS.map(|(candidate, icon, label, id)| {
                 let active = candidate == filter;
-                let tone = if active { theme.text } else { theme.text_muted };
+                let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
                 let choose = entity.clone();
                 div()
                     .id(id)
@@ -1022,7 +1022,7 @@ impl ChangeRequestList {
                                 div()
                                     .text_size(theme.typography.caption2)
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.accent)
+                                    .text_color(theme.sirio.quantity)
                                     .child(count.to_string()),
                             )
                         })
@@ -1035,7 +1035,7 @@ impl ChangeRequestList {
                                 .left_0()
                                 .right_0()
                                 .h(px(2.0))
-                                .bg(theme.text),
+                                .bg(theme.ely.fg),
                         )
                     })
             }))
@@ -1057,7 +1057,7 @@ impl ChangeRequestList {
         theme: &Theme,
         entity: &Entity<Self>,
     ) -> impl IntoElement {
-        let hover = theme.element_hover;
+        let hover = theme.ely.hover;
         let open = entity.clone();
         let menu = entity.clone();
         div()
@@ -1069,7 +1069,7 @@ impl ChangeRequestList {
             .items_start()
             .gap(px(8.0))
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .on_click(move |_, _, cx| open.update(cx, |list, cx| list.open_row(index, cx)))
@@ -1095,13 +1095,13 @@ impl ChangeRequestList {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(row.title.clone()),
                     )
                     .child(
                         div()
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(format!(
                                 "{} · {} · {}",
                                 row.reference.label(),
@@ -1117,7 +1117,7 @@ impl ChangeRequestList {
                     .items_center()
                     .gap(px(7.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .when_some(style::ci_mark(row.ci, theme), |this, (icon, tint)| {
                         this.child(IconElement::new(icon, IconSize::Small).text_color(tint))
                     })
@@ -1187,7 +1187,7 @@ impl ChangeRequestList {
                         .items_center()
                         .gap(px(8.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child(
                             div()
                                 .flex_1()
@@ -1278,7 +1278,7 @@ impl ChangeRequestList {
         .child(
             div()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(selectable_text(format!(
                     "Sign in with the {} CLI:",
                     forge.name()
@@ -1292,7 +1292,7 @@ impl ChangeRequestList {
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded(theme.radii.control)
-                .bg(theme.code_wash)
+                .bg(theme.sirio.code_wash)
                 .text_size(theme.typography.footnote)
                 .child(selectable_text(command))
                 .child(icon_button(
@@ -1306,7 +1306,7 @@ impl ChangeRequestList {
         .child(
             div()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(selectable_text(format!(
                     "or paste a personal access token with {scopes}:"
                 ))),
@@ -1337,8 +1337,8 @@ impl ChangeRequestList {
         .when_some(
             match &self.token_state {
                 TokenState::Idle => None,
-                TokenState::Saving => Some(("Checking the token…".to_string(), theme.text_faint)),
-                TokenState::Failed(why) => Some((why.clone(), theme.danger)),
+                TokenState::Saving => Some(("Checking the token…".to_string(), theme.ely.fg_subtle)),
+                TokenState::Failed(why) => Some((why.clone(), theme.ely.danger)),
             },
             |this, (text, tone)| {
                 this.child(
@@ -1457,7 +1457,7 @@ impl Render for ChangeRequestList {
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .border_b_1()
-                                .border_color(theme.border)
+                                .border_color(theme.ely.border)
                                 .child(self.search.clone()),
                         )
                     })

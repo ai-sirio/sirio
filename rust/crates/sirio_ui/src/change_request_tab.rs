@@ -1019,7 +1019,7 @@ fn button(
     theme: &Theme,
     on_click: impl Fn(&mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.element_hover;
+    let hover = theme.ely.hover;
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -1031,7 +1031,7 @@ fn button(
         .py(px(4.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(theme.text_muted)
+        .text_color(theme.ely.fg_muted)
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
         .on_click(move |_, _, cx| on_click(cx))
@@ -1066,7 +1066,7 @@ fn error_panel(
         .p(theme.spacing.card_gap)
         .child(
             div()
-                .text_color(theme.danger)
+                .text_color(theme.ely.danger)
                 .child(selectable_text(message)),
         )
         .child(
@@ -1099,7 +1099,7 @@ fn stale_line(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> An
         .items_center()
         .gap(px(8.0))
         .text_size(theme.typography.footnote)
-        .text_color(theme.danger)
+        .text_color(theme.ely.danger)
         .child(
             div()
                 .flex_1()
@@ -1128,7 +1128,7 @@ fn slot_view<T>(
 ) -> AnyElement {
     match slot {
         Slot::Idle | Slot::Loading => div()
-            .text_color(theme.text_faint)
+            .text_color(theme.ely.fg_subtle)
             .child(format!("Loading {what}…"))
             .into_any_element(),
         Slot::Failed(error) => error_panel(error.to_string(), theme, retry, close),
@@ -1156,7 +1156,7 @@ fn line_link(
     div()
         .id(id)
         .cursor_pointer()
-        .text_color(theme.accent)
+        .text_color(theme.sirio.quantity)
         .child(text)
         .on_click(move |_, _, cx| {
             let path = PathBuf::from(&path);
@@ -1190,7 +1190,7 @@ impl ChangeRequestTab {
             .pt(px(12.0))
             .pb(px(10.0))
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .child(
                 div()
                     .flex()
@@ -1217,7 +1217,7 @@ impl ChangeRequestTab {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child(selectable_text(self.reference.label())),
                             ),
                     )
@@ -1257,7 +1257,7 @@ impl ChangeRequestTab {
                         .items_center()
                         .gap(px(8.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .child(badge(
                             style::state_label(summary.state),
                             style::state_color(summary.state, theme),
@@ -1297,7 +1297,7 @@ impl ChangeRequestTab {
 
     fn render_inner_strip(&self, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
         let ci = self.header.value().map(|header| header.summary.ci);
-        let hover = theme.element_hover;
+        let hover = theme.ely.hover;
         div()
             .id("change-request-inner-tabs")
             .h(px(32.0))
@@ -1306,10 +1306,10 @@ impl ChangeRequestTab {
             .items_center()
             .gap(px(2.0))
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .children(InnerTab::ALL.into_iter().map(|inner| {
                 let active = inner == self.inner;
-                let tone = if active { theme.text } else { theme.text_muted };
+                let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
                 let (icon, tint): (Icon, Hsla) = match inner {
                     InnerTab::Conversation => (Icon::MessageSquare, tone.into()),
                     InnerTab::Commits => (Icon::GitCommit, tone.into()),
@@ -1353,9 +1353,9 @@ impl ChangeRequestTab {
                             div()
                                 .px(px(6.0))
                                 .rounded(px(999.0))
-                                .bg(theme.element_hover)
+                                .bg(theme.ely.hover)
                                 .text_size(theme.typography.caption2)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(count),
                         )
                     })
@@ -1367,7 +1367,7 @@ impl ChangeRequestTab {
                                 .left_0()
                                 .right_0()
                                 .h(px(2.0))
-                                .bg(theme.text),
+                                .bg(theme.ely.fg),
                         )
                     })
             }))
@@ -1406,8 +1406,8 @@ impl ChangeRequestTab {
                             .p(px(12.0))
                             .rounded(theme.radii.control)
                             .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface)
+                            .border_color(theme.ely.border)
+                            .bg(theme.ely.bg)
                             .child(Chat::render_markdown_document_with_link_override(
                                 doc,
                                 theme,
@@ -1440,17 +1440,17 @@ impl ChangeRequestTab {
                 .items_center()
                 .gap(px(6.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(
                     div()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .child(selectable_text(who)),
                 )
                 .child(selectable_text(what))
                 .child(
                     div()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child(selectable_text(style::age(now, at))),
                 )
         };
@@ -1458,7 +1458,7 @@ impl ChangeRequestTab {
             div()
                 .pl(px(12.0))
                 .border_l_2()
-                .border_color(theme.border)
+                .border_color(theme.ely.border)
                 .child(Chat::render_markdown_document_with_link_override(
                     doc,
                     theme,
@@ -1516,7 +1516,7 @@ impl ChangeRequestTab {
                             .flex()
                             .gap(px(6.0))
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(line_link(
                                 ("change-request-line-comment", index * 1000 + position),
                                 format!(
@@ -1591,7 +1591,7 @@ impl ChangeRequestTab {
         entity: &Entity<Self>,
     ) -> AnyElement {
         let now = style::now();
-        let hover = theme.element_hover;
+        let hover = theme.ely.hover;
         div()
             .flex()
             .flex_col()
@@ -1605,7 +1605,7 @@ impl ChangeRequestTab {
                         .px(px(6.0))
                         .pb(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .child(div().flex_1().child(error.to_string()))
                         .child(button(
                             "change-request-commit-forge",
@@ -1621,7 +1621,7 @@ impl ChangeRequestTab {
                             .px(px(6.0))
                             .pb(px(6.0))
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(hint),
                     )
                 })
@@ -1645,13 +1645,13 @@ impl ChangeRequestTab {
                     })
                     .child(
                         IconElement::new(Icon::GitCommit, IconSize::Small)
-                            .text_color(theme.text_faint),
+                            .text_color(theme.ely.fg_subtle),
                     )
                     .child(
                         div()
                             .flex_none()
                             .font_family(theme.typography.code_family)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(commit.short_sha.clone()),
                     )
                     .child(
@@ -1667,7 +1667,7 @@ impl ChangeRequestTab {
                         div()
                             .flex_none()
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(format!(
                                 "{} · {}",
                                 commit.author,
@@ -1678,7 +1678,7 @@ impl ChangeRequestTab {
             .when(listing.truncated, |this| {
                 this.child(
                     div()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("More commits are on the forge."),
                 )
             })
@@ -1707,7 +1707,7 @@ impl ChangeRequestTab {
             .filter(|(_, check)| check.status == CheckStatus::Passed)
             .count();
         let toggle = entity.clone();
-        let hover = theme.element_hover;
+        let hover = theme.ely.hover;
         let row = |index: usize, check: &Check| {
             let (icon, tint) = style::check_mark(check.status, theme);
             let url = check.url.clone();
@@ -1729,7 +1729,7 @@ impl ChangeRequestTab {
                 })
                 .child(IconElement::new(icon, IconSize::Small).text_color(tint))
                 .when_some(check.group.clone(), |this, group| {
-                    this.child(div().flex_none().text_color(theme.text_faint).child(group))
+                    this.child(div().flex_none().text_color(theme.ely.fg_subtle).child(group))
                 })
                 .child(
                     div()
@@ -1744,7 +1744,7 @@ impl ChangeRequestTab {
                     this.child(
                         div()
                             .flex_none()
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(style::duration_text(secs)),
                     )
                 })
@@ -1763,7 +1763,7 @@ impl ChangeRequestTab {
                         .px(px(6.0))
                         .py(px(5.0))
                         .cursor_pointer()
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .on_click(move |_, _, cx| {
                             toggle.update(cx, |tab, cx| {
                                 tab.show_settled_checks = !tab.show_settled_checks;
@@ -1787,7 +1787,7 @@ impl ChangeRequestTab {
             .when(listing.truncated, |this| {
                 this.child(
                     div()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("More checks are on the forge."),
                 )
             })
@@ -1802,18 +1802,18 @@ impl ChangeRequestTab {
                 Forge::GitHub => format!("{}/files", header.summary.web_url),
                 Forge::GitLab => format!("{}/diffs", header.summary.web_url),
             });
-        let hover = theme.element_hover;
+        let hover = theme.ely.hover;
         div()
             .flex()
             .flex_col()
             .children(listing.items.iter().enumerate().map(|(index, file)| {
                 let (letter, tint): (&str, Hsla) = match file.kind {
-                    Some(FileChangeKind::Added) => ("A", theme.success.into()),
-                    Some(FileChangeKind::Deleted) => ("D", theme.danger.into()),
-                    Some(FileChangeKind::Renamed) => ("R", theme.accent.into()),
-                    Some(FileChangeKind::Copied) => ("C", theme.accent.into()),
-                    Some(FileChangeKind::Modified) => ("M", theme.warning.into()),
-                    None => ("·", theme.text_faint.into()),
+                    Some(FileChangeKind::Added) => ("A", theme.ely.success.into()),
+                    Some(FileChangeKind::Deleted) => ("D", theme.ely.danger.into()),
+                    Some(FileChangeKind::Renamed) => ("R", theme.sirio.quantity.into()),
+                    Some(FileChangeKind::Copied) => ("C", theme.sirio.quantity.into()),
+                    Some(FileChangeKind::Modified) => ("M", theme.ely.warning.into()),
+                    None => ("·", theme.ely.fg_subtle.into()),
                 };
                 let url = files_url.clone();
                 div()
@@ -1851,20 +1851,20 @@ impl ChangeRequestTab {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(theme.diff_add)
+                            .text_color(theme.sirio.diff_add)
                             .child(format!("+{}", file.additions)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_color(theme.diff_del)
+                            .text_color(theme.sirio.diff_del)
                             .child(format!("−{}", file.deletions)),
                     )
             }))
             .when(listing.truncated, |this| {
                 this.child(
                     div()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("More files are on the forge."),
                 )
             })
@@ -1885,7 +1885,7 @@ impl ChangeRequestTab {
         let note = |text: String| {
             div()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(text)
         };
         match &self.range {
@@ -1901,14 +1901,14 @@ impl ChangeRequestTab {
                         .px(px(12.0))
                         .py(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .child(format!(
                             "base {} … head {}",
                             short(&revisions.base_sha),
                             short(&revisions.head_sha)
                         ))
                         .when_some(self.updated_notice.clone(), |this, notice| {
-                            this.child(div().text_color(theme.text_faint).child(notice))
+                            this.child(div().text_color(theme.ely.fg_subtle).child(notice))
                         }),
                 )
                 .child(div().flex_1().min_h(px(0.0)).child(changes.clone()))
@@ -1941,7 +1941,7 @@ impl ChangeRequestTab {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_color(theme.danger)
+                            .text_color(theme.ely.danger)
                             .child(div().flex_1().child(error.to_string()))
                             .child(button(
                                 "change-request-range-retry",
@@ -1996,7 +1996,7 @@ impl ChangeRequestTab {
             .child(
                 div()
                     .max_w(px(520.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(selectable_text(message)),
             )
             .child(
@@ -2082,8 +2082,8 @@ impl Render for ChangeRequestTab {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.bg)
-            .text_color(theme.text)
+            .bg(theme.sirio.canvas)
+            .text_color(theme.ely.fg)
             .child(self.render_header(&theme, &entity))
             .child(body)
     }

@@ -541,7 +541,7 @@ impl RightPanel {
             .justify_center()
             .gap(px(4.0))
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .children(PanelView::ORDER.into_iter().filter(|view| *view != PanelView::ChangeRequests || self.project_is_git).map(|view| {
                 let is_active = view == active;
                 div()
@@ -553,13 +553,13 @@ impl RightPanel {
                     .items_center()
                     .justify_center()
                     .rounded(px(4.0))
-                    .when(is_active, |this| this.bg(theme.element_hover))
-                    .hover(|style| style.bg(theme.element_hover))
+                    .when(is_active, |this| this.bg(theme.ely.hover))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
-                            theme.text
+                            theme.ely.fg
                         } else {
-                            theme.text_muted
+                            theme.ely.fg_muted
                         },
                     ))
                     .on_mouse_down(MouseButton::Left, {
@@ -585,19 +585,19 @@ impl RightPanel {
             .gap(theme.spacing.card_gap)
             .p(theme.spacing.card_gap)
             .text_size(theme.typography.headline)
-            .text_color(theme.text)
+            .text_color(theme.ely.fg)
             .child(
                 IconElement::new(
                     Icon::PanelRight,
                     IconSize::Custom(theme.typography.large_title),
                 )
-                .text_color(theme.text),
+                .text_color(theme.ely.fg),
             )
             .child("No worktree selected")
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("Select a worktree to inspect its files and changes."),
             )
     }
@@ -852,7 +852,7 @@ impl Render for RightPanel {
             .w_full()
             .h_full()
             .overflow_hidden()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .child(self.render_header(entity.clone(), theme, cx))
             .child(body)
             .when(self.worktree_selected, |this| {
