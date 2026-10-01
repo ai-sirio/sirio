@@ -5,6 +5,9 @@ each value is what it is. This document is the rationale moved verbatim out
 of `ThemeColors::for_appearance` (`rust/crates/sirio_theme/src/lib.rs`), which
 used to derive every token live and now reads the frozen presets instead.
 
+The dump comparison and seeded Linux screenshots are recorded in the
+[theme migration evidence](testing/theme-ely-palette/README.md).
+
 ## Where the values come from
 
 The values are frozen from `bezel-theme` 0.1.4's `Theme::branded` plus
