@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-30
 
-**Status:** proposed; layout approved, written spec awaiting review
+**Status:** approved by the user on 2026-10-01
 
 **Scope:** the entire AI chat surface in Sirio.
 
