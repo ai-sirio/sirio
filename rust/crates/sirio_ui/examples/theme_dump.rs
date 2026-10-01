@@ -29,52 +29,20 @@ fn push(out: &mut String, combo: &str, token: &str, color: Hsla) {
     .unwrap();
 }
 
-/// Sirio's tokens, in this tree's vocabulary.
+/// Sirio's tokens in the new vocabulary: `ely.<field>` and `sirio.<field>`.
 fn sirio_tokens(theme: &Theme) -> Vec<(String, Hsla)> {
-    let c = theme.colors;
-    [
-        ("frame_surface", c.frame_surface),
-        ("bg", c.bg),
-        ("surface", c.surface),
-        ("border_opaque", c.border_opaque),
-        ("terminal_surface", c.terminal_surface),
-        ("warning", c.warning),
-        ("success", c.success),
-        ("danger", c.danger),
-        ("border", c.border),
-        ("element_hover", c.element_hover),
-        ("text", c.text),
-        ("text_muted", c.text_muted),
-        ("text_faint", c.text_faint),
-        ("tree_guide", c.tree_guide),
-        ("git_untracked", c.git_untracked),
-        ("diff_add", c.diff_add),
-        ("diff_add_bg", c.diff_add_bg),
-        ("diff_del", c.diff_del),
-        ("diff_del_bg", c.diff_del_bg),
-        ("file_link", c.file_link),
-        ("surface_raised", c.surface_raised),
-        ("input_bg", c.input_bg),
-        ("dialog_surface", c.dialog_surface),
-        ("floating_surface", c.floating_surface),
-        ("overlay", c.overlay),
-        ("overlay_strong", c.overlay_strong),
-        ("border_strong", c.border_strong),
-        ("ring", c.ring),
-        ("text_dim", c.text_dim),
-        ("brand_coral", c.brand_coral),
-        ("accent", c.accent),
-        ("element_active", c.element_active),
-        ("selection", c.selection),
-        ("code_wash", c.code_wash),
-        ("solid", c.solid),
-        ("on_solid", c.on_solid),
-        ("favorite", c.favorite),
-        ("danger_muted", c.danger_muted),
-    ]
-    .into_iter()
-    .map(|(name, color)| (name.to_string(), Hsla::from(color)))
-    .collect()
+    let c = &theme.colors;
+    let mut rows: Vec<(String, Hsla)> = ely_tokens(&c.ely)
+        .into_iter()
+        .map(|(name, color)| (format!("ely.{name}"), color))
+        .collect();
+    rows.extend(
+        c.sirio
+            .named()
+            .into_iter()
+            .map(|(name, color)| (format!("sirio.{name}"), color)),
+    );
+    rows
 }
 
 fn ely_tokens(palette: &Palette) -> Vec<(String, Hsla)> {

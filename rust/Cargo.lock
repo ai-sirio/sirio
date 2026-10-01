@@ -7587,6 +7587,7 @@ dependencies = [
  "ashpd",
  "bezel",
  "bezel-gpui",
+ "ely-palette",
  "fontdb",
  "ttf-parser",
 ]

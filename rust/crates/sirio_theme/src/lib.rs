@@ -31,7 +31,7 @@
 //! treats a missing or silent portal as **dark**, not light. macOS keeps the
 //! old behavior: `NSAppearance` is synchronous and authoritative there.
 
-use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
+use gpui::{App, FontWeight, Global, Hsla, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -46,6 +46,9 @@ use std::sync::OnceLock;
 /// *resolved* one) and because it keeps `sirio_persistence::AppearanceMode`
 /// unambiguous at the one place both are in scope, `sirio`'s `main.rs`.
 mod base_color;
+mod presets;
+
+pub use ely_palette;
 
 pub use base_color::BaseColor;
 
@@ -103,6 +106,114 @@ fn resolve_mode_linux(mode: ThemeMode, system_appearance: WindowAppearance) -> A
     }
 }
 
+/// The colours Ely's `Palette` has no field for, or whose value differs
+/// from the Ely field of the same meaning (spec §3.2). Each field's doc says
+/// where it is painted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SirioColors {
+    /// Opaque fallback behind the app shell and window canvas, and behind the
+    /// working columns when translucency is unavailable.
+    pub canvas: Hsla,
+    /// Translucent window-frame material. Its RGB value is paired with
+    /// [`ThemeColors::bg`] for platforms without translucency.
+    pub frame_surface: Hsla,
+    /// Terminal surface — the pane surface in dark mode and paper-white in
+    /// light mode. Kept under its own name because the terminal renderer also
+    /// uses it as the ANSI default background.
+    pub terminal_surface: Hsla,
+    /// A sheet an event opens over the shell and that reads like a panel of
+    /// its own: the New Worktree prompt and the Clone/Create project forms.
+    /// The same value as [`ThemeColors::surface`], but **never faded** by
+    /// [`Theme::with_translucency_at`] — translucency belongs to the main
+    /// window's background, and a sheet the desktop shows through is
+    /// unreadable exactly when it is asking for input.
+    pub dialog_surface: Hsla,
+    /// A card floating over the frame that an event puts up: the modal
+    /// sheet (Set Title, Close confirm) and the toasts. The same value as
+    /// [`ThemeColors::surface_raised`], never faded, for the reason
+    /// [`ThemeColors::dialog_surface`] gives.
+    pub floating_surface: Hsla,
+    /// Generic hover wash — 5% neutral. Also the transcript row hover: a step
+    /// lighter than [`ThemeColors::element_hover`], because transcript rows
+    /// are wider and a 6% wash over that area reads as a block.
+    pub overlay: Hsla,
+    /// Pressed wash — 9% neutral, so press reads as more than hover.
+    pub overlay_strong: Hsla,
+    /// Stronger divider, for seams that separate rather than merely delimit,
+    /// and the neutral rail down a task, edit or tool card.
+    pub border_strong: Hsla,
+    /// Keyboard-focus ring on a text field — bezel's `ring`, the translucent
+    /// hairline every bezel input, select and control lights up with. A veil
+    /// on the surface's own tone (white on dark, black on light), never the
+    /// body text colour: that painted an opaque white frame on the dark theme.
+    pub ring: Hsla,
+    /// Faintest text step — placeholder copy and disabled labels, below
+    /// [`ThemeColors::text_faint`].
+    pub text_dim: Hsla,
+    /// Soft danger fill (stop button hover).
+    pub danger_muted: Hsla,
+    /// Quantity blue: quota meters, and the clone and update progress bars.
+    /// Blue means "how much", which is why a progress bar is never painted in
+    /// a status hue — a bar filling up is not an alert.
+    pub quantity: Hsla,
+    /// Light fill for primary buttons, dark glyph on top.
+    pub solid: Hsla,
+    /// Glyph on primary buttons.
+    pub on_solid: Hsla,
+    /// Brand coral. No role paints it any more: the shell's focus rings,
+    /// caret, selection and active chrome are neutral, and every colour left in
+    /// the UI is a status, a diff, a quantity or an agent's own brand.
+    ///
+    /// What still reads it is the `Coral` entry of the agent-colour picker,
+    /// which needs a real coral to offer. Kept as a token rather than inlined
+    /// as a literal there, so the picker keeps drawing from `Theme` — and so
+    /// the two invariants this value carries (it clears AA on its own surface,
+    /// and it is not any agent's brand) still have something to hold.
+    pub brand_coral: Hsla,
+    /// Inline `code` rounded wash, and the band under a diff hunk — the same
+    /// wash, because a hunk is code too.
+    pub code_wash: Hsla,
+    /// Tree guide stroke, including its source alpha.
+    pub tree_guide: Hsla,
+    /// Addition diff accent — the success hue.
+    pub diff_add: Hsla,
+    /// Addition diff background — translucent success wash.
+    pub diff_add_bg: Hsla,
+    /// Deletion diff accent — the danger hue.
+    pub diff_del: Hsla,
+    /// Deletion diff background — translucent danger wash.
+    pub diff_del_bg: Hsla,
+}
+
+impl SirioColors {
+    /// Every field with its name, in declaration order.
+    pub fn named(&self) -> [(&'static str, Hsla); 21] {
+        [
+            ("canvas", self.canvas),
+            ("frame_surface", self.frame_surface),
+            ("terminal_surface", self.terminal_surface),
+            ("dialog_surface", self.dialog_surface),
+            ("floating_surface", self.floating_surface),
+            ("overlay", self.overlay),
+            ("overlay_strong", self.overlay_strong),
+            ("border_strong", self.border_strong),
+            ("ring", self.ring),
+            ("text_dim", self.text_dim),
+            ("danger_muted", self.danger_muted),
+            ("quantity", self.quantity),
+            ("solid", self.solid),
+            ("on_solid", self.on_solid),
+            ("brand_coral", self.brand_coral),
+            ("code_wash", self.code_wash),
+            ("tree_guide", self.tree_guide),
+            ("diff_add", self.diff_add),
+            ("diff_add_bg", self.diff_add_bg),
+            ("diff_del", self.diff_del),
+            ("diff_del_bg", self.diff_del_bg),
+        ]
+    }
+}
+
 /// All adaptive colors used by Sirio.
 ///
 /// Names say what a value *does* in the design system (`surface_raised`,
@@ -116,37 +227,53 @@ fn resolve_mode_linux(mode: ThemeMode, system_appearance: WindowAppearance) -> A
 /// `docs/THEME-PROVENANCE.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColors {
+    /// Ely's vocabulary, holding Sirio's values: what every Ely component
+    /// reads, and what Sirio's own call sites read where meaning and value
+    /// coincide (spec §3.2).
+    pub ely: ely_palette::Palette,
+    /// The colours Ely has no field for.
+    pub sirio: SirioColors,
     /// Translucent window-frame material. Its RGB value is paired with
     /// [`ThemeColors::bg`] for platforms without translucency.
+    #[deprecated(note = "sirio.frame_surface")]
     pub frame_surface: Rgba,
     /// Opaque fallback behind the app shell and window canvas, and behind the
     /// working columns when translucency is unavailable.
+    #[deprecated(note = "sirio.canvas")]
     pub bg: Rgba,
     /// Opaque reading surface inside the shell: panels, the sidebar, the tab
     /// bar, the workspace column, the right panel, settings, and the chat
     /// transcript, which reads directly on the central panel rather than on a
     /// floating card.
+    #[deprecated(note = "ely.bg")]
     pub surface: Rgba,
     /// Opaque separator between shell panels, and the seam the tab chip's
     /// underline and the sidebar draw. Opaque rather than a veil, which is
     /// what keeps it a separate token from [`ThemeColors::border`].
+    #[deprecated(note = "ely.border")]
     pub border_opaque: Rgba,
     /// Terminal surface — the pane surface in dark mode and paper-white in
     /// light mode. Kept under its own name because the terminal renderer also
     /// uses it as the ANSI default background.
+    #[deprecated(note = "sirio.terminal_surface")]
     pub terminal_surface: Rgba,
     /// Waiting-for-input status, a modified file, and the rail down a
     /// question card — the one card kind that is waiting on the reader, and
     /// so the one that keeps its colour.
+    #[deprecated(note = "ely.warning")]
     pub warning: Rgba,
     /// Completed status, and a staged file.
+    #[deprecated(note = "ely.success")]
     pub success: Rgba,
     /// Errored status, and a conflicted file.
+    #[deprecated(note = "ely.danger")]
     pub danger: Rgba,
     /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
     /// so it reads as a seam rather than a line.
+    #[deprecated(note = "ely.border")]
     pub border: Rgba,
     /// Hover fill for sidebar rows — a 6% neutral layer, not a colour.
+    #[deprecated(note = "ely.hover")]
     pub element_hover: Rgba,
     /// Primary text neutral, and the shell's whole "this is active" channel:
     /// row titles selected or not, the tab strip's underline and dirty dot, a
@@ -155,36 +282,48 @@ pub struct ThemeColors {
     /// colour reserved for data and attention, contrast is the only channel
     /// left to say "this one is active", so active chrome is the full text
     /// neutral rather than a step below it, and never a second blue.
+    #[deprecated(note = "ely.fg")]
     pub text: Rgba,
     /// Secondary row text, and the focus ring for shell panels — one step
     /// below [`ThemeColors::text`]: a focused pane has to be findable, not
     /// loud. Clears WCAG AA on the panel surface at body size.
+    #[deprecated(note = "ely.fg_muted")]
     pub text_muted: Rgba,
     /// Raw sampled meta text, reserved for nonessential metadata and disabled
     /// labels. Body-size secondary text uses [`ThemeColors::text_muted`],
     /// which clears WCAG AA on the panel surface.
+    #[deprecated(note = "ely.fg_subtle")]
     pub text_faint: Rgba,
     /// Tree guide stroke, including its source alpha.
+    #[deprecated(note = "sirio.tree_guide")]
     pub tree_guide: Rgba,
     /// Untracked-file status color — the accent blue.
+    #[deprecated(note = "ely.fg_subtle")]
     pub git_untracked: Rgba,
     /// Addition diff accent — the success hue.
+    #[deprecated(note = "sirio.diff_add")]
     pub diff_add: Rgba,
     /// Addition diff background — translucent success wash.
+    #[deprecated(note = "sirio.diff_add_bg")]
     pub diff_add_bg: Rgba,
     /// Deletion diff accent — the danger hue.
+    #[deprecated(note = "sirio.diff_del")]
     pub diff_del: Rgba,
     /// Deletion diff background — translucent danger wash.
+    #[deprecated(note = "sirio.diff_del_bg")]
     pub diff_del_bg: Rgba,
     /// Clickable file-link color — the accent blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
+    #[deprecated(note = "ely.link")]
     pub file_link: Rgba,
     // ── Role tokens: what a value does, rather than who consumes it ───────
     /// Floating cards, popovers, tooltips, the composer and primary pills: a
     /// step *above* the surface.
+    #[deprecated(note = "ely.surface")]
     pub surface_raised: Rgba,
     /// Recessed wells — filter fields, code and diff insets: a step *below*
     /// the surface. Code sits *in* the card, the inverse of a raised move.
+    #[deprecated(note = "ely.sunken")]
     pub input_bg: Rgba,
     /// A sheet an event opens over the shell and that reads like a panel of
     /// its own: the New Worktree prompt and the Clone/Create project forms.
@@ -192,28 +331,35 @@ pub struct ThemeColors {
     /// [`Theme::with_translucency_at`] — translucency belongs to the main
     /// window's background, and a sheet the desktop shows through is
     /// unreadable exactly when it is asking for input.
+    #[deprecated(note = "sirio.dialog_surface")]
     pub dialog_surface: Rgba,
     /// A card floating over the frame that an event puts up: the modal
     /// sheet (Set Title, Close confirm) and the toasts. The same value as
     /// [`ThemeColors::surface_raised`], never faded, for the reason
     /// [`ThemeColors::dialog_surface`] gives.
+    #[deprecated(note = "sirio.floating_surface")]
     pub floating_surface: Rgba,
     /// Generic hover wash — 5% neutral. Also the transcript row hover: a step
     /// lighter than [`ThemeColors::element_hover`], because transcript rows
     /// are wider and a 6% wash over that area reads as a block.
+    #[deprecated(note = "sirio.overlay")]
     pub overlay: Rgba,
     /// Pressed wash — 9% neutral, so press reads as more than hover.
+    #[deprecated(note = "sirio.overlay_strong")]
     pub overlay_strong: Rgba,
     /// Stronger divider, for seams that separate rather than merely delimit,
     /// and the neutral rail down a task, edit or tool card.
+    #[deprecated(note = "sirio.border_strong")]
     pub border_strong: Rgba,
     /// Keyboard-focus ring on a text field — bezel's `ring`, the translucent
     /// hairline every bezel input, select and control lights up with. A veil
     /// on the surface's own tone (white on dark, black on light), never the
     /// body text colour: that painted an opaque white frame on the dark theme.
+    #[deprecated(note = "sirio.ring")]
     pub ring: Rgba,
     /// Faintest text step — placeholder copy and disabled labels, below
     /// [`ThemeColors::text_faint`].
+    #[deprecated(note = "sirio.text_dim")]
     pub text_dim: Rgba,
     /// Brand coral. No role paints it any more: the shell's focus rings,
     /// caret, selection and active chrome are neutral, and every colour left in
@@ -224,31 +370,40 @@ pub struct ThemeColors {
     /// as a literal there, so the picker keeps drawing from `Theme` — and so
     /// the two invariants this value carries (it clears AA on its own surface,
     /// and it is not any agent's brand) still have something to hold.
+    #[deprecated(note = "sirio.brand_coral")]
     pub brand_coral: Rgba,
     /// Quantity blue: quota meters, and the clone and update progress bars.
     /// Blue means "how much", which is why a progress bar is never painted in
     /// a status hue — a bar filling up is not an alert.
+    #[deprecated(note = "sirio.quantity")]
     pub accent: Rgba,
     /// Selected-row fill, and the resting fill of a control the user clicks.
     /// Must stay distinguishable from [`ThemeColors::surface_raised`]; that is
     /// the property this token exists to preserve.
     /// [`ThemeColors::selection`] remains reserved for text-selection under
     /// glyphs.
+    #[deprecated(note = "ely.active")]
     pub element_active: Rgba,
     /// Text-selection wash, painted *under* glyphs: the top rung of the veil
     /// ladder, neutral in both appearances. Never used for row chrome — that
     /// is [`ThemeColors::element_active`].
+    #[deprecated(note = "ely.selection")]
     pub selection: Rgba,
     /// Inline `code` rounded wash, and the band under a diff hunk — the same
     /// wash, because a hunk is code too.
+    #[deprecated(note = "sirio.code_wash")]
     pub code_wash: Rgba,
     /// Light fill for primary buttons, dark glyph on top.
+    #[deprecated(note = "sirio.solid")]
     pub solid: Rgba,
     /// Glyph on primary buttons.
+    #[deprecated(note = "sirio.on_solid")]
     pub on_solid: Rgba,
     /// Star/favorite amber.
+    #[deprecated(note = "ely.warning")]
     pub favorite: Rgba,
     /// Soft danger fill (stop button hover).
+    #[deprecated(note = "sirio.danger_muted")]
     pub danger_muted: Rgba,
 }
 
@@ -442,6 +597,7 @@ impl ThemeColors {
         }
     }
 
+    #[allow(deprecated)]
     fn for_appearance(appearance: Appearance, base: BaseColor) -> Self {
         // Every neutral, status and diff token below is bezel's. What stays
         // Sirio's is listed in `Group C` of the design doc: the coral, the
@@ -591,7 +747,10 @@ impl ThemeColors {
         let on_inverse = Rgba::from(bezel.on_solid);
         let danger_soft = Rgba::from(bezel.danger_muted);
 
+        let (ely, sirio) = presets::preset(base, appearance);
         Self {
+            ely,
+            sirio,
             frame_surface,
             bg: frame_fallback,
             surface: panel_surface,
@@ -1756,6 +1915,7 @@ impl Theme {
     /// chosen opacity is remembered on the theme
     /// ([`Theme::translucent_surface_opacity`]) so every reinstall keeps it
     /// alongside the flag.
+    #[allow(deprecated)]
     pub fn with_translucency_at(self, enabled: bool, opacity: f32) -> Self {
         let mut theme = Self::for_appearance(self.mode, self.appearance, self.base_color);
         theme.typography = self.typography;
@@ -1775,6 +1935,25 @@ impl Theme {
         theme.colors.surface_raised = fade(theme.colors.surface_raised);
         theme.colors.input_bg = fade(theme.colors.input_bg);
         theme.colors.terminal_surface = fade(theme.colors.terminal_surface);
+        // The same surfaces under their new names, plus the copies Ely was
+        // handed *after* fading: overlay and tooltip_bg are surface_raised,
+        // on_accent is surface (spec §3.5).
+        let fade_hsla = |surface: Hsla| Hsla {
+            a: surface.a * opacity,
+            ..surface
+        };
+        let ely = &mut theme.colors.ely;
+        for surface in [
+            &mut ely.bg,
+            &mut ely.surface,
+            &mut ely.sunken,
+            &mut ely.overlay,
+            &mut ely.tooltip_bg,
+            &mut ely.on_accent,
+        ] {
+            *surface = fade_hsla(*surface);
+        }
+        theme.colors.sirio.terminal_surface = fade_hsla(theme.colors.sirio.terminal_surface);
         // `dialog_surface` and `floating_surface` are deliberately absent:
         // a sheet or toast an event puts up stays opaque over the blur.
         theme
@@ -2759,6 +2938,49 @@ mod tests {
                 (opaque.r, opaque.g),
                 "staying opaque must not change the menu's tone"
             );
+        }
+    }
+
+    #[test]
+    fn translucency_fades_every_surface_ely_receives() {
+        for base in BaseColor::ALL {
+            for appearance in [Appearance::Dark, Appearance::Light] {
+                let mode = match appearance {
+                    Appearance::Dark => ThemeMode::Dark,
+                    Appearance::Light => ThemeMode::Light,
+                };
+                let opaque = Theme::for_appearance(mode, appearance, base);
+                let faded = opaque.with_translucency_at(true, 0.7);
+                let (o, f) = (opaque.colors, faded.colors);
+                let pairs = [
+                    ("ely.bg", o.ely.bg, f.ely.bg),
+                    ("ely.surface", o.ely.surface, f.ely.surface),
+                    ("ely.sunken", o.ely.sunken, f.ely.sunken),
+                    ("ely.overlay", o.ely.overlay, f.ely.overlay),
+                    ("ely.tooltip_bg", o.ely.tooltip_bg, f.ely.tooltip_bg),
+                    ("ely.on_accent", o.ely.on_accent, f.ely.on_accent),
+                    (
+                        "sirio.terminal_surface",
+                        o.sirio.terminal_surface,
+                        f.sirio.terminal_surface,
+                    ),
+                ];
+                for (name, before, after) in pairs {
+                    assert_eq!(
+                        after.a,
+                        before.a * 0.7,
+                        "{base:?}/{appearance:?}: {name} not faded"
+                    );
+                    assert_eq!((after.h, after.s, after.l), (before.h, before.s, before.l), "{name}");
+                }
+                // An event-opened sheet and the frame material never fade.
+                assert_eq!(f.sirio.dialog_surface, o.sirio.dialog_surface);
+                assert_eq!(f.sirio.floating_surface, o.sirio.floating_surface);
+                assert_eq!(f.sirio.frame_surface, o.sirio.frame_surface);
+                // Text and washes keep full strength.
+                assert_eq!(f.ely.fg, o.ely.fg);
+                assert_eq!(f.ely.border, o.ely.border);
+            }
         }
     }
 
