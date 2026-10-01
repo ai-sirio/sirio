@@ -180,12 +180,12 @@ through the real app's restore path with the opt-in trace (`SIRIO_PERF_TRACE`,
 static content-free span names) and reports the process's CPU over the stream
 and the span totals. Two runs each, alternating.
 
-| Build | CPU s (of ~30.5 s) | `Chat.handle_event` | `Chat.parse_markdown` | `Chat.render` |
-|---|---|---|---|---|
-| release, baseline | 27.5 / 27.6 | 1817 / 1861 ms | 1628 / 1666 ms | 540 / 539 calls, 120 / 127 ms |
-| release, branch | 28.3 / 28.2 | 1893 / 1866 ms | 1689 / 1674 ms | 458 / 466 calls, 107 / 110 ms |
-| debug, baseline | 31.5 / 31.6 | 14094 / 13952 ms | 13671 / 13534 ms | 126 / 121 calls |
-| debug, branch | 31.8 / 32.5 | 13685 / 14740 ms | 13267 / 14307 ms | 87 / 84 calls |
+| Build | CPU s (of ~30.5 s) | `Chat.handle_event` | `Chat.parse_markdown` | `Chat.render` | `Chat.render_entry` |
+|---|---|---|---|---|---|
+| release, baseline | 27.5 / 27.6 | 1817 / 1861 ms | 1628 / 1666 ms | 540 / 539 calls, 120 / 127 ms | 556 / 550 calls, 4.8 / 4.7 ms |
+| release, branch | 28.3 / 28.2 | 1893 / 1866 ms | 1689 / 1674 ms | 458 / 466 calls, 107 / 110 ms | 461 / 470 calls, 7.7 / 7.6 ms |
+| debug, baseline | 31.5 / 31.6 | 14094 / 13952 ms | 13671 / 13534 ms | 126 / 121 calls | 136 / 129 calls, 5.2 / 5.4 ms |
+| debug, branch | 31.8 / 32.5 | 13685 / 14740 ms | 13267 / 14307 ms | 87 / 84 calls | 91 / 86 calls, 7.1 / 7.2 ms |
 
 Reading it:
 
@@ -197,6 +197,10 @@ Reading it:
   the same per call); the difference is in what they do not cover, GPUI's
   layout, paint and the software rasteriser (the Xvfb has no GPU, ~50 ms a frame).
   A 700×500 window gave the same ratio as 1280×833, so it is not fill area.
+  Nor is it the rows' own build: the list re-renders about one row a frame
+  (the streaming one), and `Chat.render_entry` — which includes the agent
+  mark, rebuilt per row — totals under 8 ms over the whole stream on either
+  build, a few milliseconds more on the branch against seconds of missing frames.
   It was not localised further: stack sampling was not possible here
   (`ptrace_scope=1`, no `perf`), and the native GPUI journal needs a feature
   build and a driver this repository does not carry. **Read it as a measured,

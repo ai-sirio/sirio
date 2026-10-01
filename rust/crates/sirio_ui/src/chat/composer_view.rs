@@ -76,6 +76,16 @@ pub(crate) enum PillDot {
     Offline,
 }
 
+impl PillDot {
+    pub(crate) fn color(self) -> gpui::Rgba {
+        match self {
+            PillDot::Busy => gpui::rgb(0xf5a623),
+            PillDot::Ready => gpui::rgb(0x53c653),
+            PillDot::Offline => gpui::rgb(0x8a8d99),
+        }
+    }
+}
+
 /// The status pill's dot and label. The label is the session's permission
 /// mode whenever the agent has advertised one: the pill is the mode
 /// selector, and its word must not flip to "working" every time a turn
@@ -1167,19 +1177,23 @@ impl Chat {
         }
 
         // Enter queues while a turn runs and sends otherwise; the hint says
-        // which, under the card rather than inside it.
-        let hint = div()
-            .id("composer-input-hint")
-            .debug_selector(|| "composer-input-hint".into())
-            .w_full()
-            .flex()
-            .justify_center()
-            .pt(px(4.0))
-            .child(InputHint::new().enter(if streaming {
-                "to queue ·"
-            } else {
-                "to send ·"
-            }));
+        // which, under the card rather than inside it. While the composer is
+        // out of service (a request waits, the agent is offline) Enter does
+        // neither, and the placeholder already names why — no hint then.
+        let hint = (!self.composer_disabled()).then(|| {
+            div()
+                .id("composer-input-hint")
+                .debug_selector(|| "composer-input-hint".into())
+                .w_full()
+                .flex()
+                .justify_center()
+                .pt(px(4.0))
+                .child(InputHint::new().enter(if streaming {
+                    "to queue ·"
+                } else {
+                    "to send ·"
+                }))
+        });
 
         div()
             .w_full()
@@ -1203,7 +1217,7 @@ impl Chat {
                     )
                     .child(prompt),
             )
-            .child(hint)
+            .children(hint)
             .into_any_element()
     }
 }

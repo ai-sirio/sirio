@@ -589,6 +589,74 @@ async fn ely_expired_request_cannot_answer_the_next_request(cx: &mut TestAppCont
     assert_eq!(wire[0]["result"]["outcome"]["optionId"], "allow:this-call");
 }
 
+#[gpui::test]
+async fn ely_composer_hint_names_enter_only_while_enter_acts(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let (chat, cx) = super::tests::chat_view(cx, &["ely-permission", dir.0.to_str().unwrap()]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("composer-input-hint").is_some(),
+        "an idle composer says what Enter does"
+    );
+    chat.update(cx, |v, cx| {
+        v.control_send("inspect", cx);
+    });
+    pump_chat_until(cx, &chat, |v| v.pending_question().is_some());
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("composer-input-hint").is_none(),
+        "while a request waits Enter neither sends nor queues, so no hint may promise it"
+    );
+}
+
+#[gpui::test]
+async fn ely_header_names_the_connection_and_activity_state(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let (chat, cx) = super::tests::chat_view(cx, &["staged", dir.0.to_str().unwrap()]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    refresh_frame(cx);
+    let header = cx.debug_bounds("chat-header").unwrap();
+    let idle = cx
+        .debug_bounds("chat-header-state-idle")
+        .expect("a connected, idle chat says so in its header");
+    assert!(inside(header, idle));
+    chat.update(cx, |v, cx| {
+        v.control_send("hello", cx);
+    });
+    pump_chat_until(cx, &chat, |v| v.streaming);
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("chat-header-state-working").is_some());
+    assert!(cx.debug_bounds("chat-header-state-idle").is_none());
+    std::fs::write(dir.0.join("go"), "go").unwrap();
+    pump_chat_until(cx, &chat, |v| !v.streaming);
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("chat-header-state-idle").is_some());
+}
+
+#[gpui::test]
+async fn ely_generating_indicator_sits_on_the_transcript_text_column(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let (chat, cx) = super::tests::chat_view(cx, &["staged", dir.0.to_str().unwrap()]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    chat.update(cx, |v, cx| {
+        v.control_send("hello", cx);
+    });
+    pump_chat_until(cx, &chat, |v| v.streaming);
+    refresh_frame(cx);
+    let transcript = cx.debug_bounds("chat-transcript").unwrap();
+    let indicator = cx.debug_bounds("chat-generating-indicator").unwrap();
+    let column = transcript.left() + px(24.0);
+    assert!(
+        (indicator.left() - column).abs() < px(0.5),
+        "the Thinking row starts where transcript text starts: {:?} vs {:?}",
+        indicator.left(),
+        column
+    );
+    std::fs::write(dir.0.join("go"), "go").unwrap();
+    pump_chat_until(cx, &chat, |v| !v.streaming);
+}
+
 fn user_turns(chat: &Entity<Chat>, cx: &VisualTestContext) -> usize {
     chat.read_with(&cx.cx, |chat, _| {
         chat.entries

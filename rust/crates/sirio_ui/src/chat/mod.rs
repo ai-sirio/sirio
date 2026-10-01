@@ -12,7 +12,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
     SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
-    quad, relative, rgb, transparent_black,
+    quad, relative, transparent_black,
 };
 use sirio_acp::{
     AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
@@ -6356,12 +6356,20 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                         .debug_selector(|| "chat-generating-spinner".into())
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
+                        // The transcript's own side padding: the row starts on
+                        // the text column, not at the box's edge.
+                        .px(px(24.0))
                         .pt(px(6.0))
                         // The transient row is the thought header itself — orb,
                         // `Thinking`, same paddings — so a run in progress has one
-                        // shape whether or not a thought has arrived. `usize::MAX`
-                        // only feeds the row's marker ids; nothing reads them.
-                        .child(ely_gpui_component::chat::ThinkingIndicator::new("chat-generating-indicator")),
+                        // shape whether or not a thought has arrived.
+                        .child(
+                            div()
+                                .debug_selector(|| "chat-generating-indicator".into())
+                                .child(ely_gpui_component::chat::ThinkingIndicator::new(
+                                    "chat-generating-indicator",
+                                )),
+                        ),
                 )
             })
 

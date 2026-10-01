@@ -48,11 +48,7 @@ impl Chat {
             self.client.is_some(),
             self.mode_catalog.as_ref(),
         );
-        let dot = match dot {
-            composer_view::PillDot::Busy => rgb(0xf5a623),
-            composer_view::PillDot::Ready => rgb(0x53c653),
-            composer_view::PillDot::Offline => rgb(0x8a8d99),
-        };
+        let dot = dot.color();
         let mode_selectable = self.mode_selectable();
         let status_pill = div()
             .flex()

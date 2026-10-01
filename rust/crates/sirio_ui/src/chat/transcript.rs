@@ -94,6 +94,15 @@ impl Chat {
     }
     pub(crate) fn render_header(&self, theme: &Theme, _: &Context<Self>) -> AnyElement {
         let name = self.agent_badge_name();
+        // The connection/activity word alone, never the permission mode: the
+        // control row's pill names the mode, the header what the agent is
+        // doing.
+        let (dot, state) = super::composer_view::status_pill_content(
+            self.connecting,
+            self.streaming,
+            self.client.is_some(),
+            None,
+        );
         let mut header = MessageHeader::new("chat-agent-header", name.clone());
         if let Some(model) = self
             .available_models
@@ -121,6 +130,21 @@ impl Chat {
                 theme,
             ))
             .child(header)
+            .child(
+                div()
+                    .debug_selector({
+                        let state = state.clone();
+                        move || format!("chat-header-state-{state}")
+                    })
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot.color()))
+                    .child(state),
+            )
             .into_any_element()
     }
     pub(super) fn render_entry(
