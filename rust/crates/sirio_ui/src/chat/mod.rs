@@ -5946,7 +5946,7 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 },
             );
         }
-        Entry::Plan { entries, .. } => {
+        Entry::Plan { entries, approval } => {
             row.insert("kind".into(), "plan".into());
             row.insert(
                 "text".into(),
@@ -5956,6 +5956,22 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
+            // The approval a plan waits on is a request like any other: its
+            // handle and its state, so a control client can answer it
+            // (`surface.chat.permission`) without guessing.
+            if let Some(approval) = approval {
+                row.insert("id".into(), approval.request_id.to_string());
+                row.insert(
+                    "status".into(),
+                    if approval.expired {
+                        "expired".into()
+                    } else if approval.resolved.is_some() {
+                        "selected".into()
+                    } else {
+                        "pending".into()
+                    },
+                );
+            }
         }
         Entry::TurnFooter(text) => {
             row.insert("kind".into(), "turn".into());

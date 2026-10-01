@@ -259,11 +259,11 @@ fn main() {
                             };
                             let agent = std::env::var("ELY_PROBE_AGENT")
                                 .unwrap_or_else(|_| "claude".into());
-                            let name = if agent == "codex" {
-                                "Codex"
-                            } else {
-                                "Claude Code"
-                            };
+                            let name = sirio_agents::ALL
+                                .iter()
+                                .find(|adapter| adapter.id() == agent)
+                                .map(|adapter| adapter.display_name())
+                                .unwrap_or("Claude Code");
                             chat.set_agent_identity(Some(agent), Some(name.into()));
                             if let Ok(history) = std::env::var("ELY_PROBE_HISTORY") {
                                 chat.restore_transcript(&history, cx);

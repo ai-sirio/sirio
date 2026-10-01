@@ -246,10 +246,10 @@ impl Render for ActivityProbe {
                     )
                     .expanded(tool_open, move |desired, _, cx| {
                         tool_owner.update(cx, |v, cx| {
-                            if let Some(Entry::ToolCall { expanded, .. }) = v.entries.get_mut(1) {
-                                if *expanded != desired {
-                                    v.toggle_tool_call_expanded(1, cx);
-                                }
+                            if let Some(Entry::ToolCall { expanded, .. }) = v.entries.get_mut(1)
+                                && *expanded != desired
+                            {
+                                v.toggle_tool_call_expanded(1, cx);
                             }
                         })
                     }),
@@ -264,10 +264,10 @@ impl Render for ActivityProbe {
                     )
                     .expanded(thought_open, move |desired, _, cx| {
                         thought_owner.update(cx, |v, cx| {
-                            if let Some(Entry::Thought { open, .. }) = v.entries.first() {
-                                if open.get(false) != desired {
-                                    v.toggle_thought(0, cx);
-                                }
+                            if let Some(Entry::Thought { open, .. }) = v.entries.first()
+                                && open.get(false) != desired
+                            {
+                                v.toggle_thought(0, cx);
                             }
                         })
                     }),

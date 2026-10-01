@@ -307,10 +307,10 @@ impl Chat {
                 .header_selector(format!("thought-toggle-{entry_index}"))
                 .expanded(is_open, move |desired, _, cx| {
                     toggle_entity.update(cx, |chat, cx| {
-                        if let Some(Entry::Thought { open, .. }) = chat.entries.get(entry_index) {
-                            if open.get(chat.thought_is_streaming(entry_index)) != desired {
-                                chat.toggle_thought(entry_index, cx);
-                            }
+                        if let Some(Entry::Thought { open, .. }) = chat.entries.get(entry_index)
+                            && open.get(chat.thought_is_streaming(entry_index)) != desired
+                        {
+                            chat.toggle_thought(entry_index, cx);
                         }
                     })
                 });

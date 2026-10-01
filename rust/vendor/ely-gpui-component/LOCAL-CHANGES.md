@@ -110,3 +110,26 @@ physical Wayland session and native macOS/Windows input are unverified.
   note, no-ops in release builds); `Menu::step` and `Menu::run` are public so a
   host can walk and press rows itself. The stateful hosts (`DropdownMenu`,
   `ContextMenu`, ...) are untouched.
+
+## Final compatibility evidence
+
+Seen on Linux x86_64 (Arch, kernel 7.2.3) with rustc 1.98.1, cargo 1.98.1 and
+Zig 0.15.2; `docs/testing/ely-agent-chat.md` has the commands, the runner and
+what each check does and does not prove.
+
+- **One GPUI.** `cargo metadata --locked` resolves 30 `gpui`/`zed` packages, none
+  with more than one version. This crate depends on `bezel-gpui =0.3.8` and
+  `bezel-gpui-platform =0.3.8`, the packages Sirio pins.
+- **This crate:** `cargo test -p ely-gpui-component --features test-support`,
+  79 passed (77 without the feature: two fit tests need it). Its own
+  warnings — unused `pub(crate)` re-exports of the parts of Ely this chat does
+  not use — are upstream's subset, not suppressed.
+- **The chat on top of it:** 205 chat tests, the real-app runner (11 scenarios,
+  each on an isolated instance), the five agent marks in dark and light.
+- **Platforms:** Linux X11 only (isolated Xvfb, software Mesa). macOS, Windows
+  and a physical Wayland session were not available and are **unverified**; a
+  cross-target source check was not obtained (no macOS SDK for a dependency's C
+  build). Ely's own macOS Gallery says nothing about Sirio's other platforms.
+- **Not established:** a real IME, and rewind natively.
+
+Every deviation from upstream is listed above, with the file it changes.

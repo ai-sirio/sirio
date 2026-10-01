@@ -20478,7 +20478,9 @@ fn restore_tabs_with_terminal_cache(
                     }
                     chat
                 });
-                chat.update(cx, |chat, _| chat.set_agent_identity(agent_id.clone(), agent_name.clone()));
+                chat.update(cx, |chat, _| {
+                    chat.set_agent_identity(agent_id.clone(), agent_name.clone())
+                });
                 TabContent::Chat(chat)
             }
             Some(TabKind::Terminal) => {
@@ -21005,7 +21007,9 @@ fn restore_tabs_in_workspace(
                     }
                     chat
                 });
-                chat.update(cx, |chat, _| chat.set_agent_identity(agent_id.clone(), agent_name.clone()));
+                chat.update(cx, |chat, _| {
+                    chat.set_agent_identity(agent_id.clone(), agent_name.clone())
+                });
                 TabContent::Chat(chat)
             }
             Some(TabKind::Terminal) => {
