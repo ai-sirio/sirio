@@ -13,6 +13,78 @@ use gpui::{
 #[path = "../src/chat/identity.rs"]
 mod identity;
 
+/// Three chat sessions for the History popover: one with a title far longer
+/// than the menu, so a narrow pane shows how a row cuts it.
+fn seed_history(path: &std::path::Path) {
+    use sirio_persistence::{
+        AppDatabase, ChatEntry, ChatTranscript, ChatTurn, ProjectRecord, TabRecord, WorktreeRecord,
+    };
+    let db = AppDatabase::open(path).expect("probe history database");
+    db.save_project(&ProjectRecord {
+        id: "project".into(),
+        name: "Project".into(),
+        root_path: "/tmp/project".into(),
+        order_idx: 0,
+        color_hex: None,
+        display_name: None,
+        icon_kind: "icon".into(),
+        icon_value: None,
+        avatar_image: None,
+        default_worktree_base: None,
+        worktree_location_override: None,
+    })
+    .unwrap();
+    db.save_worktree(&WorktreeRecord {
+        id: "worktree".into(),
+        project_id: "project".into(),
+        branch: "main".into(),
+        path: "/tmp/project".into(),
+        order_idx: 0,
+        is_primary: true,
+        comment: None,
+        created_at: None,
+        updated_at: None,
+        secondary_pane_hidden: false,
+    })
+    .unwrap();
+    let tab = |id: &str, title: &str| TabRecord {
+        id: id.into(),
+        worktree_id: "worktree".into(),
+        title: title.into(),
+        kind: "chat".into(),
+        agent_id: None,
+        agent_session_id: None,
+        order_idx: 0,
+        is_active: false,
+        last_event_at: None,
+        closed_at: None,
+    };
+    let titles = [
+        ("current-chat", "Current chat"),
+        (
+            "long-chat",
+            "Refactor the whole authentication layer so that sessions survive a restart and tokens rotate",
+        ),
+        ("short-chat", "Fix the flaky test"),
+        ("empty-chat", ""),
+    ];
+    db.save_tabs("worktree", &titles.map(|(id, title)| tab(id, title)))
+        .unwrap();
+    for (id, _) in titles.iter().skip(1) {
+        db.save_chat_transcript(&ChatTranscript {
+            tab_id: (*id).into(),
+            turns: vec![ChatTurn {
+                entries: vec![ChatEntry::UserMessage {
+                    text: format!("said in {id}"),
+                    at: None,
+                }],
+            }],
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+}
+
 struct Probe {
     input: Entity<TextInput>,
     messages: Vec<String>,
@@ -122,6 +194,12 @@ fn main() {
             } else {
                 sirio_theme::Theme::set_mode(sirio_theme::ThemeMode::Dark, cx);
             }
+            if let Some(size) = std::env::var("ELY_PROBE_UI_SIZE")
+                .ok()
+                .and_then(|size| size.parse::<i32>().ok())
+            {
+                sirio_theme::Theme::set_interface_font_size(size, cx);
+            }
             for (path, _) in identity::ASSETS {
                 assert!(identity::asset(path).is_some());
                 assert!(
@@ -159,11 +237,26 @@ fn main() {
                             if let Ok(extra) = std::env::var("ELY_PROBE_FIXTURE_DIR") {
                                 command = command.arg(extra);
                             }
-                            let mut chat = sirio_ui::chat::Chat::launch_with_command(
-                                sirio_acp::LaunchSpec::Acp(command),
-                                std::env::temp_dir(),
-                                cx,
-                            );
+                            let launch = sirio_acp::LaunchSpec::Acp(command);
+                            let mut chat = match std::env::var_os("ELY_PROBE_HISTORY_DB") {
+                                Some(path) => {
+                                    let path = std::path::PathBuf::from(path);
+                                    seed_history(&path);
+                                    sirio_ui::chat::Chat::launch_with_command_and_persistence(
+                                        launch,
+                                        std::env::temp_dir(),
+                                        path,
+                                        "current-chat".into(),
+                                        "worktree".into(),
+                                        cx,
+                                    )
+                                }
+                                None => sirio_ui::chat::Chat::launch_with_command(
+                                    launch,
+                                    std::env::temp_dir(),
+                                    cx,
+                                ),
+                            };
                             let agent = std::env::var("ELY_PROBE_AGENT")
                                 .unwrap_or_else(|_| "claude".into());
                             let name = if agent == "codex" {

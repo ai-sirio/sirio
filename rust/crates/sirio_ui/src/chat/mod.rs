@@ -45,7 +45,10 @@ mod ely_tests;
 mod identity;
 pub use ely::ChatAssets;
 mod composer_view;
+mod controls;
+mod history;
 mod list_scroll;
+mod menus;
 mod question_dock;
 mod thought;
 mod tool_calls;
@@ -651,7 +654,12 @@ actions!(
         PasteComposer,
         PopupPrevious,
         PopupNext,
-        PopupAccept
+        PopupAccept,
+        /// The catalogue popups (model, mode, thinking): the keys mark a row
+        /// and Enter chooses it.
+        PickerPrevious,
+        PickerNext,
+        PickerChoose
     ]
 );
 
@@ -1959,6 +1967,11 @@ pub struct Chat {
     /// Scroll position of the model picker's result list, kept across
     /// re-renders the way `settings.rs`'s `detail_scroll` is.
     model_picker_scroll: ScrollHandle,
+    /// The row the keys have marked in the open catalogue popup.
+    picker_cursor: Option<usize>,
+    /// The model search the cursor was last placed for, so a changed query
+    /// restarts it on the first match and a moved caret does not.
+    picker_query: String,
     /// F-CHAT-16: the model picker's own search query — live in the field,
     /// read from it at render time. Matches `ModelPickerFilter`'s Swift
     /// semantics — trimmed, case-insensitive substring match against
@@ -2246,8 +2259,15 @@ impl Chat {
                 .with_placeholder("Search models\u{2026}")
                 .with_key_context("ChatModelSearch")
         });
-        cx.observe(&model_search_field, |_, _, cx| cx.notify())
-            .detach();
+        cx.observe(&model_search_field, |chat: &mut Self, field, cx| {
+            let query = field.read(cx).content().to_string();
+            if query != chat.picker_query {
+                chat.picker_query = query;
+                chat.picker_cursor = Some(0);
+            }
+            cx.notify();
+        })
+        .detach();
 
         let composer_field = cx.new(|cx| {
             TextField::new(cx)
@@ -2309,6 +2329,8 @@ impl Chat {
             selected_model: None,
             model_picker_open: false,
             model_picker_scroll: ScrollHandle::new(),
+            picker_cursor: None,
+            picker_query: String::new(),
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
@@ -2585,6 +2607,28 @@ impl Chat {
             // open, so Escape has to resolve from its context too.
             KeyBinding::new("escape", Cancel, Some("ChatModelSearch")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
+            KeyBinding::new("escape", Cancel, Some("ChatEffortPicker")),
+            KeyBinding::new("escape", Cancel, Some("ChatThinkingPicker")),
+            KeyBinding::new("escape", Cancel, Some("ChatOverflowMenu")),
+            KeyBinding::new("escape", Cancel, Some("ChatHistoryMenu")),
+            // The catalogue popups. The model picker's search field holds the
+            // focus while it is open, so the keys resolve from its context.
+            KeyBinding::new("up", PickerPrevious, Some("ChatModelSearch")),
+            KeyBinding::new("down", PickerNext, Some("ChatModelSearch")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatModelSearch")),
+            KeyBinding::new("return", PickerChoose, Some("ChatModelSearch")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatModelPicker")),
+            KeyBinding::new("down", PickerNext, Some("ChatModelPicker")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatModelPicker")),
+            KeyBinding::new("return", PickerChoose, Some("ChatModelPicker")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatThinkingPicker")),
+            KeyBinding::new("down", PickerNext, Some("ChatThinkingPicker")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatThinkingPicker")),
+            KeyBinding::new("return", PickerChoose, Some("ChatThinkingPicker")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatOverflowMenu")),
+            KeyBinding::new("down", PickerNext, Some("ChatOverflowMenu")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatOverflowMenu")),
+            KeyBinding::new("return", PickerChoose, Some("ChatOverflowMenu")),
             // F-CHAT-25: the question answer field owns Enter (send the
             // answer) and Escape (cancel the question) while it has focus.
             KeyBinding::new("enter", SendAnswer, Some("ChatQuestionAnswer")),
@@ -3768,6 +3812,8 @@ impl Chat {
             // the popover view is recreated.
             self.model_search_field
                 .update(cx, |field, cx| field.clear(cx));
+            self.picker_query.clear();
+            self.start_picker_cursor(cx);
             let focus = self.model_search_field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
             window.on_next_frame(move |window, cx| window.focus(&focus, cx));
@@ -3811,6 +3857,7 @@ impl Chat {
         self.effort_picker_open = false;
         self.mode_picker_open = !self.mode_picker_open;
         if self.mode_picker_open {
+            self.start_picker_cursor(cx);
             let focus = self.mode_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
@@ -3934,6 +3981,7 @@ impl Chat {
         self.context_popover_open = false;
         self.thinking_picker_open = !self.thinking_picker_open;
         if self.thinking_picker_open {
+            self.start_picker_cursor(cx);
             let focus = self.thinking_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
@@ -4203,58 +4251,6 @@ impl Chat {
         }
     }
 
-    fn render_composer_context_menu(
-        &self,
-        bezel_theme: &bezel::theme::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let position = *self
-            .composer_context_menu
-            .get()
-            .expect("mounted composer context menu");
-        let closing = self.composer_context_menu.closing_since();
-        let painter = bezel::motion::Painter::of(cx);
-        let entity = cx.entity();
-        let mut card = popover::popover_card(bezel_theme)
-            .id("composer-context-menu")
-            .debug_selector(|| "composer-context-menu".into())
-            .w(px(160.0));
-        for item in ComposerContextItem::ALL {
-            let selector = format!("composer-context-{}", item.selector());
-            let row_entity = entity.clone();
-            let row_selector = selector.clone();
-            card = card.child(
-                popover::menu_row(
-                    bezel_theme,
-                    false,
-                    bezel::motion::Fade::new(painter, selector.clone()),
-                )
-                .id(SharedString::from(selector))
-                .debug_selector(move || row_selector.clone())
-                .w_full()
-                .min_h(px(29.0))
-                .text_color(bezel_theme.text)
-                .on_click(move |_, window, cx| {
-                    row_entity.update(cx, |chat, cx| {
-                        chat.composer_context_action(item, window, cx)
-                    });
-                })
-                .child(item.label()),
-            );
-        }
-        // `menu_at` owns the deferred layer; dismissal stays on the card
-        // because bezel leaves that listener to the caller.
-        let card = card.on_mouse_down_out(move |_, _, cx| {
-            entity.update(cx, |chat, cx| chat.close_composer_context_menu(cx));
-        });
-        popover::menu_at(
-            "composer-context-menu-layer",
-            position,
-            card.into_any_element(),
-            closing,
-        )
-    }
-
     // --- Transcript context menu (right-click Copy / Select All) ---
 
     /// Secondary click on the transcript: the Copy / Select All menu at the
@@ -4308,56 +4304,6 @@ impl Chat {
             TranscriptContextItem::Copy => self.copy_transcript(&CopyTranscript, window, cx),
             TranscriptContextItem::SelectAll => self.select_all_transcript(cx),
         }
-    }
-
-    fn render_transcript_context_menu(
-        &self,
-        bezel_theme: &bezel::theme::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let position = *self
-            .transcript_context_menu
-            .get()
-            .expect("mounted transcript context menu");
-        let closing = self.transcript_context_menu.closing_since();
-        let painter = bezel::motion::Painter::of(cx);
-        let entity = cx.entity();
-        let mut card = popover::popover_card(bezel_theme)
-            .id("transcript-context-menu")
-            .debug_selector(|| "transcript-context-menu".into())
-            .w(px(160.0));
-        for item in TranscriptContextItem::ALL {
-            let selector = format!("transcript-context-{}", item.selector());
-            let row_entity = entity.clone();
-            let row_selector = selector.clone();
-            card = card.child(
-                popover::menu_row(
-                    bezel_theme,
-                    false,
-                    bezel::motion::Fade::new(painter, selector.clone()),
-                )
-                .id(SharedString::from(selector))
-                .debug_selector(move || row_selector.clone())
-                .w_full()
-                .min_h(px(29.0))
-                .text_color(bezel_theme.text)
-                .on_click(move |_, window, cx| {
-                    row_entity.update(cx, |chat, cx| {
-                        chat.transcript_context_action(item, window, cx)
-                    });
-                })
-                .child(item.label()),
-            );
-        }
-        let card = card.on_mouse_down_out(move |_, _, cx| {
-            entity.update(cx, |chat, cx| chat.close_transcript_context_menu(cx));
-        });
-        popover::menu_at(
-            "transcript-context-menu-layer",
-            position,
-            card.into_any_element(),
-            closing,
-        )
     }
 
     // --- File drop (F-CHAT-13) ---
@@ -4499,6 +4445,7 @@ impl Chat {
     fn toggle_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overflow_open = !self.overflow_open;
         if self.overflow_open {
+            self.start_picker_cursor(cx);
             let focus = self.overflow_focus.clone();
             window.focus(&focus, cx);
         }
@@ -4955,23 +4902,28 @@ impl Chat {
         self.send(cx);
     }
 
-    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if self.composer_context_menu.is_open() {
             self.close_composer_context_menu(cx);
-        } else if self.model_picker_open {
+        } else if self.model_picker_open
+            || self.mode_picker_open
+            || self.thinking_picker_open
+            || self.context_popover_open
+            || self.effort_picker_open
+            || self.overflow_open
+            || self.history_open
+        {
+            // Every popup the controls open takes the focus; closing one
+            // returns it to the composer it came from.
             self.model_picker_open = false;
-            cx.notify();
-        } else if self.mode_picker_open {
             self.mode_picker_open = false;
-            cx.notify();
-        } else if self.context_popover_open {
+            self.thinking_picker_open = false;
             self.context_popover_open = false;
-            cx.notify();
-        } else if self.effort_picker_open {
             self.effort_picker_open = false;
-            cx.notify();
-        } else if self.overflow_open {
             self.overflow_open = false;
+            self.history_open = false;
+            self.picker_cursor = None;
+            self.focus_composer(window, cx);
             cx.notify();
         } else if self.open_token_popup() != TokenPopup::None {
             self.slash_dismissed = true;

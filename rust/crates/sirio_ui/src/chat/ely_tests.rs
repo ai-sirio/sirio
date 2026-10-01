@@ -723,3 +723,266 @@ async fn ely_composer_sends_an_attachment_without_text(cx: &mut TestAppContext) 
     );
     assert!(chat.read_with(&cx.cx, |v, _| v.attachments.is_empty()));
 }
+
+/// Whether `inner` lies within `outer`, to the half pixel layout rounds to.
+fn inside(outer: gpui::Bounds<gpui::Pixels>, inner: gpui::Bounds<gpui::Pixels>) -> bool {
+    let slack = px(0.5);
+    inner.left() >= outer.left() - slack
+        && inner.top() >= outer.top() - slack
+        && inner.right() <= outer.right() + slack
+        && inner.bottom() <= outer.bottom() + slack
+}
+
+fn history_database(path: &std::path::Path, long_title: &str) {
+    use sirio_persistence::{ProjectRecord, TabRecord, WorktreeRecord};
+    let db = AppDatabase::open(path).unwrap();
+    db.save_project(&ProjectRecord {
+        id: "project".into(),
+        name: "Project".into(),
+        root_path: "/tmp/project".into(),
+        order_idx: 0,
+        color_hex: None,
+        display_name: None,
+        icon_kind: "icon".into(),
+        icon_value: None,
+        avatar_image: None,
+        default_worktree_base: None,
+        worktree_location_override: None,
+    })
+    .unwrap();
+    db.save_worktree(&WorktreeRecord {
+        id: "worktree".into(),
+        project_id: "project".into(),
+        branch: "main".into(),
+        path: "/tmp/project".into(),
+        order_idx: 0,
+        is_primary: true,
+        comment: None,
+        created_at: None,
+        updated_at: None,
+        secondary_pane_hidden: false,
+    })
+    .unwrap();
+    let tab = |id: &str, title: &str| TabRecord {
+        id: id.into(),
+        worktree_id: "worktree".into(),
+        title: title.into(),
+        kind: "chat".into(),
+        agent_id: None,
+        agent_session_id: None,
+        order_idx: 0,
+        is_active: false,
+        last_event_at: None,
+        closed_at: None,
+    };
+    db.save_tabs(
+        "worktree",
+        &[
+            tab("current-chat", "Current chat"),
+            tab("long-title-chat", long_title),
+            tab("short-chat", "Short chat"),
+        ],
+    )
+    .unwrap();
+    for (id, text) in [
+        ("long-title-chat", "said in the long titled chat"),
+        ("short-chat", "said in the short chat"),
+    ] {
+        db.save_chat_transcript(&ChatTranscript {
+            tab_id: id.into(),
+            turns: vec![ChatTurn {
+                entries: vec![ChatEntry::UserMessage {
+                    text: text.into(),
+                    at: None,
+                }],
+            }],
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+#[gpui::test]
+async fn ely_history_opens_the_chosen_session_and_confirms_deletion(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let database_path = dir.0.join("history.db");
+    let long_title = "LongSessionTitle".repeat(12);
+    history_database(&database_path, &long_title);
+    cx.update(Theme::init);
+    cx.update(bezel::ui::input::init);
+    cx.update(init);
+    let path = database_path.clone();
+    let (chat, cx) = cx.add_window_view(move |_, cx| {
+        let mut chat = Chat::new(
+            Some(LaunchSpec::Acp(AgentCommand::new(
+                "/definitely/missing/sirio-acp-agent",
+            ))),
+            std::env::temp_dir(),
+            cx,
+        );
+        chat.persistence = Some(ChatPersistence {
+            database_path: path,
+            tab_id: "current-chat".into(),
+            worktree_id: "worktree".into(),
+        });
+        chat
+    });
+    refresh_frame(cx);
+
+    let overflow = cx.debug_bounds("composer-overflow").unwrap();
+    cx.simulate_click(overflow.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let history = cx.debug_bounds("overflow-chat-history").unwrap();
+    cx.simulate_click(history.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+
+    // The long title is cut inside the row; its controls stay in the row.
+    let row = cx.debug_bounds("chat-history-row-long-title-chat").unwrap();
+    let open = cx
+        .debug_bounds("chat-history-open-long-title-chat")
+        .unwrap();
+    let delete = cx
+        .debug_bounds("chat-history-delete-long-title-chat")
+        .unwrap();
+    assert!(inside(row, open) && inside(row, delete));
+    assert!(row.size.width <= px(280.0), "{row:?}");
+
+    // Deleting asks first; Cancel leaves the session where it was.
+    cx.simulate_click(delete.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+    let cancel = cx
+        .debug_bounds("chat-history-cancel-delete-long-title-chat")
+        .expect("the row asks for confirmation");
+    assert!(inside(
+        row,
+        cx.debug_bounds("chat-history-confirm-delete-long-title-chat")
+            .unwrap()
+    ));
+    cx.simulate_click(cancel.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("chat-history-delete-long-title-chat")
+            .is_some()
+    );
+    let stored = |path: &std::path::Path| {
+        AppDatabase::open(path)
+            .unwrap()
+            .chat_sessions("worktree")
+            .unwrap()
+            .into_iter()
+            .map(|session| session.tab_id)
+            .collect::<Vec<_>>()
+    };
+    assert!(stored(&database_path).contains(&"long-title-chat".to_string()));
+
+    // Confirming removes the stored transcript and the row.
+    let delete = cx
+        .debug_bounds("chat-history-delete-long-title-chat")
+        .unwrap();
+    cx.simulate_click(delete.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+    let confirm = cx
+        .debug_bounds("chat-history-confirm-delete-long-title-chat")
+        .unwrap();
+    cx.simulate_click(confirm.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("chat-history-row-long-title-chat")
+            .is_none()
+    );
+    assert!(!stored(&database_path).contains(&"long-title-chat".to_string()));
+
+    // Opening another session rebinds this tab's persistence to it.
+    let open = cx.debug_bounds("chat-history-open-short-chat").unwrap();
+    cx.simulate_click(open.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    chat.read_with(&cx.cx, |chat, _| {
+        assert_eq!(
+            chat.persistence.as_ref().map(|p| p.tab_id.as_str()),
+            Some("short-chat")
+        );
+        assert!(!chat.history_open);
+        assert!(chat.entries.iter().any(
+            |entry| matches!(entry, Entry::User { text, .. } if text == "said in the short chat")
+        ));
+    });
+}
+
+#[gpui::test]
+async fn ely_narrow_catalogue_popup_keeps_send_and_focus_reachable(cx: &mut TestAppContext) {
+    let (chat, cx) = super::tests::chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    cx.simulate_resize(size(px(430.0), px(720.0)));
+    chat.update(cx, |chat, cx| {
+        chat.has_completed_turn = true;
+        chat.available_models = vec![
+            ModelOption {
+                id: "advertised-long".into(),
+                name: "An agent reported model whose label is far too long for a 430 pixel pane"
+                    .into(),
+                description: None,
+            },
+            ModelOption {
+                id: "advertised-short".into(),
+                name: "Short".into(),
+                description: None,
+            },
+        ];
+        chat.model_config_id = Some("model".into());
+        chat.selected_model = Some("advertised-short".into());
+        cx.notify();
+    });
+    refresh_frame(cx);
+    let pane = cx.debug_bounds("chat-root").unwrap();
+
+    let chip = cx.debug_bounds("model-chip").unwrap();
+    cx.simulate_click(chip.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+    refresh_frame(cx);
+    let send_bounds = cx.debug_bounds("send").expect("send stays drawn");
+    assert!(inside(pane, send_bounds), "{send_bounds:?} in {pane:?}");
+
+    // Up from the current model reaches the long one; Enter chooses it.
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    refresh_frame(cx);
+    let selected_row_bounds = cx
+        .debug_bounds("model-option-advertised-long")
+        .expect("the long label's row is drawn");
+    assert!(
+        inside(pane, selected_row_bounds),
+        "{selected_row_bounds:?} in {pane:?}"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let selected_model_id = chat.read_with(&cx.cx, |v, _| v.selected_model.clone());
+    assert_eq!(selected_model_id.as_deref(), Some("advertised-long"));
+    assert!(
+        cx.debug_bounds("model-picker").is_none(),
+        "choosing closes it"
+    );
+
+    // Escape closes a reopened picker and the composer has the focus again.
+    refresh_frame(cx);
+    let chip = cx.debug_bounds("model-chip").unwrap();
+    cx.simulate_click(chip.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("model-picker").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    refresh_frame(cx);
+    assert!(cx.debug_bounds("model-picker").is_none());
+    let composer = chat.read_with(&cx.cx, |v, cx| v.composer_field.read(cx).focus_handle(cx));
+    let composer_focus_after_escape =
+        cx.update(|window, app| window.focused(app).is_some_and(|f| f == composer));
+    assert!(composer_focus_after_escape, "Escape hands the focus back");
+    let send_bounds = cx.debug_bounds("send").unwrap();
+    assert!(inside(pane, send_bounds));
+}

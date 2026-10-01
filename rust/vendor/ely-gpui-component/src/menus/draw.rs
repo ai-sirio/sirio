@@ -10,12 +10,13 @@ use super::{
 use crate::{
     compat::marked,
     forms::{Run, surface},
+    primitives::Tooltip,
     primitives::{Icon, IconName},
     theme::{ActiveTheme, ControlSize, IconSize, Radius, TextSize},
     typography::KbdCombo,
 };
 
-fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
+pub(super) fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let colors = &theme.colors;
     let fg = if item.disabled {
@@ -64,6 +65,21 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
                     marked(item.label.clone(), item.hits.clone(), cx)
                 }),
         )
+        .when_some(item.note.clone(), |row, note| {
+            row.child(
+                div()
+                    .flex_none()
+                    .when_some(item.note_selector.clone(), |tag, selector| {
+                        tag.debug_selector(move || selector.to_string())
+                    })
+                    .px_1p5()
+                    .rounded(theme.radius(Radius::Sm))
+                    .bg(colors.hover)
+                    .text_size(theme.text_size(TextSize::Xs))
+                    .text_color(colors.fg_muted)
+                    .child(note),
+            )
+        })
         .when_some(item.keys.clone(), |row, keys| {
             row.child(
                 div()
@@ -72,6 +88,12 @@ fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
                     .text_color(colors.fg_subtle)
                     .child(KbdCombo::new(&keys)),
             )
+        })
+        .when_some(item.selector.clone(), |row, selector| {
+            row.debug_selector(move || selector.to_string())
+        })
+        .when_some(item.tooltip.clone(), |row, text| {
+            row.tooltip(Tooltip::text(text))
         })
         .when(matches!(item.kind, Kind::Sub(_)), |row| {
             row.child(

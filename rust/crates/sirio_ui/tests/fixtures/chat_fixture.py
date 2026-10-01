@@ -35,6 +35,9 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   death-then-ok <dir>  On the first invocation (no <dir>/died marker) stream a
                    partial reply and die; later invocations stream normally.
                    Lets the drawn Retry click be followed by a real recovery.
+  ely-catalogue    Like `composer`, with every catalogue an agent can report: three
+                   session modes, models with long names, four effort levels and
+                   an 85% context fill. The native pass over the chat's popups.
   auth-required    initialize advertises one login auth method, then every
                    session/new is rejected with wire code -32000
                    "Authentication required" — ACP's auth_required shape, so
@@ -177,6 +180,43 @@ def advertise():
                         {"value": "low", "name": "Low"},
                         {"value": "medium", "name": "Medium"},
                         {"value": "high", "name": "High"},
+                    ],
+                },
+            ],
+        }
+    )
+    usage_update(170000, 200000)
+
+
+def advertise_catalogue():
+    """The catalogues of a talkative agent: long labels are the point."""
+    notification(
+        {
+            "sessionUpdate": "config_option_update",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "sonnet",
+                    "options": [
+                        {"value": "opus", "name": "Opus Extended Reasoning Preview with a very long marketing name"},
+                        {"value": "sonnet", "name": "Sonnet"},
+                        {"value": "haiku", "name": "Haiku"},
+                    ],
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning effort",
+                    "category": "effort",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "medium", "name": "Medium"},
+                        {"value": "high", "name": "High"},
+                        {"value": "max", "name": "Maximum"},
                     ],
                 },
             ],
@@ -404,7 +444,24 @@ def main():
                 # session_creation_auth_required_error_becomes_typed_auth_required).
                 error(request["id"], "Authentication required")
                 continue
-            response(request["id"], {"sessionId": SESSION_ID})
+            if mode == "ely-catalogue":
+                response(
+                    request["id"],
+                    {
+                        "sessionId": SESSION_ID,
+                        "modes": {
+                            "currentModeId": "ask",
+                            "availableModes": [
+                                {"id": "ask", "name": "Ask before editing"},
+                                {"id": "plan", "name": "Plan only"},
+                                {"id": "auto", "name": "Auto: accept every edit without asking"},
+                            ],
+                        },
+                    },
+                )
+                advertise_catalogue()
+            else:
+                response(request["id"], {"sessionId": SESSION_ID})
             if mode == "composer":
                 advertise()
         elif method == "session/prompt":
@@ -422,7 +479,7 @@ def main():
             if mode == "plain":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
-            if mode == "composer":
+            if mode in ("composer", "ely-catalogue"):
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "echo-blocks":

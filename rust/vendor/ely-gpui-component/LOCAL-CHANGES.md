@@ -97,3 +97,16 @@ physical Wayland session and native macOS/Windows input are unverified.
   `InputHint` is no longer a unit struct.
 - `chat/attach.rs`: `AttachmentChip::remove_selector` puts a debug selector on
   the remove button.
+
+- `menus/{model,draw,panel}.rs`: `MenuPanel` draws a menu's rows and surface
+  exactly as the stateful hosts do, for a host that owns whether the menu is
+  open, where it hangs, which row its keys mark and what closes it; a press runs
+  the row's `on_click` and leaves the menu open for the host to close.
+  `layer` + `Hang` float such a panel over its parent's top edge (left or right
+  aligned) or at a window point, kept inside the window, occluding what is under
+  it, fading in. `panel_surface` is the card itself, for content that is not
+  rows. `MenuItem` gains `note` (a quiet tag at the row's end), `tooltip` (the
+  full label of a cut one) and `selectors` (debug selectors on the row and its
+  note, no-ops in release builds); `Menu::step` and `Menu::run` are public so a
+  host can walk and press rows itself. The stateful hosts (`DropdownMenu`,
+  `ContextMenu`, ...) are untouched.

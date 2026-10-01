@@ -23,6 +23,10 @@ pub struct MenuItem {
     pub(super) disabled: bool,
     pub(super) on_click: Option<Run>,
     pub(super) hits: Vec<Range<usize>>,
+    pub(super) note: Option<SharedString>,
+    pub(super) note_selector: Option<SharedString>,
+    pub(super) selector: Option<SharedString>,
+    pub(super) tooltip: Option<SharedString>,
 }
 
 impl MenuItem {
@@ -35,6 +39,10 @@ impl MenuItem {
             disabled: false,
             on_click: None,
             hits: Vec::new(),
+            note: None,
+            note_selector: None,
+            selector: None,
+            tooltip: None,
         }
     }
 
@@ -75,6 +83,26 @@ impl MenuItem {
 
     pub fn on_click(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    /// A quiet tag at the row's end, such as which choice is recommended.
+    pub fn note(mut self, note: impl Into<SharedString>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// The row's full label on hover, for one that was cut to fit.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    /// Debug selectors on the row and on its note, for hosts that measure them in tests.
+    /// GPUI's `debug_selector` is a no-op in release builds.
+    pub fn selectors(mut self, row: impl Into<SharedString>, note: Option<SharedString>) -> Self {
+        self.selector = Some(row.into());
+        self.note_selector = note;
         self
     }
 }
@@ -121,6 +149,20 @@ impl Menu {
         self
     }
 
+    /// Runs row `at` as a press would, unless it is disabled or opens a submenu.
+    pub fn run(&self, at: usize, window: &mut Window, cx: &mut App) -> bool {
+        let Some(item) = self.item_at(at).filter(|item| !item.disabled) else {
+            return false;
+        };
+        if matches!(item.kind, Kind::Sub(_)) {
+            return false;
+        }
+        if let Some(on_click) = &item.on_click {
+            on_click(window, cx);
+        }
+        true
+    }
+
     pub(super) fn item_at(&self, ix: usize) -> Option<&MenuItem> {
         match self.entries.get(ix) {
             Some(Entry::Item(item)) => Some(item),
@@ -129,7 +171,7 @@ impl Menu {
     }
 
     /// The next enabled row from `from`, stepping by `by` and wrapping.
-    pub(super) fn step(&self, from: Option<usize>, by: isize) -> Option<usize> {
+    pub fn step(&self, from: Option<usize>, by: isize) -> Option<usize> {
         let count = self.entries.len() as isize;
         let mut at = from.map_or(if by > 0 { -1 } else { count }, |at| at as isize);
         for _ in 0..count {
