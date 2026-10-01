@@ -1709,6 +1709,33 @@ impl Theme {
         cx.set_global(theme);
     }
 
+    /// A local theme for the two sidebars: every text size and line height
+    /// is one pixel smaller, including explicit sizes resolved by `scaled`.
+    /// Derive it once from the global theme at each sidebar view's render
+    /// entry so children inherit the same scale without shrinking it twice.
+    pub fn with_sidebar_typography(mut self) -> Self {
+        let smaller = |size: Pixels| px((f32::from(size) - 1.0).max(6.0));
+        let typography = self.typography;
+        self.typography = Typography {
+            base_size: smaller(typography.base_size),
+            code_size: smaller(typography.code_size),
+            code_line_height: smaller(typography.code_line_height),
+            large_title: smaller(typography.large_title),
+            title: smaller(typography.title),
+            title2: smaller(typography.title2),
+            title3: smaller(typography.title3),
+            headline: smaller(typography.headline),
+            callout: smaller(typography.callout),
+            footnote: smaller(typography.footnote),
+            caption2: smaller(typography.caption2),
+            ui_size: smaller(typography.ui_size),
+            body_line_height: smaller(typography.body_line_height),
+            ui_line_height: smaller(typography.ui_line_height),
+            ..typography
+        };
+        self
+    }
+
     /// Returns the surface opacity used when translucency is enabled.
     ///
     /// The fade is 0.70 over a 0.85 (dark) / 0.80 (light) frame. The layers

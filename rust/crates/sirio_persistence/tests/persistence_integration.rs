@@ -1943,7 +1943,7 @@ fn no_write_path_opens_a_deferred_transaction() {
 
 /// The panel widths are Linux-rewrite-only keys with no Swift antecedent.
 /// They round-trip, clamp into their ranges, and fall back to the drawn
-/// geometry (325 / 405) when never written — which is what makes wiring them
+/// geometry (280 / 320) when never written — which is what makes wiring them
 /// visually a no-op on first launch.
 #[test]
 fn panel_widths_round_trip_and_clamp_into_their_ranges() {
@@ -1953,9 +1953,9 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
     {
         let db = AppDatabase::open(&path).expect("open");
         let fresh = db.settings().expect("load defaults");
-        assert_eq!(fresh.sidebar_width, 325, "matches the geometry drawn today");
+        assert_eq!(fresh.sidebar_width, 280, "matches the geometry drawn today");
         assert_eq!(
-            fresh.right_panel_width, 405,
+            fresh.right_panel_width, 320,
             "matches the geometry drawn today"
         );
 

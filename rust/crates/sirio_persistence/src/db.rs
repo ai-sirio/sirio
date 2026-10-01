@@ -1141,14 +1141,17 @@ impl AppDatabase {
             defaults.translucency = parse_bool_setting(&value, false);
         }
         if let Some(value) = self.setting_value(settings_keys::SIDEBAR_WIDTH)? {
-            defaults.sidebar_width =
-                clamp_setting(&value, crate::model::settings_ranges::SIDEBAR_WIDTH, 325);
+            defaults.sidebar_width = clamp_setting(
+                &value,
+                crate::model::settings_ranges::SIDEBAR_WIDTH,
+                defaults.sidebar_width,
+            );
         }
         if let Some(value) = self.setting_value(settings_keys::RIGHT_PANEL_WIDTH)? {
             defaults.right_panel_width = clamp_setting(
                 &value,
                 crate::model::settings_ranges::RIGHT_PANEL_WIDTH,
-                405,
+                defaults.right_panel_width,
             );
         }
         if let Some(value) = self.setting_value(settings_keys::CENTER_SPLIT_RATIO)? {

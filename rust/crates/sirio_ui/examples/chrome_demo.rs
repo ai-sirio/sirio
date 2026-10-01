@@ -28,7 +28,7 @@ impl Render for ChromeDemo {
                     .flex_1()
                     .w_full()
                     .flex()
-                    .child(div().w(px(325.0)).bg(canvas))
+                    .child(div().w(px(280.0)).bg(canvas))
                     .child(div().w(px(1.0)).bg(gpui::black()))
                     .child(
                         div()
@@ -39,7 +39,7 @@ impl Render for ChromeDemo {
                             .child(div().flex_1().bg(background)),
                     )
                     .child(div().w(px(1.0)).bg(gpui::black()))
-                    .child(div().w(px(405.0)).bg(background)),
+                    .child(div().w(px(320.0)).bg(background)),
             )
             .child(self.statusbar.clone())
     }
