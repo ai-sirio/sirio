@@ -128,12 +128,10 @@ impl BaseColor {
         Self::Onice,
     ];
 
-    /// The grey ladder this base paints in `appearance`, or `None` when its
-    /// surfaces are bezel's own (the tinted five) or Notte's.
-    ///
-    /// Having one also moves two rules in `ThemeColors::for_appearance`: the
-    /// terminal follows the page instead of the sidebar surface, and both
-    /// hovers are the ladder's solid fill instead of a veil.
+    /// The grey ladder this base feeds only to `Theme::to_bezel_theme`, or
+    /// `None` when its surfaces are bezel's own (the tinted five) or Notte's.
+    /// Sirio's matching values are hand-maintained in `presets.rs`; edit both
+    /// ladder sources until sub-project 7.
     pub(crate) fn grey_ladder(self, appearance: Appearance) -> Option<GreyLadder> {
         match (self, appearance) {
             (Self::Neutral, Appearance::Dark) => Some(NEUTRAL_DARK),

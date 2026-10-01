@@ -7,7 +7,7 @@ Builds the packages (all targets) from rust/ with JSON diagnostics. For every
 `deprecated` warning on a `sirio_theme::ThemeColors` field, rewrites the
 field name at the warning's primary span to the path the deprecation note
 names (`text` -> `ely.fg`). Repeats until a build reports none. A span inside
-a macro expansion is printed and left for a person.
+a macro expansion is printed and left for a person. Ran once over `dd939303..190dfac0`, against `#[deprecated]` fields that no longer exist.
 """
 import collections
 import json

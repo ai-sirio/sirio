@@ -206,6 +206,7 @@ git -C "$FIXTURE" status --short
 # migration); creating it first is what the migration itself does.
 if ((${#SETTINGS[@]} > 0)); then
     command -v sqlite3 >/dev/null || die "--setting needs sqlite3"
+    command -v python3 >/dev/null || die "--setting needs python3"
     sql="CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
     for pair in "${SETTINGS[@]}"; do
         key="${pair%%=*}"

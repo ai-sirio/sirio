@@ -270,12 +270,12 @@ impl Chat {
                     "fast-mode-chip"
                 };
                 let label_colour: gpui::Hsla = match (&blocked, fast.enabled) {
-                    (Some(_), _) => theme.ely.fg_subtle.into(),
+                    (Some(_), _) => theme.ely.fg_subtle,
                     // On, the chip is filled with the theme's own accent
                     // pair rather than a colour of Sirio's: the palette is
                     // bezel's, all of it.
                     (None, true) => bezel_theme.on_solid,
-                    (None, false) => theme.ely.fg.into(),
+                    (None, false) => theme.ely.fg,
                 };
                 div()
                     .id("fast-mode-chip")

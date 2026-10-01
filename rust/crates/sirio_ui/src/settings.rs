@@ -3916,7 +3916,7 @@ impl Settings {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .child(status_dot(tone.into()))
+            .child(status_dot(tone))
             .child(
                 div()
                     .text_size(px(12.0))

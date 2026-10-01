@@ -4556,7 +4556,7 @@ pub(super) mod tests_support {
                     title: "Chat".to_string(),
                     selected: true,
                     kind: TabKind::AgentChat,
-                    agent: AgentMark::for_agent_id("claude").into(),
+                    agent: AgentMark::for_agent_id("claude"),
                     persistence_id: "test-tab-1".into(),
                     status: None,
                     last_event_at: None,

@@ -4159,10 +4159,10 @@ struct GridAssemblyKey {
 impl TerminalPalette {
     fn from_theme(theme: &Theme) -> Self {
         Self {
-            background: theme.sirio.terminal_surface.into(),
-            foreground: theme.ely.fg.into(),
-            cursor: theme.ely.fg.into(),
-            selection: theme.ely.selection.into(),
+            background: theme.sirio.terminal_surface,
+            foreground: theme.ely.fg,
+            cursor: theme.ely.fg,
+            selection: theme.ely.selection,
         }
     }
 }

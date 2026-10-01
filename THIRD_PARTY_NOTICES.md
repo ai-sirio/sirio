@@ -131,6 +131,16 @@ above. Before it, from 2026-09-05, they came from Codicons and Simple
 Icons; before that Claude, OpenAI and OpenCode were the Zed catalog's
 `ai_*.svg` assets and Pi a project-owned monogram, all since removed.
 
+## Geist (UI fonts)
+
+The five UI faces in `rust/assets/fonts/` — `Geist.ttf`,
+`Geist-Medium.ttf`, `Geist-SemiBold.ttf`, `Geist-Bold.ttf` and `GeistMono.ttf`
+— were copied byte-for-byte from `bezel-ui` 0.1.4's `assets/fonts`. Geist is
+from [vercel/geist-font](https://github.com/vercel/geist-font) and is licensed
+under the SIL Open Font License 1.1. The license is copied to
+`rust/assets/fonts/Geist-OFL.txt`; SHA-256 sums for each face are in
+`rust/assets/fonts/README.md`.
+
 ## JetBrainsMono Nerd Font Mono (terminal font)
 
 The terminal face in `rust/assets/fonts/` is

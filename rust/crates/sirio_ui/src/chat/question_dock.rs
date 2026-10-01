@@ -367,7 +367,7 @@ impl Chat {
                     .bg(if highlighted {
                         theme.ely.active
                     } else {
-                        gpui::transparent_black().into()
+                        gpui::transparent_black()
                     })
                     .cursor_pointer()
                     .hover(|row| row.bg(theme.ely.hover))

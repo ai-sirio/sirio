@@ -73,10 +73,10 @@
 //! from `Theme::get(cx)` like every other surface: the row itself paints
 //! *no* fill and lets the window surface through (a deliberate choice,
 //! because the screenshot wants **one continuous surface**, no seam between
-//! chrome and content), its text is the theme's `text`, the
+//! chrome and content), its text is the theme's `fg`, the
 //! lights are the theme's own `danger`/`warning`/`success` (already red/
 //! amber/green — no new colour tokens needed), and the cluster buttons read
-//! [`IconButtonColors`], which is `text` on `element_hover`/`element_active`.
+//! [`IconButtonColors`], which is `fg` on `hover`/`active`.
 //! The caption buttons read it too, except for the close button's red, which
 //! is a *system* constant and lives in [`sirio_theme::WindowsCaption`] —
 //! that type's docs explain why a theme `danger` cannot stand in for it.
@@ -545,8 +545,8 @@ fn traffic_light(
 /// This replaces COSMIC's `Component`, which carried six fields where this
 /// file read three. It is local rather than a theme type because nothing
 /// outside the titlebar draws a control with its own resting/hover/pressed
-/// set — the rest of the app composes those from `element_hover` and
-/// `element_active` at the call site, which is what this does too.
+/// set — the rest of the app composes those from `hover` and `active` at the
+/// call site, which is what this does too.
 #[derive(Clone, Copy)]
 struct IconButtonColors {
     /// The glyph colour, drawn on the bar itself — these buttons have no

@@ -2761,7 +2761,7 @@ impl ChangesTab {
                             &[gpui::TextRun {
                                 len: content.len(),
                                 font: gpui::font(theme.typography.code_family),
-                                color: theme.ely.fg.into(),
+                                color: theme.ely.fg,
                                 ..Default::default()
                             }],
                             None,
@@ -2790,7 +2790,7 @@ impl ChangesTab {
                                     &[gpui::TextRun {
                                         len: content.len(),
                                         font: gpui::font(theme.typography.code_family),
-                                        color: theme.ely.fg.into(),
+                                        color: theme.ely.fg,
                                         ..Default::default()
                                     }],
                                     None,

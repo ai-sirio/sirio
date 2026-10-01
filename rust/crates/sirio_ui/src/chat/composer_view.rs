@@ -848,7 +848,7 @@ impl Chat {
         // Anchored to the composer card's top edge (`bottom: 100%`), not a
         // fixed distance up from its bottom: the card is taller than that
         // distance, so the list used to sit *inside* it — over the input
-        // rows, in the card's own `surface_raised` fill, where it read as a
+        // rows, in the card's own `surface` fill, where it read as a
         // transparent veil rather than a menu. The same token paints both
         // on purpose (they are the same step above the page); what makes
         // this a card of its own is that it floats over the page, with the

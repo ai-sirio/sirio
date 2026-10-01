@@ -111,6 +111,22 @@ physical Wayland session and native macOS/Windows input are unverified.
   host can walk and press rows itself. The stateful hosts (`DropdownMenu`,
   `ContextMenu`, ...) are untouched.
 
+- `src/theme/palette.rs` and `src/theme/syntax.rs` moved, with `Mode`, into
+  the sibling crate `rust/vendor/ely-palette`, which this crate re-exports at
+  the original paths: `theme::{Palette, Syntax, Mode, …}` are the same types.
+  Sirio's theme crate holds Ely's palette as its colour vocabulary without
+  compiling Ely's components. `Palette` and `Syntax` derive `Copy` (all their
+  fields are `Hsla`), so Sirio's `Theme` stays `Copy`. The split also widens
+  `color_blind_chart` from `pub(crate)` to `pub` in
+  `rust/vendor/ely-palette/src/palette.rs`.
+- The upstream `.clone()` calls were replaced with copies in
+  `rust/vendor/ely-palette/src/syntax.rs` and these files under
+  `rust/vendor/ely-gpui-component/src/`: `agent/control.rs`,
+  `agent/permission.rs`, `agent/progress.rs`, `agent/tools.rs`, `chat/attach.rs`,
+  `chat/cite.rs`, `chat/code.rs`, `chat/composer.rs`, `chat/conversations.rs`,
+  `chat/list.rs`, `chat/message.rs`, `chat/search.rs`, `chat/status.rs`,
+  `menus/panel.rs`, `theme/mod.rs` and `theme/tests.rs`.
+
 ## Final compatibility evidence
 
 Seen on Linux x86_64 (Arch, kernel 7.2.3) with rustc 1.98.1, cargo 1.98.1 and
@@ -133,11 +149,3 @@ what each check does and does not prove.
 - **Not established:** a real IME, and rewind natively.
 
 Every deviation from upstream is listed above, with the file it changes.
-
-- `src/theme/palette.rs` and `src/theme/syntax.rs` moved, with `Mode`, into
-  the sibling crate `rust/vendor/ely-palette`, which this crate re-exports at
-  the original paths: `theme::{Palette, Syntax, Mode, …}` are the same types.
-  Sirio's theme crate holds Ely's palette as its colour vocabulary without
-  compiling Ely's components. `Palette` and `Syntax` derive `Copy` (all their
-  fields are `Hsla`), so Sirio's `Theme` stays `Copy`. The files are otherwise
-  upstream's.

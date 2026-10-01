@@ -345,14 +345,14 @@ impl ChangeRequestTab {
     pub(crate) fn render_action_status(&self, theme: &Theme) -> Option<AnyElement> {
         let (text, tone): (String, Hsla) = match &self.actions.state {
             ActionState::Idle => return None,
-            ActionState::Working(kind) => (format!("Sending {kind}…"), theme.ely.fg_subtle.into()),
-            ActionState::Failed { message, .. } => (message.clone(), theme.ely.danger.into()),
+            ActionState::Working(kind) => (format!("Sending {kind}…"), theme.ely.fg_subtle),
+            ActionState::Failed { message, .. } => (message.clone(), theme.ely.danger),
             ActionState::Unconfirmed { .. } => (
                 "Could not confirm that it went through. Look at the conversation before sending it again."
                     .to_string(),
-                theme.ely.warning.into(),
+                theme.ely.warning,
             ),
-            ActionState::Warning(text) => (text.clone(), theme.ely.warning.into()),
+            ActionState::Warning(text) => (text.clone(), theme.ely.warning),
         };
         Some(
             div()

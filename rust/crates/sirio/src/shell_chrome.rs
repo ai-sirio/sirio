@@ -139,10 +139,10 @@ impl ShellMaterial {
     }
 }
 
-/// A shell panel. Keyboard focus used to brighten this border to `text_muted`
+/// A shell panel. Keyboard focus used to brighten this border to `fg_muted`
 /// (and before that, paint a second coral ring inside it — #58 already kept
 /// the center panel out of that treatment). Both are gone: the pane's own
-/// contents are the focus indicator, and every panel rests on `border_opaque`
+/// contents are the focus indicator, and every panel rests on `border`
 /// no matter where the keyboard is.
 pub(crate) fn panel(id: &'static str, focus_handle: &FocusHandle, theme: &Theme) -> Stateful<Div> {
     div()

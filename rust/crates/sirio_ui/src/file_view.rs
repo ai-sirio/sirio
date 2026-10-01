@@ -3395,10 +3395,10 @@ fn line_highlights(
         (
             range.clone(),
             HighlightStyle {
-                color: Some(theme.ely.link.into()),
+                color: Some(theme.ely.link),
                 underline: Some(UnderlineStyle {
                     thickness: px(1.0),
-                    color: Some(theme.ely.link.into()),
+                    color: Some(theme.ely.link),
                     wavy: false,
                 }),
                 ..Default::default()
@@ -3435,7 +3435,7 @@ fn underline_highlights(
                 HighlightStyle {
                     underline: Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(color.into()),
+                        color: Some(color),
                         // Wavy, not straight: a straight rule is already
                         // the Markdown link style in this same surface.
                         wavy: true,
@@ -4737,7 +4737,7 @@ mod tests {
             let marked = style_at(&highlights, 4);
             let underline = marked.underline.expect("the diagnostic span underlines");
             assert!(underline.wavy);
-            assert_eq!(underline.color, Some(theme.ely.warning.into()));
+            assert_eq!(underline.color, Some(theme.ely.warning));
 
             let keyword = style_at(&highlights, 0);
             assert!(

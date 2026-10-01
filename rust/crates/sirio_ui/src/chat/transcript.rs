@@ -48,7 +48,7 @@ pub(crate) fn heading_for(entries: &[Entry], index: usize, now: DateTime<Local>)
 
 impl Chat {
     /// The day heading above a turn's question: `py 8`, `Subheadline` in
-    /// `text_faint`, uppercased with the popover's tracking.
+    /// `fg_subtle`, uppercased with the popover's tracking.
     pub(crate) fn render_day_heading(
         entry_index: usize,
         label: &str,

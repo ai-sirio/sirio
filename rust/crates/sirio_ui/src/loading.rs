@@ -91,7 +91,7 @@ fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
         sirio_theme::Appearance::Light => bezel::theme::Theme::light(),
         sirio_theme::Appearance::Dark => bezel::theme::Theme::dark(),
     };
-    bezel_theme.accent = theme.sirio.brand_coral.into();
+    bezel_theme.accent = theme.sirio.brand_coral;
     bezel_theme
 }
 
@@ -113,7 +113,7 @@ pub fn thinking_indicator(
     cx: &mut App,
 ) -> AnyElement {
     let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = loading_accent(theme).into();
+    bezel_theme.accent = loading_accent(theme);
     loaders::orb(
         loaders::Orb::Cluster,
         id,
@@ -134,7 +134,7 @@ pub fn indeterminate(
     cx: &mut App,
 ) -> AnyElement {
     let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = loading_accent(theme).into();
+    bezel_theme.accent = loading_accent(theme);
     loaders::orb(
         loaders::Orb::Cluster,
         id,
@@ -161,7 +161,7 @@ pub fn bloom(
     cx: &mut App,
 ) -> AnyElement {
     let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = tint.into();
+    bezel_theme.accent = tint;
     loaders::orb(
         loaders::Orb::Bloom,
         id,

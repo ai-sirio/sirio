@@ -1311,12 +1311,12 @@ impl ChangeRequestTab {
                 let active = inner == self.inner;
                 let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
                 let (icon, tint): (Icon, Hsla) = match inner {
-                    InnerTab::Conversation => (Icon::MessageSquare, tone.into()),
-                    InnerTab::Commits => (Icon::GitCommit, tone.into()),
+                    InnerTab::Conversation => (Icon::MessageSquare, tone),
+                    InnerTab::Commits => (Icon::GitCommit, tone),
                     InnerTab::Checks => ci
                         .and_then(|ci| style::ci_mark(ci, theme))
-                        .unwrap_or((Icon::Circle, tone.into())),
-                    InnerTab::Files => (Icon::File, tone.into()),
+                        .unwrap_or((Icon::Circle, tone)),
+                    InnerTab::Files => (Icon::File, tone),
                 };
                 let id = match inner {
                     InnerTab::Conversation => "change-request-inner-conversation",

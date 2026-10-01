@@ -216,9 +216,9 @@ impl SirioColors {
 
 /// All adaptive colors used by Sirio.
 ///
-/// Names say what a value *does* in the design system (`surface_raised`,
-/// `input_bg`, `overlay`, …) rather than which component consumes it. The
-/// component-named layer this file used to carry alongside it — the
+/// Names say what a value *does* in the design system (`ely.surface`,
+/// `ely.sunken`, `sirio.overlay`, …) rather than which component consumes it.
+/// The component-named layer this file used to carry alongside it — the
 /// `tab_focus_accent`/`filter_field_bg` aliases — has been collapsed into the
 /// roles it resolved to.
 ///
@@ -262,10 +262,9 @@ fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel_theme
 /// are painted here, after `branded`, onto the seven surface tokens and
 /// nothing else: the veils (`element_hover`, `border`, `input_bg`, …) are
 /// white-alpha washes that compose over whatever is beneath them, and the
-/// text ladder and semantic hues stay bezel's. Done in this builder, not in
-/// `ThemeColors::for_appearance`, because `to_bezel_theme` calls the same
-/// function and hands the result to `install_custom` — so bezel's own widgets
-/// and Sirio's tokens see one ladder by construction.
+/// text ladder and semantic hues stay bezel's. These values in `base_color.rs`
+/// now feed only `to_bezel_theme`; Sirio's source is `presets.rs`. Keep the
+/// matching ladders in both files aligned until sub-project 7.
 ///
 /// Mutation of the local, in bezel's own `Brand::apply` style; struct-update
 /// syntax would need every one of bezel's 72 fields restated.
@@ -283,10 +282,9 @@ fn paint_notte_ladder(theme: &mut bezel_theme::Theme) {
 }
 
 /// The solid grey ladders of `Neutral` and `Onice`, same mechanism as
-/// [`paint_notte_ladder`]; the values are in `base_color.rs`.
-///
-/// The tint stays `NONE` — this moves lightness only, so bezel widgets (via
-/// `to_bezel_theme`) and Sirio tokens see one ladder by construction.
+/// [`paint_notte_ladder`]. These `base_color.rs` values feed only
+/// `to_bezel_theme`; Sirio's matching values are hand-maintained in
+/// `presets.rs`. Keep both copies aligned until sub-project 7.
 fn paint_grey_ladder(theme: &mut bezel_theme::Theme, ladder: base_color::GreyLadder) {
     theme.bg = opaque_hsla(ladder.page);
     theme.surface = opaque_hsla(ladder.surface);
@@ -319,11 +317,9 @@ fn opaque_hsla(hex: u32) -> gpui::Hsla {
 /// `parameter` take the body text colour, `punctuation` the dimmed one, and
 /// `invalid` the theme's danger. Everything else is a fixed hue.
 ///
-/// This is a deliberate exception to this crate's "no palette of its own"
-/// rule, and the only one: every non-syntax colour still comes from bezel.
-/// The rule exists so a bezel bump stays reviewable as a visual change —
-/// which is exactly why the exception is confined to this one function
-/// rather than spread across `ThemeColors`.
+/// This source-code palette is Sirio's own. Adaptive colours are also
+/// hand-maintained in `presets.rs`; a bezel change affects its widgets through
+/// `to_bezel_theme`, not Sirio's preset values.
 mod zed_syntax {
     //! One Dark / One Light token hues, by role.
     pub const DARK_RED: u32 = 0xE06C75;
@@ -470,8 +466,8 @@ pub struct Spacing {
 }
 
 impl Default for Spacing {
-    /// Same rule as [`Radii::default`]: the measurements do not move (T2),
-    /// only their derivation, which is now bezel's four spacing steps.
+    /// Same rule as [`Radii::default`]: the measurements do not move (T2).
+    /// These literals preserve the values bezel's spacing steps produced.
     fn default() -> Self {
         Self {
             shell_gap: px(4.0), // bezel SPACE_XS
@@ -529,8 +525,8 @@ pub struct Radii {
 }
 
 impl Default for Radii {
-    /// The values are unchanged (spec decision T2); what changes is that they
-    /// now follow bezel's `Brand::radius` instead of standing alone. Ratios
+    /// The values are unchanged (spec decision T2); they are literals that
+    /// preserve the values bezel's `Brand::radius` produced. Ratios
     /// that do not land on one of bezel's five named corners carry an explicit
     /// multiplier rather than being rounded to the nearest named one —
     /// rounding would move the UI, which T2 forbids.
@@ -918,7 +914,7 @@ impl Default for Typography {
 // invisible until you look for it.
 //
 // One list per role, no platform split: Geist and Geist Mono (SIL OFL 1.1)
-// lead everywhere, registered by `bezel::ui::register_fonts` before the first
+// lead everywhere, registered by `register_ui_fonts` before the first
 // window opens, so they are always present. A theme that changes face per
 // platform cannot be reviewed as one design, which is why the Apple faces sit
 // at the tail as a last resort rather than leading on macOS. The JetBrains
@@ -929,11 +925,11 @@ impl Default for Typography {
 
 /// The sans-serif families to prefer, in order, when resolving the UI font.
 ///
-/// "Geist" leads on every platform, macOS included: bezel registers it, with
-/// real 500/600/700 statics, so it is always present here — the chain behind
-/// it only matters if that registration is ever skipped. Apple's SF faces are
-/// kept at the tail as a last resort rather than led with, because a theme
-/// that changes face per platform cannot be reviewed as one design.
+/// "Geist" leads on every platform, macOS included: `register_ui_fonts`
+/// registers it with real 500/600/700 statics, so it is always present here.
+/// Apple's SF faces are kept at the tail as a last resort rather than led with,
+/// because a theme that changes face per platform cannot be reviewed as one
+/// design.
 pub const UI_FAMILY_CANDIDATES: &[&str] = &[
     "Geist",
     "JetBrains Sans",
@@ -949,10 +945,10 @@ pub const UI_FAMILY_CANDIDATES: &[&str] = &[
 /// Monospace families to prefer, in order, when resolving the code font.
 ///
 /// "Geist Mono" leads for the same reason "Geist" leads
-/// [`UI_FAMILY_CANDIDATES`]: bezel registers it before the first window
-/// opens. Behind it, the family the visual bar is set in (waku's JetBrains
-/// Mono), then common good monospaced faces, then whatever the system's
-/// generic "monospace" resolves to (fontconfig's alias on Linux, always
+/// [`UI_FAMILY_CANDIDATES`]: `register_ui_fonts` registers it before the first
+/// window opens. Behind it is the family the visual bar is set in (waku's
+/// JetBrains Mono), then common good monospaced faces, then whatever the
+/// system's generic "monospace" resolves to (fontconfig's alias on Linux, always
 /// present). A candidate that is not installed is skipped — never guessed
 /// at.
 pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
@@ -970,7 +966,7 @@ pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
 /// The terminal family Sirio ships: JetBrains Mono patched by Nerd Fonts
 /// (v3.5.1, `patched-fonts/JetBrainsMono/Ligatures`), the `Mono` build in
 /// which every icon and Powerline glyph is exactly one cell wide. Bundled
-/// for the same reason bezel bundles Geist — so the terminal's face does not
+/// for the same reason Sirio bundles Geist — so the terminal's face does not
 /// depend on what the host happens to have installed. The 2026-09-12
 /// Windows screenshot is what that dependence looked like: a stock box has
 /// none of the JetBrains, Nerd or Linux families below, every candidate was
@@ -1046,7 +1042,7 @@ pub fn bundled_terminal_fonts() -> Vec<Cow<'static, [u8]>> {
 }
 
 /// Registers the bundled terminal faces with the text system. Must run
-/// before [`Theme::init`] for the same reason bezel's `register_fonts`
+/// before [`Theme::init`] for the same reason `register_ui_fonts`
 /// must: `Theme::install` resolves and remembers `TERMINAL_FAMILY` from
 /// `all_font_names()` on its first call, and a face registered afterwards
 /// is never seen. Failure is non-fatal: the candidate chain below still
@@ -1308,8 +1304,9 @@ impl Theme {
         });
     }
 
-    /// The bezel theme this Sirio theme is derived from — the same
-    /// `Theme::branded` call used to build Sirio's adaptive colors.
+    /// The bezel theme built from `base_color.rs`'s ladders. Sirio's matching
+    /// preset values are maintained separately in `presets.rs`; keep ladder
+    /// edits aligned in both until sub-project 7.
     pub fn to_bezel_theme(&self) -> bezel_theme::Theme {
         bezel_theme_for(self.base_color, self.appearance)
     }
@@ -1520,7 +1517,7 @@ impl Theme {
     /// that matters: the strips are the only place text sits directly on
     /// it, and over a white desktop (blur averages the backdrop to one tone)
     /// a 0.35 frame washed the dark shell's strips out to light grey and a
-    /// 0.70 one left `text_muted` at 3.1:1 there (2026-09-07); 0.85 clears
+    /// 0.70 one left `fg_muted` at 3.1:1 there (2026-09-07); 0.85 clears
     /// WCAG AA with room. The panel fade barely moves that contrast (≥6:1
     /// across 0.70–0.90), so it stays where the glass still reads. Held by
     /// `translucent_shell_keeps_wcag_aa_over_an_opposing_desktop`.
@@ -1768,8 +1765,8 @@ mod tests {
     /// How far the frozen body text sits back from bezel's full-contrast rung
     /// toward its surface. Moved here from the derivation it used to
     /// parameterise: `body_text_is_softened_off_bezels_full_contrast` still
-    /// pins the frozen `ely.fg` against the rule, so the constant and the
-    /// mixer live with that test.
+    /// compares the frozen `ely.fg` with the rule, so the constant and mixer
+    /// live with the preset agreement test.
     const TEXT_SOFTENING: f32 = 0.10;
 
     /// Mixes `fraction` of `target` into `color`, opaquely.
@@ -1783,7 +1780,6 @@ mod tests {
     }
 
     mod looks_like_test_harness {
-        use super::*;
         use std::path::Path;
 
         /// The name the original guard was written for.
@@ -1820,6 +1816,16 @@ mod tests {
     }
 
     #[test]
+    fn named_covers_every_sirio_color_field() {
+        let named = Theme::dark().sirio.named();
+        assert_eq!(
+            named.len(),
+            std::mem::size_of::<SirioColors>() / std::mem::size_of::<Hsla>(),
+            "SirioColors::named() must include every field"
+        );
+    }
+
+    #[test]
     fn a_tinted_base_moves_the_greys_and_leaves_sirios_own_colours_alone() {
         // Decision B4: the coral is Sirio's identity, anchored by two
         // measured constraints. The dark terminal now follows the pane's
@@ -1833,9 +1839,9 @@ mod tests {
             // The borders stay verbatim, on purpose: bezel 0.1.3 tints only
             // opaque achromatic ink — `Brand::apply`: "Translucent ink is
             // skipped because it paints over whatever is beneath it, which is
-            // tinted already" — and both borders are 8–10% veils. They read
-            // the page's tint through compositing, which is also exactly what
-            // keeps `assert_palette_comes_from_bezel` true under every base.
+            // tinted already" — and both borders are 8–10% veils. Their
+            // relationship to bezel's preset values is checked across every
+            // base by `frozen_presets_match_their_bezel_ladders`.
             assert_eq!(slate.ely.border, neutral.ely.border);
 
             assert_eq!(
@@ -1957,7 +1963,7 @@ mod tests {
             ("surface_raised", sirio.ely.surface),
             (
                 "surface_raised_hover",
-                Hsla::from(bezel.surface_raised_hover),
+                bezel.surface_raised_hover,
             ),
         ] {
             let ratio = contrast_ratio(sirio.ely.fg, surface);
@@ -1995,7 +2001,7 @@ mod tests {
     /// tree at once), where that reads as glare. The target is the contrast
     /// Sirio shipped before adopting bezel, so this pins the *relationship* —
     /// softened toward the surface, still past AAA, still clearly ahead of
-    /// `text_muted`.
+    /// `fg_muted`.
     #[test]
     fn body_text_is_softened_off_bezels_full_contrast() {
         for (appearance, bezel) in [
@@ -2003,18 +2009,12 @@ mod tests {
             (Appearance::Light, bezel_theme::Theme::light()),
         ] {
             let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            let full = Hsla::from(bezel.text);
+            let full = bezel.text;
 
             assert_ne!(
                 sirio.ely.fg, full,
                 "{appearance:?} text must not be bezel's full-contrast rung"
             );
-            assert_eq!(
-                sirio.ely.fg,
-                Hsla::from(toward(Rgba::from(full), Rgba::from(sirio.ely.bg), TEXT_SOFTENING)),
-                "{appearance:?} text must be bezel's, softened toward the surface"
-            );
-
             // Softer than bezel, but not into the muted rung's territory: the
             // ladder still has a visible first step.
             let step = contrast_ratio(sirio.ely.fg, sirio.ely.bg);
@@ -2030,6 +2030,51 @@ mod tests {
                 step < contrast_ratio(full, sirio.ely.bg),
                 "{appearance:?} text must be softer than bezel's"
             );
+        }
+    }
+
+    #[test]
+    fn frozen_presets_match_their_bezel_ladders() {
+        const RGB_TOLERANCE: f32 = 0.5 / 255.0;
+
+        for base in BaseColor::ALL {
+            for appearance in [Appearance::Light, Appearance::Dark] {
+                let (ely, sirio) = presets::preset(base, appearance);
+                let bezel = bezel_theme_for(base, appearance);
+                let softened_body = Hsla::from(toward(
+                    Rgba::from(bezel.text),
+                    Rgba::from(bezel.surface),
+                    TEXT_SOFTENING,
+                ));
+                let pairs = [
+                    ("ely.bg", ely.bg, bezel.surface),
+                    ("ely.surface", ely.surface, bezel.surface_raised),
+                    ("sirio.canvas", sirio.canvas, bezel.bg),
+                    ("ely.sunken", ely.sunken, bezel.input_bg),
+                    ("ely.hover", ely.hover, bezel.element_hover),
+                    ("ely.border", ely.border, bezel.border),
+                    ("ely.fg", ely.fg, softened_body),
+                    ("ely.fg_muted", ely.fg_muted, bezel.text_muted),
+                    ("ely.fg_subtle", ely.fg_subtle, bezel.text_faint),
+                    ("sirio.text_dim", sirio.text_dim, bezel.text_dim),
+                ];
+
+                for (name, preset, bezel_origin) in pairs {
+                    let preset = Rgba::from(preset);
+                    let bezel_round_trip = Hsla::from(Rgba::from(bezel_origin));
+                    let bezel = Rgba::from(bezel_round_trip);
+                    for (channel, preset, bezel) in [
+                        ("red", preset.r, bezel.r),
+                        ("green", preset.g, bezel.g),
+                        ("blue", preset.b, bezel.b),
+                    ] {
+                        assert!(
+                            (preset - bezel).abs() <= RGB_TOLERANCE,
+                            "{base:?} {appearance:?} {name} {channel} differs: preset {preset}, bezel {bezel}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2403,7 +2448,7 @@ mod tests {
             }
             assert_eq!(
                 palette.color(Kind::Variable),
-                gpui::Hsla::from(base.ely.fg),
+                base.ely.fg,
                 "a plain identifier stays the body text colour"
             );
         }
@@ -2775,9 +2820,8 @@ mod tests {
                 "no static Geist {weight} in {faces:?}"
             );
         }
-        assert!(faces.iter().any(|(family, _)| family == "Geist"));
         assert!(faces.iter().any(|(family, _)| family == "Geist Mono"), "{faces:?}");
-        assert_eq!(faces.len(), 5);
+        assert_eq!(faces.len(), 5, "{faces:?}");
     }
 
     /// With nothing installed, the fallback is the system's generic
@@ -2841,12 +2885,17 @@ mod agent_brand_tests {
                 ("danger", theme.ely.danger),
             ];
             for brand in brands {
-                let brand_color = Hsla::from(brand.color());
+                let brand_color = Rgba::from(brand.color());
                 for (name, status) in statuses {
-                    assert_ne!(
-                        brand_color, status,
-                        "{brand:?} is byte-identical to {name}: a running \
-                         worktree would be indistinguishable from that status"
+                    let status = Rgba::from(status);
+                    let separation = (brand_color.r - status.r)
+                        .abs()
+                        .max((brand_color.g - status.g).abs())
+                        .max((brand_color.b - status.b).abs());
+                    assert!(
+                        separation > 0.5 / 255.0,
+                        "{brand:?} is too close to {name}: a running worktree \
+                         would be indistinguishable from that status"
                     );
                 }
             }
