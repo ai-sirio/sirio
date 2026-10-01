@@ -87,9 +87,9 @@ impl MaterialStrength {
         }
     }
 
-    pub(crate) fn frame_fill(self, frame_surface: gpui::Rgba) -> gpui::Rgba {
+    pub(crate) fn frame_fill(self, frame_surface: gpui::Hsla) -> gpui::Hsla {
         match self.frame_alpha {
-            Some(a) => gpui::Rgba { a, ..frame_surface },
+            Some(a) => gpui::Hsla { a, ..frame_surface },
             None => frame_surface,
         }
     }
@@ -103,14 +103,14 @@ impl ShellMaterial {
         }
     }
 
-    pub(crate) fn frame_fill(self, theme: &Theme) -> gpui::Rgba {
+    pub(crate) fn frame_fill(self, theme: &Theme) -> gpui::Hsla {
         self.frame_fill_at(MaterialStrength::for_platform(), theme)
     }
 
-    fn frame_fill_at(self, strength: MaterialStrength, theme: &Theme) -> gpui::Rgba {
+    fn frame_fill_at(self, strength: MaterialStrength, theme: &Theme) -> gpui::Hsla {
         match self {
-            Self::Opaque => theme.bg,
-            Self::Blurred => strength.frame_fill(theme.frame_surface),
+            Self::Opaque => theme.sirio.canvas,
+            Self::Blurred => strength.frame_fill(theme.sirio.frame_surface),
         }
     }
 
@@ -150,9 +150,9 @@ pub(crate) fn panel(id: &'static str, focus_handle: &FocusHandle, theme: &Theme)
         .debug_selector(move || id.into())
         .relative()
         .size_full()
-        .bg(theme.surface)
+        .bg(theme.ely.bg)
         .border_1()
-        .border_color(theme.border_opaque)
+        .border_color(theme.ely.border)
         .rounded(theme.radii.shell_panel)
         .overflow_hidden()
         .track_focus(focus_handle)

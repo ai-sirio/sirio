@@ -92,8 +92,7 @@ pub fn schedule<T: 'static>(
 /// occupying layout so surrounding text doesn't shift as it blinks, and
 /// never shrinking: in a row whose value overflows, flex shrink would take
 /// its share out of the bar too and leave a sliver.
-pub fn bar(height: Pixels, color: impl Into<Hsla>, visible: bool) -> gpui::AnyElement {
-    let color = color.into();
+pub fn bar(height: Pixels, color: Hsla, visible: bool) -> gpui::AnyElement {
     let bar = gpui::div()
         .w(BAR_WIDTH)
         .h(height)
