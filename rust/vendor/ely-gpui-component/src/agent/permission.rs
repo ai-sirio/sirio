@@ -1,8 +1,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    App, ElementId, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
-    Window, div, prelude::*,
+    AnyElement, App, ElementId, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString,
+    Styled, Window, div, prelude::*,
 };
 
 use crate::{
@@ -99,7 +99,10 @@ pub struct PermissionPrompt {
     id: ElementId,
     title: SharedString,
     detail: Option<SharedString>,
-    on_answer: OnPermission,
+    on_answer: Option<OnPermission>,
+    body: Option<AnyElement>,
+    actions: Vec<AnyElement>,
+    header_selector: Option<SharedString>,
 }
 
 impl PermissionPrompt {
@@ -112,8 +115,36 @@ impl PermissionPrompt {
             id: id.into(),
             title: title.into(),
             detail: None,
-            on_answer: Rc::new(on_answer),
+            on_answer: Some(Rc::new(on_answer)),
+            body: None,
+            actions: Vec::new(),
+            header_selector: None,
         }
+    }
+
+    /// A protocol-driven request: only supplied actions are rendered.
+    pub fn custom(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            detail: None,
+            on_answer: None,
+            body: None,
+            actions: Vec::new(),
+            header_selector: None,
+        }
+    }
+    pub fn header_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.header_selector = Some(selector.into());
+        self
+    }
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+    pub fn action(mut self, action: impl IntoElement) -> Self {
+        self.actions.push(action.into_any_element());
+        self
     }
 
     /// What the permission covers, such as the command or the folder.
@@ -127,15 +158,44 @@ impl RenderOnce for PermissionPrompt {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors.clone();
-        let choice = |key: &'static str, label: &'static str, variant, answer: Permission| {
-            let on_answer = self.on_answer.clone();
-            Button::new((self.id.clone(), key), label)
-                .variant(variant)
-                .on_click(move |_, window, cx| {
-                    log::info!("permission: {answer:?}");
-                    on_answer(answer, window, cx)
-                })
-        };
+        let builtin = self.on_answer.map(|on_answer| {
+            let choice = |key: &'static str, label: &'static str, variant, answer: Permission| {
+                let on_answer = on_answer.clone();
+                Button::new((self.id.clone(), key), label)
+                    .variant(variant)
+                    .on_click(move |_, window, cx| {
+                        log::info!("permission: {answer:?}");
+                        on_answer(answer, window, cx)
+                    })
+            };
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap_2()
+                .child(choice(
+                    "deny",
+                    "Deny",
+                    ButtonVariant::Ghost,
+                    Permission::Deny,
+                ))
+                .child(
+                    div()
+                        .debug_selector(|| "ely-request-always".into())
+                        .child(choice(
+                            "always",
+                            "Always allow",
+                            ButtonVariant::Secondary,
+                            Permission::Always,
+                        )),
+                )
+                .child(choice(
+                    "once",
+                    "Allow once",
+                    ButtonVariant::Primary,
+                    Permission::Once,
+                ))
+        });
         div()
             .flex()
             .flex_col()
@@ -162,6 +222,9 @@ impl RenderOnce for PermissionPrompt {
                             .min_w_0()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(colors.fg)
+                            .when_some(self.header_selector, |title, selector| {
+                                title.debug_selector(move || selector.to_string())
+                            })
                             .child(self.title.clone()),
                     ),
             )
@@ -179,30 +242,18 @@ impl RenderOnce for PermissionPrompt {
                         .child(detail),
                 )
             }))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap_2()
-                    .child(choice(
-                        "deny",
-                        "Deny",
-                        ButtonVariant::Ghost,
-                        Permission::Deny,
-                    ))
-                    .child(choice(
-                        "always",
-                        "Always allow",
-                        ButtonVariant::Secondary,
-                        Permission::Always,
-                    ))
-                    .child(choice(
-                        "once",
-                        "Allow once",
-                        ButtonVariant::Primary,
-                        Permission::Once,
-                    )),
-            )
+            .children(self.body)
+            .children(builtin)
+            .when(!self.actions.is_empty(), |card| {
+                card.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(self.actions),
+                )
+            })
     }
 }

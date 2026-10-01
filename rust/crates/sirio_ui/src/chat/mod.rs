@@ -9069,13 +9069,6 @@ fn composer_border(_focused: bool, theme: &bezel::theme::Theme) -> gpui::Hsla {
     theme.border
 }
 
-/// The question card's accent: the neutral rule the Plan and Rewind cards
-/// wear. It used to be the warning colour, which made an ordinary question
-/// read as an alarm.
-fn permission_card_accent(theme: &Theme) -> Rgba {
-    theme.border_strong
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9376,7 +9369,7 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn chat_view<'a>(
+    pub(super) fn chat_view<'a>(
         cx: &'a mut TestAppContext,
         fixture_args: &[&str],
     ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {

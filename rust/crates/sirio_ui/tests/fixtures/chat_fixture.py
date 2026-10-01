@@ -357,6 +357,20 @@ def subagent_turn(request):
     response(request["id"], {"stopReason": "end_turn"})
 
 
+def ely_permission(request_id, title, question=False):
+    send({"jsonrpc": "2.0", "id": request_id, "method": "session/request_permission",
+          "params": {"sessionId": SESSION_ID,
+                     "toolCall": {"toolCallId": "opaque-" + str(request_id), "title": title,
+                                  "status": "pending", **({"rawInput": {"questions": [{"question": title}]}} if question else {})},
+                     "options": [{"optionId": "allow:this-call", "name": "Run this call", "kind": "allow_once"},
+                                 {"optionId": "deny:this-call", "name": "Skip this call", "kind": "reject_once"}]}})
+
+
+def record_ely_response(directory, message):
+    with open(os.path.join(directory, "wire.jsonl"), "a", encoding="utf-8") as log:
+        log.write(json.dumps(message) + "\n")
+
+
 def main():
     mode = sys.argv[1]
     extra = sys.argv[2] if len(sys.argv) > 2 else None
@@ -370,6 +384,9 @@ def main():
         except json.JSONDecodeError:
             return
         method = request.get("method")
+        if mode in ("ely-permission", "ely-expiry") and method is None:
+            record_ely_response(extra, request)
+            continue
         if method == "initialize":
             result = {"protocolVersion": 1, "agentCapabilities": {}}
             if mode == "auth-required":
@@ -421,6 +438,25 @@ def main():
                         names.append(kind)
                 message_chunk("blocks: " + ",".join(names))
                 response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-permission":
+                ely_permission(9001, "Inspect src/α.rs")
+                answer = json.loads(sys.stdin.readline())
+                record_ely_response(extra, answer)
+                message_chunk("Echoed option: " + answer.get("result", {}).get("outcome", {}).get("optionId", ""))
+                response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-expiry":
+                if first_prompt:
+                    first_prompt = False
+                    ely_permission(9001, "Inspect first file")
+                    while not os.path.exists(os.path.join(extra, "expire")):
+                        time.sleep(0.01)
+                    response(request["id"], {"stopReason": "end_turn"})
+                else:
+                    ely_permission(9002, "Inspect next file")
+                    answer = json.loads(sys.stdin.readline())
+                    record_ely_response(extra, answer)
+                    message_chunk("Second option: " + answer.get("result", {}).get("outcome", {}).get("optionId", ""))
+                    response(request["id"], {"stopReason": "end_turn"})
             if mode == "ely-activity":
                 thought_chunk("Analisi 🌙 del risultato e delle modifiche.\n" * 12)
                 for tool_id, kind, status, title in [

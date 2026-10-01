@@ -70,3 +70,13 @@ physical Wayland session and native macOS/Windows input are unverified.
   selectors preserve virtualized interaction. Tool groups accept reported
   status, and thoughts accept an honest label when no duration was measured.
   The default Gallery constructors retain their original uncontrolled behavior.
+
+- `agent/permission.rs`, `agent/control.rs`: custom request constructors plus
+  rich body/action slots render only protocol-supplied controls. Human custom
+  mode has no Ely editor or default Reply handler; default Gallery
+  constructors preserve their built-in choices and editor behavior.
+  `header_selector` puts a debug selector on the real header text, and the
+  built-in "Always allow" button sits in a wrapper carrying the
+  `ely-request-always` selector, so a test can prove a protocol request never
+  grows Ely's fixed Once/Always/Deny set. GPUI's `debug_selector` is a no-op in
+  release builds, so both are test hooks only there.

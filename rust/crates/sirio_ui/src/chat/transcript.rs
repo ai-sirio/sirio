@@ -5,6 +5,7 @@
 //! behind a header. What is left here is the day heading that marks
 //! where the calendar day changes between turns.
 
+use crate::text_selection::selectable_text;
 use chrono::{DateTime, Local};
 use sirio_theme::Theme;
 
@@ -401,6 +402,7 @@ impl Chat {
                 resolved,
                 expired,
                 dismissed,
+                is_question,
                 ..
             } => {
                 // The record of a question: what was asked and what became
@@ -421,16 +423,7 @@ impl Chat {
                 } else {
                     "Waiting for your answer below".to_string()
                 };
-                let mut card = div()
-                    .id(("permission-card", request_id as usize))
-                    .debug_selector(move || format!("permission-card-{request_id}"))
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(permission_card_accent(theme))
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
+                let body = div()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
@@ -438,23 +431,40 @@ impl Chat {
                         div()
                             .text_size(typography.callout)
                             .text_color(theme.text)
-                            .child(header),
-                    );
-                if !prompt.is_empty() {
-                    card = card.child(
+                            .child(selectable_text(header)),
+                    )
+                    .when(!prompt.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .text_size(typography.footnote)
+                                .text_color(theme.text_muted)
+                                .child(selectable_text(prompt)),
+                        )
+                    })
+                    .child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(theme.text_muted)
-                            .child(prompt),
+                            .text_color(theme.text_faint)
+                            .child(status),
                     );
-                }
-                card.child(
-                    div()
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_faint)
-                        .child(status),
-                )
-                .into_any_element()
+                let shell = if is_question {
+                    ely_gpui_component::agent::HumanInputRequest::custom(id.clone(), "Question")
+                        .body(body)
+                        .into_any_element()
+                } else {
+                    ely_gpui_component::agent::PermissionPrompt::custom(
+                        id.clone(),
+                        "Permission requested",
+                    )
+                    .body(body)
+                    .into_any_element()
+                };
+                div()
+                    .id(("permission-card", request_id as usize))
+                    .debug_selector(move || format!("permission-card-{request_id}"))
+                    .w_full()
+                    .child(shell)
+                    .into_any_element()
             }
             Entry::Plan { entries, approval } => {
                 let mut card = div()

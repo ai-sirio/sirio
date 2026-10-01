@@ -482,3 +482,109 @@ async fn ely_rich_diff_drag_and_copy_includes_raw_projection_offsets(cx: &mut Te
     cx.update(|window, cx| chat.update(cx, |v, cx| v.copy_transcript(&CopyTranscript, window, cx)));
     assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), selected);
 }
+
+fn request_wire(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("wire.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[gpui::test]
+async fn ely_request_sends_only_the_advertised_option_id(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let (chat, cx) = super::tests::chat_view(cx, &["ely-permission", dir.0.to_str().unwrap()]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    chat.update(cx, |v, cx| {
+        v.control_send("inspect", cx);
+    });
+    pump_chat_until(cx, &chat, |v| v.pending_question().is_some());
+    refresh_frame(cx);
+    let request_id = chat.read_with(&cx.cx, |v, _| {
+        question_dock::question_view(&v.entries).unwrap().request_id
+    });
+    let request_selector: &'static str = format!("ely-request-{request_id}").leak();
+    assert!(
+        cx.debug_bounds(request_selector).is_some(),
+        "wire-driven Ely shell must render the live request"
+    );
+    assert!(cx.debug_bounds("ely-request-always").is_none());
+    cx.executor()
+        .advance_clock(question_dock::DOCK_ARMING_DELAY);
+    cx.run_until_parked();
+    let allow = cx
+        .debug_bounds("permission-option-allow:this-call")
+        .unwrap();
+    cx.simulate_click(allow.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    pump_chat_until(cx, &chat, |v| {
+        v.entries.iter().any(|e| matches!(e, Entry::Assistant { text, .. } if text.contains("Echoed option: allow:this-call")))
+    });
+    let wire = request_wire(&dir.0);
+    assert_eq!(wire.len(), 1);
+    assert_eq!(wire[0]["result"]["outcome"]["optionId"], "allow:this-call");
+}
+
+#[gpui::test]
+async fn ely_expired_request_cannot_answer_the_next_request(cx: &mut TestAppContext) {
+    let dir = TempDir::new();
+    let (chat, cx) = super::tests::chat_view(cx, &["ely-expiry", dir.0.to_str().unwrap()]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    cx.update(|window, cx| {
+        let focus = chat.read(cx).composer_field.read(cx).focus_handle(cx);
+        focus.focus(window, cx);
+    });
+    chat.update(cx, |v, cx| {
+        v.control_send("first", cx);
+    });
+    pump_chat_until(cx, &chat, |v| v.pending_question().is_some());
+    refresh_frame(cx);
+    refresh_frame(cx);
+    let request_id = chat.read_with(&cx.cx, |v, _| {
+        question_dock::question_view(&v.entries).unwrap().request_id
+    });
+    let request_selector: &'static str = format!("ely-request-{request_id}").leak();
+    assert!(cx.debug_bounds(request_selector).is_some());
+    chat.update(cx, |v, cx| {
+        v.question_answer.for_request = Some(request_id);
+        v.question_answer.draft = "stale draft".into();
+        v.question_dock.selected = 1;
+        cx.notify();
+    });
+    std::fs::write(dir.0.join("expire"), "go").unwrap();
+    pump_chat_until(cx, &chat, |v| {
+        !v.streaming && v.pending_question().is_none()
+    });
+    refresh_frame(cx);
+    refresh_frame(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        request_wire(&dir.0).is_empty(),
+        "expired request must not send any answer"
+    );
+    assert!(cx.debug_bounds(request_selector).is_none());
+    chat.update(cx, |v, cx| {
+        v.control_send("second", cx);
+    });
+    pump_chat_until(cx, &chat, |v| {
+        v.entries.iter().any(|e| matches!(e, Entry::Permission { request_id: id, expired: false, .. } if *id != request_id))
+    });
+    refresh_frame(cx);
+    refresh_frame(cx);
+    chat.read_with(&cx.cx, |v, _| {
+        assert!(v.question_answer.draft.is_empty());
+        assert_eq!(v.question_dock.selected, 0);
+    });
+    cx.executor()
+        .advance_clock(question_dock::DOCK_ARMING_DELAY);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    pump_chat_until(cx, &chat, |v| !v.streaming);
+    let wire = request_wire(&dir.0);
+    assert_eq!(wire.len(), 1);
+    assert_eq!(wire[0]["id"], 9002);
+    assert_eq!(wire[0]["result"]["outcome"]["optionId"], "allow:this-call");
+}
