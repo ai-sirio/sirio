@@ -80,3 +80,20 @@ physical Wayland session and native macOS/Windows input are unverified.
   `ely-request-always` selector, so a test can prove a protocol request never
   grows Ely's fixed Once/Always/Deny set. GPUI's `debug_selector` is a no-op in
   release builds, so both are test hooks only there.
+
+- `chat/composer.rs`: `PromptInput::custom` draws Ely's shell around the
+  host's own editor, with host-supplied send eligibility (`ready`) and focus
+  (`.focused`). It takes no `forms::Enter` action and offers no completion
+  rows, so the host's keyboard, IME and popups stay in charge; the default
+  constructor keeps its upstream behaviour. In custom mode the shell wears
+  the input fill (`sunken`) so the host's field and the card read as one
+  surface, its focused border steps to `fg_muted` instead of the ring colour,
+  and the tool row wraps. `.trailing` puts tools at the end of the row, next
+  to the send control. `SendButton` carries `send`, `send-ready` and
+  `stop-glyph` debug selectors, and `PromptInput`'s card `ely-prompt-input`
+  (no-ops in release builds); the card sets a text colour so content without
+  one of its own is not drawn in gpui's default black. `InputHint::new().enter(..)`
+  names what Enter does now, such as `to queue ·` while an answer streams;
+  `InputHint` is no longer a unit struct.
+- `chat/attach.rs`: `AttachmentChip::remove_selector` puts a debug selector on
+  the remove button.

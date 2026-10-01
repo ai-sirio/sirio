@@ -196,6 +196,16 @@ fn main() {
                 )
                 .unwrap();
             }
+            // Native X11 has no portal file dialog and no clipboard tool here: the
+            // probe puts a picture on the clipboard itself, so Ctrl+V attaches it.
+            if let Ok(path) = std::env::var("ELY_PROBE_CLIPBOARD_IMAGE") {
+                let bytes = std::fs::read(path).expect("ELY_PROBE_CLIPBOARD_IMAGE is readable");
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image {
+                    format: gpui::ImageFormat::Png,
+                    bytes,
+                    id: 1,
+                }));
+            }
             cx.activate(true);
         });
 }

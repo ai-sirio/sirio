@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, ElementId, FontWeight, IntoElement, ObjectFit, ParentElement, RenderOnce, SharedString,
-    Styled, Window, div, relative,
+    Styled, Window, div, prelude::*, relative,
 };
 
 use crate::{
@@ -31,6 +31,7 @@ pub struct AttachmentChip {
     id: ElementId,
     attachment: Attachment,
     on_remove: Option<Run>,
+    remove_selector: Option<SharedString>,
 }
 
 impl AttachmentChip {
@@ -46,7 +47,14 @@ impl AttachmentChip {
             id: id.into(),
             attachment,
             on_remove: None,
+            remove_selector: None,
         }
+    }
+
+    /// A debug selector on the remove button, for hosts that measure it in tests.
+    pub fn remove_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.remove_selector = Some(selector.into());
+        self
     }
 
     pub fn on_remove(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
@@ -133,14 +141,21 @@ impl RenderOnce for AttachmentChip {
                     .child(detail),
             )
             .children(self.on_remove.map(|remove| {
-                IconButton::new((self.id.clone(), "remove"), IconName::X)
-                    .variant(ButtonVariant::Ghost)
-                    .size(ControlSize::Sm)
-                    .tooltip("Remove")
-                    .on_click(move |_, window, cx| {
-                        log::info!("attachment: removed");
-                        remove(window, cx)
+                div()
+                    .flex_none()
+                    .when_some(self.remove_selector, |wrap, selector| {
+                        wrap.debug_selector(move || selector.to_string())
                     })
+                    .child(
+                        IconButton::new((self.id.clone(), "remove"), IconName::X)
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .tooltip("Remove")
+                            .on_click(move |_, window, cx| {
+                                log::info!("attachment: removed");
+                                remove(window, cx)
+                            }),
+                    )
             }))
     }
 }

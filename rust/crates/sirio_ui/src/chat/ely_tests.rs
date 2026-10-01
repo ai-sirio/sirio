@@ -2,7 +2,7 @@
 use super::tests::{CHAT_FIXTURE, TempDir, pump_chat_until, refresh_frame};
 use super::*;
 use bezel::ui::widgets::{ButtonStyle, Buttons};
-use gpui::{TestAppContext, size};
+use gpui::{TestAppContext, VisualTestContext, size};
 
 struct ThemeProbe {
     chat: Entity<Chat>,
@@ -587,4 +587,139 @@ async fn ely_expired_request_cannot_answer_the_next_request(cx: &mut TestAppCont
     assert_eq!(wire.len(), 1);
     assert_eq!(wire[0]["id"], 9002);
     assert_eq!(wire[0]["result"]["outcome"]["optionId"], "allow:this-call");
+}
+
+fn user_turns(chat: &Entity<Chat>, cx: &VisualTestContext) -> usize {
+    chat.read_with(&cx.cx, |chat, _| {
+        chat.entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::User { .. }))
+            .count()
+    })
+}
+
+#[gpui::test]
+async fn ely_composer_enter_respects_completion_and_ime(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (chat, cx) = super::tests::chat_view(cx, &["composer"]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("ely-prompt-input").is_some(),
+        "the composer is drawn by Ely's prompt input"
+    );
+    let composer = cx.debug_bounds("composer").unwrap();
+    cx.simulate_click(composer.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    // A completion row is open: Enter accepts it and sends nothing.
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("slash-popup").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        user_turns(&chat, cx),
+        0,
+        "accepting a popup row sends no turn"
+    );
+    assert!(
+        chat.read_with(&cx.cx, |v, _| v.draft_text())
+            .starts_with("/cr")
+    );
+
+    // A marked composition is in flight: Enter belongs to the IME.
+    let field = chat.read_with(&cx.cx, |v, _| v.composer_field.clone());
+    cx.update(|window, cx| {
+        field.update(cx, |field, cx| {
+            field.replace_and_mark_text_in_range(None, "か", None, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, cx| field.update(cx, |f, cx| f.marked_text_range(window, cx)))
+            .is_some(),
+        "the field is composing"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        user_turns(&chat, cx),
+        0,
+        "Enter during composition sends nothing"
+    );
+
+    // The composition commits; the next Enter is an ordinary send.
+    cx.update(|window, cx| {
+        field.update(cx, |field, cx| {
+            field.replace_text_in_range(None, "か", window, cx)
+        })
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    pump_chat_until(cx, &chat, |v| v.has_completed_turn);
+    assert_eq!(
+        user_turns(&chat, cx),
+        1,
+        "one Enter after the commit sends once"
+    );
+    assert!(chat.read_with(&cx.cx, |v, _| {
+        v.entries
+            .iter()
+            .any(|e| matches!(e, Entry::User { text, .. } if text.contains("か")))
+    }));
+}
+
+#[gpui::test]
+async fn ely_composer_sends_an_attachment_without_text(cx: &mut TestAppContext) {
+    let (chat, cx) = super::tests::chat_view(cx, &["echo-blocks"]);
+    pump_chat_until(cx, &chat, |v| v.client.is_some());
+    refresh_frame(cx);
+    assert!(
+        cx.debug_bounds("ely-prompt-input").is_some(),
+        "the composer is drawn by Ely's prompt input"
+    );
+    cx.cx
+        .write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image {
+            format: gpui::ImageFormat::Png,
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+            id: 11,
+        }));
+    let composer = cx.debug_bounds("composer").unwrap();
+    cx.simulate_click(composer.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    #[cfg(target_os = "macos")]
+    cx.simulate_keystrokes("cmd-v");
+    #[cfg(not(target_os = "macos"))]
+    cx.simulate_keystrokes("ctrl-v");
+    cx.run_until_parked();
+    refresh_frame(cx);
+    assert_eq!(chat.read_with(&cx.cx, |v, _| v.attachments.len()), 1);
+    assert_eq!(chat.read_with(&cx.cx, |v, _| v.draft_text()), "");
+
+    let send = cx
+        .debug_bounds("send-ready")
+        .expect("an attachment alone makes the send action available");
+    cx.simulate_click(send.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    pump_chat_until(cx, &chat, |v| {
+        v.entries
+            .iter()
+            .any(|e| matches!(e, Entry::Assistant { text, .. } if text.starts_with("blocks:")))
+    });
+    let reply = chat.read_with(&cx.cx, |v, _| {
+        v.entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Assistant { text, .. } if text.starts_with("blocks:") => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap()
+    });
+    assert_eq!(
+        reply, "blocks: image(image/png)",
+        "the agent received the picture and no text block"
+    );
+    assert!(chat.read_with(&cx.cx, |v, _| v.attachments.is_empty()));
 }
