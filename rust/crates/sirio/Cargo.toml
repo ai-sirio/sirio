@@ -17,7 +17,7 @@ perf_scheduler = { package = "bezel-zed-scheduler", version = "=0.3.8", optional
 sirio_perf = { path = "../sirio_perf" }
 sirio_lsp = { path = "../sirio_lsp" }
 notify.workspace = true
-# Only for `bezel::ui::register_fonts`: the Geist faces the theme names.
+# Sirio uses bezel's UI components; its Geist faces ship from `rust/assets/fonts`.
 bezel.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true

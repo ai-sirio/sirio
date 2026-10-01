@@ -1006,6 +1006,34 @@ static TERMINAL_FONT_ITALIC: &[u8] =
 static TERMINAL_FONT_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf");
 
+static UI_FONT_GEIST: &[u8] = include_bytes!("../../../assets/fonts/Geist.ttf");
+static UI_FONT_GEIST_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/Geist-Medium.ttf");
+static UI_FONT_GEIST_SEMIBOLD: &[u8] =
+    include_bytes!("../../../assets/fonts/Geist-SemiBold.ttf");
+static UI_FONT_GEIST_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Geist-Bold.ttf");
+static UI_FONT_GEIST_MONO: &[u8] = include_bytes!("../../../assets/fonts/GeistMono.ttf");
+
+/// The UI faces: Geist, its static 500/600/700 weights, and Geist Mono.
+pub fn bundled_ui_fonts() -> Vec<Cow<'static, [u8]>> {
+    [
+        UI_FONT_GEIST,
+        UI_FONT_GEIST_MEDIUM,
+        UI_FONT_GEIST_SEMIBOLD,
+        UI_FONT_GEIST_BOLD,
+        UI_FONT_GEIST_MONO,
+    ]
+    .into_iter()
+    .map(Cow::Borrowed)
+    .collect()
+}
+
+/// Registers the UI faces. Must run before [`Theme::init`], like
+/// [`register_bundled_terminal_font`]: `Theme::install` resolves the UI and
+/// code families from `all_font_names()` once.
+pub fn register_ui_fonts(cx: &App) -> anyhow::Result<()> {
+    cx.text_system().add_fonts(bundled_ui_fonts())
+}
+
 /// The bundled terminal faces, regular, bold, italic and bold italic, as
 /// the bytes `TextSystem::add_fonts` takes.
 pub fn bundled_terminal_fonts() -> Vec<Cow<'static, [u8]>> {
@@ -2707,6 +2735,49 @@ mod tests {
             4,
             "expected regular, bold, italic and bold italic, got {styles:?}"
         );
+    }
+
+    /// Linux rasterises a variable font at its default instance only, so the
+    /// static 500/600/700 faces are what let it paint medium, semibold and
+    /// bold. A wrong or missing file shows up nowhere but on screen.
+    #[test]
+    fn bundled_ui_faces_are_geist_in_their_weights() {
+        let faces: Vec<(String, u16)> = bundled_ui_fonts()
+            .iter()
+            .map(|bytes| {
+                let face = ttf_parser::Face::parse(bytes, 0).expect("a font file");
+                let names: Vec<(u16, String)> = face
+                    .names()
+                    .into_iter()
+                    .filter(|name| {
+                        (name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                            || name.name_id == ttf_parser::name_id::FAMILY)
+                            && name.is_unicode()
+                    })
+                    .filter_map(|name| name.to_string().map(|value| (name.name_id, value)))
+                    .collect();
+                let family = names
+                    .iter()
+                    .find(|(name_id, _)| *name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+                    .or_else(|| {
+                        names
+                            .iter()
+                            .find(|(name_id, _)| *name_id == ttf_parser::name_id::FAMILY)
+                    })
+                    .map(|(_, family)| family.clone())
+                    .expect("a family name");
+                (family, face.weight().to_number())
+            })
+            .collect();
+        for weight in [500, 600, 700] {
+            assert!(
+                faces.iter().any(|(family, w)| family == "Geist" && *w == weight),
+                "no static Geist {weight} in {faces:?}"
+            );
+        }
+        assert!(faces.iter().any(|(family, _)| family == "Geist"));
+        assert!(faces.iter().any(|(family, _)| family == "Geist Mono"), "{faces:?}");
+        assert_eq!(faces.len(), 5);
     }
 
     /// With nothing installed, the fallback is the system's generic

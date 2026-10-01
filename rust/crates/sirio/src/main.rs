@@ -21785,11 +21785,11 @@ fn app_icon() -> Arc<image::RgbaImage> {
 }
 
 /// Registers the bundled faces with the text system, on every platform:
-/// bezel's Geist for the UI and code, and `sirio_theme`'s JetBrainsMono Nerd
-/// Font Mono for the terminal. Sirio used to carry its own Geist copies in
+/// Sirio's Geist faces for the UI and code, and `sirio_theme`'s JetBrainsMono
+/// Nerd Font Mono for the terminal. Sirio used to carry its own Geist copy in
 /// `assets/fonts` and skip macOS, which kept SF Pro there; B3 makes one face
-/// the face everywhere, and bezel's copies include the 500/600/700 statics
-/// Sirio's never had. The terminal face came back into `assets/fonts` for
+/// the face everywhere, with static 500/600/700 weights. The terminal face
+/// came back into `assets/fonts` for
 /// the reason recorded at `sirio_theme::BUNDLED_TERMINAL_FAMILY`: on a stock
 /// Windows box no candidate in the terminal chain existed, and the generic
 /// answer was Courier New with no Nerd Font glyph in it.
@@ -21808,7 +21808,7 @@ fn app_icon() -> Arc<image::RgbaImage> {
 /// terminal, as a Cascadia Mono or Consolas pane whose Powerline glyphs are
 /// tofu.
 fn register_fonts(cx: &App) {
-    if let Err(error) = bezel::ui::register_fonts(cx) {
+    if let Err(error) = sirio_theme::register_ui_fonts(cx) {
         eprintln!("[fonts] failed to register Geist: {error}");
     }
     if let Err(error) = sirio_theme::register_bundled_terminal_font(cx) {
@@ -21928,8 +21928,7 @@ fn main() {
     app.run(|cx: &mut App| {
         #[cfg(feature = "perf-native")]
         native_perf::init(cx);
-        // Must land before `Theme::init` — see `register_fonts`'s own doc
-        // comment for why the order is load-bearing.
+        // Must land before `Theme::init`: Theme caches resolved font names.
         register_fonts(cx);
         Theme::init(cx);
         sirio_ui::ely::init(cx);

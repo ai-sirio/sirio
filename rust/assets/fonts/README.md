@@ -1,5 +1,21 @@
 # Bundled fonts
 
+## Geist
+
+The five UI faces registered by `sirio_theme::register_ui_fonts`: `Geist.ttf`,
+`Geist-Medium.ttf`, `Geist-SemiBold.ttf`, `Geist-Bold.ttf`, and `GeistMono.ttf`.
+Copied byte-for-byte from `bezel-ui` 0.1.4's `assets/fonts`; upstream is
+[vercel/geist-font](https://github.com/vercel/geist-font). Licensed under the
+SIL Open Font License 1.1 in `Geist-OFL.txt`.
+
+| File | SHA-256 |
+| --- | --- |
+| `Geist.ttf` | `73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659` |
+| `Geist-Medium.ttf` | `0090e004725f6f64b841715b4167920580f883fcf9b67fc6d744089103fec101` |
+| `Geist-SemiBold.ttf` | `612ec98df33935354f39e81e54101656961ab6e5549f64b63eb57868ba7bab8d` |
+| `Geist-Bold.ttf` | `e866b423b755233cae8bce6a37519f6fe630be9772fa08fc3114bff15bc8580f` |
+| `GeistMono.ttf` | `87c2aff9723544a9adaea19d92e42a33705c9723624801b6e0224c2206a6af0d` |
+
 ## JetBrainsMono Nerd Font Mono
 
 The terminal face `sirio_theme::BUNDLED_TERMINAL_FAMILY` names and

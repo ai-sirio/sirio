@@ -186,7 +186,7 @@ fn main() {
     gpui_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(|cx: &mut App| {
-            bezel::ui::register_fonts(cx).expect("Sirio fonts");
+            sirio_theme::register_ui_fonts(cx).expect("Sirio fonts");
             sirio_theme::Theme::init(cx);
             sirio_ui::chat::init(cx);
             if std::env::var("ELY_PROBE_APPEARANCE").as_deref() == Ok("light") {
