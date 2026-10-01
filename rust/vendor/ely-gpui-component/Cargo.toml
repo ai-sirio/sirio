@@ -1,0 +1,35 @@
+[package]
+name = "ely-gpui-component"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Components"
+publish = false
+autoexamples = false
+
+[features]
+default = ["sirio-chat"]
+sirio-chat = []
+test-support = ["gpui/test-support"]
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+anyhow.workspace = true
+smallvec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures = "0.3"
+jiff = "0.2"
+log = "0.4"
+regex = "1"
+rust-embed = "8.12"
+unicode-segmentation = "1"
+web-time = "1.1"
+image = { version = "0.25", default-features = false }
+iso_currency = { version = "0.7", features = ["iterator"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }

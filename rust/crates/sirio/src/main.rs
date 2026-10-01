@@ -7990,12 +7990,10 @@ impl SirioWorkspace {
                 cx,
             ),
         });
-        if let Some(agent_name) = agent_name {
-            chat_entity.update(cx, |chat, cx| {
-                chat.set_agent_name(agent_name);
-                cx.notify();
-            });
-        }
+        chat_entity.update(cx, |chat, cx| {
+            chat.set_agent_identity(agent_id.clone(), agent_name);
+            cx.notify();
+        });
         Self::bind_chat(&chat_entity, cx);
         let pane_id = self.next_pane_id;
         register_restored_agent(
@@ -11844,12 +11842,10 @@ impl SirioWorkspace {
                 })
             }
         };
-        if let Some(agent_name) = agent_name {
-            chat.update(cx, |chat, cx| {
-                chat.set_agent_name(agent_name);
-                cx.notify();
-            });
-        }
+        chat.update(cx, |chat, cx| {
+            chat.set_agent_identity(agent_id.clone(), agent_name);
+            cx.notify();
+        });
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         // A chat pane is an agent pane: register its identity the same way
@@ -11958,12 +11954,10 @@ impl SirioWorkspace {
                 chat
             }
         });
-        if let Some(agent_name) = agent_name {
-            chat.update(cx, |chat, cx| {
-                chat.set_agent_name(agent_name);
-                cx.notify();
-            });
-        }
+        chat.update(cx, |chat, cx| {
+            chat.set_agent_identity(agent_id.clone(), agent_name);
+            cx.notify();
+        });
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         register_restored_agent(
@@ -20491,9 +20485,9 @@ fn restore_tabs_with_terminal_cache(
                     }
                     chat
                 });
-                if let Some(agent_name) = agent_name.clone() {
-                    chat.update(cx, |chat, _| chat.set_agent_name(agent_name));
-                }
+                chat.update(cx, |chat, _| {
+                    chat.set_agent_identity(agent_id.clone(), agent_name.clone())
+                });
                 TabContent::Chat(chat)
             }
             Some(TabKind::Terminal) => {
@@ -21020,9 +21014,9 @@ fn restore_tabs_in_workspace(
                     }
                     chat
                 });
-                if let Some(agent_name) = agent_name.clone() {
-                    chat.update(cx, |chat, _| chat.set_agent_name(agent_name));
-                }
+                chat.update(cx, |chat, _| {
+                    chat.set_agent_identity(agent_id.clone(), agent_name.clone())
+                });
                 TabContent::Chat(chat)
             }
             Some(TabKind::Terminal) => {
@@ -21930,7 +21924,7 @@ fn main() {
     // bezel's icons are `svg().path("icons/…")`; without an asset source
     // gpui finds nothing and paints nothing. Sirio's own icons embed their
     // bytes and never needed this.
-    let app = application().with_assets(bezel::ui::icons::Assets);
+    let app = application().with_assets(sirio_ui::chat::ChatAssets);
     app.run(|cx: &mut App| {
         #[cfg(feature = "perf-native")]
         native_perf::init(cx);

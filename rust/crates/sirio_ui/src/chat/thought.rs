@@ -5,18 +5,16 @@
 //! (`Activity`). Whether the body is open is `widgets::Takeover`: it follows
 //! the run until the reader presses the header, then obeys the reader.
 
+#[cfg(test)]
 use std::time::Duration;
 
 use bezel::motion::Painter;
 use bezel::ui::scroll;
 use bezel::ui::scroll::{FollowState, ScrollbarState};
-use bezel::ui::widgets::Layout as _;
-use gpui::{
-    AnyElement, App, Entity, ScrollHandle, Window, div, linear_color_stop, linear_gradient,
-    prelude::*, px,
-};
+use gpui::{AnyElement, ScrollHandle, div, linear_color_stop, linear_gradient, prelude::*, px};
 use sirio_theme::Theme;
 
+#[cfg(test)]
 use crate::loading;
 
 use super::{Chat, Entry, TranscriptInteraction, tool_calls::tool_output_consumes_scroll};
@@ -24,6 +22,7 @@ use super::{Chat, Entry, TranscriptInteraction, tool_calls::tool_output_consumes
 /// The header's word: `Thinking` while the thought streams, then
 /// `Thought for Ns` when this process measured it, or a bare `Thought` for a
 /// thought restored from a database that never knew.
+#[cfg(test)]
 pub(crate) fn thought_header_label(streaming: bool, duration_ms: Option<u64>) -> String {
     if streaming {
         "Thinking".to_string()
@@ -94,81 +93,6 @@ impl ThoughtScroll {
                 .size_0(),
             )
             .into_any_element()
-    }
-}
-
-impl Chat {
-    /// The gallery's `Activity::header`: a 14 px glyph slot — the orb
-    /// cluster while the thought streams, the disclosure chevron once it
-    /// settles — and the state's word. Clickable when it belongs to an entry;
-    /// the generating spinner (#239) draws the same row without a click.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_thought_header(
-        entry_index: usize,
-        streaming: bool,
-        open: bool,
-        duration_ms: Option<u64>,
-        theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
-        window: &mut Window,
-        cx: &mut App,
-        entity: Option<Entity<Chat>>,
-    ) -> AnyElement {
-        // Built outside the row: gpui reads an svg's colour off its own
-        // element, so a chevron tinted by its parent paints nothing.
-        let glyph: AnyElement = if streaming {
-            loading::thinking_indicator("thought-orb", theme, window, cx)
-        } else {
-            bezel_theme.disclosure(open).into_any_element()
-        };
-        let label = thought_header_label(streaming, duration_ms);
-        let mut row = div()
-            .id(("thought-toggle", entry_index))
-            .debug_selector(move || format!("thought-toggle-{entry_index}"))
-            .self_start()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(4.0))
-            .py(px(5.0))
-            .rounded(px(bezel::theme::Theme::control_radius()))
-            .cursor_pointer()
-            .hover(|s| s.bg(bezel::theme::ink(0.03)))
-            .child(
-                div()
-                    .flex()
-                    .w(px(loading::THINKING_GLYPH))
-                    .justify_center()
-                    .child(glyph),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.callout)
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
-                    .child(label),
-            )
-            .child(div().size_0().debug_selector(move || {
-                if streaming {
-                    format!("thought-streaming-{entry_index}")
-                } else {
-                    format!("thought-settled-{entry_index}")
-                }
-            }))
-            .when(duration_ms.is_some() && !streaming, |row| {
-                row.child(
-                    div()
-                        .size_0()
-                        .debug_selector(move || format!("thought-took-{entry_index}")),
-                )
-            });
-        if let Some(entity) = entity {
-            row = row.on_click(move |_, _, cx| {
-                entity.update(cx, |chat, cx| chat.toggle_thought(entry_index, cx));
-            });
-        }
-        row.into_any_element()
     }
 }
 

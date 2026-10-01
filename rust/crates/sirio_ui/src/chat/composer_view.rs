@@ -76,6 +76,16 @@ pub(crate) enum PillDot {
     Offline,
 }
 
+impl PillDot {
+    pub(crate) fn color(self) -> gpui::Rgba {
+        match self {
+            PillDot::Busy => gpui::rgb(0xf5a623),
+            PillDot::Ready => gpui::rgb(0x53c653),
+            PillDot::Offline => gpui::rgb(0x8a8d99),
+        }
+    }
+}
+
 /// The status pill's dot and label. The label is the session's permission
 /// mode whenever the agent has advertised one: the pill is the mode
 /// selector, and its word must not flip to "working" every time a turn
@@ -388,7 +398,7 @@ mod tests {
     }
 }
 
-use gpui::{AnyElement, Context, Pixels, Point, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, Pixels, Point, SharedString, div, px};
 use sirio_acp::{EffortChoice, ModeCatalog};
 
 use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
@@ -570,5 +580,644 @@ impl Chat {
             self.attachments.remove(index);
             cx.notify();
         }
+    }
+}
+
+use super::*;
+use ely_gpui_component::{
+    buttons::{Button, ButtonVariant, IconButton},
+    chat::{Attachment, AttachmentChip, InputHint, PromptInput},
+    primitives::{Icon, IconName},
+    theme::{ActiveTheme as _, ControlSize, IconSize, Radius, TextSize},
+    typography::EllipsisTooltip,
+};
+
+/// How much of bezel's text field is clipped away on every side. The field
+/// draws a 1px border on an 8px corner radius; clipping 3px clears the arc
+/// where it bends inward, so no trace of the border or the focus ring shows.
+const FIELD_CROP: f32 = 3.0;
+
+/// How far the clip box sits outside the composer's content: the field's 1px
+/// border and 10px inset, less what is clipped. The text lands on the content
+/// edge, lined up with the chips and the tool row.
+const FIELD_INSET: f32 = 11.0 - FIELD_CROP;
+
+/// The distance from the shell's top edge to the field's first row: its 1px
+/// border and 12px padding. The completion popups hang above the token that
+/// opened them, and this keeps one opened on the first row above the card
+/// instead of over its border.
+const SHELL_TOP_INSET: f32 = 13.0;
+
+/// What the chip calls an attached picture: the kind of file it will be sent as.
+fn attachment_chip_name(mime_type: &str) -> String {
+    match mime_type {
+        "image/png" => "Image.png".to_string(),
+        "image/jpeg" => "Image.jpg".to_string(),
+        "image/gif" => "Image.gif".to_string(),
+        "image/webp" => "Image.webp".to_string(),
+        _ => "Image".to_string(),
+    }
+}
+
+/// The size of the picture a base64 payload carries, without decoding it.
+fn base64_decoded_len(data: &str) -> u64 {
+    let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
+    (data.len() as u64 / 4 * 3).saturating_sub(padding as u64)
+}
+
+impl Chat {
+    /// The queue block above the composer: a header with the count, a fold
+    /// and "Clear all", then one row per queued prompt in send order — its
+    /// text, "Send now" and a remove control. The front entry is the one the
+    /// running turn's end sends; its dot is the only bright one. The list caps
+    /// its height and scrolls, so a long queue never pushes the card off the
+    /// pane. Callers draw it only while the queue is non-empty.
+    pub(super) fn render_queue(&self, _theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let ely = cx.theme();
+        let (border, fg, fg_muted, fg_subtle, surface) = {
+            let colors = &ely.colors;
+            (
+                colors.border,
+                colors.fg,
+                colors.fg_muted,
+                colors.fg_subtle,
+                colors.surface,
+            )
+        };
+        let (radius, label_size) = (ely.radius(Radius::Md), ely.text_size(TextSize::Xs));
+        let entity = cx.entity();
+        let count = self.queue.len();
+        let expanded = self.queue_expanded;
+        let title = if count == 1 {
+            "1 message queued".to_string()
+        } else {
+            format!("{count} messages queued")
+        };
+        let toggle_entity = entity.clone();
+        let clear_entity = entity.clone();
+        div()
+            .id("queue")
+            .debug_selector(|| "queue".into())
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .mb(px(8.0))
+            .rounded(radius)
+            .border_1()
+            .border_color(border)
+            .bg(surface)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("queue-header")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .pr_1()
+                    .py_0p5()
+                    .child(
+                        div()
+                            .id("queue-toggle")
+                            .debug_selector(|| "queue-toggle".into())
+                            .flex()
+                            .flex_1()
+                            .items_center()
+                            .gap_1p5()
+                            .py_1()
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| {
+                                toggle_entity.update(cx, |chat, cx| chat.toggle_queue_folded(cx));
+                            })
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(IconSize::Xs)
+                                .color(fg_subtle),
+                            )
+                            .child(
+                                div()
+                                    .id("queue-count")
+                                    .debug_selector(move || format!("queue-count-{count}"))
+                                    .text_size(label_size)
+                                    .text_color(fg_muted)
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .debug_selector(|| "queue-clear".into())
+                            .child(
+                                Button::new("queue-clear-all", "Clear all")
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ControlSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        clear_entity.update(cx, |chat, cx| chat.clear_queue(cx));
+                                    }),
+                            ),
+                    ),
+            )
+            .when(expanded, |block| {
+                block.child(
+                    div()
+                        .id("queue-entries")
+                        .flex()
+                        .flex_col()
+                        .max_h(px(QUEUE_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .border_t_1()
+                        .border_color(border)
+                        .children(self.queue.iter().enumerate().map(|(index, text)| {
+                            let send_entity = entity.clone();
+                            let remove_entity = entity.clone();
+                            let text_for_id = text.clone();
+                            let is_next = index == 0;
+                            div()
+                                .id(("queue-entry", index))
+                                .debug_selector(move || format!("queue-entry-{index}"))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_2p5()
+                                .py_1()
+                                .when(index + 1 < count, |row| {
+                                    row.border_b_1().border_color(border)
+                                })
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .size(px(6.0))
+                                        .rounded_full()
+                                        .bg(if is_next { fg } else { fg_subtle }),
+                                )
+                                .child(
+                                    div()
+                                        .id(("queue-text", index))
+                                        .debug_selector(move || format!("queue-text-{text_for_id}"))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(label_size)
+                                        .text_color(fg)
+                                        .child(EllipsisTooltip::new(
+                                            ("queue-tooltip", index),
+                                            text.clone(),
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .debug_selector(move || format!("queue-send-{index}"))
+                                        .child(
+                                            Button::new(("queue-send-button", index), "Send now")
+                                                .variant(ButtonVariant::Ghost)
+                                                .size(ControlSize::Sm)
+                                                .on_click(move |_, _, cx| {
+                                                    send_entity.update(cx, |chat, cx| {
+                                                        chat.send_queued_entry_now(index, cx);
+                                                    });
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .debug_selector(move || format!("queue-remove-{index}"))
+                                        .child(
+                                            IconButton::new(
+                                                ("queue-remove-button", index),
+                                                IconName::X,
+                                            )
+                                            .variant(ButtonVariant::Ghost)
+                                            .size(ControlSize::Sm)
+                                            .tooltip("Remove")
+                                            .on_click(
+                                                move |_, _, cx| {
+                                                    remove_entity.update(cx, |chat, cx| {
+                                                        chat.remove_queued_entry(index, cx);
+                                                    });
+                                                },
+                                            ),
+                                        ),
+                                )
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn render_composer(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let _perf = sirio_perf::span("Chat.render_composer", cx.entity_id().as_u64());
+        let typography = theme.typography;
+        let focused = self
+            .composer_field
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        let placeholder = self.composer_placeholder();
+        if placeholder != self.composer_placeholder_shown {
+            self.composer_placeholder_shown = placeholder.clone();
+            self.composer_field
+                .update(cx, |field, cx| field.set_placeholder(placeholder, cx));
+        }
+        let disabled = self.composer_disabled();
+        let can_send = self.can_send();
+        let entity = cx.entity();
+
+        let send_entity = entity.clone();
+        let stop_entity = entity.clone();
+        let attach_entity = entity.clone();
+        let overflow_entity = entity.clone();
+
+        // Slash-command popup (F-CHAT-09): a filtered list over the input,
+        // opened by the leading `/token`, closed the moment the token is no
+        // longer a single unbroken prefix. Keyboard selection comes from the
+        // composer key path (up/down/tab, enter accepts via `Send`); click
+        // accepts directly.
+        //
+        // Anchored to the composer card's top edge (`bottom: 100%`), not a
+        // fixed distance up from its bottom: the card is taller than that
+        // distance, so the list used to sit *inside* it — over the input
+        // rows, in the card's own `surface_raised` fill, where it read as a
+        // transparent veil rather than a menu. The same token paints both
+        // on purpose (they are the same step above the page); what makes
+        // this a card of its own is that it floats over the page, with the
+        // gap below it.
+        let slash_popup = if self.slash_popup_visible() {
+            let candidates = self.slash_candidates();
+            let active = self.slash_filter.active();
+            let view = bezel::motion::Painter::of(cx);
+            let anchor = self
+                .composer_field
+                .read(cx)
+                .offset_bounds(0, window)
+                .map(|row| gpui::point(row.left(), row.top() - px(8.0 + SHELL_TOP_INSET)));
+            anchor.map(|anchor| {
+                let rows: Vec<AnyElement> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, command)| {
+                        let name = command.name.clone();
+                        let tooltip = slash_option_tooltip(&command.description);
+                        let hint = command.argument_hint.clone();
+                        let row_entity = entity.clone();
+                        let accept_name = name.clone();
+                        let name_for_id = name.clone();
+                        let name_for_label_id = name.clone();
+                        let name_for_hint_id = name.clone();
+                        // One line per row: the name. The description is
+                        // the row's tooltip, so ten rows stay ten lines
+                        // and the list does not fill the pane.
+                        popover::menu_row(
+                            &bezel_theme,
+                            Some(position) == active,
+                            bezel::motion::Fade::new(view, format!("slash-option-{name}")),
+                        )
+                        .id(SharedString::from(format!("slash-option-{name}")))
+                        .debug_selector(move || format!("slash-option-{name_for_id}"))
+                        .when_some(tooltip, |this, text| {
+                            this.tooltip(move |window, cx| Tooltip::text(text.clone(), window, cx))
+                        })
+                        .on_click(move |_, _, cx| {
+                            row_entity.update(cx, |chat, cx| {
+                                chat.accept_slash_command(&accept_name, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("slash-option-name-{name_for_label_id}")
+                                })
+                                .flex_none()
+                                .text_size(typography.footnote)
+                                .text_color(bezel_theme.text)
+                                .child(format!("/{name}")),
+                        )
+                        // The hint rides beside the name rather than under
+                        // it: the row is one line by design (the
+                        // description is the tooltip), and a second line
+                        // per row would fill the pane. A command that
+                        // takes no arguments draws nothing — the CLI says
+                        // so with an empty `argumentHint`, and three in
+                        // five of its commands do.
+                        .when_some(hint, |row, hint| {
+                            row.child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("slash-option-hint-{name_for_hint_id}")
+                                    })
+                                    .min_w_0()
+                                    .truncate()
+                                    // The name's own size, not a smaller
+                                    // one: a second size on a 12px row is
+                                    // noise, colour already says which of
+                                    // the two is secondary, and a taller
+                                    // line box here would grow the row.
+                                    .text_size(typography.footnote)
+                                    .text_color(bezel_theme.text_faint)
+                                    .child(hint),
+                            )
+                        })
+                        .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .child(composer_view::menu_above_at(
+                        "slash-popup-menu",
+                        anchor,
+                        popover::popover_card(&bezel_theme)
+                            .debug_selector(|| "slash-popup".into())
+                            .w(px(280.0))
+                            .child(div().flex().flex_col().children(rows))
+                            .into_any_element(),
+                    ))
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
+
+        // @ file-mention popup (F-CHAT-10): the bounded filesystem walk's
+        // results for the trailing `@token`, anchored above the token. Hidden
+        // when the token matches nothing.
+        let mention_popup = if mention_token(&self.draft, self.draft_caret).is_some()
+            && !self.mention_candidates.is_empty()
+        {
+            let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
+            let candidates = self.mention_candidates.clone();
+            let active = self.mention_filter.active();
+            let view = bezel::motion::Painter::of(cx);
+            let anchor = self
+                .composer_field
+                .read(cx)
+                .offset_bounds(at, window)
+                .map(|row| gpui::point(row.left(), row.top() - px(8.0 + SHELL_TOP_INSET)));
+            anchor.map(|anchor| {
+                let rows: Vec<AnyElement> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, path)| {
+                        let row_entity = entity.clone();
+                        let path_for_id = path.clone();
+                        let path_for_accept = path.clone();
+                        popover::menu_row(
+                            &bezel_theme,
+                            Some(position) == active,
+                            bezel::motion::Fade::new(view, format!("mention-option-{path}")),
+                        )
+                        .id(SharedString::from(format!("mention-option-{path_for_id}")))
+                        .debug_selector(move || format!("mention-option-{path_for_id}"))
+                        // Pin the row to the card's inner width instead of
+                        // trusting cross-axis stretch, so the path below has
+                        // a definite box to ellipsize inside.
+                        .w_full()
+                        .min_w_0()
+                        .on_click(move |_, _, cx| {
+                            row_entity.update(cx, |chat, cx| {
+                                chat.accept_mention(&path_for_accept, cx);
+                            });
+                        })
+                        .child(
+                            bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
+                                .size(px(12.0))
+                                .text_color(bezel_theme.text_faint),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(typography.footnote)
+                                .text_color(bezel_theme.text)
+                                .child(path),
+                        )
+                        .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .child(composer_view::menu_above_at(
+                        "mention-popup-menu",
+                        anchor,
+                        popover::popover_card(&bezel_theme)
+                            .id("mention-popup-card")
+                            .debug_selector(|| "mention-popup-card".into())
+                            .w(px(360.0))
+                            .child(div().flex().flex_col().children(rows))
+                            .into_any_element(),
+                    ))
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
+
+        // Overflow menu (F-CHAT-14) and the Chat History popover
+        // (F-CHAT-34/35): the two secondary composer actions the control row
+        // does not carry inline.
+        let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
+        let chat_history_menu = self.history_open.then(|| self.render_history(theme, cx));
+
+        let attach_button = div()
+            .flex_none()
+            .debug_selector(|| "attach-image".into())
+            .child(
+                IconButton::new("attach-image-button", IconName::Paperclip)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip("Attach image")
+                    .on_click(move |_, window, cx| {
+                        attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
+                    }),
+            );
+
+        let overflow_button = div()
+            .flex_none()
+            .debug_selector(|| "composer-overflow".into())
+            .child(
+                IconButton::new("composer-overflow-button", IconName::Ellipsis)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip("More")
+                    .on_click(move |_, window, cx| {
+                        overflow_entity.update(cx, |chat, cx| chat.toggle_overflow(window, cx));
+                    }),
+            );
+
+        // With no agent configured the tool row holds only the send control.
+        let has_agent = self.agent_launch.is_some();
+
+        let composer_context_menu = self
+            .composer_context_menu
+            .get()
+            .map(|_| self.render_composer_context_menu(&bezel_theme, cx));
+
+        // Pictures waiting to be sent, as Ely attachment chips above the
+        // editor. The agent gets the base64 payload; the chip only needs a
+        // name and a size, both read off what is attached.
+        let attachment_chips = (!self.attachments.is_empty()).then(|| {
+            div()
+                .id("attachment-strip")
+                .debug_selector(|| "attachment-strip".into())
+                .flex()
+                .flex_wrap()
+                .gap_1p5()
+                .children(self.attachments.iter().enumerate().map(|(index, image)| {
+                    let remove_entity = entity.clone();
+                    div()
+                        .id(("attachment-chip", index))
+                        .debug_selector(move || format!("attachment-chip-{index}"))
+                        .min_w_0()
+                        .child(
+                            AttachmentChip::new(
+                                ("attachment", index),
+                                Attachment {
+                                    key: format!("image-{index}").into(),
+                                    name: attachment_chip_name(&image.mime_type).into(),
+                                    bytes: base64_decoded_len(&image.base64_data),
+                                    preview: None,
+                                    progress: None,
+                                },
+                            )
+                            .remove_selector(format!("attachment-remove-{index}"))
+                            .on_remove(move |window, cx| {
+                                remove_entity.update(cx, |chat, cx| {
+                                    chat.remove_attachment(index, cx);
+                                    chat.composer_field
+                                        .read(cx)
+                                        .focus_handle(cx)
+                                        .focus(window, cx);
+                                });
+                            }),
+                        )
+                }))
+        });
+
+        // Bezel's field draws a frame of its own (fill, border, a 10px inset).
+        // The shell is the one frame the composer has, so the field is laid
+        // partly outside a clip box (`FIELD_CROP`, `FIELD_INSET`): its border
+        // and the focus ring are never drawn, and its fill is the shell's own
+        // (`PromptInput::custom`).
+        let input_box = div()
+            .id("composer-input")
+            .debug_selector(|| "composer-input".into())
+            .relative()
+            .w_full()
+            .when(disabled, |input| input.opacity(0.6))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_composer_context_menu(event.position, window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .mx(px(-FIELD_INSET))
+                    .overflow_hidden()
+                    .child(div().m(px(-FIELD_CROP)).child(self.composer_field.clone())),
+            )
+            .children(slash_popup)
+            .children(mention_popup)
+            .children(composer_context_menu);
+        let editor = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(input_box)
+            .when_some(self.attach_error.clone(), |column, message| {
+                column.child(
+                    div()
+                        .id("attach-error")
+                        .debug_selector(|| "attach-error".into())
+                        .text_size(typography.caption2)
+                        .text_color(theme.danger)
+                        .child(message),
+                )
+            });
+
+        let streaming = self.streaming;
+        let mut prompt = PromptInput::custom("composer-shell", editor, can_send, move |_, cx| {
+            send_entity.update(cx, |chat, cx| chat.send(cx));
+        })
+        .focused(focused);
+        if streaming {
+            // While a turn runs the send control is stop: the same path Escape
+            // takes, and it leaves the draft alone.
+            prompt = prompt.busy(move |_, cx| {
+                stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
+            });
+        }
+        if let Some(chips) = attachment_chips {
+            prompt = prompt.above(chips);
+        }
+        if has_agent {
+            prompt = prompt
+                .tool(self.render_agent_controls(theme, window, cx))
+                .trailing(attach_button)
+                .trailing(
+                    div()
+                        .relative()
+                        .child(overflow_button)
+                        .children(overflow_menu)
+                        .children(chat_history_menu),
+                );
+        }
+
+        // Enter queues while a turn runs and sends otherwise; the hint says
+        // which, under the card rather than inside it. While the composer is
+        // out of service (a request waits, the agent is offline) Enter does
+        // neither, and the placeholder already names why — no hint then.
+        let hint = (!self.composer_disabled()).then(|| {
+            div()
+                .id("composer-input-hint")
+                .debug_selector(|| "composer-input-hint".into())
+                .w_full()
+                .flex()
+                .justify_center()
+                .pt(px(4.0))
+                .child(InputHint::new().enter(if streaming {
+                    "to queue ·"
+                } else {
+                    "to send ·"
+                }))
+        });
+
+        div()
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("composer")
+                    .debug_selector(|| "composer".into())
+                    .relative()
+                    .w_full()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.composer_field
+                                .read(cx)
+                                .focus_handle(cx)
+                                .focus(window, cx);
+                        }),
+                    )
+                    .child(prompt),
+            )
+            .children(hint)
+            .into_any_element()
     }
 }

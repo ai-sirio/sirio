@@ -35,6 +35,9 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   death-then-ok <dir>  On the first invocation (no <dir>/died marker) stream a
                    partial reply and die; later invocations stream normally.
                    Lets the drawn Retry click be followed by a real recovery.
+  ely-catalogue    Like `composer`, with every catalogue an agent can report: three
+                   session modes, models with long names, four effort levels and
+                   an 85% context fill. The native pass over the chat's popups.
   auth-required    initialize advertises one login auth method, then every
                    session/new is rejected with wire code -32000
                    "Authentication required" — ACP's auth_required shape, so
@@ -177,6 +180,43 @@ def advertise():
                         {"value": "low", "name": "Low"},
                         {"value": "medium", "name": "Medium"},
                         {"value": "high", "name": "High"},
+                    ],
+                },
+            ],
+        }
+    )
+    usage_update(170000, 200000)
+
+
+def advertise_catalogue():
+    """The catalogues of a talkative agent: long labels are the point."""
+    notification(
+        {
+            "sessionUpdate": "config_option_update",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "sonnet",
+                    "options": [
+                        {"value": "opus", "name": "Opus Extended Reasoning Preview with a very long marketing name"},
+                        {"value": "sonnet", "name": "Sonnet"},
+                        {"value": "haiku", "name": "Haiku"},
+                    ],
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning effort",
+                    "category": "effort",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "medium", "name": "Medium"},
+                        {"value": "high", "name": "High"},
+                        {"value": "max", "name": "Maximum"},
                     ],
                 },
             ],
@@ -357,6 +397,20 @@ def subagent_turn(request):
     response(request["id"], {"stopReason": "end_turn"})
 
 
+def ely_permission(request_id, title, question=False):
+    send({"jsonrpc": "2.0", "id": request_id, "method": "session/request_permission",
+          "params": {"sessionId": SESSION_ID,
+                     "toolCall": {"toolCallId": "opaque-" + str(request_id), "title": title,
+                                  "status": "pending", **({"rawInput": {"questions": [{"question": title}]}} if question else {})},
+                     "options": [{"optionId": "allow:this-call", "name": "Run this call", "kind": "allow_once"},
+                                 {"optionId": "deny:this-call", "name": "Skip this call", "kind": "reject_once"}]}})
+
+
+def record_ely_response(directory, message):
+    with open(os.path.join(directory, "wire.jsonl"), "a", encoding="utf-8") as log:
+        log.write(json.dumps(message) + "\n")
+
+
 def main():
     mode = sys.argv[1]
     extra = sys.argv[2] if len(sys.argv) > 2 else None
@@ -370,6 +424,9 @@ def main():
         except json.JSONDecodeError:
             return
         method = request.get("method")
+        if mode in ("ely-permission", "ely-expiry") and method is None:
+            record_ely_response(extra, request)
+            continue
         if method == "initialize":
             result = {"protocolVersion": 1, "agentCapabilities": {}}
             if mode == "auth-required":
@@ -387,7 +444,24 @@ def main():
                 # session_creation_auth_required_error_becomes_typed_auth_required).
                 error(request["id"], "Authentication required")
                 continue
-            response(request["id"], {"sessionId": SESSION_ID})
+            if mode == "ely-catalogue":
+                response(
+                    request["id"],
+                    {
+                        "sessionId": SESSION_ID,
+                        "modes": {
+                            "currentModeId": "ask",
+                            "availableModes": [
+                                {"id": "ask", "name": "Ask before editing"},
+                                {"id": "plan", "name": "Plan only"},
+                                {"id": "auto", "name": "Auto: accept every edit without asking"},
+                            ],
+                        },
+                    },
+                )
+                advertise_catalogue()
+            else:
+                response(request["id"], {"sessionId": SESSION_ID})
             if mode == "composer":
                 advertise()
         elif method == "session/prompt":
@@ -405,7 +479,7 @@ def main():
             if mode == "plain":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
-            if mode == "composer":
+            if mode in ("composer", "ely-catalogue"):
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "echo-blocks":
@@ -420,6 +494,43 @@ def main():
                     else:
                         names.append(kind)
                 message_chunk("blocks: " + ",".join(names))
+                response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-permission":
+                ely_permission(9001, "Inspect src/α.rs")
+                answer = json.loads(sys.stdin.readline())
+                record_ely_response(extra, answer)
+                message_chunk("Echoed option: " + answer.get("result", {}).get("outcome", {}).get("optionId", ""))
+                response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-expiry":
+                if first_prompt:
+                    first_prompt = False
+                    ely_permission(9001, "Inspect first file")
+                    while not os.path.exists(os.path.join(extra, "expire")):
+                        time.sleep(0.01)
+                    response(request["id"], {"stopReason": "end_turn"})
+                else:
+                    ely_permission(9002, "Inspect next file")
+                    answer = json.loads(sys.stdin.readline())
+                    record_ely_response(extra, answer)
+                    message_chunk("Second option: " + answer.get("result", {}).get("outcome", {}).get("optionId", ""))
+                    response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-activity":
+                thought_chunk("Analisi 🌙 del risultato e delle modifiche.\n" * 12)
+                for tool_id, kind, status, title in [
+                    ("shell", "execute", "completed", "Inspect Unicode output"),
+                    ("read-failed", "read", "failed", "missing.rs"),
+                    ("read-running", "read", "in_progress", "src/α.rs"),
+                ]:
+                    update = {"sessionUpdate": "tool_call", "toolCallId": tool_id,
+                              "title": title, "kind": kind, "status": status}
+                    if tool_id == "shell":
+                        update["rawInput"] = {"command": "inspect src/α.rs"}
+                        update["content"] = [
+                            {"type": "content", "content": {"type": "text", "text": "".join(f"line {n:03}: risultato 🌙\n" for n in range(80))}},
+                            {"type": "diff", "path": "src/α.rs", "oldText": "old 🌙\n", "newText": "new β\n"},
+                        ]
+                    notification(update)
+                message_chunk("Verifica native dei tool e del diff Unicode.")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "permission":
                 request_permission()

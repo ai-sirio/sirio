@@ -4,7 +4,8 @@
 //! keyboard uses; the design is
 //! `docs/superpowers/specs/2026-09-24-question-dock-design.md`.
 
-use bezel::ui::popover;
+use crate::text_selection::selectable_text;
+use ely_gpui_component::agent::{HumanInputRequest, PermissionPrompt};
 use gpui::{AnyElement, Context, Focusable, KeyDownEvent, Window, actions, div, prelude::*, px};
 use sirio_theme::Theme;
 
@@ -155,12 +156,6 @@ pub(super) const DOCK_BODY_MAX_HEIGHT: f32 = 160.0;
 
 /// A keystroke or click already in flight when the question appears must not answer it.
 pub(super) const DOCK_ARMING_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// The dock's frame colour: the composer card's own hairline
-/// (`composer_border`), so the two read as one pair — never an alert tint.
-pub(super) fn dock_border(theme: &bezel::theme::Theme) -> gpui::Hsla {
-    theme.border
-}
 
 impl Chat {
     /// Keeps the dock's selection and focus in step with the open question.
@@ -327,7 +322,6 @@ impl Chat {
     ) -> AnyElement {
         let typography = theme.typography;
         let entity = cx.entity();
-        let painter = bezel::motion::Painter::of(cx);
         let request_id = view.request_id;
         let selected = clamp_selection(self.question_dock.selected, view.rows.len());
         let after_options = view
@@ -362,32 +356,40 @@ impl Chat {
                         .child(label)
                 });
                 let click_entity = entity.clone();
-                // bezel's menu row — the one the chat's pickers use — with
-                // the keyboard's row as its `highlighted` one.
-                let frame = popover::menu_row_nav(
-                    bezel_theme,
-                    false,
-                    highlighted,
-                    bezel::motion::Fade::new(
-                        painter,
-                        format!("question-dock-row-{request_id}-{index}"),
-                    ),
-                )
-                .when(!highlighted, |row| row.bg(gpui::transparent_black()))
-                .id(("question-dock-row", index))
-                .items_start()
-                .on_mouse_move({
-                    let hover_entity = entity.clone();
-                    move |_, _, cx| {
-                        hover_entity.update(cx, |chat, cx| chat.select_dock_row(index, cx));
-                    }
-                })
-                .on_click(move |_, window, cx| {
-                    click_entity.update(cx, |chat, cx| {
-                        chat.activate_dock_row(index, window, cx);
-                    });
-                })
-                .children(badge);
+                // Host-owned selection/focus; Ely supplies the request shell.
+                let frame = div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .gap(px(8.0))
+                    .p(px(8.0))
+                    .rounded(theme.radii.control)
+                    .bg(if highlighted {
+                        theme.element_active
+                    } else {
+                        gpui::transparent_black().into()
+                    })
+                    .cursor_pointer()
+                    .hover(|row| row.bg(theme.element_hover))
+                    .when(!highlighted, |row| row.bg(gpui::transparent_black()))
+                    .id(("question-dock-row", index))
+                    .items_start()
+                    .on_mouse_move({
+                        let hover_entity = entity.clone();
+                        move |_, _, cx| {
+                            hover_entity.update(cx, |chat, cx| chat.select_dock_row(index, cx));
+                        }
+                    })
+                    .on_click(move |_, window, cx| {
+                        click_entity.update(cx, |chat, cx| {
+                            if question_view(&chat.entries)
+                                .is_some_and(|view| view.request_id == request_id)
+                            {
+                                chat.activate_dock_row(index, window, cx);
+                            }
+                        });
+                    })
+                    .children(badge);
                 match row {
                     DockRow::Option(option) => {
                         let option_id = option.id.clone();
@@ -443,6 +445,65 @@ impl Chat {
             })
             .collect::<Vec<_>>();
 
+        let body = div()
+            .w_full()
+            .min_w_0()
+            .when(!view.body.is_empty(), |body| {
+                body.child(
+                    div()
+                        .id(("question-dock-body", request_id as usize))
+                        .debug_selector(|| "question-dock-body".into())
+                        .max_h(px(DOCK_BODY_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .text_size(typography.callout)
+                        .text_color(theme.text)
+                        .child(selectable_text(view.body)),
+                )
+            });
+        let actions = div()
+            .id(("question-dock-options", request_id as usize))
+            .w_full()
+            .min_w_0()
+            .max_h(px(220.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(rows)
+            .child(
+                div()
+                    .debug_selector(|| "question-dock-hint".into())
+                    .flex()
+                    .justify_end()
+                    .text_size(typography.caption2)
+                    .text_color(theme.text_faint)
+                    .child("↑↓ select · ⏎ confirm · esc cancel"),
+            );
+        let id: gpui::ElementId = (
+            self.row_id(view.entry_index, cx),
+            format!("request-{request_id}"),
+        )
+            .into();
+        let is_question = matches!(
+            self.entries.get(view.entry_index),
+            Some(Entry::Permission {
+                is_question: true,
+                ..
+            })
+        );
+        let shell = if is_question {
+            HumanInputRequest::custom(id, view.caption)
+                .header_selector("question-dock-caption")
+                .body(body)
+                .action(actions)
+                .into_any_element()
+        } else {
+            PermissionPrompt::custom(id, view.caption)
+                .header_selector("question-dock-caption")
+                .body(body)
+                .action(actions)
+                .into_any_element()
+        };
         div()
             .id("question-dock")
             .debug_selector(|| "question-dock".into())
@@ -456,53 +517,12 @@ impl Chat {
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
             .mb(px(8.0))
-            // The composer card's own frame (`render_composer`).
-            .rounded(px(bezel::theme::Theme::surface_radius()))
-            .border_1()
-            .border_color(dock_border(bezel_theme))
-            .bg(bezel_theme.card_glass_bg())
-            .p(px(4.0))
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
             .child(
                 div()
-                    .px(px(8.0))
-                    .pt(px(4.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "question-dock-caption".into())
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_muted)
-                            .child(view.caption),
-                    )
-                    .when(!view.body.is_empty(), |header| {
-                        header.child(
-                            div()
-                                .id(("question-dock-body", request_id as usize))
-                                .debug_selector(|| "question-dock-body".into())
-                                .max_h(px(DOCK_BODY_MAX_HEIGHT))
-                                .overflow_y_scroll()
-                                .text_size(typography.callout)
-                                .text_color(theme.text)
-                                .child(view.body),
-                        )
-                    }),
-            )
-            .child(div().flex().flex_col().gap(px(2.0)).children(rows))
-            .child(
-                div()
-                    .debug_selector(|| "question-dock-hint".into())
-                    .px(px(8.0))
-                    .pb(px(2.0))
-                    .flex()
-                    .justify_end()
-                    .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
-                    .child("↑↓ select · ⏎ confirm · esc cancel"),
+                    .w_full()
+                    .min_w_0()
+                    .debug_selector(move || format!("ely-request-{request_id}"))
+                    .child(shell),
             )
             .into_any_element()
     }

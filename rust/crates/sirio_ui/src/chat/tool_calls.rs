@@ -8,8 +8,10 @@
 //! protocol's `kind` to an icon and a verb, and a clock for the duration.
 
 use crate::text_selection::selectable_text;
-use bezel::ui::icons;
-use bezel::ui::widgets::{Status as _, step_row_hover};
+use ely_gpui_component::{
+    agent::{ToolCallCard, ToolCallGroup},
+    chat::StepState,
+};
 use gpui::{
     AnyElement, Div, ElementId, Entity, FocusHandle, ScrollHandle, SharedString, div, prelude::*,
     px,
@@ -18,7 +20,8 @@ use std::collections::HashMap;
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
-    Entry, SubagentToolCall, TranscriptInteraction, diff_preview_lines, tool_call_plain_text,
+    Entry, SubagentToolCall, TranscriptInteraction, diff_preview_lines, project_tool_content,
+    tool_call_plain_text,
 };
 use sirio_acp::{ToolCallContentInfo, ToolCallLocationInfo};
 use sirio_theme::Theme;
@@ -54,21 +57,6 @@ pub(crate) fn output_well(
         .text_size(px(12.0))
         .text_color(theme.text_muted)
         .child(selectable_text(text))
-}
-
-/// The icon for a protocol tool kind (`Read`, `Edit`, `Execute`, …).
-pub(crate) fn tool_icon(kind: &str) -> &'static str {
-    match kind.to_ascii_lowercase().as_str() {
-        "read" => icons::BOOK,
-        "edit" => icons::PEN,
-        "execute" => icons::TERMINAL,
-        "search" => icons::MAGNIFER,
-        "fetch" => icons::DOWNLOAD,
-        "think" => icons::CPU,
-        "delete" => icons::TRASH_BIN_MINIMALISTIC,
-        "move" => icons::ARROW_RIGHT,
-        _ => icons::WIDGET,
-    }
 }
 
 /// The verb a row leads with: the kind word, capitalised, snake_case read
@@ -162,6 +150,15 @@ pub(crate) fn verb_folds(kinds: &[&str]) -> Vec<(usize, usize)> {
     folds
 }
 
+pub(super) fn activity_state(status: &str) -> StepState {
+    match status.to_ascii_lowercase().as_str() {
+        "completed" | "done" => StepState::Done,
+        "failed" | "error" | "cancelled" | "canceled" => StepState::Failed,
+        "in_progress" | "inprogress" | "running" => StepState::Working,
+        _ => StepState::Waiting,
+    }
+}
+
 impl Chat {
     /// Assicura un `ScrollHandle` persistente per ogni output testuale
     /// dell'entry: senza handle la well non può trattenere la wheel e
@@ -171,7 +168,14 @@ impl Chat {
             return;
         };
         match entry {
-            Entry::ToolCall { content, .. } => {
+            Entry::ToolCall {
+                content,
+                raw_input,
+                raw_output,
+                ..
+            } => {
+                let content =
+                    project_tool_content(&content, raw_input.as_deref(), raw_output.as_deref());
                 let mut ordinal = 0usize;
                 for item in &content {
                     if matches!(item, ToolCallContentInfo::Text(_)) {
@@ -231,8 +235,9 @@ impl Chat {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_tool_row(
         entry_index: usize,
+        row_id: ElementId,
         nested: Option<(usize, usize)>,
-        first: bool,
+        _first: bool,
         title: &str,
         status: &str,
         kind: &str,
@@ -248,50 +253,60 @@ impl Chat {
         entity: Entity<Chat>,
         output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
-        let failed = is_failed_status(status);
         let has_body = Self::tool_has_body(&content, &locations);
         let meta = Self::tool_row_meta(status, duration_ms);
-        let meta_for_id = meta.clone();
+        let marker = nested
+            .map(|(task, child)| format!("{task}-{child}"))
+            .unwrap_or_else(|| entry_index.to_string());
+        let selector = nested
+            .map(|(task, child)| format!("subagent-tool-call-toggle-{task}-{child}"))
+            .unwrap_or_else(|| format!("tool-call-toggle-{entry_index}"));
         let toggle_entity = entity.clone();
-        let (row_id, selector, marker): (ElementId, String, String) = match nested {
-            None => (
-                ("tool-call-toggle", entry_index).into(),
-                format!("tool-call-toggle-{entry_index}"),
-                entry_index.to_string(),
-            ),
-            Some((task, child)) => (
-                ElementId::Name(SharedString::from(format!(
-                    "subagent-tool-call-toggle-{task}-{child}"
-                ))),
-                format!("subagent-tool-call-toggle-{task}-{child}"),
-                format!("{task}-{child}"),
-            ),
-        };
-        let row = bezel_theme
-            .step_row(
-                tool_icon(kind),
-                tool_verb(kind),
-                Some(SharedString::from(one_line_title(title))),
-                Some(meta),
-                failed,
-                has_body.then_some(expanded),
-            )
-            .id(row_id)
-            .debug_selector(move || selector.clone())
-            .hover(step_row_hover)
-            .on_click(move |_, _, cx| match nested {
-                None => toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_tool_call_expanded(entry_index, cx)
-                }),
-                Some((task, child)) => toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_subagent_tool_call_expanded(task, child, cx)
-                }),
-            })
-            // Zero-size markers: what the row *means* is testable without
-            // reading pixels.
+        let mut card = ToolCallCard::new(row_id, tool_verb(kind), activity_state(status))
+            .summary(one_line_title(title))
+            .header_selector(selector)
+            .expanded(expanded, move |desired, _, cx| toggle_entity.update(cx, |chat, cx| {
+                let current = match nested {
+                    None => matches!(chat.entries.get(entry_index), Some(Entry::ToolCall { expanded: true, .. })),
+                    Some((task, child)) => matches!(chat.entries.get(task), Some(Entry::SubagentTask { tool_calls, .. }) if tool_calls.get(child).is_some_and(|call| call.expanded)),
+                };
+                if current != desired { match nested {
+                    None => chat.toggle_tool_call_expanded(entry_index, cx),
+                    Some((task, child)) => chat.toggle_subagent_tool_call_expanded(task, child, cx),
+                } }
+            }));
+        if let Some(ms) = duration_ms {
+            card = card.took(std::time::Duration::from_millis(ms));
+        }
+        // A closed custom body is an empty element: it still gives the card a
+        // disclosure, without mounting scroll or animation work offscreen.
+        if has_body {
+            card = card.body(if expanded {
+                Self::render_tool_body(
+                    entry_index,
+                    nested,
+                    content,
+                    locations,
+                    edit_summary,
+                    source_start,
+                    interaction,
+                    title,
+                    status,
+                    theme,
+                    bezel_theme,
+                    entity,
+                    output_scrolls,
+                )
+            } else {
+                div().into_any_element()
+            });
+        }
+        div()
+            .w_full()
+            .child(card)
             .child(div().size_0().debug_selector({
                 let marker = marker.clone();
-                move || format!("tool-call-meta-{marker}-{meta_for_id}")
+                move || format!("tool-call-meta-{marker}-{meta}")
             }))
             .when(has_body, |row| {
                 row.child(div().size_0().debug_selector({
@@ -299,40 +314,14 @@ impl Chat {
                     move || format!("tool-call-chevron-{marker}")
                 }))
             })
-            .when(failed, |row| {
+            .when(is_failed_status(status), |row| {
                 row.child(
                     div()
                         .size_0()
                         .debug_selector(move || format!("tool-call-failed-{marker}")),
                 )
-            });
-
-        let mut item = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .when(!first, |item| {
-                item.border_t_1().border_color(bezel_theme.border)
             })
-            .child(row);
-        if expanded && has_body {
-            item = item.child(Self::render_tool_body(
-                entry_index,
-                nested,
-                content,
-                locations,
-                edit_summary,
-                source_start,
-                interaction,
-                title,
-                status,
-                theme,
-                bezel_theme,
-                entity,
-                output_scrolls,
-            ));
-        }
-        item.into_any_element()
+            .into_any_element()
     }
 
     /// The body under an open row: text output through bezel's capped
@@ -517,6 +506,8 @@ impl Chat {
             locations,
             expanded,
             duration_ms,
+            raw_input,
+            raw_output,
             ..
         } = entry
         else {
@@ -524,13 +515,21 @@ impl Chat {
         };
         Self::render_tool_row(
             entry_index,
+            ElementId::Name(
+                format!(
+                    "chat-{}-{}-{entry_index}",
+                    entity.entity_id().as_u64(),
+                    self.transcript_generation
+                )
+                .into(),
+            ),
             None,
             first,
             title,
             status,
             kind,
             *duration_ms,
-            content.clone(),
+            project_tool_content(content, raw_input.as_deref(), raw_output.as_deref()),
             locations.clone(),
             *expanded,
             self.edit_summaries.get(&entry_index).cloned(),
@@ -552,6 +551,7 @@ impl Chat {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_subagent_task(
         task_index: usize,
+        row_id: ElementId,
         title: String,
         status: String,
         tool_calls: Vec<SubagentToolCall>,
@@ -561,53 +561,27 @@ impl Chat {
         entity: Entity<Chat>,
         output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
-        let failed = is_failed_status(&status);
         let toggle_entity = entity.clone();
-        let header = bezel_theme
-            .step_row(
-                icons::CPU,
-                "Task",
-                Some(SharedString::from(title)),
-                Some(Self::tool_row_meta(&status, None)),
-                failed,
-                Some(expanded),
-            )
-            .id(("subagent-task-toggle", task_index))
-            .debug_selector(move || format!("subagent-task-toggle-{task_index}"))
-            .hover(step_row_hover)
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_subagent_task_expanded(task_index, cx)
-                });
-            });
-        let mut run = Self::run_box(bezel_theme)
-            .id(("tool-run", task_index))
-            .debug_selector(move || format!("tool-run-{task_index}"))
-            .child(header);
+        let mut group = ToolCallGroup::new(row_id.clone(), format!("Task · {title}"))
+            .status(activity_state(&status))
+            .header_selector(format!("subagent-task-toggle-{task_index}"))
+            .expanded(expanded, move |desired, _, cx| toggle_entity.update(cx, |chat, cx| {
+                if matches!(chat.entries.get(task_index), Some(Entry::SubagentTask { expanded, .. }) if *expanded != desired) { chat.toggle_subagent_task_expanded(task_index, cx); }
+            }));
         if expanded {
-            let mut members = div().w_full().flex().flex_col().pl(px(16.0));
             for (child_index, call) in tool_calls.into_iter().enumerate() {
-                let SubagentToolCall {
-                    title,
-                    status,
-                    kind,
-                    content,
-                    locations,
-                    expanded,
-                    duration_ms,
-                    ..
-                } = call;
-                members = members.child(Self::render_tool_row(
+                group = group.child(Self::render_tool_row(
                     task_index,
+                    (row_id.clone(), format!("child-{child_index}")).into(),
                     Some((task_index, child_index)),
                     child_index == 0,
-                    &title,
-                    &status,
-                    &kind,
-                    duration_ms,
-                    content,
-                    locations,
-                    expanded,
+                    &call.title,
+                    &call.status,
+                    &call.kind,
+                    call.duration_ms,
+                    call.content,
+                    call.locations,
+                    call.expanded,
                     None,
                     0,
                     None,
@@ -617,9 +591,12 @@ impl Chat {
                     output_scrolls,
                 ));
             }
-            run = run.child(members);
         }
-        run.into_any_element()
+        Self::run_box(bezel_theme)
+            .id(("tool-run", task_index))
+            .debug_selector(move || format!("tool-run-{task_index}"))
+            .child(group)
+            .into_any_element()
     }
 
     /// The box a run shares: rounded, bordered, clipping whatever it holds.
@@ -678,44 +655,51 @@ impl Chat {
             }
             let fold_start = slice[0].0;
             let open = self.open_verb_folds.contains(&fold_start);
-            let any_failed = slice.iter().any(|(_, _, entry)| {
-                matches!(entry, Entry::ToolCall { status, .. } if is_failed_status(status))
-            });
-            let kind = kinds[offset];
-            let toggle_entity = entity.clone();
-            let header = bezel_theme
-                .step_row(
-                    tool_icon(kind),
-                    tool_verb(kind),
-                    Some(SharedString::from(format!("· {len}"))),
-                    None,
-                    any_failed,
-                    Some(open),
-                )
-                .id(("tool-fold", fold_start))
-                .debug_selector(move || format!("tool-fold-{fold_start}"))
-                .hover(step_row_hover)
-                .on_click(move |_, _, cx| {
-                    toggle_entity.update(cx, |chat, cx| chat.toggle_verb_fold(fold_start, cx));
-                });
-            let mut fold = div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .when(!first_in_box, |fold| {
-                    fold.border_t_1().border_color(bezel_theme.border)
+            let state = slice
+                .iter()
+                .map(|(_, _, entry)| match entry {
+                    Entry::ToolCall { status, .. } => activity_state(status),
+                    _ => StepState::Waiting,
                 })
-                .child(header);
+                .fold(StepState::Done, |a, b| match (a, b) {
+                    (StepState::Failed, _) | (_, StepState::Failed) => StepState::Failed,
+                    (StepState::Working, _) | (_, StepState::Working) => StepState::Working,
+                    (StepState::Waiting, _) | (_, StepState::Waiting) => StepState::Waiting,
+                    _ => StepState::Done,
+                });
+            let working = slice.iter().filter(|(_, _, entry)| matches!(entry, Entry::ToolCall { status, .. } if activity_state(status) == StepState::Working)).count();
+            let failed = slice.iter().filter(|(_, _, entry)| matches!(entry, Entry::ToolCall { status, .. } if activity_state(status) == StepState::Failed)).count();
+            let mut label = format!("{} · {len}", tool_verb(kinds[offset]));
+            if working > 0 {
+                label.push_str(&format!(" · {working} running"));
+            }
+            if failed > 0 {
+                label.push_str(&format!(" · {failed} failed"));
+            }
+            let toggle_entity = entity.clone();
+            let mut fold = ToolCallGroup::new(
+                ElementId::Name(
+                    format!(
+                        "chat-{}-{}-{fold_start}-fold",
+                        entity.entity_id().as_u64(),
+                        self.transcript_generation
+                    )
+                    .into(),
+                ),
+                label,
+            )
+            .status(state)
+            .header_selector(format!("tool-fold-{fold_start}"))
+            .expanded(open, move |desired, _, cx| {
+                toggle_entity.update(cx, |chat, cx| {
+                    if chat.open_verb_folds.contains(&fold_start) != desired {
+                        chat.toggle_verb_fold(fold_start, cx);
+                    }
+                })
+            });
             if open {
-                let mut inner = div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .border_t_1()
-                    .border_color(bezel_theme.border)
-                    .pl(px(16.0));
                 for (position, (index, source_start, entry)) in slice.iter().enumerate() {
-                    inner = inner.child(self.tool_row_from_entry(
+                    fold = fold.child(self.tool_row_from_entry(
                         *index,
                         position == 0,
                         *source_start,
@@ -726,7 +710,6 @@ impl Chat {
                         entity.clone(),
                     ));
                 }
-                fold = fold.child(inner);
             }
             children.push(fold.into_any_element());
             first_in_box = false;
@@ -742,6 +725,7 @@ impl Chat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bezel::ui::widgets::Status as _;
 
     /// The well is a copy of bezel's `step_output` with a selectable body;
     /// this is what keeps the copy honest. Drawn side by side at the same
@@ -778,8 +762,12 @@ mod tests {
             let (_, vcx) = cx.add_window_view(|_, _| Wells(text.clone()));
             vcx.simulate_resize(size(px(400.0), px(800.0)));
             vcx.run_until_parked();
-            let bezel = vcx.debug_bounds("bezel-well").expect("bezel's well renders");
-            let sirio = vcx.debug_bounds("sirio-well").expect("the selectable well renders");
+            let bezel = vcx
+                .debug_bounds("bezel-well")
+                .expect("bezel's well renders");
+            let sirio = vcx
+                .debug_bounds("sirio-well")
+                .expect("the selectable well renders");
             assert_eq!(sirio.size, bezel.size, "for {text:?}");
         }
     }

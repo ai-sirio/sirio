@@ -1,4 +1,10 @@
-# `rust/vendor/` — local overrides of three published crates
+# `rust/vendor/` — local overrides and Ely chat components
+
+`ely-gpui-component/` is the pinned Ely chat/agent component source, licensed
+MIT OR Apache-2.0 and built as a workspace path dependency. Its
+`LOCAL-CHANGES.md` records provenance, the supported module closure and the
+compatibility changes. It uses the same published Bezel GPUI packages and
+the patches described below.
 
 This directory holds `[patch.crates-io]` overrides for three packages: `bezel-gpui-linux` and
 `bezel-gpui-windows` (both release `0.3.8`) and `libghostty-vt-sys` (release `0.2.1`), all wired

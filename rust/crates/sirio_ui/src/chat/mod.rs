@@ -12,13 +12,13 @@ use gpui::{
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
     SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
-    quad, relative, rgb, transparent_black,
+    quad, relative, transparent_black,
 };
 use sirio_acp::{
-    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, FastMode,
-    THINKING_DISPLAYS, ThinkingDisplay,
-    EffortChoice, EffortOption, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog,
-    ModelOption, SessionNotice, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
+    EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
+    SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -39,21 +39,26 @@ use std::rc::Rc;
 use crate::caret;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
+mod ely;
+#[cfg(test)]
+mod ely_tests;
+mod identity;
+pub use ely::ChatAssets;
 mod composer_view;
+mod controls;
+mod history;
 mod list_scroll;
+mod menus;
 mod question_dock;
 mod thought;
 mod tool_calls;
 mod transcript;
 mod turn_rail;
-use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
-use bezel::ui::widgets::{ButtonStyle, Buttons, Controls, SliderDrag, slider_fraction};
-use composer_view::{
-    EFFORT_RESET, TokenPopup, assemble_prompt, effort_fraction_for_stop, effort_stop_for_fraction,
-    effort_stop_share, effort_stops, mention_token, slash_token,
-};
+use bezel::ui::widgets::{Controls, SliderDrag, slider_fraction};
+use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
+use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -73,6 +78,7 @@ fn highlight_markdown_code(
 /// blocks. The renderer remains usable without this registration and simply
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {
+    ely::init(cx);
     markdown::set_highlighter(
         cx,
         highlight_markdown_code,
@@ -431,11 +437,8 @@ impl IntoElement for MarkdownBody {
     }
 }
 
-/// The transcript's content column maximum — the Bezel Transcript pattern's
-/// 700 (spec §2). Settings and the markdown column keep waku's 720; this one
-/// column follows Bezel because the live transcript is what the migration
-/// copies.
-pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
+/// The Ely chat reading column at the default Sirio scale.
+pub(crate) const TRANSCRIPT_WIDTH: f32 = 760.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 /// The tallest the queue's entry list grows before it scrolls (D-CHAT-03):
 /// about five rows, Zed's `max_h_40`, so a long queue never pushes the
@@ -443,12 +446,6 @@ pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const QUEUE_MAX_HEIGHT: f32 = 160.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 
-/// The user turn's bubble: rounded, right-aligned, capped at the Bezel
-/// Activity pattern's 440. The assistant reply has no container at all.
-pub(crate) const USER_PILL_MAX_WIDTH: f32 = 440.0;
-pub(crate) const USER_PILL_H_PADDING: f32 = 14.0;
-pub(crate) const USER_PILL_V_PADDING: f32 = 9.0;
-pub(crate) const USER_PILL_TEXT_SIZE: f32 = 13.5;
 pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
 
 /// Ten megabytes: past this point a stray drop or paste would stall a turn
@@ -485,8 +482,8 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 text: bezel_text(&inline),
             }
         })),
-        LegacyBlock::Paragraph { inline } => out.push(at(
-            if let Some((url, alt, width)) = lone_image(&inline) {
+        LegacyBlock::Paragraph { inline } => {
+            out.push(at(if let Some((url, alt, width)) = lone_image(&inline) {
                 // Before the quote check: bezel's quote block holds text
                 // only, and a picture inside a quote is still a picture.
                 markdown::BlockKind::Image {
@@ -498,8 +495,8 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 markdown::BlockKind::Quote(bezel_text(&inline))
             } else {
                 markdown::BlockKind::Paragraph(bezel_text(&inline))
-            },
-        )),
+            }))
+        }
         LegacyBlock::List { kind, items, .. } => {
             for (index, item) in items.into_iter().enumerate() {
                 let mut item_blocks = item.blocks.into_iter();
@@ -657,11 +654,19 @@ actions!(
         PasteComposer,
         PopupPrevious,
         PopupNext,
-        PopupAccept
+        PopupAccept,
+        /// The catalogue popups (model, mode, thinking): the keys mark a row
+        /// and Enter chooses it.
+        PickerPrevious,
+        PickerNext,
+        PickerChoose
     ]
 );
 
-actions!(chat_question_answer, [SendAnswer, CancelAnswer, LeaveAnswer]);
+actions!(
+    chat_question_answer,
+    [SendAnswer, CancelAnswer, LeaveAnswer]
+);
 
 /// One option offered by an open question, drawn as a row of the dock.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -917,8 +922,16 @@ impl Entry {
                 status,
                 content,
                 locations,
+                raw_input,
+                raw_output,
                 ..
-            } => tool_call_plain_text(title, status, content, locations).text(),
+            } => tool_call_plain_text(
+                title,
+                status,
+                &project_tool_content(content, raw_input.as_deref(), raw_output.as_deref()),
+                locations,
+            )
+            .text(),
             Self::SubagentTask {
                 title,
                 status,
@@ -1173,7 +1186,11 @@ fn thousands(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
     }
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let thousands = (tokens as f64 / 1_000.0).round() as u64;
     format!("{thousands}k")
 }
@@ -1873,6 +1890,8 @@ pub struct Chat {
     /// `None` when there is nothing to launch — see [`Chat::unavailable`].
     agent_launch: Option<LaunchSpec>,
     /// Display name shown in the empty composer placeholder when known.
+    transcript_generation: u64,
+    agent_id: Option<String>,
     agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
@@ -1948,6 +1967,11 @@ pub struct Chat {
     /// Scroll position of the model picker's result list, kept across
     /// re-renders the way `settings.rs`'s `detail_scroll` is.
     model_picker_scroll: ScrollHandle,
+    /// The row the keys have marked in the open catalogue popup.
+    picker_cursor: Option<usize>,
+    /// The model search the cursor was last placed for, so a changed query
+    /// restarts it on the first match and a moved caret does not.
+    picker_query: String,
     /// F-CHAT-16: the model picker's own search query — live in the field,
     /// read from it at render time. Matches `ModelPickerFilter`'s Swift
     /// semantics — trimmed, case-insensitive substring match against
@@ -2124,6 +2148,12 @@ impl Chat {
         self.agent_name = Some(name.into());
     }
 
+    /// Sets identity independently of the selected model.
+    pub fn set_agent_identity(&mut self, agent_id: Option<String>, display_name: Option<String>) {
+        self.agent_id = agent_id;
+        self.agent_name = display_name;
+    }
+
     /// What the composer's agent badge shows (#206).
     ///
     /// It names the *agent*, so it reads `agent_name` -- not
@@ -2229,8 +2259,15 @@ impl Chat {
                 .with_placeholder("Search models\u{2026}")
                 .with_key_context("ChatModelSearch")
         });
-        cx.observe(&model_search_field, |_, _, cx| cx.notify())
-            .detach();
+        cx.observe(&model_search_field, |chat: &mut Self, field, cx| {
+            let query = field.read(cx).content().to_string();
+            if query != chat.picker_query {
+                chat.picker_query = query;
+                chat.picker_cursor = Some(0);
+            }
+            cx.notify();
+        })
+        .detach();
 
         let composer_field = cx.new(|cx| {
             TextField::new(cx)
@@ -2247,6 +2284,8 @@ impl Chat {
         Self {
             client: None,
             agent_launch: launch,
+            transcript_generation: 0,
+            agent_id: None,
             agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
@@ -2290,6 +2329,8 @@ impl Chat {
             selected_model: None,
             model_picker_open: false,
             model_picker_scroll: ScrollHandle::new(),
+            picker_cursor: None,
+            picker_query: String::new(),
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
@@ -2566,6 +2607,28 @@ impl Chat {
             // open, so Escape has to resolve from its context too.
             KeyBinding::new("escape", Cancel, Some("ChatModelSearch")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
+            KeyBinding::new("escape", Cancel, Some("ChatEffortPicker")),
+            KeyBinding::new("escape", Cancel, Some("ChatThinkingPicker")),
+            KeyBinding::new("escape", Cancel, Some("ChatOverflowMenu")),
+            KeyBinding::new("escape", Cancel, Some("ChatHistoryMenu")),
+            // The catalogue popups. The model picker's search field holds the
+            // focus while it is open, so the keys resolve from its context.
+            KeyBinding::new("up", PickerPrevious, Some("ChatModelSearch")),
+            KeyBinding::new("down", PickerNext, Some("ChatModelSearch")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatModelSearch")),
+            KeyBinding::new("return", PickerChoose, Some("ChatModelSearch")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatModelPicker")),
+            KeyBinding::new("down", PickerNext, Some("ChatModelPicker")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatModelPicker")),
+            KeyBinding::new("return", PickerChoose, Some("ChatModelPicker")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatThinkingPicker")),
+            KeyBinding::new("down", PickerNext, Some("ChatThinkingPicker")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatThinkingPicker")),
+            KeyBinding::new("return", PickerChoose, Some("ChatThinkingPicker")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatOverflowMenu")),
+            KeyBinding::new("down", PickerNext, Some("ChatOverflowMenu")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatOverflowMenu")),
+            KeyBinding::new("return", PickerChoose, Some("ChatOverflowMenu")),
             // F-CHAT-25: the question answer field owns Enter (send the
             // answer) and Escape (cancel the question) while it has focus.
             KeyBinding::new("enter", SendAnswer, Some("ChatQuestionAnswer")),
@@ -2988,12 +3051,10 @@ impl Chat {
                             // plain permission with no choices is different:
                             // its wire request has no renderable answer, so it
                             // gets Dismiss below instead of a fake option.
-                            (is_question && answer_options.is_empty()).then_some(
-                                AnswerTextInput {
-                                    placeholder: None,
-                                    prefill: None,
-                                },
-                            )
+                            (is_question && answer_options.is_empty()).then_some(AnswerTextInput {
+                                placeholder: None,
+                                prefill: None,
+                            })
                         });
                     self.push_entry(Entry::Permission {
                         request_id,
@@ -3164,6 +3225,14 @@ impl Chat {
     /// Send.
     fn is_offline(&self) -> bool {
         self.client.is_none() && !self.connecting
+    }
+
+    /// Whether the composer's field holds provisional IME text.
+    fn composer_is_composing(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use gpui::EntityInputHandler as _;
+        self.composer_field.update(cx, |field, cx| {
+            field.marked_text_range(window, cx).is_some()
+        })
     }
 
     fn can_send(&self) -> bool {
@@ -3483,6 +3552,7 @@ impl Chat {
             }
         };
         persistence.tab_id = tab_id;
+        self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.entries.clear();
         self.turn_message_ids.clear();
         // F-CHAT-22: `unfolded_turns` is keyed by entry index, so anything
@@ -3605,6 +3675,7 @@ impl Chat {
     /// the exact visible transcript is more important than pretending the
     /// ACP event boundaries survived after the session was retained.
     pub fn restore_transcript(&mut self, transcript: &str, cx: &mut Context<Self>) {
+        self.transcript_generation = self.transcript_generation.wrapping_add(1);
         if transcript.is_empty() {
             return;
         }
@@ -3741,6 +3812,8 @@ impl Chat {
             // the popover view is recreated.
             self.model_search_field
                 .update(cx, |field, cx| field.clear(cx));
+            self.picker_query.clear();
+            self.start_picker_cursor(cx);
             let focus = self.model_search_field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
             window.on_next_frame(move |window, cx| window.focus(&focus, cx));
@@ -3784,6 +3857,7 @@ impl Chat {
         self.effort_picker_open = false;
         self.mode_picker_open = !self.mode_picker_open;
         if self.mode_picker_open {
+            self.start_picker_cursor(cx);
             let focus = self.mode_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
@@ -3907,6 +3981,7 @@ impl Chat {
         self.context_popover_open = false;
         self.thinking_picker_open = !self.thinking_picker_open;
         if self.thinking_picker_open {
+            self.start_picker_cursor(cx);
             let focus = self.thinking_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
@@ -4176,58 +4251,6 @@ impl Chat {
         }
     }
 
-    fn render_composer_context_menu(
-        &self,
-        bezel_theme: &bezel::theme::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let position = *self
-            .composer_context_menu
-            .get()
-            .expect("mounted composer context menu");
-        let closing = self.composer_context_menu.closing_since();
-        let painter = bezel::motion::Painter::of(cx);
-        let entity = cx.entity();
-        let mut card = popover::popover_card(bezel_theme)
-            .id("composer-context-menu")
-            .debug_selector(|| "composer-context-menu".into())
-            .w(px(160.0));
-        for item in ComposerContextItem::ALL {
-            let selector = format!("composer-context-{}", item.selector());
-            let row_entity = entity.clone();
-            let row_selector = selector.clone();
-            card = card.child(
-                popover::menu_row(
-                    bezel_theme,
-                    false,
-                    bezel::motion::Fade::new(painter, selector.clone()),
-                )
-                .id(SharedString::from(selector))
-                .debug_selector(move || row_selector.clone())
-                .w_full()
-                .min_h(px(29.0))
-                .text_color(bezel_theme.text)
-                .on_click(move |_, window, cx| {
-                    row_entity.update(cx, |chat, cx| {
-                        chat.composer_context_action(item, window, cx)
-                    });
-                })
-                .child(item.label()),
-            );
-        }
-        // `menu_at` owns the deferred layer; dismissal stays on the card
-        // because bezel leaves that listener to the caller.
-        let card = card.on_mouse_down_out(move |_, _, cx| {
-            entity.update(cx, |chat, cx| chat.close_composer_context_menu(cx));
-        });
-        popover::menu_at(
-            "composer-context-menu-layer",
-            position,
-            card.into_any_element(),
-            closing,
-        )
-    }
-
     // --- Transcript context menu (right-click Copy / Select All) ---
 
     /// Secondary click on the transcript: the Copy / Select All menu at the
@@ -4281,56 +4304,6 @@ impl Chat {
             TranscriptContextItem::Copy => self.copy_transcript(&CopyTranscript, window, cx),
             TranscriptContextItem::SelectAll => self.select_all_transcript(cx),
         }
-    }
-
-    fn render_transcript_context_menu(
-        &self,
-        bezel_theme: &bezel::theme::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let position = *self
-            .transcript_context_menu
-            .get()
-            .expect("mounted transcript context menu");
-        let closing = self.transcript_context_menu.closing_since();
-        let painter = bezel::motion::Painter::of(cx);
-        let entity = cx.entity();
-        let mut card = popover::popover_card(bezel_theme)
-            .id("transcript-context-menu")
-            .debug_selector(|| "transcript-context-menu".into())
-            .w(px(160.0));
-        for item in TranscriptContextItem::ALL {
-            let selector = format!("transcript-context-{}", item.selector());
-            let row_entity = entity.clone();
-            let row_selector = selector.clone();
-            card = card.child(
-                popover::menu_row(
-                    bezel_theme,
-                    false,
-                    bezel::motion::Fade::new(painter, selector.clone()),
-                )
-                .id(SharedString::from(selector))
-                .debug_selector(move || row_selector.clone())
-                .w_full()
-                .min_h(px(29.0))
-                .text_color(bezel_theme.text)
-                .on_click(move |_, window, cx| {
-                    row_entity.update(cx, |chat, cx| {
-                        chat.transcript_context_action(item, window, cx)
-                    });
-                })
-                .child(item.label()),
-            );
-        }
-        let card = card.on_mouse_down_out(move |_, _, cx| {
-            entity.update(cx, |chat, cx| chat.close_transcript_context_menu(cx));
-        });
-        popover::menu_at(
-            "transcript-context-menu-layer",
-            position,
-            card.into_any_element(),
-            closing,
-        )
     }
 
     // --- File drop (F-CHAT-13) ---
@@ -4472,6 +4445,7 @@ impl Chat {
     fn toggle_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overflow_open = !self.overflow_open;
         if self.overflow_open {
+            self.start_picker_cursor(cx);
             let focus = self.overflow_focus.clone();
             window.focus(&focus, cx);
         }
@@ -4482,6 +4456,7 @@ impl Chat {
     /// is dropped and the ACP session is relaunched.
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
+        self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.entries.clear();
         self.turn_message_ids.clear();
         self.pending_rewind = None;
@@ -4914,7 +4889,12 @@ impl Chat {
         }
     }
 
-    fn send_action(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
+    fn send_action(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
+        // A marked composition owns Enter: it confirms the IME candidate,
+        // and a send here would submit the half-written draft with it.
+        if self.composer_is_composing(window, cx) {
+            return;
+        }
         if self.accept_active_popup_row(cx) {
             cx.notify();
             return;
@@ -4922,23 +4902,28 @@ impl Chat {
         self.send(cx);
     }
 
-    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if self.composer_context_menu.is_open() {
             self.close_composer_context_menu(cx);
-        } else if self.model_picker_open {
+        } else if self.model_picker_open
+            || self.mode_picker_open
+            || self.thinking_picker_open
+            || self.context_popover_open
+            || self.effort_picker_open
+            || self.overflow_open
+            || self.history_open
+        {
+            // Every popup the controls open takes the focus; closing one
+            // returns it to the composer it came from.
             self.model_picker_open = false;
-            cx.notify();
-        } else if self.mode_picker_open {
             self.mode_picker_open = false;
-            cx.notify();
-        } else if self.context_popover_open {
+            self.thinking_picker_open = false;
             self.context_popover_open = false;
-            cx.notify();
-        } else if self.effort_picker_open {
             self.effort_picker_open = false;
-            cx.notify();
-        } else if self.overflow_open {
             self.overflow_open = false;
+            self.history_open = false;
+            self.picker_cursor = None;
+            self.focus_composer(window, cx);
             cx.notify();
         } else if self.open_token_popup() != TokenPopup::None {
             self.slash_dismissed = true;
@@ -5847,654 +5832,6 @@ impl Chat {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_entry(
-        entry: Entry,
-        entry_index: usize,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-        transcript_focus: FocusHandle,
-        source_start: usize,
-        copied_target: Option<CopyTarget>,
-        edit_summary: Option<EditSummaryState>,
-        thought_streaming: bool,
-        thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
-        tool_output_scroll: &HashMap<String, ScrollHandle>,
-        day_heading: Option<&str>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let _perf = sirio_perf::span("Chat.render_entry", entry_index as u64);
-        let typography = theme.typography;
-        let bezel_theme = theme.to_bezel_theme();
-        let interaction = TranscriptInteraction {
-            chat: entity.clone(),
-            focus: transcript_focus,
-        };
-        match entry {
-            Entry::User { text, .. } => {
-                let bubble = div()
-                    .w_full()
-                    .flex()
-                    .justify_end()
-                    // #173: without this the row's flex child keeps its content
-                    // width as a floor, so a message wider than the pane refuses
-                    // to shrink and — being end-justified — spills off the *left*
-                    // edge, where nothing can scroll to it. `max_w` never binds in
-                    // that case, because the pane is already narrower than the cap.
-                    .min_w_0()
-                    .child(
-                        div()
-                            .debug_selector(move || format!("user-bubble-{entry_index}"))
-                            .min_w_0()
-                            .max_w(px(USER_PILL_MAX_WIDTH))
-                            .rounded(theme.radii.user_pill)
-                            .bg(theme.surface_raised)
-                            .px(px(USER_PILL_H_PADDING))
-                            .py(px(USER_PILL_V_PADDING))
-                            .text_size(typography.scaled(USER_PILL_TEXT_SIZE))
-                            .text_color(theme.text)
-                            .child(Self::render_plain_text(
-                                text,
-                                theme,
-                                format!("user-entry-{entry_index}"),
-                                source_start,
-                                Some(&interaction),
-                            )),
-                    )
-                    .into_any_element();
-                // The heading row belongs to the `User` entry's row, so no
-                // extra list index is needed: it sits above the question.
-                match day_heading {
-                    Some(label) => div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .child(Chat::render_day_heading(
-                            entry_index,
-                            label,
-                            theme,
-                            &bezel_theme,
-                        ))
-                        .child(bubble)
-                        .into_any_element(),
-                    None => bubble,
-                }
-            }
-            Entry::Assistant { text, document } => {
-                let target = CopyTarget::Assistant(entry_index);
-                let copied = copied_target.as_ref() == Some(&target);
-                let hover_group = format!("assistant-response-{entry_index}");
-                let copy_entity = entity.clone();
-                let copy_target = target.clone();
-                let copy_text = text;
-                let mut copy = div()
-                    .id(("assistant-copy", entry_index))
-                    .debug_selector(move || format!("assistant-copy-{entry_index}"))
-                    .absolute()
-                    .top(px(0.0))
-                    .right(px(0.0))
-                    .px(px(7.0))
-                    .py(px(4.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.surface_raised)
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        copy_entity.update(cx, |chat, cx| {
-                            chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
-                        });
-                    });
-                if copied {
-                    copy = copy.child(
-                        div()
-                            .id(("assistant-copy-confirmed", entry_index))
-                            .debug_selector(move || {
-                                format!("assistant-copy-confirmed-{entry_index}")
-                            })
-                            .child("Copied ✓"),
-                    );
-                } else {
-                    copy = copy
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .child("Copy");
-                }
-                // Every prose entry is an answer, whether it closes the turn
-                // or sits between tool calls: same markdown, same colour.
-                div()
-                    .id(("assistant-response", entry_index))
-                    .debug_selector(move || format!("assistant-response-{entry_index}"))
-                    .relative()
-                    .group(hover_group)
-                    .w_full()
-                    .child(MarkdownBody::selectable(
-                        document,
-                        interaction.clone(),
-                        source_start,
-                    ))
-                    .child(copy)
-                    .child(
-                        div()
-                            .size_0()
-                            .debug_selector(move || format!("answer-{entry_index}")),
-                    )
-                    .into_any_element()
-            }
-            Entry::Thought {
-                text,
-                open,
-                duration_ms,
-                ..
-            } => {
-                let streaming = thought_streaming;
-                let is_open = open.get(streaming);
-                let mut column = div().w_full().flex().flex_col().gap(px(4.0)).child(
-                    Self::render_thought_header(
-                        entry_index,
-                        streaming,
-                        is_open,
-                        duration_ms,
-                        theme,
-                        &bezel_theme,
-                        window,
-                        cx,
-                        Some(entity.clone()),
-                    ),
-                );
-                if is_open && let Some(scroll) = thought_scroll.get(&entry_index) {
-                    column = column.child(Self::render_thought_body(
-                        entry_index,
-                        &text,
-                        source_start,
-                        &interaction,
-                        scroll,
-                        theme,
-                        &bezel_theme,
-                    ));
-                }
-                column.into_any_element()
-            }
-            Entry::ToolCall {
-                title,
-                status,
-                kind,
-                content,
-                locations,
-                expanded,
-                duration_ms,
-                ..
-            } => Self::render_tool_row(
-                entry_index,
-                None,
-                true,
-                &title,
-                &status,
-                &kind,
-                duration_ms,
-                content,
-                locations,
-                expanded,
-                edit_summary,
-                source_start,
-                Some(interaction.clone()),
-                theme,
-                &bezel_theme,
-                entity.clone(),
-                tool_output_scroll,
-            ),
-            Entry::SubagentTask {
-                title,
-                status,
-                tool_calls,
-                expanded,
-                ..
-            } => Self::render_subagent_task(
-                entry_index,
-                title,
-                status,
-                tool_calls,
-                expanded,
-                theme,
-                &bezel_theme,
-                entity.clone(),
-                tool_output_scroll,
-            ),
-            Entry::Permission {
-                request_id,
-                title,
-                prompt,
-                resolved,
-                expired,
-                dismissed,
-                ..
-            } => {
-                // The record of a question: what was asked and what became
-                // of it. It is answered from the dock above the composer,
-                // so it carries no buttons in any state.
-                let header = if title.is_empty() {
-                    "Permission requested".to_string()
-                } else {
-                    title
-                };
-                let status = if let Some(choice) = resolved {
-                    format!("Answered: {choice}")
-                } else if dismissed {
-                    "Dismissed — request cancelled".to_string()
-                } else if expired {
-                    // F-CHAT-27: the turn ended unanswered.
-                    "No answer — the turn ended".to_string()
-                } else {
-                    "Waiting for your answer below".to_string()
-                };
-                let mut card = div()
-                    .id(("permission-card", request_id as usize))
-                    .debug_selector(move || format!("permission-card-{request_id}"))
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(permission_card_accent(theme))
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(typography.callout)
-                            .text_color(theme.text)
-                            .child(header),
-                    );
-                if !prompt.is_empty() {
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_muted)
-                            .child(prompt),
-                    );
-                }
-                card.child(
-                    div()
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_faint)
-                        .child(status),
-                )
-                .into_any_element()
-            }
-            Entry::Plan { entries, approval } => {
-                let completed = entries
-                    .iter()
-                    .filter(|entry| entry.status == "completed")
-                    .count();
-                let mut card = div()
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(theme.border_strong)
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(typography.caption2)
-                            .child(div().text_color(theme.text).child("Plan"))
-                            .child(
-                                div()
-                                    .text_color(theme.text_faint)
-                                    .child(format!("{completed}/{}", entries.len())),
-                            ),
-                    );
-                for row in entries {
-                    let (glyph, tint) = match row.status.as_str() {
-                        "completed" => ("✓", theme.border_strong),
-                        "in_progress" => ("◌", theme.text),
-                        _ => ("○", theme.text_faint),
-                    };
-                    card = card.child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap(px(6.0))
-                            .text_size(typography.callout)
-                            .child(div().w(px(14.0)).text_color(tint).child(glyph))
-                            .child(div().flex_1().text_color(theme.text).child(row.content)),
-                    );
-                }
-                if let Some(approval) = approval {
-                    // Approved from the dock above the composer; the card
-                    // keeps the plan and says what became of the approval.
-                    let status = if let Some(choice) = &approval.resolved {
-                        format!("Approved: {choice}")
-                    } else if approval.expired {
-                        "No answer — the turn ended".to_string()
-                    } else {
-                        "Waiting for your approval below".to_string()
-                    };
-                    card = card.child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .child(status),
-                    );
-                }
-                card.into_any_element()
-            }
-            Entry::RewindPreview {
-                files,
-                insertions,
-                deletions,
-                error,
-            } => {
-                let mut card = div()
-                    .id(("rewind-preview", entry_index))
-                    .debug_selector(move || format!("rewind-preview-{entry_index}"))
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.surface_raised)
-                    .border_l_2()
-                    .border_color(theme.border_strong)
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(typography.callout)
-                            .text_color(theme.text)
-                            .child(rewind_preview_text(&files, insertions, deletions, &error)),
-                    );
-                if error.is_none() {
-                    let confirm_entity = entity.clone();
-                    card = card.child(
-                        bezel_theme
-                            .button("Restore files", ButtonStyle::Prominent, None)
-                            .id(("rewind-confirm", entry_index))
-                            .debug_selector(move || format!("rewind-confirm-{entry_index}"))
-                            .on_click(move |_, _, cx| {
-                                confirm_entity.update(cx, |chat, cx| chat.confirm_rewind(cx));
-                            }),
-                    );
-                }
-                card.into_any_element()
-            }
-            Entry::RewindReport {
-                files,
-                insertions,
-                deletions,
-                skipped_links,
-            } => div()
-                .id(("rewind-report", entry_index))
-                .debug_selector(move || format!("rewind-report-{entry_index}"))
-                .w_full()
-                .rounded(theme.radii.code_block)
-                .bg(theme.surface_raised)
-                .border_l_2()
-                .border_color(theme.border_strong)
-                .px(px(CARD_H_PADDING))
-                .py(px(CARD_V_PADDING))
-                .text_size(typography.callout)
-                .text_color(theme.text)
-                .child(rewind_report_text(
-                    &files,
-                    insertions,
-                    deletions,
-                    skipped_links,
-                ))
-                .into_any_element(),
-            Entry::TurnFooter(at) => div()
-                .w_full()
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                .child(
-                    div()
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_faint)
-                        .child(at.clone()),
-                )
-                .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                .into_any_element(),
-            Entry::Notice { text, kind } => {
-                let selector = kind.selector();
-                match kind {
-                    // A compaction is drawn across the whole width, like a
-                    // turn footer: what it says applies to everything above
-                    // it, not to the row beside it.
-                    NoticeKind::Compaction => div()
-                        .w_full()
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .debug_selector(move || selector.into())
-                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                        .child(
-                            div()
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child(Self::render_plain_text(
-                                    text.clone(),
-                                    theme,
-                                    format!("notice-entry-{entry_index}"),
-                                    source_start,
-                                    Some(&interaction),
-                                )),
-                        )
-                        .child(div().h(px(1.0)).flex_1().bg(theme.border))
-                        .into_any_element(),
-                    NoticeKind::BackgroundTask | NoticeKind::Warning => div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .debug_selector(move || selector.into())
-                        .text_size(typography.footnote)
-                        .text_color(if kind == NoticeKind::Warning {
-                            theme.warning
-                        } else {
-                            theme.text_faint
-                        })
-                        .child(Self::render_plain_text(
-                            text.clone(),
-                            theme,
-                            format!("notice-entry-{entry_index}"),
-                            source_start,
-                            Some(&interaction),
-                        ))
-                        .into_any_element(),
-                }
-            }
-            Entry::Error {
-                message,
-                retryable,
-                kind,
-            } => {
-                let retry_entity = entity.clone();
-                let dismiss_entity = entity.clone();
-                let is_mcp_warning = kind == ErrorKind::McpWarning;
-                // F-CHAT-02: AuthRequired gets its own amber treatment
-                // (matching the connecting/working status-dot color already
-                // used elsewhere in this file) instead of the generic red
-                // connection-failure card — the fix here is "sign in, then
-                // retry", not "the network hiccupped, retry", and the card
-                // should look like a different kind of problem.
-                let is_auth_required = kind == ErrorKind::AuthRequired;
-                // F-CHAT-03: the agent's own process is gone — there is no
-                // live request left to retry, only a fresh process to
-                // start, so this offers "Restart agent" instead of "Retry"
-                // (Swift's `ChatState.disconnected` banner names the same
-                // distinction; `ChatPaneView.swift:82`).
-                let is_disconnected = kind == ErrorKind::Disconnected;
-                // Nothing broke, so this must not look like breakage: the
-                // agent simply is not available here. It borrows the amber
-                // treatment AuthRequired uses for the same reason -- both
-                // say "there is an action for you", not "something failed".
-                let is_unavailable = kind == ErrorKind::Unavailable;
-                let settings_entity = entity.clone();
-                let (banner_bg, banner_border, banner_text) = if is_auth_required || is_unavailable
-                {
-                    (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), theme.text)
-                } else {
-                    (theme.diff_del_bg, theme.diff_del, theme.diff_del)
-                };
-                div()
-                    .id(("chat-error-banner", entry_index))
-                    .when(is_auth_required, |this| {
-                        this.debug_selector(|| "chat-auth-required-banner".into())
-                    })
-                    .when(is_disconnected, |this| {
-                        this.debug_selector(|| "chat-disconnected-banner".into())
-                    })
-                    .when(is_mcp_warning, |this| {
-                        this.debug_selector(|| "chat-mcp-warning-banner".into())
-                    })
-                    .when(is_unavailable, |this| {
-                        this.debug_selector(|| "chat-unavailable-banner".into())
-                    })
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(banner_bg)
-                    .border_l_2()
-                    .border_color(banner_border)
-                    .px(px(CARD_H_PADDING))
-                    .py(px(CARD_V_PADDING))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .text_size(typography.callout)
-                    .text_color(banner_text)
-                    // F-CHAT-02: a flex child defaults to a min-width of its
-                    // own content (same rule as CSS flexbox), so a long
-                    // guidance message never shrank below its own text
-                    // width — it overflowed the row and pushed the Retry
-                    // sibling out past the visible edge instead of wrapping.
-                    // `min_w_0()` is the standard fix (zed's own
-                    // `ui::components::banner` uses the identical
-                    // `.min_w_0().flex_1()` pairing for the same reason).
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .debug_selector(move || format!("chat-error-message-{entry_index}"))
-                            .child(Self::render_plain_text(
-                                message,
-                                theme,
-                                format!("error-entry-{entry_index}"),
-                                source_start,
-                                Some(&interaction),
-                            )),
-                    )
-                    .when(retryable, |this| {
-                        this.child(
-                            div()
-                                .id(("retry", entry_index))
-                                .debug_selector(move || {
-                                    if is_disconnected {
-                                        "chat-restart-agent".into()
-                                    } else {
-                                        "chat-retry".into()
-                                    }
-                                })
-                                // Never shrink: the message above now wraps
-                                // and gives up width instead of pushing this
-                                // sibling out of the row (F-CHAT-02).
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.surface_raised)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    // Same underlying call as Retry
-                                    // (`Chat::retry` -> `start_connection`)
-                                    // for the same reason Swift's Restart
-                                    // agent button calls the identical
-                                    // `ChatController.start()` its Retry
-                                    // button does (F-CHAT-03): it always
-                                    // spawns a fresh agent process either
-                                    // way, so "restart" and "retry" name the
-                                    // same act from two different starting
-                                    // states rather than two mechanisms.
-                                    retry_entity.update(cx, |chat, cx| chat.retry(cx));
-                                })
-                                .child(if is_disconnected {
-                                    "Restart agent"
-                                } else {
-                                    "Retry"
-                                }),
-                        )
-                    })
-                    // The one action that can change the outcome. The chat
-                    // does not open Settings itself: the workspace owns that
-                    // surface and subscribes to the event, the same way it
-                    // already handles OpenFile and OpenLink.
-                    .when(is_unavailable, |this| {
-                        this.child(
-                            div()
-                                .id(("open-settings", entry_index))
-                                .debug_selector(|| "chat-open-settings".into())
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.surface_raised)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    settings_entity
-                                        .update(cx, |_, cx| cx.emit(ChatEvent::OpenSettings));
-                                })
-                                .child("Open Settings"),
-                        )
-                    })
-                    // F-CHAT-33: "OK to dismiss" -- present for every error,
-                    // retryable or not (Swift's `promptError`/`mcpWarning`
-                    // banners both carry exactly this one action). It never
-                    // retries or restarts anything, only removes this one
-                    // row, so it stays available even when Retry/Restart is
-                    // also shown above: dismissing without retrying is a
-                    // real, distinct choice.
-                    //
-                    // Withheld for Unavailable alone: there the box is the
-                    // tab's entire content, so dismissing would leave a chat
-                    // that neither explains itself nor does anything.
-                    .when(!is_unavailable, |this| {
-                        this.child(
-                            div()
-                                .id(("dismiss-error", entry_index))
-                                .debug_selector(|| "chat-error-ok".into())
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .text_color(theme.text)
-                                .bg(theme.surface_raised)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    dismiss_entity.update(cx, |chat, cx| {
-                                        chat.dismiss_error(entry_index, cx);
-                                    });
-                                })
-                                .child("OK"),
-                        )
-                    })
-                    .into_any_element()
-            }
-        }
-    }
-
     /// F-CHAT-22, turn half: the single row an older turn collapses to.
     ///
     /// Swift's `TurnFoldRow` — a chevron, `Turn: <label>`, the turn's clock
@@ -6559,2089 +5896,6 @@ impl Chat {
         self.answer_blink.flip();
         cx.notify();
     }
-
-    /// D-CHAT-03: the queue block above the composer card — a header that
-    /// counts the entries and folds them, then one row per entry with its
-    /// text, "Send now" and ✕. The front entry is the one the running
-    /// turn's end sends; its dot is the only bright one. The list caps its
-    /// height and scrolls, so a long queue never pushes the card off the
-    /// pane. Callers draw it only while the queue is non-empty.
-    fn render_queue(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
-        let typography = theme.typography;
-        let entity = cx.entity();
-        let count = self.queue.len();
-        let expanded = self.queue_expanded;
-        let title = if count == 1 {
-            "1 message queued".to_string()
-        } else {
-            format!("{count} messages queued")
-        };
-        let toggle_entity = entity.clone();
-        let clear_entity = entity.clone();
-        div()
-            .id("queue")
-            .debug_selector(|| "queue".into())
-            .w_full()
-            .max_w(px(TRANSCRIPT_WIDTH))
-            .mb(px(8.0))
-            .rounded(px(bezel::theme::Theme::surface_radius()))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .text_size(typography.footnote)
-            .child(
-                div()
-                    .id("queue-header")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .pl(px(8.0))
-                    .pr(px(4.0))
-                    .py(px(4.0))
-                    .child(
-                        div()
-                            .id("queue-toggle")
-                            .debug_selector(|| "queue-toggle".into())
-                            .flex()
-                            .flex_1()
-                            .items_center()
-                            .gap(px(6.0))
-                            .py(px(2.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .on_click(move |_, _, cx| {
-                                toggle_entity.update(cx, |chat, cx| chat.toggle_queue_folded(cx));
-                            })
-                            .child(
-                                IconElement::new(
-                                    if expanded {
-                                        Icon::ChevronDown
-                                    } else {
-                                        Icon::ChevronRight
-                                    },
-                                    IconSize::XSmall,
-                                )
-                                .text_color(theme.text_faint),
-                            )
-                            .child(
-                                div()
-                                    .id("queue-count")
-                                    .debug_selector(move || format!("queue-count-{count}"))
-                                    .text_color(theme.text_muted)
-                                    .child(title),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("queue-clear")
-                            .debug_selector(|| "queue-clear".into())
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.caption2)
-                            .text_color(theme.text_faint)
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(move |_, _, cx| {
-                                clear_entity.update(cx, |chat, cx| chat.clear_queue(cx));
-                            })
-                            .child("Clear all"),
-                    ),
-            )
-            .when(expanded, |block| {
-                block.child(
-                    div()
-                        .id("queue-entries")
-                        .flex()
-                        .flex_col()
-                        .max_h(px(QUEUE_MAX_HEIGHT))
-                        .overflow_y_scroll()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .children(self.queue.iter().enumerate().map(|(index, text)| {
-                            let send_entity = entity.clone();
-                            let remove_entity = entity.clone();
-                            let text_for_id = text.clone();
-                            let is_next = index == 0;
-                            div()
-                                .id(("queue-entry", index))
-                                .debug_selector(move || format!("queue-entry-{index}"))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .px(px(10.0))
-                                .py(px(4.0))
-                                .when(index + 1 < count, |row| {
-                                    row.border_b_1().border_color(theme.border)
-                                })
-                                .child(bezel::ui::widgets::status_dot(if is_next {
-                                    theme.text.into()
-                                } else {
-                                    theme.text_faint.into()
-                                }))
-                                .child(
-                                    div()
-                                        .id(("queue-text", index))
-                                        .debug_selector(move || format!("queue-text-{text_for_id}"))
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_ellipsis()
-                                        .text_color(theme.text)
-                                        .child(text.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .id(("queue-send", index))
-                                        .debug_selector(move || format!("queue-send-{index}"))
-                                        .flex_none()
-                                        .px(px(8.0))
-                                        .py(px(3.0))
-                                        .rounded(theme.radii.control)
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.text_muted)
-                                        .cursor(CursorStyle::PointingHand)
-                                        .hover(|style| style.bg(theme.overlay))
-                                        .on_click(move |_, _, cx| {
-                                            send_entity.update(cx, |chat, cx| {
-                                                chat.send_queued_entry_now(index, cx);
-                                            });
-                                        })
-                                        .child("Send now"),
-                                )
-                                .child(
-                                    div()
-                                        .id(("queue-remove", index))
-                                        .debug_selector(move || format!("queue-remove-{index}"))
-                                        .flex_none()
-                                        .px(px(4.0))
-                                        .rounded(px(3.0))
-                                        .text_color(theme.text_faint)
-                                        .cursor(CursorStyle::PointingHand)
-                                        .hover(|style| style.bg(theme.overlay))
-                                        .on_click(move |_, _, cx| {
-                                            remove_entity.update(cx, |chat, cx| {
-                                                chat.remove_queued_entry(index, cx);
-                                            });
-                                        })
-                                        .child("×"),
-                                )
-                        })),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_composer(
-        &mut self,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let _perf = sirio_perf::span("Chat.render_composer", cx.entity_id().as_u64());
-        let typography = theme.typography;
-        let focused = self
-            .composer_field
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
-        let placeholder = self.composer_placeholder();
-        if placeholder != self.composer_placeholder_shown {
-            self.composer_placeholder_shown = placeholder.clone();
-            self.composer_field
-                .update(cx, |field, cx| field.set_placeholder(placeholder, cx));
-        }
-        let disabled = self.composer_disabled();
-        let can_send = self.can_send();
-        let entity = cx.entity();
-
-        // Swift's `modePill` (ComposerControlBar.swift) pairs a status dot
-        // with the permission mode's name: the dot carries the connection
-        // state, the label the mode, and a raw state word ("idle"/"working")
-        // only stands in while no mode is known. The port used to let
-        // "working" and "connecting" take the label over from the mode, so
-        // the permission the user picked was unreadable exactly while a
-        // turn ran (`status_pill_content`, `composer_view.rs`).
-        let connecting = self.connecting;
-        // F-CHAT-15 / #136: a known mode names itself from the first frame,
-        // never waiting on `has_completed_turn`.
-        let (dot, label) = composer_view::status_pill_content(
-            connecting,
-            self.streaming,
-            self.client.is_some(),
-            self.mode_catalog.as_ref(),
-        );
-        let dot = match dot {
-            composer_view::PillDot::Busy => rgb(0xf5a623),
-            composer_view::PillDot::Ready => rgb(0x53c653),
-            composer_view::PillDot::Offline => rgb(0x8a8d99),
-        };
-        let mode_selectable = self.mode_selectable();
-        let status_pill = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(24.0))
-            .px(px(7.0))
-            .rounded(theme.radii.control)
-            .text_size(typography.ui_size);
-        let status_pill = if connecting {
-            status_pill
-                .id("chat-connecting")
-                .debug_selector(|| "chat-connecting".into())
-        } else {
-            status_pill
-                .id("chat-status")
-                .debug_selector(|| "chat-status".into())
-        };
-        let status_pill = status_pill
-            .when(mode_selectable, |this| {
-                this.hover(|style| style.bg(bezel_theme.element_hover))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_mode_picker(window, cx);
-                    }))
-            })
-            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(div().text_color(theme.text).child(label))
-            .when(mode_selectable, |this| this.child(picker_chevron(theme)));
-
-        let selected_model_name = self
-            .selected_model
-            .as_deref()
-            .and_then(|selected| {
-                self.available_models
-                    .iter()
-                    .find(|option| option.id == selected)
-                    .map(|option| option.name.clone())
-            })
-            .or_else(|| self.selected_model.clone())
-            .unwrap_or_else(|| "Claude Code".into());
-        let model_entity = entity.clone();
-        let effort_label = self.effort.as_ref().and_then(|effort| {
-            effort.current_value.as_ref().map(|current| {
-                let name = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == *current)
-                    .map(|choice| choice.name.clone())
-                    .unwrap_or_else(|| current.clone());
-                // Not uppercased any more: it used to be a bare caption that
-                // needed to read as chrome, and now it sits beside its own
-                // "Effort" label exactly the way the model value sits beside
-                // "Model".
-                name
-            })
-        });
-        // The picker chip — "Model" in muted chrome text, the value in
-        // title text, the effort level when one is selected — opens only
-        // once a turn has completed and the agent reported models. Without
-        // models the pill degrades to a plain agent badge (F-CHAT-36): no
-        // label, no chevron, no picker.
-        let model_control = if self.model_control_visible() {
-            let model_selection_id = self
-                .selected_model
-                .as_deref()
-                .map(|id| format!("model-selection-{id}"))
-                .unwrap_or_else(|| "model-selection-none".into());
-            div()
-                .id("model-chip")
-                .debug_selector(|| "model-chip".into())
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                // Sized to its content, not to the row. It used to carry
-                // `flex_1`, which stretched the pill the whole width of the
-                // control row and stranded its own chevron ~200px from the
-                // model name, next to the overflow button -- so the chevron
-                // read as belonging to nothing and the model value read as a
-                // caption rather than a picker. It still shrinks on a tight
-                // row -- that is what keeps the name's ellipsis working --
-                // but a 56px floor stops it collapsing to nothing: the name
-                // ellipsizes while the row wraps around it, never erasing
-                // the picker.
-                .min_w(px(56.0))
-                .hover(|style| style.bg(bezel_theme.element_hover))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_model_picker(window, cx);
-                }))
-                .child(div().text_color(theme.text_faint).child("Model"))
-                .child(
-                    div()
-                        .id(model_selection_id.clone())
-                        .debug_selector(move || model_selection_id)
-                        // No `flex_1`. Inert on its own now that the pill
-                        // hugs its content -- there is no slack left inside
-                        // to absorb, and removing it alone does not move the
-                        // chevron, which the test below confirms. It goes
-                        // because the two together are what stranded the
-                        // chevron: restore `flex_1` on the pill and this
-                        // would push it to the far edge again.
-                        // `min_w_0` + `text_ellipsis` do the real work,
-                        // truncating a long name when the row is tight.
-                        .min_w_0()
-                        .text_ellipsis()
-                        .text_color(theme.text)
-                        .child(selected_model_name.clone()),
-                )
-                .child(
-                    div()
-                        .id("model-chip-chevron")
-                        .debug_selector(|| "model-chip-chevron".into())
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .child(picker_chevron(theme)),
-                )
-        } else {
-            // #206: this badge names the *agent*, so it reads the agent.
-            // It used to render `selected_model_name`, a model variable
-            // whose fallback is the literal "Claude Code" -- so it named
-            // the wrong agent for every other one until models arrived,
-            // and named an agent at all for a chat whose banner two
-            // inches above says the agent is unknowable. `agent_name` is
-            // `None` in exactly that case, which is the case the banner
-            // is about.
-            let agent_badge_name = self.agent_badge_name();
-            div()
-                .id("agent-badge")
-                .debug_selector(|| "agent-badge".into())
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                // Same rule as the chip above: hug the content.
-                .min_w_0()
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_ellipsis()
-                        .text_color(theme.text)
-                        .child(agent_badge_name),
-                )
-        };
-
-        // The effort level is a peer of the model, not a caption inside it:
-        // it is changed about as often, so it belongs at the same depth and
-        // carries its own label. Drawn only when the agent reports a value
-        // AND the picker can actually open, so this is never a click target
-        // that leads nowhere. `flex_none` keeps it intact while the model
-        // chip beside it absorbs the squeeze on a narrow pane — past that
-        // the chip wraps whole to the next line, never over the send disc.
-        let effort_control = effort_label
-            .filter(|_| self.model_control_visible())
-            .map(|label| {
-                let effort_entity = entity.clone();
-                div()
-                    .id("effort-chip")
-                    .debug_selector(|| "effort-chip".into())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(7.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.ui_size)
-                    .hover(|style| style.bg(bezel_theme.element_hover))
-                    .on_click(move |_, window, cx| {
-                        effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
-                    })
-                    .child(div().text_color(theme.text_faint).child("Effort"))
-                    .child(
-                        div()
-                            .id("model-effort-label")
-                            .debug_selector(|| "model-effort-label".into())
-                            .text_color(theme.text)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .child(picker_chevron(theme)),
-                    )
-            });
-
-        // Fast mode: a toggle, not a picker, so it is a chip that shows its
-        // own state rather than one that opens a list. Drawn only when the
-        // session reported the feature at all — an older CLI says nothing
-        // and gets no chip, rather than a dead one. When the CLI has
-        // refused it, the chip stays and carries the CLI's own sentence,
-        // the way a missing language server names the program.
-        let fast_control = self
-            .fast_mode
-            .clone()
-            .filter(|_| self.model_control_visible())
-            .map(|fast| {
-                let blocked = fast.blocked_by.clone();
-                let fast_entity = entity.clone();
-                let selector = if blocked.is_some() {
-                    "fast-mode-chip-blocked"
-                } else {
-                    "fast-mode-chip"
-                };
-                let label_colour: gpui::Hsla = match (&blocked, fast.enabled) {
-                    (Some(_), _) => theme.text_faint.into(),
-                    // On, the chip is filled with the theme's own accent
-                    // pair rather than a colour of Sirio's: the palette is
-                    // bezel's, all of it.
-                    (None, true) => bezel_theme.on_solid,
-                    (None, false) => theme.text.into(),
-                };
-                div()
-                    .id("fast-mode-chip")
-                    .debug_selector(move || selector.into())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(7.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.ui_size)
-                    .when(fast.enabled && blocked.is_none(), |chip| {
-                        chip.bg(bezel_theme.solid)
-                    })
-                    .when(blocked.is_none(), |chip| {
-                        chip.hover(|style| style.bg(bezel_theme.element_hover))
-                            .on_click(move |_, _, cx| {
-                                fast_entity.update(cx, |chat, cx| chat.toggle_fast_mode(cx));
-                            })
-                    })
-                    .when_some(blocked, |chip, reason| {
-                        let reason = SharedString::from(reason);
-                        chip.tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
-                    })
-                    .child(div().text_color(label_colour).child("Fast"))
-            });
-
-        // Background tasks: a count, not a list. The CLI sends the whole
-        // running set on every change and drains it as each task ends, so
-        // this is only ever "how many are still going" — what *finished*
-        // arrives separately, as a notice in the transcript, because the
-        // list is already empty by the time that is known.
-        let background_tasks = (self.background_tasks > 0).then(|| {
-            let running = self.background_tasks;
-            div()
-                .id("background-tasks-chip")
-                .debug_selector(|| "background-tasks-chip".into())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                .text_color(theme.text_faint)
-                .tooltip(move |window, cx| {
-                    Tooltip::text(
-                        SharedString::from(if running == 1 {
-                            "1 background task running".to_string()
-                        } else {
-                            format!("{running} background tasks running")
-                        }),
-                        window,
-                        cx,
-                    )
-                })
-                .child(format!("⌁ {running}"))
-        });
-
-        // The thinking display. Drawn only while the transport has it and
-        // the CLI has not refused the verb; unset shows no value at all,
-        // because nothing reports the session's own and a word here would
-        // be one nobody read (F-CHAT-18's rule, as the effort track already
-        // applies it).
-        let thinking = self
-            .thinking_display
-            .clone()
-            .filter(|state| !state.unsupported)
-            .filter(|_| self.model_control_visible());
-        let thinking_control = thinking.clone().map(|state| {
-            let thinking_entity = entity.clone();
-            let chosen = state.chosen.clone();
-            div()
-                .id("thinking-chip")
-                .debug_selector(|| "thinking-chip".into())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                .hover(|style| style.bg(bezel_theme.element_hover))
-                .on_click(move |_, window, cx| {
-                    thinking_entity
-                        .update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
-                })
-                .child(div().text_color(theme.text_faint).child("Thinking"))
-                .when_some(chosen, |chip, chosen| {
-                    chip.child(
-                        div()
-                            .debug_selector(|| "thinking-chip-value".into())
-                            .text_color(theme.text)
-                            .child(thinking_display_name(&chosen).to_string()),
-                    )
-                })
-        });
-
-        let thinking_picker = self.thinking_picker_open.then(|| {
-            // The shared painter is bound further down, past this chip.
-            let view = bezel::motion::Painter::of(cx);
-            let chosen = thinking.and_then(|state| state.chosen);
-            popover::anchored_menu_above(
-                "thinking-picker-menu",
-                div()
-                    .id("thinking-picker")
-                    .debug_selector(|| "thinking-picker".into())
-                    .key_context("ChatThinkingPicker")
-                    .track_focus(&self.thinking_picker_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .w(px(200.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.thinking_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        popover::popover_card(&bezel_theme).child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                // The agent's own answer is a row, not the
-                                // absence of one: choosing it is how a user
-                                // undoes a choice they made.
-                                .children(thinking_rows().map(|value| {
-                                    let id = value.unwrap_or("default");
-                                    let row_entity = entity.clone();
-                                    let is_selected = chosen.as_deref() == value;
-                                    popover::menu_row_nav(
-                                        &bezel_theme,
-                                        is_selected,
-                                        false,
-                                        bezel::motion::Fade::new(
-                                            view,
-                                            format!("thinking-option-{id}"),
-                                        ),
-                                    )
-                                    .id(format!("thinking-option-{id}"))
-                                    .debug_selector(move || format!("thinking-option-{id}"))
-                                    .on_click(move |_, _, cx| {
-                                        row_entity.update(cx, |chat, cx| {
-                                            chat.select_thinking_display(
-                                                value.map(str::to_string),
-                                                cx,
-                                            );
-                                        });
-                                    })
-                                    .child(
-                                        value
-                                            .map_or("Agent's own", thinking_display_name)
-                                            .to_string(),
-                                    )
-                                })),
-                        ),
-                    )
-                    .into_any_element(),
-                None,
-            )
-        });
-
-        // The effort selector, anchored to the chip above. A slider rather
-        // than a row per level: effort is a scale, and the levels are the
-        // session's own — `supportedEffortLevels` differs per model, so the
-        // track grows and shrinks with the model instead of naming rungs the
-        // model does not have.
-        let effort_picker = self
-            .effort_picker_open
-            .then(|| self.effort.clone())
-            .flatten()
-            .map(|effort| {
-                let stops: Vec<EffortChoice> =
-                    effort_stops(&effort.choices).into_iter().cloned().collect();
-                let count = stops.len();
-                let current = effort
-                    .current_value
-                    .clone()
-                    .unwrap_or_else(|| EFFORT_RESET.to_string());
-                // `None` while the session is on its model's own default:
-                // that is not a point on the track, so nothing is filled and
-                // the value reads in the muted tone the rest of the row uses
-                // for "not chosen".
-                let selected = stops.iter().position(|stop| stop.value == current);
-                let fraction = selected.map_or(0.0, |index| effort_fraction_for_stop(count, index));
-                let current_name = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == current)
-                    .map(|choice| choice.name.clone())
-                    .unwrap_or_else(|| current.clone());
-                let reset = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == EFFORT_RESET)
-                    .cloned();
-                let heading = effort.name.clone().unwrap_or_else(|| "Effort".to_string());
-
-                let zones: Vec<AnyElement> = stops
-                    .iter()
-                    .enumerate()
-                    .map(|(index, stop)| {
-                        let value = stop.value.clone();
-                        let selector_value = value.clone();
-                        let zone_entity = entity.clone();
-                        div()
-                            .id(format!("effort-stop-{value}"))
-                            .debug_selector(move || format!("effort-stop-{selector_value}"))
-                            // Not an equal share each: a stop owns the track
-                            // that is nearer to it than to its neighbours, and
-                            // the two ends have a neighbour on one side only.
-                            // Equal shares would put every boundary half a
-                            // step away from where the drag snaps.
-                            .w(relative(effort_stop_share(count, index)))
-                            .h_full()
-                            .cursor_pointer()
-                            // The zones sit above the track, so they are what
-                            // the pointer actually lands on: gpui only arms a
-                            // drag on the element whose hitbox is topmost at
-                            // mouse-down. Each one therefore starts the
-                            // track's drag, under the track's own id — the
-                            // move is read against the whole track's bounds
-                            // by the listener below, not against one zone's.
-                            .on_drag(SliderDrag("effort-slider".into()), |_, _, _, cx| {
-                                cx.new(|_| gpui::Empty)
-                            })
-                            .on_click(move |_, _, cx| {
-                                zone_entity.update(cx, |chat, cx| {
-                                    chat.select_effort(value.clone(), cx);
-                                });
-                            })
-                            .into_any_element()
-                    })
-                    .collect();
-
-                let drag_stops = stops.clone();
-                let track = div()
-                    .relative()
-                    .w_full()
-                    .h(px(16.0))
-                    .child(bezel_theme.slider(fraction))
-                    .child(
-                        div()
-                            .id("effort-slider")
-                            .debug_selector(|| "effort-slider".into())
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_stretch()
-                            .on_drag_move(cx.listener(
-                                move |chat, event: &DragMoveEvent<SliderDrag>, _, cx| {
-                                    let Some(fraction) =
-                                        slider_fraction(event, "effort-slider", cx)
-                                    else {
-                                        return;
-                                    };
-                                    let Some(stop) =
-                                        drag_stops.get(effort_stop_for_fraction(count, fraction))
-                                    else {
-                                        return;
-                                    };
-                                    // Every stop reached is a control request
-                                    // to the agent, and a drag crosses the
-                                    // track in dozens of moves. Only a stop
-                                    // the session is not already on is worth
-                                    // asking for.
-                                    let standing = chat
-                                        .effort
-                                        .as_ref()
-                                        .and_then(|effort| effort.current_value.as_deref());
-                                    if standing != Some(stop.value.as_str()) {
-                                        chat.select_effort(stop.value.clone(), cx);
-                                    }
-                                },
-                            ))
-                            .children(zones),
-                    );
-
-                let ends = div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
-                    .child(
-                        stops
-                            .first()
-                            .map(|stop| stop.name.clone())
-                            .unwrap_or_default(),
-                    )
-                    .child(
-                        stops
-                            .last()
-                            .map(|stop| stop.name.clone())
-                            .unwrap_or_default(),
-                    );
-
-                let reset_row = reset.map(|reset| {
-                    let reset_entity = entity.clone();
-                    let reset_value = reset.value.clone();
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(div().h(px(1.0)).w_full().bg(theme.border))
-                        .child(
-                            div()
-                                .id("effort-reset")
-                                .debug_selector(|| "effort-reset".into())
-                                .h(px(22.0))
-                                .px(px(6.0))
-                                .flex()
-                                .items_center()
-                                .rounded(theme.radii.control)
-                                .text_size(typography.caption2)
-                                .text_color(theme.text)
-                                .when(selected.is_none(), |this| this.bg(theme.element_active))
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    reset_entity.update(cx, |chat, cx| {
-                                        chat.select_effort(reset_value.clone(), cx);
-                                        // A reset is a command, not an
-                                        // adjustment: it answers and closes,
-                                        // where the track stays open because
-                                        // moving a knob is something you do
-                                        // more than once.
-                                        chat.effort_picker_open = false;
-                                        cx.notify();
-                                    });
-                                })
-                                .child("Use the model's default"),
-                        )
-                });
-
-                // A scale needs two ends. One level is a choice between it
-                // and the model's default, which is a row — a knob with
-                // nowhere to slide would be a control that cannot be worked.
-                let scale = (count > 1).then(|| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        // The knob is 14px centred on the track ends, so it
-                        // overhangs 7px each side: without this inset it runs
-                        // into the card's 4px padding and clips.
-                        .px(px(8.0))
-                        .child(track)
-                        .child(ends)
-                });
-                let lone_stop = stops.first().filter(|_| count == 1).map(|stop| {
-                    let value = stop.value.clone();
-                    let selector_value = value.clone();
-                    let lone_entity = entity.clone();
-                    div()
-                        .id(format!("effort-stop-{value}"))
-                        .debug_selector(move || format!("effort-stop-{selector_value}"))
-                        .h(px(22.0))
-                        .px(px(6.0))
-                        .flex()
-                        .items_center()
-                        .rounded(theme.radii.control)
-                        .text_size(typography.caption2)
-                        .text_color(theme.text)
-                        .when(selected.is_some(), |this| this.bg(theme.element_active))
-                        .hover(|style| style.bg(theme.overlay))
-                        .on_click(move |_, _, cx| {
-                            lone_entity
-                                .update(cx, |chat, cx| chat.select_effort(value.clone(), cx));
-                        })
-                        .child(stop.name.clone())
-                });
-
-                popover::anchored_menu_above(
-                    "effort-picker-menu",
-                    div()
-                        .id("effort-picker")
-                        .debug_selector(|| "effort-picker".into())
-                        .key_context("ChatEffortPicker")
-                        .track_focus(&self.effort_picker_focus)
-                        .on_action(cx.listener(Self::cancel))
-                        .w(px(220.0))
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.effort_picker_open = false;
-                            cx.notify();
-                        }))
-                        .child(
-                            popover::popover_card(&bezel_theme).child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap(px(8.0))
-                                            .text_size(typography.caption2)
-                                            .child(
-                                                div().text_color(theme.text_faint).child(heading),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("effort-current")
-                                                    .debug_selector(move || {
-                                                        if selected.is_some() {
-                                                            "effort-current".into()
-                                                        } else {
-                                                            "effort-current-unset".into()
-                                                        }
-                                                    })
-                                                    .text_color(if selected.is_some() {
-                                                        theme.text
-                                                    } else {
-                                                        theme.text_faint
-                                                    })
-                                                    .child(current_name),
-                                            ),
-                                    )
-                                    .children(scale)
-                                    .children(lone_stop)
-                                    .children(reset_row),
-                            ),
-                        )
-                        .into_any_element(),
-                    None,
-                )
-            });
-
-        let view = bezel::motion::Painter::of(cx);
-        let model_picker = self.model_picker_open.then(|| {
-            let picker_entity = model_entity.clone();
-            // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
-            // has none, and the ACP layer never carries one — it is purely
-            // the driver's own first-listed choice, matching Swift's
-            // `recommendedId = models.first?.modelId` exactly. The search
-            // filter runs over the full, unfiltered list order (`filter`,
-            // not `sort`) so a query never reorders results.
-            let recommended_id = self
-                .available_models
-                .first()
-                .map(|option| option.id.clone());
-            let query = self.model_search_field.read(cx).content().to_string();
-            let filtered_models: Vec<ModelOption> = self
-                .available_models
-                .iter()
-                .filter(|option| model_query_matches(option, &query))
-                .cloned()
-                .collect();
-            let selected_id = self.selected_model.clone();
-            popover::anchored_menu_above(
-                "model-picker-menu",
-                div()
-                    .id("model-picker")
-                    .debug_selector(|| "model-picker".into())
-                    .key_context("ChatModelPicker")
-                    .on_action(cx.listener(Self::cancel))
-                    .w(px(245.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.model_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        popover::popover_card(&bezel_theme).child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .when(!self.available_models.is_empty(), |this| {
-                                    this.child(
-                                        div()
-                                            .id("model-search-input")
-                                            .debug_selector(|| "model-search-input".into())
-                                            .w_full()
-                                            .mb(px(6.0))
-                                            .child(self.model_search_field.clone()),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .id("model-picker-list")
-                                        .debug_selector(|| "model-picker-list".into())
-                                        .max_h(px(MODEL_PICKER_LIST_MAX_H))
-                                        .overflow_y_scroll()
-                                        .track_scroll(&self.model_picker_scroll)
-                                        .flex()
-                                        .flex_col()
-                                        .when(self.available_models.is_empty(), |this| {
-                                            this.child(
-                                                div()
-                                                    .p(px(8.0))
-                                                    .text_size(typography.footnote)
-                                                    .text_color(theme.text_faint)
-                                                    .child(
-                                                        "The connected agent did not report any models.",
-                                                    ),
-                                            )
-                                        })
-                                        .when(
-                                            !self.available_models.is_empty()
-                                                && filtered_models.is_empty(),
-                                            |this| {
-                                                this.child(
-                                                    div()
-                                                        .id("model-picker-no-match")
-                                                        .debug_selector(|| {
-                                                            "model-picker-no-match".into()
-                                                        })
-                                                        .p(px(8.0))
-                                                        .text_size(typography.footnote)
-                                                        .text_color(theme.text_faint)
-                                                        .child("No models match"),
-                                                )
-                                            },
-                                        )
-                                        .children(filtered_models.iter().cloned().map(|option| {
-                                            let option_id = option.id.clone();
-                                            let option_name = option.name.clone();
-                                            let option_entity = picker_entity.clone();
-                                            let is_recommended = recommended_id.as_deref()
-                                                == Some(option_id.as_str());
-                                            let is_selected =
-                                                selected_id.as_deref() == Some(option_id.as_str());
-                                            popover::menu_row_nav(
-                                                &bezel_theme,
-                                                is_selected,
-                                                false,
-                                                bezel::motion::Fade::new(
-                                                    view,
-                                                    format!("model-option-{option_id}"),
-                                                ),
-                                            )
-                                            .id(format!("model-option-{option_id}"))
-                                            .debug_selector(move || {
-                                                format!("model-option-{option_id}")
-                                            })
-                                            .on_click(move |_, _, cx| {
-                                                option_entity.update(cx, |chat, cx| {
-                                                    chat.select_model(option.clone(), cx);
-                                                });
-                                            })
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_ellipsis()
-                                                    .child(option_name),
-                                            )
-                                            .when(is_recommended, |this| {
-                                                this.child(
-                                                    div()
-                                                        .id("model-option-recommended")
-                                                        .debug_selector(|| {
-                                                            "model-option-recommended".into()
-                                                        })
-                                                        .flex_shrink_0()
-                                                        .px(px(5.0))
-                                                        .rounded(px(4.0))
-                                                        .text_size(typography.caption2)
-                                                        .text_color(theme.text)
-                                                        .bg(theme.overlay_strong)
-                                                        .child("Recommended"),
-                                                )
-                                            })
-                                        })),
-                                )
-                        ),
-                    )
-                    .into_any_element(),
-                None,
-            )
-        });
-
-        // F-CHAT-15: the session-mode picker, anchored above the status
-        // pill the same way `model_picker` anchors above the model chip.
-        // No search field — mode lists are small and entirely agent-defined
-        // (ask/plan/auto today), so a flat list of rows is enough.
-        let mode_picker = self.mode_picker_open.then(|| {
-            let mode_entity = entity.clone();
-            let current_id = self
-                .mode_catalog
-                .as_ref()
-                .map(|catalog| catalog.current_id.clone())
-                .unwrap_or_default();
-            let options: Vec<AgentMode> = self
-                .mode_catalog
-                .as_ref()
-                .map(|catalog| catalog.options.clone())
-                .unwrap_or_default();
-            popover::anchored_menu_above(
-                "mode-picker-menu",
-                div()
-                    .id("mode-picker")
-                    .debug_selector(|| "mode-picker".into())
-                    .key_context("ChatModelPicker")
-                    .track_focus(&self.mode_picker_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .w(px(200.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.mode_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        popover::popover_card(&bezel_theme).child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .when(options.is_empty(), |this| {
-                                    this.child(
-                                        div()
-                                            .p(px(8.0))
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.text_faint)
-                                            .child("No modes offered"),
-                                    )
-                                })
-                                .children(options.into_iter().map(|mode| {
-                                    let mode_id = mode.id.clone();
-                                    let mode_name = mode.name.clone();
-                                    let row_entity = mode_entity.clone();
-                                    let is_selected = mode.id == current_id;
-                                    popover::menu_row_nav(
-                                        &bezel_theme,
-                                        is_selected,
-                                        false,
-                                        bezel::motion::Fade::new(
-                                            view,
-                                            format!("mode-option-{mode_id}"),
-                                        ),
-                                    )
-                                    .id(format!("mode-option-{mode_id}"))
-                                    .debug_selector(move || format!("mode-option-{mode_id}"))
-                                    .on_click(move |_, _, cx| {
-                                        row_entity.update(cx, |chat, cx| {
-                                            chat.select_mode(mode.clone(), cx)
-                                        });
-                                    })
-                                    .child(mode_name)
-                                })),
-                        ),
-                    )
-                    .into_any_element(),
-                None,
-            )
-        });
-
-        let context_usage = self.context_usage.clone();
-        let context_amount = context_usage
-            .as_ref()
-            .filter(|usage| usage.size > 0)
-            .map(|usage| (usage.used as f32 / usage.size as f32).clamp(0.0, 1.0))
-            .unwrap_or(0.0);
-        let context_ring_entity = entity.clone();
-        // Above the 80% warning threshold the arc switches from the gauge
-        // blue to the shared danger token, the same rule as the reference
-        // `contextRingColor`. The warning wrapper element exists only in
-        // that state, so drawn tests can see the colour decision without
-        // reading pixels.
-        let context_warning = context_amount > 0.8;
-        let warning_element = div()
-            .id("context-ring-warning")
-            .debug_selector(|| "context-ring-warning".into());
-        let context_ring = div()
-            .id("context-ring")
-            .debug_selector(|| "context-ring".into())
-            .relative()
-            .w(px(16.0))
-            .h(px(16.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border)
-            .hover(|style| style.bg(theme.overlay))
-            .on_click(move |_, window, cx| {
-                context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
-            })
-            .when(context_warning, |this| this.child(warning_element))
-            .child(
-                div()
-                    .id("context-ring-progress")
-                    .debug_selector(|| "context-ring-progress".into())
-                    .absolute()
-                    .inset_0()
-                    .child({
-                        // The paint closure is `'static`, so it cannot borrow
-                        // `theme`; copy out the two colours it draws with.
-                        let ring_danger = theme.danger;
-                        let ring_accent = theme.accent;
-                        canvas(
-                            move |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                if context_amount <= 0.0 {
-                                    return;
-                                }
-                                let origin_x: f32 = bounds.origin.x.into();
-                                let origin_y: f32 = bounds.origin.y.into();
-                                let width: f32 = bounds.size.width.into();
-                                let center =
-                                    point(px(origin_x + width / 2.0), px(origin_y + width / 2.0));
-                                let radius = width / 2.0 - 2.0;
-                                let start = point(center.x, px(origin_y + 1.0));
-                                let angle = -std::f32::consts::FRAC_PI_2
-                                    + context_amount * std::f32::consts::TAU;
-                                let end = point(
-                                    px(origin_x + width / 2.0 + radius * angle.cos()),
-                                    px(origin_y + width / 2.0 + radius * angle.sin()),
-                                );
-                                let mut path = PathBuilder::stroke(px(2.0));
-                                path.move_to(start);
-                                if context_amount >= 1.0 {
-                                    path.arc_to(
-                                        point(px(radius), px(radius)),
-                                        px(0.0),
-                                        false,
-                                        true,
-                                        point(center.x, px(origin_y + width - 1.0)),
-                                    );
-                                    path.arc_to(
-                                        point(px(radius), px(radius)),
-                                        px(0.0),
-                                        false,
-                                        true,
-                                        start,
-                                    );
-                                } else if context_amount > 0.0 {
-                                    path.arc_to(
-                                        point(px(radius), px(radius)),
-                                        px(0.0),
-                                        context_amount > 0.5,
-                                        true,
-                                        end,
-                                    );
-                                }
-                                if let Ok(path) = path.build() {
-                                    window.paint_path(
-                                        path,
-                                        if context_warning {
-                                            ring_danger
-                                        } else {
-                                            ring_accent
-                                        },
-                                    );
-                                }
-                            },
-                        )
-                        .absolute()
-                        .size_full()
-                    }),
-            );
-
-        let context_popover = if self.context_popover_open {
-            let usage = context_usage.clone();
-            Some(popover::anchored_menu_above_end(
-                "context-popover-menu",
-                div()
-                    .id("context-popover")
-                    .debug_selector(|| "context-popover".into())
-                    .key_context("ChatContextPopover")
-                    .track_focus(&self.context_popover_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .w(px(285.0))
-                    // `anchored_menu_*` mounts this straight on the popover
-                    // surface, which paints the fill and the hairline but no
-                    // inset -- unlike the pickers above, which go through
-                    // `popover::popover_card`. Without it the usage lines sat
-                    // flush against the border.
-                    .p(px(4.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.context_popover_open = false;
-                        cx.notify();
-                    }))
-                    .when_some(usage, |this, usage| {
-                        // `None` is a state of its own, not a zero: a
-                        // session whose `usage_update` named no window size
-                        // has nothing to report, and folding that into "0%"
-                        // would claim an empty context nobody measured.
-                        // Agents that never send a usage update (Pi's ACP
-                        // adapter among them) are exactly the ones a
-                        // fabricated zero would libel.
-                        let percent = if usage.size == 0 {
-                            None
-                        } else {
-                            Some(((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
-                        };
-                        let cost = usage
-                            .cost
-                            .map(|cost| format!("Cost: {:.2} {}", cost.amount, cost.currency));
-                        let this = match percent {
-                            Some(percent) => this
-                                .child(
-                                    div()
-                                        .id(format!(
-                                            "context-usage-{}-of-{}",
-                                            usage.used, usage.size
-                                        ))
-                                        .debug_selector(move || {
-                                            format!(
-                                                "context-usage-{}-of-{}",
-                                                usage.used, usage.size
-                                            )
-                                        })
-                                        .text_size(typography.footnote)
-                                        .text_color(theme.text)
-                                        .child(format!("{percent}% of context used")),
-                                )
-                                .child(
-                                    div()
-                                        .mt(px(4.0))
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.text_faint)
-                                        .child(format!("{} / {} tokens", usage.used, usage.size)),
-                                ),
-                            // A partial update — the breakdown merged in
-                            // before any used/size pair, or one that named
-                            // no window — must not read as "0 of 0 tokens":
-                            // the breakdown rows below are real, the
-                            // fraction simply is not known.
-                            None => this.child(
-                                div()
-                                    .id("context-usage-unreported")
-                                    .debug_selector(|| "context-usage-unreported".into())
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.text_faint)
-                                    .child("The agent has not reported its context window size."),
-                            ),
-                        };
-                        this.when_some(cost, |this, cost| {
-                            this.child(
-                                div()
-                                    .mt(px(4.0))
-                                    .text_size(typography.caption2)
-                                    .text_color(theme.text_faint)
-                                    .child(cost),
-                            )
-                        })
-                        // F-CHAT-18: input/output/cache breakdown, present
-                        // only for agents that report end-of-turn usage
-                        // (`unstable_end_turn_token_usage`) -- absent for
-                        // every other agent, so the rows are opt-in rather
-                        // than showing zeros.
-                        .when(
-                            usage.input_tokens.is_some()
-                                || usage.output_tokens.is_some()
-                                || usage.cached_read_tokens.is_some(),
-                            |this| {
-                                this.child(
-                                    div()
-                                        .id("context-usage-breakdown")
-                                        .debug_selector(|| "context-usage-breakdown".into())
-                                        .mt(px(6.0))
-                                        .pt(px(6.0))
-                                        .border_t_1()
-                                        .border_color(theme.border)
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .when_some(usage.input_tokens, |this, tokens| {
-                                            this.child(
-                                                div()
-                                                    .text_size(typography.caption2)
-                                                    .text_color(theme.text_faint)
-                                                    .child(format!("Input: {tokens} tokens")),
-                                            )
-                                        })
-                                        .when_some(usage.output_tokens, |this, tokens| {
-                                            this.child(
-                                                div()
-                                                    .text_size(typography.caption2)
-                                                    .text_color(theme.text_faint)
-                                                    .child(format!("Output: {tokens} tokens")),
-                                            )
-                                        })
-                                        .when_some(usage.cached_read_tokens, |this, tokens| {
-                                            this.child(
-                                                div()
-                                                    .text_size(typography.caption2)
-                                                    .text_color(theme.text_faint)
-                                                    .child(format!("Cache read: {tokens} tokens")),
-                                            )
-                                        }),
-                                )
-                            },
-                        )
-                    })
-                    .when(self.context_usage.is_none(), |this| {
-                        this.child(
-                            div()
-                                .id("context-usage-never-reported")
-                                .debug_selector(|| "context-usage-never-reported".into())
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child("The agent has not reported context usage yet."),
-                        )
-                    })
-                    .into_any_element(),
-                None,
-            ))
-        } else {
-            None
-        };
-
-        let send_entity = entity.clone();
-        let stop_entity = entity.clone();
-        let attach_entity = entity.clone();
-        let overflow_entity = entity.clone();
-
-        // Slash-command popup (F-CHAT-09): a filtered list over the input,
-        // opened by the leading `/token`, closed the moment the token is no
-        // longer a single unbroken prefix. Keyboard selection comes from the
-        // composer key path (up/down/tab, enter accepts via `Send`); click
-        // accepts directly.
-        //
-        // Anchored to the composer card's top edge (`bottom: 100%`), not a
-        // fixed distance up from its bottom: the card is taller than that
-        // distance, so the list used to sit *inside* it — over the input
-        // rows, in the card's own `surface_raised` fill, where it read as a
-        // transparent veil rather than a menu. The same token paints both
-        // on purpose (they are the same step above the page); what makes
-        // this a card of its own is that it floats over the page, with the
-        // gap below it.
-        let slash_popup = if self.slash_popup_visible() {
-            let candidates = self.slash_candidates();
-            let active = self.slash_filter.active();
-            let view = bezel::motion::Painter::of(cx);
-            let anchor = self
-                .composer_field
-                .read(cx)
-                .offset_bounds(0, window)
-                .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
-            anchor.map(|anchor| {
-                let rows: Vec<AnyElement> = candidates
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, command)| {
-                        let name = command.name.clone();
-                        let tooltip = slash_option_tooltip(&command.description);
-                        let hint = command.argument_hint.clone();
-                        let row_entity = entity.clone();
-                        let accept_name = name.clone();
-                        let name_for_id = name.clone();
-                        let name_for_label_id = name.clone();
-                        let name_for_hint_id = name.clone();
-                        // One line per row: the name. The description is
-                        // the row's tooltip, so ten rows stay ten lines
-                        // and the list does not fill the pane.
-                        popover::menu_row(
-                            &bezel_theme,
-                            Some(position) == active,
-                            bezel::motion::Fade::new(view, format!("slash-option-{name}")),
-                        )
-                        .id(SharedString::from(format!("slash-option-{name}")))
-                        .debug_selector(move || format!("slash-option-{name_for_id}"))
-                        .when_some(tooltip, |this, text| {
-                            this.tooltip(move |window, cx| Tooltip::text(text.clone(), window, cx))
-                        })
-                        .on_click(move |_, _, cx| {
-                            row_entity.update(cx, |chat, cx| {
-                                chat.accept_slash_command(&accept_name, cx);
-                            });
-                        })
-                        .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("slash-option-name-{name_for_label_id}")
-                                })
-                                .flex_none()
-                                .text_size(typography.footnote)
-                                .text_color(bezel_theme.text)
-                                .child(format!("/{name}")),
-                        )
-                        // The hint rides beside the name rather than under
-                        // it: the row is one line by design (the
-                        // description is the tooltip), and a second line
-                        // per row would fill the pane. A command that
-                        // takes no arguments draws nothing — the CLI says
-                        // so with an empty `argumentHint`, and three in
-                        // five of its commands do.
-                        .when_some(hint, |row, hint| {
-                            row.child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("slash-option-hint-{name_for_hint_id}")
-                                    })
-                                    .min_w_0()
-                                    .truncate()
-                                    // The name's own size, not a smaller
-                                    // one: a second size on a 12px row is
-                                    // noise, colour already says which of
-                                    // the two is secondary, and a taller
-                                    // line box here would grow the row.
-                                    .text_size(typography.footnote)
-                                    .text_color(bezel_theme.text_faint)
-                                    .child(hint),
-                            )
-                        })
-                        .into_any_element()
-                    })
-                    .collect();
-                div()
-                    .child(composer_view::menu_above_at(
-                        "slash-popup-menu",
-                        anchor,
-                        popover::popover_card(&bezel_theme)
-                            .debug_selector(|| "slash-popup".into())
-                            .w(px(280.0))
-                            .child(div().flex().flex_col().children(rows))
-                            .into_any_element(),
-                    ))
-                    .into_any_element()
-            })
-        } else {
-            None
-        };
-
-        // @ file-mention popup (F-CHAT-10): the bounded filesystem walk's
-        // results for the trailing `@token`, anchored above the token. Hidden
-        // when the token matches nothing.
-        let mention_popup = if mention_token(&self.draft, self.draft_caret).is_some()
-            && !self.mention_candidates.is_empty()
-        {
-            let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
-            let candidates = self.mention_candidates.clone();
-            let active = self.mention_filter.active();
-            let view = bezel::motion::Painter::of(cx);
-            let anchor = self
-                .composer_field
-                .read(cx)
-                .offset_bounds(at, window)
-                .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
-            anchor.map(|anchor| {
-                let rows: Vec<AnyElement> = candidates
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, path)| {
-                        let row_entity = entity.clone();
-                        let path_for_id = path.clone();
-                        let path_for_accept = path.clone();
-                        popover::menu_row(
-                            &bezel_theme,
-                            Some(position) == active,
-                            bezel::motion::Fade::new(view, format!("mention-option-{path}")),
-                        )
-                        .id(SharedString::from(format!("mention-option-{path_for_id}")))
-                        .debug_selector(move || format!("mention-option-{path_for_id}"))
-                        // Pin the row to the card's inner width instead of
-                        // trusting cross-axis stretch, so the path below has
-                        // a definite box to ellipsize inside.
-                        .w_full()
-                        .min_w_0()
-                        .on_click(move |_, _, cx| {
-                            row_entity.update(cx, |chat, cx| {
-                                chat.accept_mention(&path_for_accept, cx);
-                            });
-                        })
-                        .child(
-                            bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
-                                .size(px(12.0))
-                                .text_color(bezel_theme.text_faint),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(typography.footnote)
-                                .text_color(bezel_theme.text)
-                                .child(path),
-                        )
-                        .into_any_element()
-                    })
-                    .collect();
-                div()
-                    .child(composer_view::menu_above_at(
-                        "mention-popup-menu",
-                        anchor,
-                        popover::popover_card(&bezel_theme)
-                            .id("mention-popup-card")
-                            .debug_selector(|| "mention-popup-card".into())
-                            .w(px(360.0))
-                            .child(div().flex().flex_col().children(rows))
-                            .into_any_element(),
-                    ))
-                    .into_any_element()
-            })
-        } else {
-            None
-        };
-
-        // Overflow menu (F-CHAT-14): Follow Edited Files toggle and New
-        // Conversation, the two secondary composer actions the control row
-        // does not carry inline.
-        let overflow_menu = if self.overflow_open {
-            let follow_label = if self.following_edited_files {
-                "Stop Following"
-            } else {
-                "Follow Edited Files"
-            };
-            Some(popover::anchored_menu_above_end(
-                "composer-overflow-menu-menu",
-                div()
-                    .id("composer-overflow-menu")
-                    .debug_selector(|| "composer-overflow-menu".into())
-                    .key_context("ChatOverflowMenu")
-                    .track_focus(&self.overflow_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .w(px(200.0))
-                    // The card inset `popover_card` would have carried: this
-                    // menu mounts on the bare popover surface, so its rows'
-                    // hover wash ran into the border.
-                    .p(px(4.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.overflow_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .id("overflow-follow")
-                            .debug_selector(|| "overflow-follow".into())
-                            .w_full()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.following_edited_files = !this.following_edited_files;
-                                cx.notify();
-                            }))
-                            .child(follow_label),
-                    )
-                    .child(
-                        div()
-                            .id("overflow-new-conversation")
-                            .debug_selector(|| "overflow-new-conversation".into())
-                            .w_full()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.new_conversation(cx);
-                            }))
-                            .child("New Conversation"),
-                    )
-                    .child(
-                        div()
-                            .id("overflow-chat-history")
-                            .debug_selector(|| "overflow-chat-history".into())
-                            .w_full()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_chat_history(window, cx);
-                            }))
-                            .child("Chat History"),
-                    )
-                    .into_any_element(),
-                None,
-            ))
-        } else {
-            None
-        };
-
-        // F-CHAT-34/35: the Chat History popover — a session list with
-        // Open/Delete per row, or the "No past chats" empty state.
-        let chat_history_menu = if self.history_open {
-            let rows: Vec<AnyElement> = if self.history_sessions.is_empty() {
-                vec![
-                    div()
-                        .id("chat-history-empty")
-                        .debug_selector(|| "chat-history-empty".into())
-                        .px(px(8.0))
-                        .py(px(10.0))
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_muted)
-                        .child("No past chats")
-                        .into_any_element(),
-                ]
-            } else {
-                self.history_sessions
-                    .iter()
-                    .map(|session| {
-                        let tab_id = session.tab_id.clone();
-                        let confirming = self.history_delete_confirm.as_deref() == Some(&tab_id);
-                        let open_tab_id = tab_id.clone();
-                        let row_id = SharedString::from(format!("chat-history-row-{tab_id}"));
-                        let row_selector = format!("chat-history-row-{tab_id}");
-                        let title = if session.title.is_empty() {
-                            "Untitled chat".to_string()
-                        } else {
-                            session.title.clone()
-                        };
-                        div()
-                            .id(row_id)
-                            .debug_selector(move || row_selector.clone())
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(6.0))
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(theme.radii.control)
-                            .hover(|style| style.bg(theme.overlay))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("chat-history-open-{tab_id}")))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.text)
-                                    .child(title)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_chat_history_session(open_tab_id.clone(), cx);
-                                    })),
-                            )
-                            .child(if confirming {
-                                let confirm_tab_id = tab_id.clone();
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "chat-history-confirm-{tab_id}"
-                                    )))
-                                    .flex()
-                                    .flex_shrink_0()
-                                    .gap(px(6.0))
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "chat-history-confirm-delete-{tab_id}"
-                                            )))
-                                            .flex_shrink_0()
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.danger)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.confirm_delete_chat_session(
-                                                    confirm_tab_id.clone(),
-                                                    cx,
-                                                );
-                                            }))
-                                            .child("Confirm"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "chat-history-cancel-delete-{tab_id}"
-                                            )))
-                                            .flex_shrink_0()
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.text_muted)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cancel_delete_chat_session(cx);
-                                            }))
-                                            .child("Cancel"),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                let delete_tab_id = tab_id.clone();
-                                let delete_selector = format!("chat-history-delete-{tab_id}");
-                                div()
-                                    .id(SharedString::from(format!("chat-history-delete-{tab_id}")))
-                                    .debug_selector(move || delete_selector.clone())
-                                    .flex_shrink_0()
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.text_muted)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.request_delete_chat_session(delete_tab_id.clone(), cx);
-                                    }))
-                                    .child("Delete")
-                                    .into_any_element()
-                            })
-                            .into_any_element()
-                    })
-                    .collect()
-            };
-            Some(popover::anchored_menu_above_end(
-                "chat-history-menu-menu",
-                div()
-                    .id("chat-history-menu")
-                    .debug_selector(|| "chat-history-menu".into())
-                    .key_context("ChatHistoryMenu")
-                    .track_focus(&self.history_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .w(px(260.0))
-                    .max_h(px(320.0))
-                    // Same card inset as the overflow menu above; the rows
-                    // scroll inside it rather than against the border.
-                    .p(px(4.0))
-                    .overflow_y_scroll()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.history_open = false;
-                        cx.notify();
-                    }))
-                    .children(rows)
-                    .into_any_element(),
-                None,
-            ))
-        } else {
-            None
-        };
-
-        let attach_button = div()
-            .id("attach-image")
-            .debug_selector(|| "attach-image".into())
-            .w(px(24.0))
-            .h(px(24.0))
-            .flex_none()
-            .rounded(theme.radii.control)
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(|style| style.bg(bezel_theme.element_hover))
-            .on_click(move |_, window, cx| {
-                attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
-            })
-            .child(
-                bezel::ui::icons::icon(bezel::ui::icons::PAPERCLIP)
-                    .size(px(14.0))
-                    .text_color(bezel_theme.text_faint),
-            );
-
-        let overflow_button = div()
-            .id("composer-overflow")
-            .debug_selector(|| "composer-overflow".into())
-            .w(px(24.0))
-            .h(px(24.0))
-            .flex_none()
-            .rounded(theme.radii.control)
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(|style| style.bg(theme.overlay))
-            .on_click(move |_, window, cx| {
-                overflow_entity.update(cx, |chat, cx| chat.toggle_overflow(window, cx));
-            })
-            .child(
-                div()
-                    .text_size(typography.scaled(15.0))
-                    .text_color(theme.text_faint)
-                    .child("…"),
-            );
-
-        // Three looks, one `AnyElement`: the ready arm is `Stateful` (it
-        // carries an id), the other two are plain `Div`s.
-        let ready = can_send;
-        let send_disc = {
-            let disc = div()
-                .size(px(24.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center();
-            let disc: AnyElement = if self.streaming {
-                // D-CHAT-02: while a turn runs the same control becomes
-                // stop -- its click dispatches the same path Escape uses.
-                disc.bg(bezel_theme.solid)
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .id("stop-glyph")
-                            .debug_selector(|| "stop-glyph".into())
-                            .child(
-                                bezel::ui::icons::icon(bezel::ui::icons::STOP)
-                                    .size(px(12.0))
-                                    .text_color(bezel_theme.on_solid),
-                            ),
-                    )
-                    .into_any_element()
-            } else if ready {
-                disc.id("send-ready")
-                    .debug_selector(|| "send-ready".into())
-                    .bg(bezel_theme.solid)
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.9))
-                    .child(
-                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(bezel_theme.on_solid),
-                    )
-                    .into_any_element()
-            } else {
-                // Present but not pressable: the shape keeps its place, the
-                // glyph goes faint, no hover and no pointer (gallery
-                // `send_button`).
-                disc.bg(bezel::theme::ink(0.06))
-                    .child(
-                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(bezel_theme.text_faint),
-                    )
-                    .into_any_element()
-            };
-            div()
-                .id("send")
-                .debug_selector(|| "send".into())
-                .flex_none()
-                .cursor_pointer()
-                .when(self.streaming, |this| {
-                    this.on_click(move |_, _, cx| {
-                        stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
-                    })
-                })
-                .when(!self.streaming && ready, |this| {
-                    this.on_click(move |_, _, cx| {
-                        send_entity.update(cx, |chat, cx| chat.send(cx));
-                    })
-                })
-                .child(disc)
-        };
-
-        // With no agent configured the chip row holds only the send disc.
-        let has_agent = self.agent_launch.is_some();
-
-        let composer_context_menu = self
-            .composer_context_menu
-            .get()
-            .map(|_| self.render_composer_context_menu(&bezel_theme, cx));
-
-        // The composer is the gallery's `Composer` card: one frosted surface
-        // at `surface_radius` carrying the field on top and the chip row
-        // ending in the send disc under it.
-        let composer_card = div()
-            .id("composer")
-            .debug_selector(|| "composer".into())
-            .relative()
-            .w_full()
-            .max_w(px(TRANSCRIPT_WIDTH))
-            // `Card variant="input"`. #242's rule survives the restyle: the
-            // border is always present and only its color reacts to focus,
-            // so the card's box never moves while streaming.
-            .rounded(px(bezel::theme::Theme::surface_radius()))
-            .border_1()
-            .border_color(composer_border(focused, &bezel_theme))
-            .bg(bezel_theme.card_glass_bg())
-            .px(px(4.0))
-            .pt(px(4.0))
-            .pb(px(6.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.composer_field
-                        .read(cx)
-                        .focus_handle(cx)
-                        .focus(window, cx);
-                }),
-            )
-            .when(!self.attachments.is_empty(), |card| {
-                let remove_entity = entity.clone();
-                card.child(
-                    div()
-                        .id("attachment-strip")
-                        .debug_selector(|| "attachment-strip".into())
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.0))
-                        .px(px(4.0))
-                        .children(self.attachments.iter().enumerate().map(|(index, _)| {
-                            let remove_entity = remove_entity.clone();
-                            div()
-                                .id(("attachment-chip", index))
-                                .debug_selector(move || format!("attachment-chip-{index}"))
-                                .h(px(24.0))
-                                .px(px(8.0))
-                                .rounded(theme.radii.control)
-                                .bg(theme.surface_raised)
-                                .border_1()
-                                .border_color(theme.border)
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(typography.caption2)
-                                .child(div().text_color(theme.text_faint).child("▣"))
-                                .child(div().text_color(theme.text).child("Image"))
-                                .child(
-                                    div()
-                                        .id(("attachment-remove", index))
-                                        .debug_selector(move || {
-                                            format!("attachment-remove-{index}")
-                                        })
-                                        .px(px(2.0))
-                                        .rounded(px(2.0))
-                                        .text_color(theme.text_faint)
-                                        .hover(|style| style.bg(theme.overlay))
-                                        .on_click(move |_, window, cx| {
-                                            remove_entity.update(cx, |chat, cx| {
-                                                chat.remove_attachment(index, cx);
-                                                chat.composer_field
-                                                    .read(cx)
-                                                    .focus_handle(cx)
-                                                    .focus(window, cx);
-                                            });
-                                        })
-                                        .child("×"),
-                                )
-                        })),
-                )
-            })
-            .child(
-                div()
-                    .id("composer-input")
-                    .debug_selector(|| "composer-input".into())
-                    .relative()
-                    .w_full()
-                    .when(disabled, |input| input.opacity(0.6))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.open_composer_context_menu(event.position, window, cx);
-                        }),
-                    )
-                    .child(self.composer_field.clone())
-                    .when(focused, |this| {
-                        // Covers bezel's own focus ring with the composer's
-                        // dark edge: same box, same radius, painted later so
-                        // on top. Absolute, so it never moves layout; no
-                        // handlers, so clicks still reach the field (and the
-                        // card refocuses it anyway).
-                        this.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .rounded(px(bezel::theme::Theme::button_radius()))
-                                .border_1()
-                                .border_color(composer_field_edge(&bezel_theme)),
-                        )
-                    }),
-            )
-            .when_some(self.attach_error.clone(), |this, message| {
-                this.child(
-                    div()
-                        .id("attach-error")
-                        .debug_selector(|| "attach-error".into())
-                        .px(px(4.0))
-                        .text_size(typography.caption2)
-                        .text_color(theme.danger)
-                        .child(message),
-                )
-            })
-            .child(
-                // The chip row: Sirio's controls on the card's own surface,
-                // ending in the send/stop disc. One flat wrapping row —
-                // when a line is full the next chip wraps to the next line
-                // and the trio follows to the end of whichever line it
-                // lands on; nothing is ever clipped, and the disc never
-                // paints over a neighbour. With no agent configured the row
-                // holds only the send disc.
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .gap_y(px(4.0))
-                    .px(px(6.0))
-                    .when(has_agent, |row| {
-                        row.child(
-                            div()
-                                .relative()
-                                .flex_none()
-                                .child(status_pill)
-                                .children(mode_picker),
-                        )
-                        // The one shrinkable child: on a tight line the chip
-                        // ellipsizes its name down to its 56px floor, never to
-                        // nothing.
-                        .child(div().relative().child(model_control).children(model_picker))
-                        .child(
-                            div()
-                                .relative()
-                                .flex_none()
-                                .children(effort_control)
-                                .children(effort_picker),
-                        )
-                        .child(div().relative().flex_none().children(fast_control))
-                        .child(div().relative().flex_none().children(background_tasks))
-                        .child(
-                            div()
-                                .relative()
-                                .flex_none()
-                                .children(thinking_control)
-                                .children(thinking_picker),
-                        )
-                        .child(
-                            div()
-                                .relative()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(6.0))
-                                .h(px(24.0))
-                                .px(px(7.0))
-                                .rounded(theme.radii.control)
-                                .text_size(typography.ui_size)
-                                .child(context_ring)
-                                .child(
-                                    div()
-                                        .id("context-label")
-                                        .debug_selector(|| "context-label".into())
-                                        .text_color(theme.text_faint)
-                                        .child("Context"),
-                                )
-                                .children(context_popover),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(4.0))
-                            .ml_auto()
-                            .when(has_agent, |trio| {
-                                trio.child(attach_button).child(
-                                    div()
-                                        .relative()
-                                        .child(overflow_button)
-                                        .children(overflow_menu)
-                                        .children(chat_history_menu),
-                                )
-                            })
-                            .child(send_disc),
-                    ),
-            )
-            .children(slash_popup)
-            .children(mention_popup)
-            .children(composer_context_menu);
-
-        composer_card.into_any_element()
-    }
 }
 
 fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
@@ -8692,7 +5946,7 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 },
             );
         }
-        Entry::Plan { entries, .. } => {
+        Entry::Plan { entries, approval } => {
             row.insert("kind".into(), "plan".into());
             row.insert(
                 "text".into(),
@@ -8702,6 +5956,22 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
+            // The approval a plan waits on is a request like any other: its
+            // handle and its state, so a control client can answer it
+            // (`surface.chat.permission`) without guessing.
+            if let Some(approval) = approval {
+                row.insert("id".into(), approval.request_id.to_string());
+                row.insert(
+                    "status".into(),
+                    if approval.expired {
+                        "expired".into()
+                    } else if approval.resolved.is_some() {
+                        "selected".into()
+                    } else {
+                        "pending".into()
+                    },
+                );
+            }
         }
         Entry::TurnFooter(text) => {
             row.insert("kind".into(), "turn".into());
@@ -8778,6 +6048,7 @@ fn slash_option_tooltip(description: &str) -> Option<SharedString> {
 
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
         // Read before any loader renews this view's Bezel lease.
         if sirio_perf::enabled() && bezel::motion::Painter::of(cx).woken(cx) {
@@ -8849,7 +6120,11 @@ impl Render for Chat {
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
             })
-            .child(
+            .child(self.render_header(&theme, cx))
+            .child(div().w_full().flex_1().min_h_0().child(
+                ely_gpui_component::chat::ChatContainer::new(
+div().size_full().min_h_0().relative().flex().flex_col().items_center()
+                .child(
                 div()
                     .id("chat-transcript")
                     .debug_selector(|| "chat-transcript".into())
@@ -8904,12 +6179,12 @@ impl Render for Chat {
                                 {
                                     TurnRowRole::Hidden => {
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .into_any_element();
                                     }
                                     TurnRowRole::Fold { turn_id, label, at } => {
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(TURN_BOTTOM_PADDING))
@@ -8935,7 +6210,7 @@ impl Render for Chat {
                                             .map(|range| range.start)
                                             .unwrap_or(0);
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(TURN_BOTTOM_PADDING))
@@ -8955,24 +6230,13 @@ impl Render for Chat {
                                                     .children(
                                                         this.entries.get(entry_index).cloned().map(
                                                             |entry| {
-                                                                Chat::render_entry(
-                                                                    entry,
-                                                                    entry_index,
-                                                                    &transcript_theme,
-                                                                    entity.clone(),
-                                                                    transcript_focus.clone(),
-                                                                    source_start,
-                                                                    this.copied_target.clone(),
-                                                                    None,
-                                                                    this.thought_is_streaming(
-                                                                        entry_index,
-                                                                    ),
-                                                                    &this.thought_scroll,
-                                                                    &this.tool_output_scroll,
-                                                                    None,
-                                                                    &mut *window,
-                                                                    &mut *cx,
-                                                                )
+                                                                Chat::render_entry(entry, transcript::TranscriptRowContext {
+    index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
+    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    edit_summary: None, thought_streaming: this.thought_is_streaming(entry_index),
+    thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
+    day_heading: None, agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+}, &transcript_theme, &mut *window, &mut *cx)
                                                             },
                                                         ),
                                                     ),
@@ -8995,7 +6259,7 @@ impl Render for Chat {
                                 {
                                     if entry_index != end {
                                         return div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .into_any_element();
                                     }
                                     let members: Vec<(usize, usize, Entry)> = (start..=end)
@@ -9024,7 +6288,7 @@ impl Render for Chat {
                                         entity.clone(),
                                     );
                                     return div()
-                                        .id(("chat-entry", entry_index))
+                                        .id(this.row_id(entry_index, cx))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
@@ -9055,25 +6319,16 @@ impl Render for Chat {
                                             ),
                                             _ => None,
                                         };
-                                        let body = Chat::render_entry(
-                                            entry,
-                                            entry_index,
-                                            &transcript_theme,
-                                            entity.clone(),
-                                            transcript_focus.clone(),
-                                            source_start,
-                                            this.copied_target.clone(),
-                                            this.edit_summaries.get(&entry_index).cloned(),
-                                            this.thought_is_streaming(entry_index),
-                                            &this.thought_scroll,
-                                            &this.tool_output_scroll,
-                                            day_heading.as_deref(),
-                                            &mut *window,
-                                            &mut *cx,
-                                        )
+                                        let body = Chat::render_entry(entry, transcript::TranscriptRowContext {
+    index: entry_index, id: this.row_id(entry_index, cx), chat: entity.clone(),
+    focus: transcript_focus.clone(), source_start, copied_target: this.copied_target.clone(),
+    edit_summary: this.edit_summaries.get(&entry_index).cloned(), thought_streaming: this.thought_is_streaming(entry_index),
+    thought_scroll: &this.thought_scroll, tool_output_scroll: &this.tool_output_scroll,
+    day_heading: day_heading.as_deref(), agent_id: this.agent_id.as_deref(), agent_name: &this.agent_badge_name(),
+}, &transcript_theme, &mut *window, &mut *cx)
                                         .into_any_element();
                                         div()
-                                            .id(("chat-entry", entry_index))
+                                            .id(this.row_id(entry_index, cx))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(bottom_padding))
@@ -9101,25 +6356,37 @@ impl Render for Chat {
                         .debug_selector(|| "chat-generating-spinner".into())
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
+                        // The transcript's own side padding: the row starts on
+                        // the text column, not at the box's edge.
+                        .px(px(24.0))
                         .pt(px(6.0))
                         // The transient row is the thought header itself — orb,
                         // `Thinking`, same paddings — so a run in progress has one
-                        // shape whether or not a thought has arrived. `usize::MAX`
-                        // only feeds the row's marker ids; nothing reads them.
-                        .child(Self::render_thought_header(
-                            usize::MAX,
-                            true,
-                            false,
-                            None,
-                            &theme,
-                            &bezel_theme,
-                            window,
-                            cx,
-                            None,
-                        )),
+                        // shape whether or not a thought has arrived.
+                        .child(
+                            div()
+                                .debug_selector(|| "chat-generating-indicator".into())
+                                .child(ely_gpui_component::chat::ThinkingIndicator::new(
+                                    "chat-generating-indicator",
+                                )),
+                        ),
                 )
             })
-            .child(
+
+            // bezel's scrollbar over the list, on the root's right edge and
+            // as tall as the list's viewport (the transcript's own top
+            // padding below the root's top edge).
+            .child(list_scroll::list_scrollbar(
+                "chat-transcript",
+                px(28.0),
+                &self.list_state,
+                &self.transcript_bar,
+            ))
+            // The turn rail, over the root's left margin; last, so it sits
+            // above everything it is laid over.
+            .child(self.render_turn_rail(&bezel_theme, cx))
+
+                ).composer(
                 div()
                     .w_full()
                     .flex()
@@ -9146,6 +6413,7 @@ impl Render for Chat {
                     })
                     .child(self.render_composer(&theme, window, cx)),
             )
+            ))
             .child({
                 // F-CHAT-13: the "Drop files to attach" overlay, matching
                 // Swift's `ChatPaneView` — invisible by default, revealed by
@@ -9180,18 +6448,6 @@ impl Render for Chat {
                     overlay
                 }
             })
-            // bezel's scrollbar over the list, on the root's right edge and
-            // as tall as the list's viewport (the transcript's own top
-            // padding below the root's top edge).
-            .child(list_scroll::list_scrollbar(
-                "chat-transcript",
-                px(28.0),
-                &self.list_state,
-                &self.transcript_bar,
-            ))
-            // The turn rail, over the root's left margin; last, so it sits
-            // above everything it is laid over.
-            .child(self.render_turn_rail(&bezel_theme, cx))
             .children(transcript_context_menu)
     }
 }
@@ -9577,6 +6833,27 @@ impl ToolCallPlainText {
     }
 }
 
+/// The same reported data feeds painting and Unicode selection offsets.
+fn project_tool_content(
+    content: &[ToolCallContentInfo],
+    raw_input: Option<&str>,
+    raw_output: Option<&str>,
+) -> Vec<ToolCallContentInfo> {
+    let mut projected = Vec::with_capacity(content.len() + 2);
+    if let Some(arguments) = raw_input.filter(|text| !text.is_empty()) {
+        projected.push(ToolCallContentInfo::Text(arguments.to_owned()));
+    }
+    projected.extend_from_slice(content);
+    if let Some(result) = raw_output.filter(|text| !text.is_empty())
+        && !content
+            .iter()
+            .any(|item| matches!(item, ToolCallContentInfo::Text(text) if text == result))
+    {
+        projected.push(ToolCallContentInfo::Text(result.to_owned()));
+    }
+    projected
+}
+
 fn tool_call_plain_text(
     title: &str,
     status: &str,
@@ -9673,36 +6950,6 @@ fn picker_chevron(theme: &Theme) -> impl IntoElement {
         .child(IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.text_faint))
 }
 
-/// The edge drawn over the composer text field while it is focused.
-///
-/// Bezel's `TextField` paints its own 1px border — `theme.ring` on focus —
-/// with no opt-out, so the composer covers it with a border of its own in
-/// exactly the same box (see `composer-input`): opaque `surface_card`, the
-/// tone the field sits closest to, so the bright ring never shows through.
-/// Idle is untouched — the field's own subtle `border` still shows — only
-/// the focus flash is replaced by a dark hairline.
-fn composer_field_edge(theme: &bezel::theme::Theme) -> gpui::Hsla {
-    theme.surface_card
-}
-
-/// The composer card's border colour for the given focus state.
-///
-/// Focus does not brighten the card: the border stays `border` either way,
-/// the hairline closest to the background, so the composer never lights up.
-/// It used to be the body `text` colour, which on the dark theme painted a
-/// solid white frame around the card, and later `border_strong`, still
-/// visibly brighter than the surface.
-fn composer_border(_focused: bool, theme: &bezel::theme::Theme) -> gpui::Hsla {
-    theme.border
-}
-
-/// The question card's accent: the neutral rule the Plan and Rewind cards
-/// wear. It used to be the warning colour, which made an ordinary question
-/// read as an alarm.
-fn permission_card_accent(theme: &Theme) -> Rgba {
-    theme.border_strong
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9753,7 +7000,9 @@ mod tests {
                 trace.matches("\tevent\tnotify.Chat.acp_thought\t").count(),
                 2
             );
-            assert!(trace.contains("\tevent\tmotion.Chat.woken\t"));
+            // Ely indicators use GPUI animations, not Bezel's Painter lease.
+            // Keep observing real Bezel wakes when present; the redraw/content
+            // contract below does not require that retired indicator engine.
             assert_eq!(
                 trace
                     .matches("\tevent\trequest_frame.Chat.thought_follow\t")
@@ -9926,17 +7175,17 @@ mod tests {
         );
     }
 
-    const CHAT_FIXTURE: &str = concat!(
+    pub(super) const CHAT_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/chat_fixture.py"
     );
 
     /// Scratch directory shared between a test and the fixture subprocess;
     /// removed when the test finishes.
-    struct TempDir(PathBuf);
+    pub(super) struct TempDir(pub(super) PathBuf);
 
     impl TempDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let unique = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
             let path = std::env::temp_dir()
@@ -9956,7 +7205,7 @@ mod tests {
     /// `run_until_parked` — until `condition` holds over the chat's own
     /// state, or the budget is exhausted. A drawn test that skips this loop
     /// can pass on timing luck; every test below goes through it.
-    fn pump_chat_until(
+    pub(super) fn pump_chat_until(
         cx: &VisualTestContext,
         chat: &gpui::Entity<Chat>,
         mut condition: impl FnMut(&Chat) -> bool,
@@ -9994,14 +7243,14 @@ mod tests {
 
     /// A freshly drawn frame, so `debug_bounds` reads state that actually
     /// rendered rather than the last stale frame.
-    fn refresh_frame(cx: &mut VisualTestContext) {
+    pub(super) fn refresh_frame(cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
         });
         cx.run_until_parked();
     }
 
-    fn chat_view<'a>(
+    pub(super) fn chat_view<'a>(
         cx: &'a mut TestAppContext,
         fixture_args: &[&str],
     ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {
@@ -10034,7 +7283,9 @@ mod tests {
     /// A drawn chat that never connects: no subprocess, so nothing expires
     /// the questions a test pushes and no connection error lands in the
     /// transcript.
-    fn offline_chat_view(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+    pub(super) fn offline_chat_view(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         cx.update(init);
@@ -11113,7 +8364,7 @@ two"
 
     #[gpui::test]
     async fn the_turn_rail_marks_the_latest_turn_when_content_fits(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &[]);
+        let (chat, cx) = offline_chat_view(cx);
         chat.update(cx, |chat, cx| {
             for text in ["first", "second", "latest"] {
                 chat.push_entry(Entry::User {
@@ -11184,7 +8435,8 @@ two"
             "nothing to scroll: no thumb"
         );
 
-        cx.simulate_resize(size(px(600.0), px(300.0)));
+        // The bottom region (composer, hint) leaves a 13px viewport at 300px.
+        cx.simulate_resize(size(px(600.0), px(420.0)));
         push_overflowing_turns(&chat, cx);
         // The bar reads the list's geometry as the last frame left it.
         refresh_frame(cx);
@@ -12131,7 +9383,8 @@ two"
         let allow = cx
             .debug_bounds("permission-option-allow")
             .expect("allow button");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(allow.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12152,7 +9405,8 @@ two"
         let deny = cx
             .debug_bounds("permission-option-deny")
             .expect("deny button");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(deny.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12312,9 +9566,7 @@ two"
     /// never re-driven when a later pass touched an unrelated part of the
     /// row.
     #[gpui::test]
-    async fn a_listed_option_leaves_the_surface_and_clears_the_dock(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_listed_option_leaves_the_surface_and_clears_the_dock(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["question-options"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         refresh_frame(cx);
@@ -12363,7 +9615,8 @@ two"
         let blue = cx
             .debug_bounds("permission-option-blue")
             .expect("the Blue pill is drawn");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(blue.center(), Modifiers::none());
         cx.run_until_parked();
@@ -12738,7 +9991,8 @@ two"
         let approve = cx
             .debug_bounds("permission-option-approve")
             .expect("approve button");
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_click(approve.center(), Modifiers::none());
         cx.run_until_parked();
@@ -15045,9 +12299,7 @@ two"
     /// Review focus: a forty-line command must not push the composer off
     /// the pane — the body stops at its cap and scrolls.
     #[gpui::test]
-    async fn a_long_command_scrolls_inside_the_dock_instead_of_growing_it(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_long_command_scrolls_inside_the_dock_instead_of_growing_it(cx: &mut TestAppContext) {
         let (chat, cx) = offline_chat_view(cx);
         let command = (0..40)
             .map(|line| format!("echo line {line}"))
@@ -15106,7 +12358,8 @@ two"
             assert_eq!(chat.question_dock.selected, 0);
         });
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -15134,7 +12387,8 @@ two"
             cx.notify();
         });
         refresh_frame(cx);
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.update(|window, cx| {
             chat.update(cx, |chat, cx| {
                 chat.activate_dock_row(0, window, cx);
@@ -15149,17 +12403,23 @@ two"
                 Some(Entry::Permission { resolved: Some(choice), .. }) if choice == "Allow"
             ));
             assert!(matches!(
-                chat.entries.iter().find(|entry| {
-                    matches!(entry, Entry::Permission { request_id: 2, .. })
-                }),
+                chat.entries
+                    .iter()
+                    .find(|entry| { matches!(entry, Entry::Permission { request_id: 2, .. }) }),
                 Some(Entry::Permission { resolved: None, .. })
             ));
-            assert_eq!(question_dock::question_view(&chat.entries).unwrap().request_id, 2);
+            assert_eq!(
+                question_dock::question_view(&chat.entries)
+                    .unwrap()
+                    .request_id,
+                2
+            );
         });
 
         refresh_frame(cx);
         refresh_frame(cx);
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(0, window, cx)));
         assert!(chat.read_with(&cx.cx, |chat, _| matches!(
@@ -15193,7 +12453,8 @@ two"
             Some(Entry::Permission { resolved: None, .. })
         )));
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -15209,7 +12470,11 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         focus_composer(&chat, cx);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
@@ -15224,7 +12489,11 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         cx.update(|window, cx| window.blur(cx));
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
@@ -15233,7 +12502,10 @@ two"
             cx.debug_bounds("question-dock").is_some(),
             "the dock is drawn all the same"
         );
-        assert!(!dock_is_focused(&chat, cx), "but it does not take the keyboard");
+        assert!(
+            !dock_is_focused(&chat, cx),
+            "but it does not take the keyboard"
+        );
     }
 
     /// Down then Enter answers with the second option, end to end, and the
@@ -15253,9 +12525,13 @@ two"
         });
         refresh_frame(cx);
         refresh_frame(cx);
-        assert!(dock_is_focused(&chat, cx), "the question takes the keyboard");
+        assert!(
+            dock_is_focused(&chat, cx),
+            "the question takes the keyboard"
+        );
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
@@ -15289,7 +12565,8 @@ two"
         refresh_frame(cx);
         refresh_frame(cx);
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("2");
         cx.run_until_parked();
@@ -15322,7 +12599,14 @@ two"
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
-                matches!(entry, Entry::Permission { resolved: None, expired: true, .. })
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: true,
+                        ..
+                    }
+                )
             }) && chat.has_completed_turn
         });
     }
@@ -15344,7 +12628,8 @@ two"
         cx.simulate_input("Bl");
         cx.run_until_parked();
 
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         let blue = cx
             .debug_bounds("permission-option-blue")
@@ -15434,7 +12719,10 @@ two"
         cx.run_until_parked();
         refresh_frame(cx);
         assert!(dock_is_focused(&chat, cx));
-        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 1);
+        assert_eq!(
+            chat.read_with(&*cx, |chat, _| chat.question_dock.selected),
+            1
+        );
     }
 
     /// Review focus: two questions open at once — the second follows the
@@ -15444,13 +12732,22 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         focus_composer(&chat, cx);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
-            chat.push_entry(question_dock::open_permission(2, "/repo/b.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
+            chat.push_entry(question_dock::open_permission(
+                2,
+                "/repo/b.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
         refresh_frame(cx);
-        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
         cx.run_until_parked();
         cx.simulate_keystrokes("down enter");
         cx.run_until_parked();
@@ -15461,7 +12758,10 @@ two"
                 question_dock::question_view(&chat.entries).map(|view| view.request_id),
                 Some(2)
             );
-            assert_eq!(chat.question_dock.selected, 0, "a new question starts on row 1");
+            assert_eq!(
+                chat.question_dock.selected, 0,
+                "a new question starts on row 1"
+            );
         });
         assert!(dock_is_focused(&chat, cx), "the keyboard stays on the dock");
     }
@@ -15485,7 +12785,10 @@ two"
             .expect("the third answer is drawn");
         cx.simulate_mouse_move(reject.center(), None, Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(chat.read_with(&*cx, |chat, _| chat.question_dock.selected), 2);
+        assert_eq!(
+            chat.read_with(&*cx, |chat, _| chat.question_dock.selected),
+            2
+        );
     }
 
     /// Review focus: a question closed from outside the dock (the turn
@@ -15495,7 +12798,11 @@ two"
         let (chat, cx) = offline_chat_view(cx);
         focus_composer(&chat, cx);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow", "Reject"]));
+            chat.push_entry(question_dock::open_permission(
+                1,
+                "/repo/a.rs",
+                &["Allow", "Reject"],
+            ));
             cx.notify();
         });
         refresh_frame(cx);
@@ -17664,9 +14971,7 @@ two"
 
     #[test]
     fn a_diff_in_the_transcript_takes_the_column_rather_than_the_standalone_760() {
-        // The gallery's standalone Diff pattern references 760; inside a 700
-        // transcript the diff uses the width it has (spec §3).
-        assert!(DIFF_STANDALONE_REFERENCE > TRANSCRIPT_WIDTH);
+        // Ely now uses a 760px reading column; narrower panes still constrain the diff.
         assert_eq!(diff_column_width(TRANSCRIPT_WIDTH), TRANSCRIPT_WIDTH);
         assert_eq!(diff_column_width(400.0), 400.0);
     }

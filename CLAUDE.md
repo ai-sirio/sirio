@@ -8,8 +8,9 @@ Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github
 
 ### External references
 
-- [bezel](https://github.com/crabtalk/bezel) — **the UI library, always**. Every UI primitive or component in `sirio_ui` is built from bezel (`bezel::ui`, `bezel::motion`, `bezel::theme`, `bezel::agent`) before anything is hand-rolled. Its `gallery` crate (`cargo run -p gallery` in a bezel checkout) is the reference example for how each component looks and is used — the same reference already used for the loading and theme-adoption work.
-- [gpui-component](https://github.com/longbridge/gpui-component) — secondary structural reference for how a gpui component is normally shaped, consulted only when bezel has no equivalent; bezel always wins.
+- [bezel](https://github.com/crabtalk/bezel) — the UI library for the application shell and non-chat surfaces. Build their primitives from bezel (`bezel::ui`, `bezel::motion`, `bezel::theme`, `bezel::agent`); its `gallery` crate is the visual and usage reference.
+- [Ely GPUI Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components) — the AI chat's presentation library, adapted under `rust/vendor/ely-gpui-component` to the same Bezel GPUI packages. When changing chat presentation, read its `LOCAL-CHANGES.md` and `docs/superpowers/specs/2026-09-30-ely-agent-chat-design.md`; retain Sirio's theme and existing Chat controllers.
+- [gpui-component](https://github.com/longbridge/gpui-component) — secondary structural reference when the surface's primary library has no equivalent.
 - [waku](https://github.com/egoist/waku) — a comparable app (multiple coding agents, one pane each). Reference for prior art on the same problem, not a dependency.
 
 ## Commands
