@@ -43,12 +43,12 @@ def main(packages):
             if span.get("expansion"):
                 print(f"MACRO, rename by hand: {span['file_name']}:{span['line_start']} {old} -> {new}")
                 continue
-            edits[span["file_name"]].add((span["byte_start"], span["byte_end"], old, new))
+            edits[(RUST / span["file_name"]).resolve()].add((span["byte_start"], span["byte_end"], old, new))
         if not edits:
             print("RENAMES DONE")
             return
         for name, spans in edits.items():
-            path = RUST / name
+            path = name
             data = path.read_bytes()
             for start, end, old, new in sorted(spans, reverse=True):
                 text = data[start:end].decode()
@@ -56,7 +56,7 @@ def main(packages):
                     sys.exit(f"{name}:{start}: span {text!r} does not end in {old}")
                 data = data[:start] + (text[: -len(old)] + new).encode() + data[end:]
             path.write_bytes(data)
-            print(f"renamed {len(spans)} in {name}")
+            print(f"renamed {len(spans)} in {path.relative_to(RUST)}")
     sys.exit("still renaming after 10 rounds")
 
 
