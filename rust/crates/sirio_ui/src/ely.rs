@@ -37,7 +37,7 @@ impl AssetSource for AppAssets {
 struct LastTheme(Option<(Theme, bool)>);
 impl Global for LastTheme {}
 
-pub(crate) fn init(cx: &mut App) {
+pub fn init(cx: &mut App) {
     ely_gpui_component::init_chat(cx);
     if !cx.has_global::<LastTheme>() {
         cx.set_global(LastTheme::default());
@@ -59,43 +59,18 @@ pub(crate) fn sync_theme_if_changed(cx: &mut App) {
         return;
     }
     cx.global_mut::<LastTheme>().0 = Some((theme, reduced));
-    ElyTheme::set_mode_now(
-        match theme.appearance {
-            Appearance::Light => Mode::Light,
-            Appearance::Dark => Mode::Dark,
-        },
-        cx,
-    );
+    // Installers already do this; a global swapped without one (the portal
+    // follower's path) reaches bezel here.
+    theme.install_into_bezel(cx);
+    let mode = match theme.appearance {
+        Appearance::Light => Mode::Light,
+        Appearance::Dark => Mode::Dark,
+    };
+    // `set_palette` starts Ely's cross-fade; `set_mode_now` ends it before its
+    // first tick and lands on the palette at once, as Sirio's themes switch.
+    ElyTheme::set_palette(mode, Some(theme.colors.ely), cx);
+    ElyTheme::set_mode_now(mode, cx);
     ElyTheme::update(cx, |ely| {
-        let c = theme.colors;
-        let p = &mut ely.colors;
-        p.bg = c.surface.into();
-        p.surface = c.surface_raised.into();
-        p.sunken = c.input_bg.into();
-        p.overlay = c.surface_raised.into();
-        p.hover = c.element_hover.into();
-        p.active = c.element_active.into();
-        p.border = c.border.into();
-        p.border_strong = c.border_opaque.into();
-        p.fg = c.text.into();
-        p.fg_muted = c.text_muted.into();
-        p.fg_subtle = c.text_faint.into();
-        p.fg_disabled = c.text_faint.into();
-        p.accent = c.text.into();
-        p.accent_hover = c.text_muted.into();
-        p.on_accent = c.surface.into();
-        p.focus = c.text.into();
-        p.link = c.file_link.into();
-        p.selection = c.selection.into();
-        p.success = c.success.into();
-        p.warning = c.warning.into();
-        p.danger = c.danger.into();
-        p.success_subtle = p.success.opacity(0.12);
-        p.warning_subtle = p.warning.opacity(0.12);
-        p.danger_subtle = p.danger.opacity(0.12);
-        p.tooltip_bg = c.surface_raised.into();
-        p.tooltip_fg = c.text.into();
-        p.backdrop = c.overlay.into();
         ely.font_family = theme.typography.ui_family.into();
         ely.mono_family = theme.typography.code_family.into();
         ely.reduced_motion = reduced;
@@ -115,4 +90,61 @@ pub(crate) fn sync_theme_if_changed(cx: &mut App) {
             radii: [r.chip, r.control, r.code_block, r.composer],
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, WindowAppearance};
+    use sirio_theme::{BaseColor, ThemeMode};
+
+    fn boot(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            init(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn bezel_holds(cx: &App, theme: &Theme) -> bool {
+        format!("{:?}", bezel::theme::Theme::of(cx)) == format!("{:?}", theme.to_bezel_theme())
+    }
+
+    /// What the Linux portal follower does: build the next theme and set it,
+    /// with no installer in between.
+    #[gpui::test]
+    async fn a_theme_swapped_without_an_installer_reaches_both_consumers(cx: &mut TestAppContext) {
+        boot(cx);
+        let next = Theme::for_mode(ThemeMode::Light, WindowAppearance::Light, BaseColor::Slate);
+        cx.update(|cx| cx.set_global(next));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(bezel_holds(cx, &next), "bezel kept the previous theme");
+            assert_eq!(
+                bezel::theme::current_appearance(),
+                bezel::theme::Appearance::Light
+            );
+            let ely = cx.global::<ElyTheme>();
+            assert!(!ely.is_dark());
+            assert_eq!(ely.colors, next.colors.ely, "Ely is not on Sirio's palette");
+        });
+    }
+
+    #[gpui::test]
+    async fn translucency_reaches_ely_faded_and_bezel_opaque(cx: &mut TestAppContext) {
+        boot(cx);
+        let opaque = cx.update(|cx| *Theme::get(cx));
+        let faded = opaque.with_translucency(true);
+        cx.update(|cx| cx.set_global(faded));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let ely = cx.global::<ElyTheme>();
+            assert_eq!(ely.colors, faded.colors.ely);
+            assert_eq!(
+                ely.colors.overlay.a,
+                opaque.colors.ely.overlay.a * faded.translucent_surface_opacity
+            );
+            assert!(bezel_holds(cx, &opaque), "bezel must never fade");
+        });
+    }
 }

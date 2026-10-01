@@ -21932,6 +21932,7 @@ fn main() {
         // comment for why the order is load-bearing.
         register_fonts(cx);
         Theme::init(cx);
+        sirio_ui::ely::init(cx);
         init_motion(cx);
         bezel::ui::input::init(cx);
         bezel::ui::combobox::init(cx);
