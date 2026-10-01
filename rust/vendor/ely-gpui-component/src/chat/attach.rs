@@ -66,7 +66,7 @@ impl AttachmentChip {
 impl RenderOnce for AttachmentChip {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let side = theme.avatar_size(AvatarSize::Md);
         let item = self.attachment;
         let face = match &item.preview {

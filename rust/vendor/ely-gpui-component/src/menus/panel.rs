@@ -143,7 +143,7 @@ impl MenuPanel {
 impl RenderOnce for MenuPanel {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let has_rows = !self.menu.entries.is_empty();
         let rows = self
             .menu

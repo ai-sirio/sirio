@@ -157,7 +157,7 @@ impl PermissionPrompt {
 impl RenderOnce for PermissionPrompt {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let builtin = self.on_answer.map(|on_answer| {
             let choice = |key: &'static str, label: &'static str, variant, answer: Permission| {
                 let on_answer = on_answer.clone();

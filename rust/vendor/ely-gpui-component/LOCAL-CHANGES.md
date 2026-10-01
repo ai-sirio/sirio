@@ -133,3 +133,11 @@ what each check does and does not prove.
 - **Not established:** a real IME, and rewind natively.
 
 Every deviation from upstream is listed above, with the file it changes.
+
+- `src/theme/palette.rs` and `src/theme/syntax.rs` moved, with `Mode`, into
+  the sibling crate `rust/vendor/ely-palette`, which this crate re-exports at
+  the original paths: `theme::{Palette, Syntax, Mode, …}` are the same types.
+  Sirio's theme crate holds Ely's palette as its colour vocabulary without
+  compiling Ely's components. `Palette` and `Syntax` derive `Copy` (all their
+  fields are `Hsla`), so Sirio's `Theme` stays `Copy`. The files are otherwise
+  upstream's.

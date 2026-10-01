@@ -31,7 +31,7 @@ fn a_mode_set_at_once_skips_the_fade(cx: &mut TestAppContext) {
         Theme::set_mode_now(Mode::Light, cx);
     });
     assert_eq!(
-        cx.read(|cx| cx.theme().colors.clone()),
+        cx.read(|cx| cx.theme().colors),
         Palette::light(false)
     );
     std::thread::sleep(Duration::from_millis(2));
@@ -39,7 +39,7 @@ fn a_mode_set_at_once_skips_the_fade(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!cx.read(|cx| cx.theme().is_dark()));
     assert_eq!(
-        cx.read(|cx| cx.theme().colors.clone()),
+        cx.read(|cx| cx.theme().colors),
         Palette::light(false)
     );
 }

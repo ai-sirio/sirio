@@ -76,7 +76,7 @@ impl RenderOnce for CodeBlock {
         let open = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
         let opened = *open.read(cx);
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let code = self.code.trim_end_matches('\n').to_string();
         let fold = fold_at(&code, FOLD_AFTER).filter(|_| !opened);
         let hidden = fold.map(|at| code[at..].lines().count() - 1);

@@ -174,7 +174,7 @@ impl RenderOnce for ConversationItem {
         let focus = tab_stop((self.id.clone(), "focus").into(), pressable, window, cx);
         let shown = self.active || focus.contains_focused(window, cx);
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .id(self.id.clone())
             .group(group.clone())
@@ -296,7 +296,7 @@ impl ConversationList {
 impl RenderOnce for ConversationList {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let groups = grouped(
             &self.conversations,
             &self.query,

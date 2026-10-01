@@ -119,7 +119,7 @@ impl RenderOnce for ToolCallCard {
         let failed = self.status == StepState::Failed;
         let mark = step_mark((self.id.clone(), "mark").into(), self.status, window, cx);
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let label = |text: &'static str| {
             div()
                 .text_size(theme.text_size(TextSize::Xs))
@@ -264,7 +264,7 @@ impl RenderOnce for ToolCallGroup {
             .status
             .map(|status| step_mark((self.id.clone(), "mark").into(), status, window, cx));
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .flex()
             .flex_col()

@@ -2549,6 +2549,7 @@ dependencies = [
  "anyhow",
  "bezel-gpui",
  "bezel-gpui-platform",
+ "ely-palette",
  "futures",
  "image",
  "iso_currency",
@@ -2561,6 +2562,13 @@ dependencies = [
  "smallvec",
  "unicode-segmentation",
  "web-time",
+]
+
+[[package]]
+name = "ely-palette"
+version = "0.1.0"
+dependencies = [
+ "bezel-gpui",
 ]
 
 [[package]]

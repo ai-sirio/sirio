@@ -6,6 +6,12 @@ MIT OR Apache-2.0 and built as a workspace path dependency. Its
 compatibility changes. It uses the same published Bezel GPUI packages and
 the patches described below.
 
+`ely-palette/` extracts Ely's upstream `src/theme/palette.rs` and
+`src/theme/syntax.rs` at `e17e31a6890c09ebcfa8b61133d7bc7c625edf69` into a
+small crate, so a host's theme crate can use Ely's palette without compiling
+Ely's components; `ely-gpui-component` re-exports those types at their original
+paths.
+
 This directory holds `[patch.crates-io]` overrides for three packages: `bezel-gpui-linux` and
 `bezel-gpui-windows` (both release `0.3.8`) and `libghostty-vt-sys` (release `0.2.1`), all wired
 in via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Bezel GPUI family

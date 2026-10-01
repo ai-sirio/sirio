@@ -62,7 +62,7 @@ impl RenderOnce for MessageAvatar {
             return content;
         }
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         match self.role {
             Role::User | Role::System => {
                 let avatar = Avatar::new(self.id, self.name).size(AvatarSize::Sm);
@@ -126,7 +126,7 @@ impl MessageHeader {
 impl RenderOnce for MessageHeader {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .flex()
             .items_baseline()
@@ -239,7 +239,7 @@ impl ParentElement for MessageBubble {
 impl RenderOnce for MessageBubble {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let body = div()
             .flex()
             .flex_col()

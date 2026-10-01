@@ -57,7 +57,7 @@ impl SourceCard {
 /// A source's lines: the number it is cited by, its site, its title and a line from it.
 fn lines(number: Option<usize>, source: &Source, cx: &App) -> Div {
     let theme = cx.theme();
-    let colors = theme.colors.clone();
+    let colors = theme.colors;
     div()
         .flex()
         .flex_col()
@@ -101,7 +101,7 @@ fn lines(number: Option<usize>, source: &Source, cx: &App) -> Div {
 impl RenderOnce for SourceCard {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let open = self.on_open;
         div()
             .id(self.id.clone())
@@ -153,7 +153,7 @@ impl CitationBadge {
 impl RenderOnce for CitationBadge {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let (source, number) = (self.source, self.number);
         let prose = theme.prose_width();
         let open = self.on_open.clone();
@@ -212,7 +212,7 @@ impl RenderOnce for SourceList {
         let open = window.use_keyed_state((self.id.clone(), "open"), cx, |_, _| false);
         let opened = *open.read(cx);
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let count = self.sources.len();
         let sites: Vec<SharedString> = self
             .sources
