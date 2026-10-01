@@ -539,8 +539,8 @@ impl Theme {
         let purple = pick(DARK_PURPLE, LIGHT_PURPLE);
         let comment = pick(DARK_COMMENT, LIGHT_COMMENT);
         // The theme's own, so a base-colour change still moves the text.
-        let text = gpui::Hsla::from(self.colors.text);
-        let dimmed = gpui::Hsla::from(self.colors.text_faint);
+        let text = self.colors.ely.fg;
+        let dimmed = self.colors.ely.fg_subtle;
 
         bezel::theme::SyntaxPalette {
             comment,
@@ -569,7 +569,7 @@ impl Theme {
             tag: red,
             attribute: orange,
             label: orange,
-            invalid: gpui::Hsla::from(self.colors.danger),
+            invalid: self.colors.ely.danger,
         }
     }
 }
@@ -583,8 +583,8 @@ impl ThemeColors {
     /// [`ThemeColors::floating_surface`] describes, so it must not fade with
     /// the panels — a menu the desktop shows through is unreadable at the one
     /// moment it is being asked to be read.
-    pub fn menu_surface(&self) -> Rgba {
-        self.floating_surface
+    pub fn menu_surface(&self) -> Hsla {
+        self.sirio.floating_surface
     }
 
     /// Picks the dark or light variant. Call sites pass dark first, then
@@ -1634,17 +1634,17 @@ impl Theme {
     /// provenance record (see `dark_palette_matches_recorded_provenance`),
     /// so every added colour is a colour someone has to measure and justify.
     /// The graph only needs its lanes to be mutually distinguishable.
-    pub fn graph_lane(&self, index: usize) -> Rgba {
-        let lanes = [
-            self.text,
-            self.git_untracked,
-            self.success,
-            self.warning,
-            self.danger,
+    pub fn graph_lane(&self, index: usize) -> Hsla {
+        let lanes: [Hsla; 6] = [
+            self.ely.fg,
+            self.ely.fg_subtle,
+            self.ely.success,
+            self.ely.warning,
+            self.ely.danger,
             // Not `favorite`: it is `warning`, which is already lane four.
             // The coral is the one hue in the theme no other lane can collide
             // with, because no role paints it.
-            self.brand_coral,
+            self.sirio.brand_coral,
         ];
         lanes[index % lanes.len()]
     }
@@ -2284,44 +2284,48 @@ mod tests {
     fn assert_palette_comes_from_bezel(appearance: Appearance, bezel: bezel::theme::Theme) {
         let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
         for (name, ours, theirs) in [
-            ("bg", sirio.bg, bezel.bg),
-            ("surface", sirio.surface, bezel.surface),
-            ("surface_raised", sirio.surface_raised, bezel.surface_raised),
-            ("input_bg", sirio.input_bg, bezel.input_bg),
+            ("bg", sirio.sirio.canvas, bezel.bg),
+            ("surface", sirio.ely.bg, bezel.surface),
+            ("surface_raised", sirio.ely.surface, bezel.surface_raised),
+            ("input_bg", sirio.ely.sunken, bezel.input_bg),
             // The two opaque twins carry bezel's values too; what makes them
             // separate tokens is that the translucency fade skips them.
-            ("dialog_surface", sirio.dialog_surface, bezel.surface),
+            ("dialog_surface", sirio.sirio.dialog_surface, bezel.surface),
             (
                 "floating_surface",
-                sirio.floating_surface,
+                sirio.sirio.floating_surface,
                 bezel.surface_raised,
             ),
-            ("element_active", sirio.element_active, bezel.element_active),
-            ("element_hover", sirio.element_hover, bezel.element_hover),
+            ("element_active", sirio.ely.active, bezel.element_active),
+            ("element_hover", sirio.ely.hover, bezel.element_hover),
             // `text` is deliberately absent: it is bezel's, pulled one step
             // back toward the surface. `body_text_is_softened_off_bezels_full_contrast`
             // is its guard.
-            ("text_muted", sirio.text_muted, bezel.text_muted),
-            ("text_faint", sirio.text_faint, bezel.text_faint),
-            ("text_dim", sirio.text_dim, bezel.text_dim),
-            ("border", sirio.border, bezel.border),
-            ("border_strong", sirio.border_strong, bezel.border_strong),
-            ("ring", sirio.ring, bezel.ring),
-            ("selection", sirio.selection, bezel.selection),
-            ("code_wash", sirio.code_wash, bezel.code_wash),
-            ("solid", sirio.solid, bezel.solid),
-            ("on_solid", sirio.on_solid, bezel.on_solid),
-            ("accent", sirio.accent, bezel.accent),
-            ("success", sirio.success, bezel.success),
-            ("warning", sirio.warning, bezel.warning),
-            ("danger", sirio.danger, bezel.danger),
-            ("danger_muted", sirio.danger_muted, bezel.danger_muted),
-            ("diff_add", sirio.diff_add, bezel.diff_add),
-            ("diff_del", sirio.diff_del, bezel.diff_del),
+            ("text_muted", sirio.ely.fg_muted, bezel.text_muted),
+            ("text_faint", sirio.ely.fg_subtle, bezel.text_faint),
+            ("text_dim", sirio.sirio.text_dim, bezel.text_dim),
+            ("border", sirio.ely.border, bezel.border),
+            ("border_strong", sirio.sirio.border_strong, bezel.border_strong),
+            ("ring", sirio.sirio.ring, bezel.ring),
+            ("selection", sirio.ely.selection, bezel.selection),
+            ("code_wash", sirio.sirio.code_wash, bezel.code_wash),
+            ("solid", sirio.sirio.solid, bezel.solid),
+            ("on_solid", sirio.sirio.on_solid, bezel.on_solid),
+            ("accent", sirio.sirio.quantity, bezel.accent),
+            ("success", sirio.ely.success, bezel.success),
+            ("warning", sirio.ely.warning, bezel.warning),
+            ("danger", sirio.ely.danger, bezel.danger),
+            ("danger_muted", sirio.sirio.danger_muted, bezel.danger_muted),
+            ("diff_add", sirio.sirio.diff_add, bezel.diff_add),
+            ("diff_del", sirio.sirio.diff_del, bezel.diff_del),
         ] {
-            assert_eq!(
-                ours,
-                Rgba::from(theirs),
+            let ours = Rgba::from(ours);
+            let theirs = Rgba::from(theirs);
+            assert!(
+                ((ours.r - theirs.r).abs() < 1e-6)
+                    && ((ours.g - theirs.g).abs() < 1e-6)
+                    && ((ours.b - theirs.b).abs() < 1e-6)
+                    && ((ours.a - theirs.a).abs() < 1e-6),
                 "{appearance:?} {name} is not bezel's any more"
             );
         }
@@ -2336,25 +2340,25 @@ mod tests {
             let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             let slate = ThemeColors::for_appearance(appearance, BaseColor::Slate);
 
-            assert_ne!(slate.bg, neutral.bg, "{appearance:?} page takes the tint");
-            assert_ne!(slate.surface, neutral.surface);
+            assert_ne!(slate.sirio.canvas, neutral.sirio.canvas, "{appearance:?} page takes the tint");
+            assert_ne!(slate.ely.bg, neutral.ely.bg);
             // The borders stay verbatim, on purpose: bezel 0.1.3 tints only
             // opaque achromatic ink — `Brand::apply`: "Translucent ink is
             // skipped because it paints over whatever is beneath it, which is
             // tinted already" — and both borders are 8–10% veils. They read
             // the page's tint through compositing, which is also exactly what
             // keeps `assert_palette_comes_from_bezel` true under every base.
-            assert_eq!(slate.border, neutral.border);
+            assert_eq!(slate.ely.border, neutral.ely.border);
 
             assert_eq!(
-                slate.brand_coral, neutral.brand_coral,
+                slate.sirio.brand_coral, neutral.sirio.brand_coral,
                 "{appearance:?} coral is Sirio's, not bezel's to rotate"
             );
             if appearance == Appearance::Light {
                 // Tinted panes keep the paper terminal; Neutral follows its
                 // own approved page instead.
                 assert_ne!(
-                    slate.terminal_surface, neutral.terminal_surface,
+                    slate.sirio.terminal_surface, neutral.sirio.terminal_surface,
                     "light: tinted panes keep paper, neutral follows its page"
                 );
             }
@@ -2370,12 +2374,12 @@ mod tests {
                 // The grey ladders' central panes are their own plane, darker
                 // than the sidebars.
                 assert_eq!(
-                    theme.terminal_surface, theme.bg,
+                    theme.sirio.terminal_surface, theme.sirio.canvas,
                     "{base:?} dark terminal is the central pane"
                 );
             } else {
                 assert_eq!(
-                    theme.terminal_surface, theme.surface,
+                    theme.sirio.terminal_surface, theme.ely.bg,
                     "dark terminal background must match the pane for {base:?}"
                 );
             }
@@ -2391,7 +2395,7 @@ mod tests {
         let translucent = theme.with_translucency(true);
         assert_eq!(translucent.base_color, BaseColor::Slate);
         assert_eq!(
-            translucent.colors.border, theme.colors.border,
+            translucent.colors.ely.border, theme.colors.ely.border,
             "a non-faded token keeps the tinted value"
         );
     }
@@ -2460,15 +2464,15 @@ mod tests {
         let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
         let bezel = notte_bezel(Appearance::Dark);
         for (name, surface) in [
-            ("bg", sirio.bg),
-            ("surface", sirio.surface),
-            ("surface_raised", sirio.surface_raised),
+            ("bg", sirio.sirio.canvas),
+            ("surface", sirio.ely.bg),
+            ("surface_raised", sirio.ely.surface),
             (
                 "surface_raised_hover",
-                Rgba::from(bezel.surface_raised_hover),
+                Hsla::from(bezel.surface_raised_hover),
             ),
         ] {
-            let ratio = contrast_ratio(sirio.text, surface);
+            let ratio = contrast_ratio(sirio.ely.fg, surface);
             assert!(ratio >= 7.0, "text on {name} is {ratio:.1}:1, below AAA");
         }
     }
@@ -2511,23 +2515,23 @@ mod tests {
             (Appearance::Light, bezel::theme::Theme::light()),
         ] {
             let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            let full = Rgba::from(bezel.text);
+            let full = Hsla::from(bezel.text);
 
             assert_ne!(
-                sirio.text, full,
+                sirio.ely.fg, full,
                 "{appearance:?} text must not be bezel's full-contrast rung"
             );
             assert_eq!(
-                sirio.text,
-                toward(full, sirio.surface, TEXT_SOFTENING),
+                sirio.ely.fg,
+                Hsla::from(toward(Rgba::from(full), Rgba::from(sirio.ely.bg), TEXT_SOFTENING)),
                 "{appearance:?} text must be bezel's, softened toward the surface"
             );
 
             // Softer than bezel, but not into the muted rung's territory: the
             // ladder still has a visible first step.
-            let step = contrast_ratio(sirio.text, sirio.surface);
+            let step = contrast_ratio(sirio.ely.fg, sirio.ely.bg);
             assert!(
-                step > contrast_ratio(sirio.text_muted, sirio.surface),
+                step > contrast_ratio(sirio.ely.fg_muted, sirio.ely.bg),
                 "{appearance:?} text ({step:.1}:1) must stay ahead of text_muted"
             );
             assert!(
@@ -2535,7 +2539,7 @@ mod tests {
                 "{appearance:?} text is {step:.1}:1 — softening must not spend WCAG AAA"
             );
             assert!(
-                step < contrast_ratio(full, sirio.surface),
+                step < contrast_ratio(full, sirio.ely.bg),
                 "{appearance:?} text must be softer than bezel's"
             );
         }
@@ -2573,7 +2577,8 @@ mod tests {
     }
 
     /// WCAG 2.1 relative luminance of an opaque colour.
-    fn relative_luminance(color: Rgba) -> f32 {
+    fn relative_luminance(color: impl Into<Rgba>) -> f32 {
+        let color = color.into();
         let channel = |c: f32| {
             if c <= 0.03928 {
                 c / 12.92
@@ -2584,7 +2589,7 @@ mod tests {
         0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
     }
 
-    fn contrast_ratio(one: Rgba, other: Rgba) -> f32 {
+    fn contrast_ratio(one: impl Into<Rgba>, other: impl Into<Rgba>) -> f32 {
         let (a, b) = (relative_luminance(one), relative_luminance(other));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
@@ -2592,8 +2597,8 @@ mod tests {
     #[test]
     fn shell_body_text_meets_wcag_aa_on_its_panel() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            for (role, text) in [("primary", theme.text), ("secondary", theme.text_muted)] {
-                let ratio = contrast_ratio(text, theme.surface);
+            for (role, text) in [("primary", theme.ely.fg), ("secondary", theme.ely.fg_muted)] {
+                let ratio = contrast_ratio(text, theme.ely.bg);
                 assert!(
                     ratio >= 4.5,
                     "{label} {role} text contrast on the panel is {ratio:.2}:1, under WCAG AA"
@@ -2617,14 +2622,15 @@ mod tests {
 
     /// Composites `over` (which may be translucent) onto `under`, so a wash
     /// can be judged the way a reader actually sees it.
-    fn composite(over: Rgba, under: Rgba) -> Rgba {
+    fn composite(over: impl Into<Rgba>, under: impl Into<Rgba>) -> Hsla {
+        let (over, under) = (over.into(), under.into());
         let a = over.a;
-        Rgba {
+        Hsla::from(Rgba {
             r: over.r * a + under.r * (1.0 - a),
             g: over.g * a + under.g * (1.0 - a),
             b: over.b * a + under.b * (1.0 - a),
             a: 1.0,
-        }
+        })
     }
 
     /// A well is always tellable from the page it is cut into, and from a card
@@ -2639,18 +2645,18 @@ mod tests {
     #[test]
     fn the_depth_ladder_reads_as_depth() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let page = composite(theme.input_bg, theme.surface);
-            let card = composite(theme.input_bg, theme.surface_raised);
+            let page = composite(theme.ely.sunken, theme.ely.bg);
+            let card = composite(theme.ely.sunken, theme.ely.surface);
             assert_ne!(
-                page, theme.surface,
+                page, theme.ely.bg,
                 "{label}: the well vanishes into the page"
             );
             assert_ne!(
-                card, theme.surface_raised,
+                card, theme.ely.surface,
                 "{label}: the well vanishes into a card"
             );
             assert_ne!(
-                theme.surface, theme.surface_raised,
+                theme.ely.bg, theme.ely.surface,
                 "{label}: the page and a raised card are the same plane"
             );
         }
@@ -2665,7 +2671,7 @@ mod tests {
     #[test]
     fn an_inverted_chip_is_legible_on_its_own_fill() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let ratio = contrast_ratio(theme.on_solid, theme.solid);
+            let ratio = contrast_ratio(theme.sirio.on_solid, theme.sirio.solid);
             assert!(
                 ratio >= 4.5,
                 "{label}: on_solid against solid is {ratio:.2}:1, under WCAG AA"
@@ -2682,8 +2688,8 @@ mod tests {
     #[test]
     fn selection_stays_under_its_text() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let seen = composite(theme.selection, theme.surface);
-            let ratio = contrast_ratio(theme.text, seen);
+            let seen = composite(theme.ely.selection, theme.ely.bg);
+            let ratio = contrast_ratio(theme.ely.fg, seen);
             assert!(
                 ratio >= 4.5,
                 "{label}: selected text reads at {ratio:.2}:1 through its own wash"
@@ -2702,7 +2708,7 @@ mod tests {
     #[test]
     fn brand_coral_clears_contrast_on_its_own_surface() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let ratio = contrast_ratio(theme.brand_coral, theme.surface);
+            let ratio = contrast_ratio(theme.sirio.brand_coral, theme.ely.bg);
             assert!(
                 ratio >= 4.5,
                 "{label}: coral contrast against its surface is {ratio:.2}:1, under WCAG AA 4.5:1"
@@ -2731,8 +2737,8 @@ mod tests {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for brand in brands {
                 assert_ne!(
-                    theme.brand_coral,
-                    brand.color(),
+                    theme.sirio.brand_coral,
+                    Hsla::from(brand.color()),
                     "{label}: the coral is {brand:?}'s brand, so that agent's mark \
                      no longer marks anything"
                 );
@@ -2745,47 +2751,47 @@ mod tests {
         let light = Theme::light().colors;
         let dark = Theme::dark().colors;
         let tokens = [
-            ("frame_surface", light.frame_surface, dark.frame_surface),
-            ("bg", light.bg, dark.bg),
-            ("surface", light.surface, dark.surface),
-            ("border_opaque", light.border_opaque, dark.border_opaque),
+            ("frame_surface", light.sirio.frame_surface, dark.sirio.frame_surface),
+            ("bg", light.sirio.canvas, dark.sirio.canvas),
+            ("surface", light.ely.bg, dark.ely.bg),
+            ("border_opaque", light.ely.border, dark.ely.border),
             (
                 "terminal_surface",
-                light.terminal_surface,
-                dark.terminal_surface,
+                light.sirio.terminal_surface,
+                dark.sirio.terminal_surface,
             ),
-            ("warning", light.warning, dark.warning),
-            ("success", light.success, dark.success),
-            ("danger", light.danger, dark.danger),
-            ("border", light.border, dark.border),
-            ("element_hover", light.element_hover, dark.element_hover),
-            ("element_active", light.element_active, dark.element_active),
-            ("selection", light.selection, dark.selection),
-            ("text", light.text, dark.text),
-            ("text_muted", light.text_muted, dark.text_muted),
-            ("text_faint", light.text_faint, dark.text_faint),
-            ("tree_guide", light.tree_guide, dark.tree_guide),
-            ("git_untracked", light.git_untracked, dark.git_untracked),
-            ("diff_add", light.diff_add, dark.diff_add),
-            ("diff_add_bg", light.diff_add_bg, dark.diff_add_bg),
-            ("diff_del", light.diff_del, dark.diff_del),
-            ("diff_del_bg", light.diff_del_bg, dark.diff_del_bg),
-            ("file_link", light.file_link, dark.file_link),
-            ("surface_raised", light.surface_raised, dark.surface_raised),
-            ("input_bg", light.input_bg, dark.input_bg),
-            ("overlay", light.overlay, dark.overlay),
-            ("overlay_strong", light.overlay_strong, dark.overlay_strong),
-            ("border_strong", light.border_strong, dark.border_strong),
-            ("ring", light.ring, dark.ring),
-            ("text_dim", light.text_dim, dark.text_dim),
-            ("brand_coral", light.brand_coral, dark.brand_coral),
-            ("accent", light.accent, dark.accent),
-            ("selection", light.selection, dark.selection),
-            ("code_wash", light.code_wash, dark.code_wash),
-            ("solid", light.solid, dark.solid),
-            ("on_solid", light.on_solid, dark.on_solid),
-            ("favorite", light.favorite, dark.favorite),
-            ("danger_muted", light.danger_muted, dark.danger_muted),
+            ("warning", light.ely.warning, dark.ely.warning),
+            ("success", light.ely.success, dark.ely.success),
+            ("danger", light.ely.danger, dark.ely.danger),
+            ("border", light.ely.border, dark.ely.border),
+            ("element_hover", light.ely.hover, dark.ely.hover),
+            ("element_active", light.ely.active, dark.ely.active),
+            ("selection", light.ely.selection, dark.ely.selection),
+            ("text", light.ely.fg, dark.ely.fg),
+            ("text_muted", light.ely.fg_muted, dark.ely.fg_muted),
+            ("text_faint", light.ely.fg_subtle, dark.ely.fg_subtle),
+            ("tree_guide", light.sirio.tree_guide, dark.sirio.tree_guide),
+            ("git_untracked", light.ely.fg_subtle, dark.ely.fg_subtle),
+            ("diff_add", light.sirio.diff_add, dark.sirio.diff_add),
+            ("diff_add_bg", light.sirio.diff_add_bg, dark.sirio.diff_add_bg),
+            ("diff_del", light.sirio.diff_del, dark.sirio.diff_del),
+            ("diff_del_bg", light.sirio.diff_del_bg, dark.sirio.diff_del_bg),
+            ("file_link", light.ely.link, dark.ely.link),
+            ("surface_raised", light.ely.surface, dark.ely.surface),
+            ("input_bg", light.ely.sunken, dark.ely.sunken),
+            ("overlay", light.sirio.overlay, dark.sirio.overlay),
+            ("overlay_strong", light.sirio.overlay_strong, dark.sirio.overlay_strong),
+            ("border_strong", light.sirio.border_strong, dark.sirio.border_strong),
+            ("ring", light.sirio.ring, dark.sirio.ring),
+            ("text_dim", light.sirio.text_dim, dark.sirio.text_dim),
+            ("brand_coral", light.sirio.brand_coral, dark.sirio.brand_coral),
+            ("accent", light.sirio.quantity, dark.sirio.quantity),
+            ("selection", light.ely.selection, dark.ely.selection),
+            ("code_wash", light.sirio.code_wash, dark.sirio.code_wash),
+            ("solid", light.sirio.solid, dark.sirio.solid),
+            ("on_solid", light.sirio.on_solid, dark.sirio.on_solid),
+            ("favorite", light.ely.warning, dark.ely.warning),
+            ("danger_muted", light.sirio.danger_muted, dark.sirio.danger_muted),
         ];
 
         for (name, light, dark) in tokens {
@@ -2833,17 +2839,17 @@ mod tests {
         // ladder, so the veil regression this guards needs a tinted base.
         let base = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Slate);
         assert!(
-            base.input_bg.a < 0.5,
+            base.ely.sunken.a < 0.5,
             "precondition: dark input_bg is a veil, not a fill (got {})",
-            base.input_bg.a
+            base.ely.sunken.a
         );
 
         let translucent = base.with_translucency(true);
         assert!(
-            translucent.input_bg.a <= base.input_bg.a,
+            translucent.ely.sunken.a <= base.ely.sunken.a,
             "fading made the veil more opaque: {} -> {}",
-            base.input_bg.a,
-            translucent.input_bg.a
+            base.ely.sunken.a,
+            translucent.ely.sunken.a
         );
     }
 
@@ -2856,11 +2862,11 @@ mod tests {
     fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
         for base in [Theme::dark(), Theme::light()] {
             assert_eq!(
-                base.dialog_surface, base.surface,
+                base.sirio.dialog_surface, base.ely.bg,
                 "opaque twin of the panel surface"
             );
             assert_eq!(
-                base.floating_surface, base.surface_raised,
+                base.sirio.floating_surface, base.ely.surface,
                 "opaque twin of the raised surface"
             );
             for translucent in [
@@ -2869,17 +2875,17 @@ mod tests {
                 base.with_translucency_at(true, 0.9),
             ] {
                 assert!(
-                    translucent.surface.a < base.surface.a,
+                    translucent.ely.bg.a < base.ely.bg.a,
                     "precondition: panels fade"
                 );
                 assert!(
-                    translucent.surface_raised.a < base.surface_raised.a,
+                    translucent.ely.surface.a < base.ely.surface.a,
                     "precondition: raised cards fade"
                 );
-                assert_eq!(translucent.dialog_surface, base.dialog_surface);
-                assert_eq!(translucent.floating_surface, base.floating_surface);
-                assert_eq!(translucent.dialog_surface.a, 1.0);
-                assert_eq!(translucent.floating_surface.a, 1.0);
+                assert_eq!(translucent.sirio.dialog_surface, base.sirio.dialog_surface);
+                assert_eq!(translucent.sirio.floating_surface, base.sirio.floating_surface);
+                assert_eq!(translucent.sirio.dialog_surface.a, 1.0);
+                assert_eq!(translucent.sirio.floating_surface.a, 1.0);
             }
         }
     }
@@ -2909,7 +2915,7 @@ mod tests {
             }
             assert_eq!(
                 palette.color(Kind::Variable),
-                gpui::Hsla::from(base.text),
+                gpui::Hsla::from(base.ely.fg),
                 "a plain identifier stays the body text colour"
             );
         }
@@ -2924,18 +2930,19 @@ mod tests {
         for base in [Theme::dark(), Theme::light()] {
             let opaque = base.menu_surface();
             let translucent = base.with_translucency(true);
+            let translucent_menu = translucent.menu_surface();
             assert!(
-                translucent.surface_raised.a < 1.0,
+                translucent.ely.surface.a < 1.0,
                 "the fixture must actually fade the panels, or this proves nothing"
             );
             assert_eq!(
-                translucent.menu_surface().a,
+                translucent_menu.a,
                 1.0,
                 "a context menu the desktop shows through is unreadable"
             );
             assert_eq!(
-                (translucent.menu_surface().r, translucent.menu_surface().g),
-                (opaque.r, opaque.g),
+                (translucent_menu.h, translucent_menu.s, translucent_menu.l),
+                (opaque.h, opaque.s, opaque.l),
                 "staying opaque must not change the menu's tone"
             );
         }
@@ -2990,8 +2997,8 @@ mod tests {
             let subtle = base.with_translucency_at(true, 0.9);
             assert!(subtle.translucency_enabled);
             assert_eq!(subtle.translucent_surface_opacity, 0.9);
-            assert!((subtle.surface.a - base.surface.a * 0.9).abs() < 1e-6);
-            assert!((subtle.terminal_surface.a - base.terminal_surface.a * 0.9).abs() < 1e-6);
+            assert!((subtle.ely.bg.a - base.ely.bg.a * 0.9).abs() < 1e-6);
+            assert!((subtle.sirio.terminal_surface.a - base.sirio.terminal_surface.a * 0.9).abs() < 1e-6);
             // Re-deriving from the faded theme keeps the caller's opacity, so
             // a mode switch that rebuilds the palette cannot fall back to the
             // default fade.
@@ -2999,10 +3006,10 @@ mod tests {
                 subtle.translucency_enabled,
                 subtle.translucent_surface_opacity,
             );
-            assert_eq!(again.surface, subtle.surface);
+            assert_eq!(again.ely.bg, subtle.ely.bg);
             let opaque = subtle.with_translucency_at(false, 0.9);
             assert!(!opaque.translucency_enabled);
-            assert_eq!(opaque.surface, base.surface);
+            assert_eq!(opaque.ely.bg, base.ely.bg);
             assert_eq!(
                 opaque.translucent_surface_opacity, 0.9,
                 "disabling keeps the opacity for the next enable"
@@ -3017,25 +3024,25 @@ mod tests {
             let translucent = base.with_translucency(true);
 
             assert!(translucent.translucency_enabled);
-            let faded = |s: Rgba| Rgba {
+            let faded = |s: Hsla| Hsla {
                 a: s.a * opacity,
                 ..s
             };
-            assert_eq!(translucent.surface, faded(base.surface));
-            assert_eq!(translucent.surface_raised, faded(base.surface_raised));
-            assert_eq!(translucent.input_bg, faded(base.input_bg));
-            assert_eq!(translucent.terminal_surface, faded(base.terminal_surface));
+            assert_eq!(translucent.ely.bg, faded(base.ely.bg));
+            assert_eq!(translucent.ely.surface, faded(base.ely.surface));
+            assert_eq!(translucent.ely.sunken, faded(base.ely.sunken));
+            assert_eq!(translucent.sirio.terminal_surface, faded(base.sirio.terminal_surface));
 
             assert_eq!(
-                translucent.frame_surface, base.frame_surface,
+                translucent.sirio.frame_surface, base.sirio.frame_surface,
                 "the frame material is already translucent and is not faded twice"
             );
-            assert_eq!(translucent.bg, base.bg, "the opaque fallback stays opaque");
+            assert_eq!(translucent.sirio.canvas, base.sirio.canvas, "the opaque fallback stays opaque");
             assert_eq!(
-                translucent.border_opaque, base.border_opaque,
+                translucent.ely.border, base.ely.border,
                 "borders stay crisp on a translucent panel"
             );
-            assert_eq!(translucent.text, base.text, "text is untouched");
+            assert_eq!(translucent.ely.fg, base.ely.fg, "text is untouched");
 
             assert_eq!(
                 translucent.with_translucency(true),
@@ -3073,13 +3080,13 @@ mod tests {
             ("dark", Theme::dark().with_translucency(true), white),
             ("light", Theme::light().with_translucency(true), black),
         ] {
-            let strip = composite(theme.frame_surface, desktop);
-            let panel = composite(theme.surface, strip);
-            let terminal = composite(theme.terminal_surface, panel);
+            let strip = composite(theme.sirio.frame_surface, desktop);
+            let panel = composite(theme.ely.bg, strip);
+            let terminal = composite(theme.sirio.terminal_surface, panel);
             for (place, under, text) in [
-                ("frame strip", strip, theme.text_muted),
-                ("panel", panel, theme.text_muted),
-                ("terminal", terminal, theme.text),
+                ("frame strip", strip, theme.ely.fg_muted),
+                ("panel", panel, theme.ely.fg_muted),
+                ("terminal", terminal, theme.ely.fg),
             ] {
                 let ratio = contrast_ratio(text, under);
                 assert!(
@@ -3298,17 +3305,15 @@ mod agent_brand_tests {
         ];
         for theme in [Theme::dark(), Theme::light()] {
             let statuses = [
-                ("warning", theme.warning),
-                ("success", theme.success),
-                ("danger", theme.danger),
+                ("warning", theme.ely.warning),
+                ("success", theme.ely.success),
+                ("danger", theme.ely.danger),
             ];
             for brand in brands {
-                let brand_color = brand.color();
+                let brand_color = Hsla::from(brand.color());
                 for (name, status) in statuses {
-                    assert!(
-                        (brand_color.r - status.r).abs() > f32::EPSILON
-                            || (brand_color.g - status.g).abs() > f32::EPSILON
-                            || (brand_color.b - status.b).abs() > f32::EPSILON,
+                    assert_ne!(
+                        brand_color, status,
                         "{brand:?} is byte-identical to {name}: a running \
                          worktree would be indistinguishable from that status"
                     );
