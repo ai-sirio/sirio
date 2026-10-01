@@ -86,6 +86,10 @@ bezel = { version = "=0.1.4", default-features = false, features = [
 bezel-markdown = "=0.1.4"
 bezel-editor = "=0.1.4"
 bezel-syntax = "=0.1.4"
+# Renamed: the package's lib target is `theme`, so the extern name is
+# `bezel_theme` and `sirio_theme` reads `bezel_theme::…` (the same types as
+# `bezel::theme::…`). Cf. `gpui = { package = "bezel-gpui" }` above.
+bezel_theme = { version = "=0.1.4", package = "bezel-theme" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

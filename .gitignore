@@ -27,7 +27,7 @@ __pycache__/
 *.pyc
 
 # Local tool/IDE/planning artifacts — not shared repo content. docs/ stays
-# local except four directories the repo itself depends on. Each needs the
+# local except four directories and one file the repo itself depends on. Each needs the
 # `/docs/*` + `!` shape, because a parent excluded with `/docs/` could not
 # be re-included:
 #   - agents: CLAUDE.md sends the engineering skills there for the issue
@@ -42,6 +42,8 @@ __pycache__/
 #   - testing: the vendored Ely crate's LOCAL-CHANGES.md and the chat e2e
 #     runner cite docs/testing/ely-agent-chat.md for what each check proves
 #     and which platforms were seen; untracked, those would be dead links.
+#   - THEME-PROVENANCE.md: CLAUDE.md, sirio_theme's presets.rs and its
+#     Cargo.toml cite it as the record of where Sirio's colours come from.
 /.codegraph/
 /docs/*
 !/docs/agents/
@@ -50,5 +52,6 @@ __pycache__/
 /docs/superpowers/*
 !/docs/superpowers/specs/
 !/docs/testing/
+!/docs/THEME-PROVENANCE.md
 /output/
 /plans/

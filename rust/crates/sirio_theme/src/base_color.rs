@@ -15,7 +15,7 @@
 //! carries the values and the tint measured from them. See
 //! `docs/THEME-PROVENANCE.md`, "Preset ladders".
 
-use bezel::theme::Tint;
+use bezel_theme::Tint;
 
 use crate::Appearance;
 

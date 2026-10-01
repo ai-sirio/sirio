@@ -10,9 +10,10 @@ anyhow.workspace = true
 # Ely's colour vocabulary (spec 2026-10-01-sirio-theme-on-ely-palette):
 # `ThemeColors::ely` is Ely's `Palette`, holding Sirio's values.
 ely-palette.workspace = true
-# The colour tokens themselves: `ThemeColors::for_appearance` reads
-# `bezel::theme::Theme` rather than carrying its own palette.
-bezel.workspace = true
+# The derivation behind `Theme::to_bezel_theme` (what bezel's widgets and
+# bezel-markdown read), and the highlighting types `syntax_palette` returns.
+# Sirio's own colours are `ely-palette`'s, frozen in `presets.rs`.
+bezel_theme.workspace = true
 # Font discovery for the runtime-resolved code family: fontdb is the same
 # database gpui's Linux text system loads, so the generic "monospace" answer
 # here is the system's own (fontconfig's alias), not a hard-coded guess.
