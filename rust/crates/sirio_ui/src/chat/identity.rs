@@ -2,7 +2,7 @@
 use gpui::{AnyElement, ElementId, IntoElement, div, prelude::*, px, rgb, svg};
 use sirio_theme::{Theme, ThemeMode};
 
-pub(super) const ASSETS: &[(&str, &[u8])] = &[
+pub(crate) const ASSETS: &[(&str, &[u8])] = &[
     (
         "sirio-chat/claude-code.svg",
         include_bytes!("../../../../assets/icons/chat/claude-code.svg"),
@@ -24,7 +24,7 @@ pub(super) const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../../../../assets/icons/agent-omp.svg"),
     ),
 ];
-pub(super) fn asset(path: &str) -> Option<&'static [u8]> {
+pub(crate) fn asset(path: &str) -> Option<&'static [u8]> {
     ASSETS
         .iter()
         .find(|(name, _)| *name == path)

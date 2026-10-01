@@ -21924,7 +21924,7 @@ fn main() {
     // bezel's icons are `svg().path("icons/…")`; without an asset source
     // gpui finds nothing and paints nothing. Sirio's own icons embed their
     // bytes and never needed this.
-    let app = application().with_assets(sirio_ui::chat::ChatAssets);
+    let app = application().with_assets(sirio_ui::ely::AppAssets);
     app.run(|cx: &mut App| {
         #[cfg(feature = "perf-native")]
         native_perf::init(cx);

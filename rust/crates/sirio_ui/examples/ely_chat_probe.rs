@@ -184,7 +184,7 @@ impl Render for Probe {
 
 fn main() {
     gpui_platform::application()
-        .with_assets(sirio_ui::chat::ChatAssets)
+        .with_assets(sirio_ui::ely::AppAssets)
         .run(|cx: &mut App| {
             bezel::ui::register_fonts(cx).expect("Sirio fonts");
             sirio_theme::Theme::init(cx);

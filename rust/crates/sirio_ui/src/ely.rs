@@ -1,13 +1,16 @@
-//! The chat's component-library boundary. Sirio remains the token authority.
-use super::identity;
+//! Sirio's boundary with Ely. Sirio remains the token authority: the host
+//! installs Sirio's `Theme`, and this module keeps Ely's theme and
+//! bezel-theme's registry following it, and serves Ely's assets beside
+//! Sirio's own.
+use crate::chat::identity;
 use bezel::motion::AppExt;
 use ely_gpui_component::theme::{Mode, Theme as ElyTheme, ThemeMetrics};
 use gpui::{App, AssetSource, Global};
 use sirio_theme::{Appearance, Theme};
 use std::borrow::Cow;
 
-pub struct ChatAssets;
-impl AssetSource for ChatAssets {
+pub struct AppAssets;
+impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         if path.starts_with("ely/") {
             return ely_gpui_component::Assets.load(path);

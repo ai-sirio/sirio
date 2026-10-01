@@ -39,11 +39,9 @@ use std::rc::Rc;
 use crate::caret;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
-mod ely;
 #[cfg(test)]
 mod ely_tests;
-mod identity;
-pub use ely::ChatAssets;
+pub(crate) mod identity;
 mod composer_view;
 mod controls;
 mod history;
@@ -78,7 +76,7 @@ fn highlight_markdown_code(
 /// blocks. The renderer remains usable without this registration and simply
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {
-    ely::init(cx);
+    crate::ely::init(cx);
     markdown::set_highlighter(
         cx,
         highlight_markdown_code,
@@ -6048,7 +6046,7 @@ fn slash_option_tooltip(description: &str) -> Option<SharedString> {
 
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        ely::sync_theme_if_changed(cx);
+        crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
         // Read before any loader renews this view's Bezel lease.
         if sirio_perf::enabled() && bezel::motion::Painter::of(cx).woken(cx) {

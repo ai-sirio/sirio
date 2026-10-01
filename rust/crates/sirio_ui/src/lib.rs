@@ -19,6 +19,7 @@ pub mod changes;
 pub mod chat;
 pub mod controls;
 pub mod editor;
+pub mod ely;
 pub mod file_context_menu;
 pub mod file_view;
 pub mod forge_source;
