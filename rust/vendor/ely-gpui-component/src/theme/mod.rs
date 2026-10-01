@@ -19,7 +19,7 @@ mod tooling;
 
 use std::time::Duration;
 
-use gpui::{App, Global, SharedString, WindowAppearance};
+use gpui::{App, Global, Pixels, SharedString, WindowAppearance};
 use web_time::Instant;
 
 use crate::motion;
@@ -62,6 +62,13 @@ impl From<WindowAppearance> for Mode {
     }
 }
 
+/// Host metric overrides, in logical pixels; converted to rems once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeMetrics {
+    pub text: [Pixels; 8],
+    pub radii: [Pixels; 4],
+}
+
 /// Design tokens. One global per app.
 pub struct Theme {
     mode: Mode,
@@ -73,6 +80,7 @@ pub struct Theme {
     pub density: Density,
     pub radius_scale: f32,
     pub font_scale: f32,
+    pub metrics: Option<ThemeMetrics>,
     pub font_family: SharedString,
     pub mono_family: SharedString,
     pub reduced_motion: bool,
@@ -103,6 +111,7 @@ impl Theme {
             density: Density::Standard,
             radius_scale: 1.0,
             font_scale: 1.0,
+            metrics: None,
             font_family: "Inter".into(),
             mono_family: "JetBrains Mono".into(),
             reduced_motion: false,

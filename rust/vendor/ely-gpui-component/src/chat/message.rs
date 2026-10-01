@@ -29,6 +29,7 @@ pub struct MessageAvatar {
     role: Role,
     name: SharedString,
     picture: Option<SharedString>,
+    content: Option<AnyElement>,
 }
 
 impl MessageAvatar {
@@ -38,7 +39,14 @@ impl MessageAvatar {
             role,
             name: name.into(),
             picture: None,
+            content: None,
         }
+    }
+
+    /// A host-owned identity mark, rendered without replacing its geometry.
+    pub fn content(mut self, content: impl IntoElement) -> Self {
+        self.content = Some(content.into_any_element());
+        self
     }
 
     /// A person's picture, a file or a web address.
@@ -50,6 +58,9 @@ impl MessageAvatar {
 
 impl RenderOnce for MessageAvatar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        if let Some(content) = self.content {
+            return content;
+        }
         let theme = cx.theme();
         let colors = theme.colors.clone();
         match self.role {

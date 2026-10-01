@@ -47,3 +47,14 @@ terminal/webview/editor dependencies and Gallery runtime are excluded.
 Compatibility adjustments and controlled component slots are recorded here
 as they are implemented. Native rendering/input evidence is collected by
 `sirio_ui/examples/ely_chat_probe.rs`; compile checks alone do not prove it.
+
+- `chat/message.rs`: `MessageAvatar::content` accepts the host's white agent
+  mark and dark plate, before Ely's default role avatar.
+- `theme/{mod,tokens}.rs`: optional `ThemeMetrics` supplies Sirio's eight text
+  sizes and four radii in pixels; a single px-to-rem conversion preserves the
+  existing API and avoids applying font scale twice.
+
+Linux compatibility evidence: the native probe rendered under an isolated
+Xvfb X11 display (Mesa software rendering), edited/copied/pasted multiline
+text, submitted via Enter, and expanded the tool card via pointer. The
+physical Wayland session and native macOS/Windows input are unverified.

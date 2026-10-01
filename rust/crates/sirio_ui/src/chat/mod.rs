@@ -39,6 +39,11 @@ use std::rc::Rc;
 use crate::caret;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
+#[cfg(test)]
+mod ely_tests;
+mod ely;
+mod identity;
+pub use ely::ChatAssets;
 mod composer_view;
 mod list_scroll;
 mod question_dock;
@@ -73,6 +78,7 @@ fn highlight_markdown_code(
 /// blocks. The renderer remains usable without this registration and simply
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {
+    ely::init(cx);
     markdown::set_highlighter(
         cx,
         highlight_markdown_code,
@@ -1873,6 +1879,7 @@ pub struct Chat {
     /// `None` when there is nothing to launch — see [`Chat::unavailable`].
     agent_launch: Option<LaunchSpec>,
     /// Display name shown in the empty composer placeholder when known.
+    agent_id: Option<String>,
     agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
@@ -2124,6 +2131,12 @@ impl Chat {
         self.agent_name = Some(name.into());
     }
 
+    /// Sets identity independently of the selected model.
+    pub fn set_agent_identity(&mut self, agent_id: Option<String>, display_name: Option<String>) {
+        self.agent_id = agent_id;
+        self.agent_name = display_name;
+    }
+
     /// What the composer's agent badge shows (#206).
     ///
     /// It names the *agent*, so it reads `agent_name` -- not
@@ -2247,6 +2260,7 @@ impl Chat {
         Self {
             client: None,
             agent_launch: launch,
+            agent_id: None,
             agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
@@ -8778,6 +8792,7 @@ fn slash_option_tooltip(description: &str) -> Option<SharedString> {
 
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
         // Read before any loader renews this view's Bezel lease.
         if sirio_perf::enabled() && bezel::motion::Painter::of(cx).woken(cx) {
@@ -9926,17 +9941,17 @@ mod tests {
         );
     }
 
-    const CHAT_FIXTURE: &str = concat!(
+    pub(super) const CHAT_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/chat_fixture.py"
     );
 
     /// Scratch directory shared between a test and the fixture subprocess;
     /// removed when the test finishes.
-    struct TempDir(PathBuf);
+    pub(super) struct TempDir(pub(super) PathBuf);
 
     impl TempDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let unique = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
             let path = std::env::temp_dir()
@@ -9956,7 +9971,7 @@ mod tests {
     /// `run_until_parked` — until `condition` holds over the chat's own
     /// state, or the budget is exhausted. A drawn test that skips this loop
     /// can pass on timing luck; every test below goes through it.
-    fn pump_chat_until(
+    pub(super) fn pump_chat_until(
         cx: &VisualTestContext,
         chat: &gpui::Entity<Chat>,
         mut condition: impl FnMut(&Chat) -> bool,
@@ -9994,7 +10009,7 @@ mod tests {
 
     /// A freshly drawn frame, so `debug_bounds` reads state that actually
     /// rendered rather than the last stale frame.
-    fn refresh_frame(cx: &mut VisualTestContext) {
+    pub(super) fn refresh_frame(cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
         });
