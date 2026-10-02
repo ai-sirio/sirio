@@ -30,10 +30,10 @@ The hand-written ladders live in `rust/crates/sirio_theme/src/base_color.rs`:
 the four-surface `NOTTE_LADDER` (page `0x0E1016`, surface `0x202127`, raised
 `0x2B2F3A`, raised hover `0x313337` — the one place in the theme where
 lightness is chosen rather than taken from bezel), and the solid grey ladders
-`NEUTRAL_DARK` / `NEUTRAL_LIGHT` (approved shell values, 2026-09-12:
-sidebars `#191919`, central panes `#141414`, chat `#232323`, composer
-`#313131`, hover `#363636`) and `ONICE_DARK` (Neutral's shape from pure
-black). See "Preset ladders" in `base_color.rs`.
+`NEUTRAL_DARK` / `NEUTRAL_LIGHT` (dark approved 2026-10-02, darkened from
+the 2026-09-12 ladder that read as too grey: sidebars `#131313`, central
+panes `#0E0E0E`, chat `#1A1A1A`, composer `#242424`, hover `#292929`) and
+`ONICE_DARK` (Neutral's earlier shape from pure black). See "Preset ladders" in `base_color.rs`.
 
 ## The vocabulary
 
@@ -224,7 +224,7 @@ How far the primary text rung is pulled back toward its surface:
 
 > A grey ladder (Neutral's, Onice's) replaces two veil rules with solid
 > fills: the terminal follows the page (Neutral's central panes are
-> `#141414`), and both hovers are the ladder's own hover everywhere.
+> `#0E0E0E`), and both hovers are the ladder's own hover everywhere.
 
 ### `sirio.overlay`, `sirio.overlay_strong` (`VEIL_FAINT`, `VEIL_MID`)
 

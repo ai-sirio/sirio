@@ -80,15 +80,16 @@ pub(crate) struct GreyLadder {
     pub hover: u32,
 }
 
-/// Approved shell values (2026-09-12): sidebars `#191919`, central panes
-/// `#141414`, chat `#232323`, composer `#313131`, hover `#363636`.
+/// Approved shell values (2026-10-02, darkened from 2026-09-12's `#141414`
+/// ladder, which read as too grey): sidebars `#131313`, central panes
+/// `#0E0E0E`, chat `#1A1A1A`, composer `#242424`, hover `#292929`.
 const NEUTRAL_DARK: GreyLadder = GreyLadder {
-    page: 0x141414,
-    surface: 0x191919,
-    raised: 0x232323,
-    raised_hover: 0x363636,
-    input: 0x313131,
-    hover: 0x363636,
+    page: 0x0E0E0E,
+    surface: 0x131313,
+    raised: 0x1A1A1A,
+    raised_hover: 0x292929,
+    input: 0x242424,
+    hover: 0x292929,
 };
 
 /// The light steps mirror the dark ones.
@@ -103,7 +104,7 @@ const NEUTRAL_LIGHT: GreyLadder = GreyLadder {
 
 /// Neutral's shape from pure black: steps of ten code values (`00`, `0A`,
 /// `14`, `1E`) and a hover of `26`, whose jump over the raised rung is the
-/// one Neutral's `#363636` makes over its own (0.077 in oklab lightness).
+/// one Neutral's 2026-09-12 hover `#363636` made over its own (0.077 in oklab lightness).
 /// Depth has to come from these steps alone: a shadow cannot be darker than
 /// the page, so on black it does not show.
 const ONICE_DARK: GreyLadder = GreyLadder {
