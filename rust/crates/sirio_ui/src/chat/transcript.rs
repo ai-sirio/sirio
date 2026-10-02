@@ -151,8 +151,8 @@ impl Chat {
         entry: Entry,
         row: TranscriptRowContext<'_>,
         theme: &Theme,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> AnyElement {
         let TranscriptRowContext {
             index: entry_index,
@@ -338,6 +338,15 @@ impl Chat {
                         }
                     })
                 });
+                if streaming {
+                    // Only one thought streams at a time, so one orb id serves.
+                    block = block.thinking_glyph(crate::loading::thinking_indicator(
+                        "thought-orb",
+                        theme,
+                        window,
+                        cx,
+                    ));
+                }
                 if duration_ms.is_none() {
                     block = block.label("Thought");
                 }

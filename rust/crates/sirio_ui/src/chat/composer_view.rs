@@ -586,7 +586,7 @@ impl Chat {
 use super::*;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
-    chat::{Attachment, AttachmentChip, InputHint, PromptInput},
+    chat::{Attachment, AttachmentChip, PromptInput},
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, ControlSize, IconSize, Radius, TextSize},
     typography::EllipsisTooltip,
@@ -1176,25 +1176,6 @@ impl Chat {
                 );
         }
 
-        // Enter queues while a turn runs and sends otherwise; the hint says
-        // which, under the card rather than inside it. While the composer is
-        // out of service (a request waits, the agent is offline) Enter does
-        // neither, and the placeholder already names why — no hint then.
-        let hint = (!self.composer_disabled()).then(|| {
-            div()
-                .id("composer-input-hint")
-                .debug_selector(|| "composer-input-hint".into())
-                .w_full()
-                .flex()
-                .justify_center()
-                .pt(px(4.0))
-                .child(InputHint::new().enter(if streaming {
-                    "to queue ·"
-                } else {
-                    "to send ·"
-                }))
-        });
-
         div()
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
@@ -1217,7 +1198,6 @@ impl Chat {
                     )
                     .child(prompt),
             )
-            .children(hint)
             .into_any_element()
     }
 }

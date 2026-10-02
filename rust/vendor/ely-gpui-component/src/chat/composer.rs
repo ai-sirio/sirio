@@ -98,8 +98,10 @@ impl RenderOnce for SendButton {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let (button, state) = match self.on_stop {
             Some(stop) => (
+                // Solid like send: a Secondary square on the composer's
+                // sunken card is a faint outline on a near-equal fill.
                 IconButton::new(self.id, IconName::Square)
-                    .variant(ButtonVariant::Secondary)
+                    .variant(ButtonVariant::Primary)
                     .size(ControlSize::Sm)
                     .tooltip("Stop")
                     .on_click(move |_, window, cx| {
