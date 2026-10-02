@@ -91,7 +91,9 @@ pub enum Icon {
     Shield,
     /// Appearance (Zed `screen`).
     SunMoon,
-    /// A browser surface (`zed/public.svg`).
+    /// A browser surface (`zed/screen.svg`, the monitor mark).
+    Browser,
+    /// A generic globe/cloud stand-in (`zed/public.svg`).
     Globe,
     /// Anthropic's Claude starburst (`lobehub/claude-color.svg`), the one
     /// mark whose asset bakes its colour and is tinted all the same.
@@ -239,6 +241,7 @@ impl Icon {
             Icon::Sparkles => "icons/zed/sparkle.svg",
             Icon::Shield => "icons/zed/lock.svg",
             Icon::SunMoon => "icons/zed/screen.svg",
+            Icon::Browser => "icons/zed/screen.svg",
             Icon::Globe => "icons/zed/public.svg",
             Icon::ClaudeCode => "icons/lobehub/claude-color.svg",
             Icon::Codex => "icons/lobehub/codex.svg",
@@ -305,6 +308,7 @@ impl Icon {
             Icon::Sparkles => include_bytes!("../../../assets/icons/zed/sparkle.svg"),
             Icon::Shield => include_bytes!("../../../assets/icons/zed/lock.svg"),
             Icon::SunMoon => include_bytes!("../../../assets/icons/zed/screen.svg"),
+            Icon::Browser => include_bytes!("../../../assets/icons/zed/screen.svg"),
             Icon::Globe => include_bytes!("../../../assets/icons/zed/public.svg"),
             Icon::ClaudeCode => include_bytes!("../../../assets/icons/lobehub/claude-color.svg"),
             Icon::Codex => include_bytes!("../../../assets/icons/lobehub/codex.svg"),
@@ -631,7 +635,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 54] = [
+pub const ALL_ICONS: [Icon; 55] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -649,6 +653,7 @@ pub const ALL_ICONS: [Icon; 54] = [
     Icon::Sparkles,
     Icon::Shield,
     Icon::SunMoon,
+    Icon::Browser,
     Icon::Globe,
     Icon::ClaudeCode,
     Icon::Codex,
@@ -799,12 +804,19 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for icon in ALL_ICONS {
             if !seen.insert(icon.path()) {
+                // Two deliberate aliases: Lock shares Shield's lock asset,
+                // Browser shares SunMoon's monitor asset with its own
+                // semantic name for browser surfaces.
                 assert!(
-                    matches!(icon, Icon::Lock),
+                    matches!(icon, Icon::Lock | Icon::Browser),
                     "unexpected duplicate path {}",
                     icon.path()
                 );
-                assert_eq!(icon.path(), Icon::Shield.path());
+                if matches!(icon, Icon::Lock) {
+                    assert_eq!(icon.path(), Icon::Shield.path());
+                } else {
+                    assert_eq!(icon.path(), Icon::SunMoon.path());
+                }
             }
         }
     }

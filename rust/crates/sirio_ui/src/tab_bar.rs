@@ -404,7 +404,7 @@ impl TabBar {
         let (icon, glyph_color) = match label {
             "New Terminal" => (Icon::SquareTerminal, theme.ely.fg_subtle),
             "Changes" => (Icon::File, theme.ely.fg_subtle),
-            "New Browser" => (Icon::Globe, theme.ely.fg_subtle),
+            "New Browser" => (Icon::Browser, theme.ely.fg_subtle),
             "New Chat" => (Icon::MessageSquare, theme.ely.fg_subtle),
             _ => (Icon::File, theme.ely.fg_subtle),
         };
