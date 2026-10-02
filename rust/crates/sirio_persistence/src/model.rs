@@ -568,11 +568,11 @@ pub struct AppSettings {
     /// "appearance.translucency" — default: false. A Linux-rewrite-only
     /// key (F-SET-20); there is no Swift-parity `@AppStorage` field for it.
     pub translucency: bool,
-    /// "appearance.sidebarWidth" — default 325, clamped to 220...480. A
+    /// "appearance.sidebarWidth" — default 280, clamped to 220...480. A
     /// Linux-rewrite-only key: the Swift app's sidebar was a fixed width, so
     /// unlike every other key here this one has no `@AppStorage` antecedent.
     pub sidebar_width: i64,
-    /// "appearance.rightPanelWidth" — default 405, clamped to 220...640.
+    /// "appearance.rightPanelWidth" — default 320, clamped to 220...640.
     /// Linux-rewrite-only for the same reason as `sidebar_width`.
     pub right_panel_width: i64,
     /// "appearance.centerSplitRatio" — default 500, clamped to 100...900.
@@ -632,8 +632,8 @@ impl Default for AppSettings {
             refresh_interval_min: 5,
             opencode_workspace_id_override: String::new(),
             translucency: false,
-            sidebar_width: 325,
-            right_panel_width: 405,
+            sidebar_width: 280,
+            right_panel_width: 320,
             center_split_ratio: 500,
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: String::new(),

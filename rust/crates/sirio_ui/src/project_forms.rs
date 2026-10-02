@@ -296,7 +296,7 @@ impl EventEmitter<CloneFormEvent> for CloneForm {}
 
 impl Render for CloneForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         let url_field = self.url_field.clone();
         let destination = self
             .destination()
@@ -312,6 +312,7 @@ impl Render for CloneForm {
 
         div()
             .id("clone-form")
+            .text_size(theme.typography.scaled(16.0))
             .w_full()
             .p(px(16.0))
             .flex()
@@ -345,7 +346,7 @@ impl Render for CloneForm {
                             .debug_selector(|| "clone-url-field-text".to_owned())
                             .w_full()
                             .min_w_0()
-                            .child(url_field),
+                            .child(crate::controls::sidebar_text_field(url_field)),
                     ),
             )
             .child(form_label("Destination", &theme))
@@ -580,7 +581,7 @@ impl EventEmitter<CreateFormEvent> for CreateForm {}
 
 impl Render for CreateForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         let name_field = self.name_field.clone();
         let parent = self.parent.display().to_string();
         let destination = self.destination().display().to_string();
@@ -595,6 +596,7 @@ impl Render for CreateForm {
 
         div()
             .id("create-form")
+            .text_size(theme.typography.scaled(16.0))
             .w_full()
             .p(px(16.0))
             .flex()
@@ -628,7 +630,7 @@ impl Render for CreateForm {
                             .debug_selector(|| "create-name-field-text".to_owned())
                             .w_full()
                             .min_w_0()
-                            .child(name_field),
+                            .child(crate::controls::sidebar_text_field(name_field)),
                     ),
             )
             .child(form_label("Parent location", &theme))
@@ -780,6 +782,50 @@ mod tests {
     fn init_test_ui(cx: &mut gpui::App) {
         Theme::init(cx);
         bezel::ui::input::init(cx);
+    }
+
+    #[gpui::test]
+    fn the_project_name_field_tracks_font_preferences_and_keeps_native_editing(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(init_test_ui);
+        let window = cx.add_window(|_, cx| CreateForm::new(PathBuf::from("/tmp"), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| window.root::<CreateForm>().flatten().expect("form root"));
+        cx.run_until_parked();
+        let default_field = cx
+            .debug_bounds("create-name-field")
+            .expect("name field drawn");
+
+        cx.update(|_, cx| {
+            Theme::set_interface_font_size(18, cx);
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        let enlarged_field = cx
+            .debug_bounds("create-name-field")
+            .expect("name field redrawn");
+        assert!(
+            enlarged_field.size.height > default_field.size.height,
+            "the input must make room for the preferred font: \
+             default={default_field:?}, enlarged={enlarged_field:?}"
+        );
+
+        cx.simulate_click(enlarged_field.center(), Modifiers::none());
+        cx.simulate_input("demo-project");
+        cx.run_until_parked();
+        form.read_with(&cx.cx, |form, cx| {
+            assert_eq!(form.name_field.read(cx).content().as_ref(), "demo-project");
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        cx.run_until_parked();
+        form.read_with(&cx.cx, |form, cx| {
+            assert!(form.name_field.read(cx).content().is_empty());
+        });
     }
 
     struct TempDir(PathBuf);

@@ -9,7 +9,6 @@ use std::time::Duration;
 use bezel::motion::{Fade, Painter};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
-use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, FontWeight, Global,
     IntoElement, KeyDownEvent, MouseButton, Pixels, Point, Render, Task, Window, div, prelude::*,
@@ -719,7 +718,7 @@ fn icon_button(
         .text_color(theme.ely.fg_muted)
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
-        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
         .on_click(move |_, window, cx| on_click(window, cx))
         .child(IconElement::new(icon, IconSize::Small))
 }
@@ -1010,7 +1009,7 @@ impl ChangeRequestList {
                     .text_color(tone)
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
-                    .tooltip(move |window, cx| Tooltip::text(label, window, cx))
+                    .tooltip(move |window, cx| crate::controls::sidebar_tooltip(label, window, cx))
                     .on_click(move |_, _, cx| {
                         choose.update(cx, |list, cx| list.set_filter(candidate, cx))
                     })
@@ -1286,6 +1285,7 @@ impl ChangeRequestList {
         )
         .child(
             div()
+                .w_full()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -1294,7 +1294,7 @@ impl ChangeRequestList {
                 .rounded(theme.radii.control)
                 .bg(theme.sirio.code_wash)
                 .text_size(theme.typography.footnote)
-                .child(selectable_text(command))
+                .child(div().flex_1().min_w_0().child(selectable_text(command)))
                 .child(icon_button(
                     "change-requests-copy-login",
                     Icon::Copy,
@@ -1325,7 +1325,7 @@ impl ChangeRequestList {
                         .flex_1()
                         .min_w_0()
                         .on_key_down(cx.listener(Self::on_token_key))
-                        .child(self.token.clone()),
+                        .child(crate::controls::sidebar_text_field(self.token.clone())),
                 )
                 .child(text_button(
                     "change-requests-token-save",
@@ -1363,6 +1363,7 @@ impl ChangeRequestList {
         let mut view = popover::popover_card(&bezel_theme)
             .id("change-request-menu")
             .debug_selector(|| "change-request-menu".to_owned())
+            .text_size(theme.typography.ui_size)
             .w(theme.spacing.menu_width);
         for (selector, label) in [
             ("change-request-menu-open-browser", "Open in browser"),
@@ -1379,6 +1380,7 @@ impl ChangeRequestList {
             .debug_selector(move || selector.to_owned())
             .w_full()
             .min_h(theme.spacing.titlebar_control_frame.height)
+            .text_size(theme.typography.ui_size)
             .text_color(bezel_theme.text)
             .on_click(move |_, _, cx| {
                 if selector == "change-request-menu-copy-link" {
@@ -1407,7 +1409,7 @@ impl ChangeRequestList {
 impl Render for ChangeRequestList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangeRequestList.render", cx.entity_id().as_u64());
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         let entity = cx.entity();
         let filter = current_filter(cx);
         let content: AnyElement = match &self.link {
@@ -1458,7 +1460,7 @@ impl Render for ChangeRequestList {
                                 .py(px(6.0))
                                 .border_b_1()
                                 .border_color(theme.ely.border)
-                                .child(self.search.clone()),
+                                .child(crate::controls::sidebar_text_field(self.search.clone())),
                         )
                     })
                     .child(self.render_rows(&theme, &entity))
@@ -1546,6 +1548,48 @@ mod tests {
         let list = cx.new(|cx| ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx));
         list.update(cx, |list, cx| list.set_visible(true, cx));
         list
+    }
+
+    #[gpui::test]
+    fn the_login_command_and_copy_button_fit_inside_a_compact_sidebar(cx: &mut TestAppContext) {
+        struct LoginPanel(Entity<ChangeRequestList>);
+
+        impl Render for LoginPanel {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(320.0))
+                    .h_full()
+                    .overflow_hidden()
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(Theme::init);
+        let list = cx.new(|cx| {
+            let mut list = ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx);
+            list.link = Link::Settled(Connection::NotConnected {
+                forge: Forge::GitLab,
+                host: "git.compact-sidebar.invalid".to_owned(),
+            });
+            list
+        });
+        let window = cx.add_window(|_, _| LoginPanel(list));
+        let mut view = gpui::VisualTestContext::from_window(window.into(), cx);
+        view.run_until_parked();
+        let panel = view.debug_bounds("change-requests").expect("panel drawn");
+        let copy = view
+            .debug_bounds("change-requests-copy-login")
+            .expect("copy button drawn");
+        assert!(
+            copy.left() >= panel.left() && copy.right() <= panel.right(),
+            "the copy button must stay inside the sidebar: copy={copy:?}, panel={panel:?}"
+        );
+        view.simulate_click(copy.center(), gpui::Modifiers::none());
+        let copied = view.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(
+            copied.as_deref(),
+            Some("glab auth login --hostname git.compact-sidebar.invalid")
+        );
     }
 
     #[gpui::test]

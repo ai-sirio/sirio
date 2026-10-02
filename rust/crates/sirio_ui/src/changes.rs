@@ -1858,6 +1858,7 @@ impl ChangesTab {
         allows_staging: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        tooltip_builder: controls::TooltipBuilder,
     ) -> impl IntoElement {
         let entity_for_toggle = entity.clone();
         let entity_for_action = entity.clone();
@@ -1920,6 +1921,7 @@ impl ChangesTab {
                     action_label,
                     action_id,
                     theme,
+                    tooltip_builder,
                     move |cx| {
                         entity_for_action.update(cx, |tab, cx| tab.section_action(section, cx));
                     },
@@ -2311,6 +2313,7 @@ impl ChangesTab {
         let collapse_entity = entity.clone();
         let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
+        let tooltip_builder = change_tooltip_builder(self.embedded_in_panel);
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -2325,11 +2328,17 @@ impl ChangesTab {
             .flex()
             .items_center()
             .gap(px(7.0))
+            // The sidebar cannot fit the full toolbar on one line. Give its
+            // title a row and let the actions wrap as the panel is resized.
+            .when(self.embedded_in_panel, |bar| {
+                bar.h_auto().flex_wrap().py(px(4.0)).gap(px(4.0))
+            })
             .border_b_1()
             .border_color(theme.ely.border)
             .child(
                 div()
                     .flex_1()
+                    .when(self.embedded_in_panel, |title| title.flex_none().w_full())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(theme.typography.scaled(12.5))
                     .text_color(theme.ely.fg)
@@ -2350,11 +2359,12 @@ impl ChangesTab {
             // picks the diff's *scope* (whole file vs hunks), because that
             // build had only one renderer and so never needed a view-mode
             // choice at all. Do not read this control as a port of that one.
-            .child(controls::segmented_icons(
+            .child(controls::segmented_icons_with_tooltip(
                 "changes-view-mode",
                 &[(Icon::DiffUnified, "Unified"), (Icon::DiffSplit, "Split")],
                 mode.index(),
                 theme,
+                tooltip_builder,
                 move |index, cx| {
                     mode_entity.update(cx, |tab, cx| {
                         tab.set_view_mode(DiffViewMode::from_index(index), cx);
@@ -2376,6 +2386,7 @@ impl ChangesTab {
                 "changes-refresh",
                 "refresh-changes".to_owned(),
                 theme,
+                tooltip_builder,
                 move |cx| {
                     refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
                 },
@@ -2386,6 +2397,7 @@ impl ChangesTab {
                 "changes-expand-all",
                 "expand-all".to_owned(),
                 theme,
+                tooltip_builder,
                 move |cx| {
                     expand_entity.update(cx, |tab, cx| tab.expand_all(cx));
                 },
@@ -2396,6 +2408,7 @@ impl ChangesTab {
                 "changes-collapse-all",
                 "collapse-all".to_owned(),
                 theme,
+                tooltip_builder,
                 move |cx| {
                     collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx));
                 },
@@ -2409,6 +2422,7 @@ impl ChangesTab {
                     "changes-stage-all",
                     "stage-all".to_owned(),
                     theme,
+                    tooltip_builder,
                     move |cx| {
                         stage_entity.update(cx, |tab, cx| {
                             tab.start_operation(stage_all, cx);
@@ -2421,6 +2435,7 @@ impl ChangesTab {
                     "changes-discard-all",
                     "discard-all".to_owned(),
                     theme,
+                    tooltip_builder,
                     move |window, cx| {
                         discard_entity.update(cx, |tab, cx| {
                             tab.confirm_discard_all(window, cx);
@@ -2823,6 +2838,7 @@ impl ChangesTab {
         let row_entity = entity.clone();
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
+        let tooltip_builder = change_tooltip_builder(self.embedded_in_panel);
         let selected = self.selected_change.clone();
         let unified_x = self.unified_x;
         let split_left_x = self.split_left_x;
@@ -2872,6 +2888,7 @@ impl ChangesTab {
                             allows_staging,
                             row_entity.clone(),
                             theme,
+                            tooltip_builder,
                         )
                         .into_any_element(),
                         Some(ListRow::Change(row)) => Self::render_change_row(
@@ -3124,6 +3141,11 @@ impl Render for ChangesTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangesTab.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
+        let theme = if self.embedded_in_panel {
+            theme.with_sidebar_typography()
+        } else {
+            theme
+        };
         // #193: incremented here and nowhere else -- being in a drawn frame
         // is the whole signal.
         self.renders = self.renders.wrapping_add(1);
@@ -3256,12 +3278,21 @@ fn action_text_button(
         .child(label)
 }
 
+fn change_tooltip_builder(embedded_in_panel: bool) -> controls::TooltipBuilder {
+    if embedded_in_panel {
+        controls::sidebar_tooltip
+    } else {
+        Tooltip::text
+    }
+}
+
 fn action_icon_button(
     icon: Icon,
     tooltip: &'static str,
     selector: &'static str,
     id: String,
     theme: Theme,
+    tooltip_builder: controls::TooltipBuilder,
     on_click: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -3273,7 +3304,7 @@ fn action_icon_button(
         .text_size(theme.typography.caption2)
         .text_color(theme.ely.fg)
         .hover(|style| style.bg(theme.ely.hover))
-        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -3286,6 +3317,7 @@ fn section_action_button(
     label: &'static str,
     id: String,
     theme: Theme,
+    tooltip_builder: controls::TooltipBuilder,
     on_click: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -3299,7 +3331,7 @@ fn section_action_button(
         .text_size(theme.typography.caption2)
         .text_color(theme.ely.fg_muted)
         .hover(|style| style.bg(theme.ely.hover).text_color(theme.ely.fg))
-        .tooltip(move |window, cx| Tooltip::text(label, window, cx))
+        .tooltip(move |window, cx| tooltip_builder(label, window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -3313,6 +3345,7 @@ fn destructive_action_icon_button<F>(
     selector: &'static str,
     id: String,
     theme: Theme,
+    tooltip_builder: controls::TooltipBuilder,
     on_click: F,
 ) -> impl IntoElement
 where
@@ -3327,7 +3360,7 @@ where
         .text_size(theme.typography.scaled(12.5))
         .text_color(theme.ely.fg_muted)
         .hover(|style| style.text_color(theme.ely.danger))
-        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx);
@@ -5180,6 +5213,76 @@ mod tests {
                 .is_empty(),
             "the confirmed Discard runs after the refresh"
         );
+    }
+
+    /// Narrow sidebars must keep the whole action cluster visible and clickable,
+    /// including at the minimum width or a larger preferred interface font.
+    #[gpui::test]
+    async fn the_sidebar_diff_keeps_every_toolbar_action_inside_the_panel(
+        cx: &mut TestAppContext,
+    ) {
+        struct EmbeddedDiff {
+            tab: gpui::Entity<ChangesTab>,
+            width: f32,
+        }
+
+        impl Render for EmbeddedDiff {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(self.width))
+                    .h_full()
+                    .overflow_hidden()
+                    .child(self.tab.clone())
+            }
+        }
+
+        cx.update(Theme::init);
+        for (width, font_size) in [(320.0, 13), (220.0, 13), (320.0, 18)] {
+            cx.update(|cx| Theme::set_interface_font_size(font_size, cx));
+            let dir = TempDir::new();
+            clean_git_repo(&dir.0);
+            std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+            let tab = cx.new(|cx| ChangesTab::in_right_panel(dir.0.clone(), cx));
+            let tab_for_window = tab.clone();
+            let window = cx.add_window(|_, _| EmbeddedDiff {
+                tab: tab_for_window,
+                width,
+            });
+            let mut view = VisualTestContext::from_window(window.into(), cx);
+            wait_for_tab(&view, &tab, |tab| section_count(tab, "Changed") == 1);
+            let panel = view
+                .debug_bounds("changes-surface")
+                .expect("sidebar diff drawn");
+            let list = view.debug_bounds("changes-list").expect("diff list drawn");
+            for selector in [
+                "changes-view-mode-0",
+                "changes-view-mode-1",
+                "changes-refresh",
+                "changes-expand-all",
+                "changes-collapse-all",
+                "changes-stage-all",
+                "changes-discard-all",
+            ] {
+                let button = view.debug_bounds(selector).expect("toolbar action drawn");
+                assert!(
+                    button.left() >= panel.left()
+                        && button.right() <= panel.right()
+                        && button.bottom() <= list.top(),
+                    "{selector} must remain visible at {width}px and font {font_size}: \
+                     button={button:?}, panel={panel:?}, list={list:?}"
+                );
+            }
+            let discard = view
+                .debug_bounds("changes-discard-all")
+                .expect("Discard all drawn");
+            view.simulate_click(discard.center(), Modifiers::none());
+            assert!(
+                view.cx.has_pending_prompt(),
+                "the last toolbar action must take a click"
+            );
+            view.cx.simulate_prompt_answer("Cancel");
+            view.run_until_parked();
+        }
     }
 
     /// F-CHG-11: the section-level Stage all control is also a real drawn

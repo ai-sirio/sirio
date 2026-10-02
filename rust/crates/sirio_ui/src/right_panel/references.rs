@@ -101,7 +101,7 @@ impl EventEmitter<ReferencesEvent> for ReferencesList {}
 
 impl Render for ReferencesList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
 
         let (heading, body) = summary(&self.state);
 
@@ -146,7 +146,7 @@ impl Render for ReferencesList {
                 "right-panel-references-rows",
                 count,
                 cx.processor(move |_list, range: std::ops::Range<usize>, _window, cx| {
-                    let theme = *Theme::get(cx);
+                    let theme = Theme::get(cx).with_sidebar_typography();
                     range
                         .filter_map(|index| {
                             grouped.get(index).cloned().map(|entry| (index, entry))

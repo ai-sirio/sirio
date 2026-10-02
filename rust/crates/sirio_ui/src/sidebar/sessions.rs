@@ -514,7 +514,7 @@ impl Render for SessionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SessionRowView.render", self.inputs.index as u64);
         self.render_count = self.render_count.wrapping_add(1);
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         Sidebar::render_session_row(self.inputs.clone(), self.sidebar.clone(), theme, window, cx)
             .into_any_element()
     }

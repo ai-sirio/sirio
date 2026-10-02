@@ -4,7 +4,7 @@
 
 use super::*;
 use bezel::motion::{Fade, Painter};
-use bezel::ui::{popover, tooltip::Tooltip};
+use bezel::ui::popover;
 use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, uniform_list,
 };
@@ -441,6 +441,7 @@ impl RightPanel {
         let mut view = popover::popover_card(&bezel_theme)
             .id("file-context-menu")
             .debug_selector(|| "file-context-menu".to_owned())
+            .text_size(theme.typography.ui_size)
             .w(theme.spacing.menu_width);
 
         // `Open` is the one entry a directory must not offer: it emits
@@ -463,6 +464,7 @@ impl RightPanel {
                 .debug_selector(move || selector.to_owned())
                 .w_full()
                 .min_h(theme.spacing.titlebar_control_frame.height)
+                .text_size(theme.typography.ui_size)
                 .text_color(bezel_theme.text);
 
             row = match selector {
@@ -694,7 +696,7 @@ impl RightPanel {
             .when(read_error.is_some(), |this| {
                 this.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(theme.typography.scaled(12.0))
                         .text_color(theme.ely.danger)
                         .child("⚠"),
                 )
@@ -987,7 +989,7 @@ fn hidden_files_option(
         .text_color(if active { theme.ely.fg } else { theme.ely.fg_subtle })
         .when(active, |this| this.bg(theme.ely.active))
         .hover(|style| style.bg(theme.ely.hover))
-        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             ShowHiddenFilesSetting::set(show_hidden, cx);
             entity.update(cx, |_, cx| cx.notify());

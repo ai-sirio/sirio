@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 
 use bezel::motion::{Fade, Painter};
 use bezel::ui::popover::{self, Popup};
-use bezel::ui::tooltip::Tooltip;
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
@@ -180,7 +179,7 @@ pub struct SidebarTab {
 /// same number as `AppSettings::sidebar_width`'s default. Every fixture in
 /// this file's tests, and the demo sidebar, keep it: only the running shell
 /// pushes a different one, through [`Sidebar::set_panel_width`].
-const DEFAULT_SIDEBAR_WIDTH: f32 = 325.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
 /// Horizontal padding of one Projects/Sessions tab: bezel's `theme.tab()`.
 const VIEW_TAB_PAD_X: f32 = 10.0;
@@ -3153,6 +3152,7 @@ impl Sidebar {
         let mut card = popover::popover_card(&bezel_theme)
             .id("sidebar-context-menu")
             .debug_selector(|| "sidebar-context-menu".to_owned())
+            .text_size(theme.typography.ui_size)
             .w(px(280.0));
 
         for item in Self::context_menu_items(&target, &remote_tracking) {
@@ -3170,6 +3170,7 @@ impl Sidebar {
                     .debug_selector(move || selector.clone())
                     .w_full()
                     .min_h(px(29.0))
+                    .text_size(theme.typography.ui_size)
                     .justify_between()
                     .text_color(if enabled {
                         bezel_theme.text
@@ -3274,6 +3275,7 @@ impl Sidebar {
                 .flex_col()
                 .items_start()
                 .gap(theme.spacing.titlebar_control_spacing)
+                .text_size(theme.typography.ui_size)
                 .text_color(bezel_theme.text_faint)
                 .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
                 .child("Other agents…")
@@ -3294,6 +3296,7 @@ impl Sidebar {
                     bezel_theme,
                     painter,
                 )
+                .text_size(theme.typography.ui_size)
                 .on_click(on_choose(SidebarContextAction::NewChatAgent(id))),
             );
         }
@@ -3305,6 +3308,7 @@ impl Sidebar {
             )
             .id("sidebar-context-chat-other-agents")
             .debug_selector(|| "sidebar-context-chat-other-agents".to_owned())
+            .text_size(theme.typography.ui_size)
             .w_full()
             .min_h(px(29.0))
             .text_color(bezel_theme.text_faint)
@@ -3326,12 +3330,13 @@ impl Sidebar {
         let card = popover::popover_card(&bezel_theme)
             .id("add-project-menu")
             .debug_selector(|| "add-project-menu".to_owned())
+            .text_size(theme.typography.ui_size)
             .w(px(190.0))
             .child(Self::render_add_project_item(
                 entity.clone(),
                 "Open Project…",
                 "add-project-open",
-                &bezel_theme,
+                theme,
                 painter,
                 move |_, window, cx| {
                     open_entity.update(cx, |sidebar, cx| sidebar.start_open_project(window, cx))
@@ -3341,7 +3346,7 @@ impl Sidebar {
                 entity.clone(),
                 "Clone Repository…",
                 "add-project-clone",
-                &bezel_theme,
+                theme,
                 painter,
                 move |_, _, cx| {
                     clone_entity.update(cx, |sidebar, cx| sidebar.start_clone_project(cx))
@@ -3351,7 +3356,7 @@ impl Sidebar {
                 entity.clone(),
                 "Create Project…",
                 "add-project-create",
-                &bezel_theme,
+                theme,
                 painter,
                 move |_, _, cx| {
                     create_entity.update(cx, |sidebar, cx| sidebar.start_create_project(cx))
@@ -3371,16 +3376,18 @@ impl Sidebar {
         entity: gpui::Entity<Self>,
         label: &'static str,
         selector: &'static str,
-        theme: &bezel::theme::Theme,
+        theme: Theme,
         painter: Painter,
         action: impl Fn(gpui::Entity<Self>, &mut Window, &mut gpui::App) + 'static,
     ) -> impl IntoElement {
-        popover::menu_row(theme, false, Fade::new(painter, selector))
+        let bezel_theme = theme.to_bezel_theme();
+        popover::menu_row(&bezel_theme, false, Fade::new(painter, selector))
             .id(selector)
             .debug_selector(|| selector.to_owned())
             .w_full()
             .min_h(px(29.0))
-            .text_color(theme.text)
+            .text_size(theme.typography.ui_size)
+            .text_color(bezel_theme.text)
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
             .child(label)
     }
@@ -3405,6 +3412,7 @@ impl Sidebar {
         )
         .id("worktree-close-item-remove-disk")
         .debug_selector(|| "worktree-close-item-remove-disk".to_owned())
+        .text_size(theme.typography.ui_size)
         .w_full()
         .min_h(px(29.0))
         .text_color(bezel_theme.text)
@@ -3422,6 +3430,7 @@ impl Sidebar {
         )
         .id("worktree-close-item-remove-remote-and-disk")
         .debug_selector(|| "worktree-close-item-remove-remote-and-disk".to_owned())
+        .text_size(theme.typography.ui_size)
         .w_full()
         .min_h(px(29.0))
         .justify_between()
@@ -3450,6 +3459,7 @@ impl Sidebar {
         let card = popover::popover_card(&bezel_theme)
             .id("worktree-close-menu")
             .debug_selector(|| "worktree-close-menu".to_owned())
+            .text_size(theme.typography.ui_size)
             .w(px(280.0))
             .child(
                 div()
@@ -3640,14 +3650,14 @@ fn header_icon_button(
         .justify_center()
         .cursor_pointer()
         .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
-        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
         .child(IconElement::new(icon, IconSize::Small).text_color(theme.ely.fg_subtle))
 }
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("Sidebar.render", cx.entity_id().as_u64());
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         // Production installs bezel alongside Sirio's theme. Some isolated
         // sidebar fixtures set only the Sirio global, so establish the same
         // invariant lazily before the tree or a popup reads bezel's palette.
@@ -3967,6 +3977,7 @@ impl Render for Sidebar {
             .flex_col()
             .w(px(panel_width))
             .h_full()
+            .text_size(theme.typography.scaled(16.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
             .border_r_1()

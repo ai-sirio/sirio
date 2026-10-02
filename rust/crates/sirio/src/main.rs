@@ -17990,7 +17990,7 @@ impl SirioWorkspace {
         });
         // Same push for the sidebar, and it is not optional: its rows are
         // laid out to an explicit width, so without this they keep the
-        // default 325 and the panel's `overflow_hidden` silently cuts
+        // default width and the panel's `overflow_hidden` silently cuts
         // whatever the drag took away.
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_panel_width(left_width.unwrap_or(0.0), cx);
@@ -36372,9 +36372,8 @@ done
 
         // Start from widths that fit, so rendered == preferred and the assertion
         // below measures the drag rather than the viewport clamp. The gpui test
-        // window is 1024 wide (budget 688); the shipped defaults are 325 + 405 =
-        // 730, which the resolver would correctly narrow — and then `before`
-        // would not be the preference this drag is moving.
+        // window is 1024 wide (budget 688); this fixture gives the drag
+        // enough room to widen the right panel without invoking the clamp.
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.sidebar_width = 280.0;
             workspace.right_panel_width = 300.0;
@@ -36564,6 +36563,8 @@ done
                 .flatten()
                 .expect("workspace root")
         });
+        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
+        let initial_width = session.load_settings().right_panel_width;
 
         for width in [420.0, 440.0, 460.0] {
             workspace.update(&mut cx.cx, |workspace, cx| {
@@ -36573,10 +36574,9 @@ done
         }
         cx.run_until_parked();
 
-        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
         assert_eq!(
             session.load_settings().right_panel_width,
-            405,
+            initial_width,
             "nothing is written while the drag is still moving"
         );
 

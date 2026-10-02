@@ -495,6 +495,19 @@ fn migrate_v20(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v21 — compact side-panel defaults for existing installations.
+///
+/// Only the previous defaults move. Running this once as a migration lets
+/// a later resize choose those same widths without having them reset on open.
+fn migrate_v21(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "UPDATE setting SET value = '280'
+         WHERE key = 'appearance.sidebarWidth' AND value = '325';
+         UPDATE setting SET value = '320'
+         WHERE key = 'appearance.rightPanelWidth' AND value = '405';",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -518,6 +531,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v18,
     migrate_v19,
     migrate_v20,
+    migrate_v21,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -592,6 +606,69 @@ fn read_user_version(conn: &Connection) -> Result<i64, PersistenceError> {
 mod tests {
     use super::*;
     use crate::{AgentRef, AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
+
+    #[test]
+    fn compact_panel_migration_updates_only_the_previous_defaults() {
+        for (left, right, expected_left, expected_right) in [
+            ("325", "405", "280", "320"),
+            ("310", "460", "310", "460"),
+            ("325", "460", "280", "460"),
+            ("310", "405", "310", "320"),
+        ] {
+            let mut conn = Connection::open_in_memory().expect("open database");
+            migrate_up_to(&mut conn, 20).expect("migrate to the previous schema");
+            conn.execute(
+                "INSERT INTO setting (key, value) VALUES ('appearance.sidebarWidth', ?1)",
+                [left],
+            )
+            .expect("save left panel preference");
+            conn.execute(
+                "INSERT INTO setting (key, value) VALUES ('appearance.rightPanelWidth', ?1)",
+                [right],
+            )
+            .expect("save right panel preference");
+
+            migrate(&mut conn).expect("upgrade existing settings");
+
+            for (key, expected) in [
+                ("appearance.sidebarWidth", expected_left),
+                ("appearance.rightPanelWidth", expected_right),
+            ] {
+                let saved: String = conn
+                    .query_row("SELECT value FROM setting WHERE key = ?1", [key], |row| {
+                        row.get(0)
+                    })
+                    .expect("read migrated preference");
+                assert_eq!(saved, expected, "panel preferences {left}/{right}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn compact_panel_migration_does_not_reset_a_later_resize() {
+        let mut conn = Connection::open_in_memory().expect("open database");
+        migrate_up_to(&mut conn, 20).expect("migrate to the previous schema");
+        migrate(&mut conn).expect("upgrade existing settings");
+        conn.execute_batch(
+            "INSERT INTO setting (key, value) VALUES ('appearance.sidebarWidth', '325');
+             INSERT INTO setting (key, value) VALUES ('appearance.rightPanelWidth', '405');",
+        )
+        .expect("resize panels after the upgrade");
+
+        migrate(&mut conn).expect("open the upgraded database again");
+
+        for (key, expected) in [
+            ("appearance.sidebarWidth", "325"),
+            ("appearance.rightPanelWidth", "405"),
+        ] {
+            let saved: String = conn
+                .query_row("SELECT value FROM setting WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .expect("read the user's new preference");
+            assert_eq!(saved, expected, "a subsequent open keeps {key}");
+        }
+    }
 
     #[test]
     fn positional_worktree_ids_are_rekeyed_with_their_references() {
