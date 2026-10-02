@@ -281,6 +281,7 @@ impl RenderOnce for ThinkingDuration {
 pub struct ThinkingIndicator {
     id: ElementId,
     label: SharedString,
+    glyph: Option<gpui::AnyElement>,
 }
 
 impl ThinkingIndicator {
@@ -288,6 +289,7 @@ impl ThinkingIndicator {
         Self {
             id: id.into(),
             label: "Thinking".into(),
+            glyph: None,
         }
     }
 
@@ -296,20 +298,28 @@ impl ThinkingIndicator {
         self.label = label.into();
         self
     }
+
+    /// A host-owned glyph in place of the sparkles.
+    pub fn glyph(mut self, glyph: impl IntoElement) -> Self {
+        self.glyph = Some(glyph.into_any_element());
+        self
+    }
 }
 
 impl RenderOnce for ThinkingIndicator {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let glyph = self.glyph.unwrap_or_else(|| {
+            Icon::new(IconName::Sparkles)
+                .size(IconSize::Sm)
+                .color(colors.fg_subtle)
+                .into_any_element()
+        });
         div()
             .flex()
             .items_center()
             .gap_1p5()
-            .child(
-                Icon::new(IconName::Sparkles)
-                    .size(IconSize::Sm)
-                    .color(colors.fg_subtle),
-            )
+            .child(glyph)
             .child(ShimmerText::new(self.id, self.label))
     }
 }
@@ -325,6 +335,7 @@ pub struct ThinkingBlock {
     controlled: Option<(bool, crate::expansion::Toggle)>,
     header_selector: Option<SharedString>,
     label: Option<SharedString>,
+    thinking_glyph: Option<gpui::AnyElement>,
 }
 
 impl ThinkingBlock {
@@ -344,6 +355,7 @@ impl ThinkingBlock {
             controlled: None,
             header_selector: None,
             label: None,
+            thinking_glyph: None,
         }
     }
     pub fn body(mut self, body: impl IntoElement) -> Self {
@@ -367,6 +379,12 @@ impl ThinkingBlock {
         self.label = Some(label.into());
         self
     }
+    /// A host-owned glyph for the header while thinking; see
+    /// `ThinkingIndicator::glyph`.
+    pub fn thinking_glyph(mut self, glyph: impl IntoElement) -> Self {
+        self.thinking_glyph = Some(glyph.into_any_element());
+        self
+    }
 }
 
 impl RenderOnce for ThinkingBlock {
@@ -375,7 +393,11 @@ impl RenderOnce for ThinkingBlock {
         let theme = cx.theme();
         let colors = theme.colors;
         let header: gpui::AnyElement = if self.thinking {
-            ThinkingIndicator::new((self.id.clone(), "thinking")).into_any_element()
+            let mut indicator = ThinkingIndicator::new((self.id.clone(), "thinking"));
+            if let Some(glyph) = self.thinking_glyph {
+                indicator = indicator.glyph(glyph);
+            }
+            indicator.into_any_element()
         } else if let Some(label) = self.label {
             div()
                 .text_color(colors.fg_muted)

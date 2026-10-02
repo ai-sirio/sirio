@@ -70,6 +70,12 @@ physical Wayland session and native macOS/Windows input are unverified.
   selectors preserve virtualized interaction. Tool groups accept reported
   status, and thoughts accept an honest label when no duration was measured.
   The default Gallery constructors retain their original uncontrolled behavior.
+  `ThinkingIndicator::glyph` and `ThinkingBlock::thinking_glyph` take a
+  host-owned glyph in place of the sparkles, so Sirio keeps its Cluster orb;
+  without one the indicator draws its original icon.
+- `chat/composer.rs`: the stop control is `Primary`, like send, instead of
+  `Secondary`; on the custom shell's sunken fill a Secondary button's fill and
+  border all but match the card, leaving only a thin outlined square.
 
 - `agent/permission.rs`, `agent/control.rs`: custom request constructors plus
   rich body/action slots render only protocol-supplied controls. Human custom

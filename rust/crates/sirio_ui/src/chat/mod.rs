@@ -6059,6 +6059,11 @@ impl Render for Chat {
         let theme = *Theme::get(cx);
         let transcript_theme = theme;
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        // Built before the element tree borrows `cx`: the Cluster orb leases
+        // the shared animation clock through the view being rendered.
+        let generating_orb = self
+            .streaming
+            .then(|| crate::loading::thinking_indicator("chat-generating-orb", &theme, window, cx));
         // The row processor outlives this frame, so it owns a clone; the
         // transient spinner below borrows the original.
         let row_bezel_theme = bezel_theme.clone();
@@ -6347,26 +6352,33 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
             // be spliced in and out every turn and could be persisted or
             // duplicated. Living outside the list makes "never part of the
             // transcript" structural instead of a rule to maintain.
-            .when(self.streaming, |this| {
+            .when_some(generating_orb, |this, orb| {
                 this.child(
                     div()
                         .id("chat-generating-spinner")
                         .debug_selector(|| "chat-generating-spinner".into())
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
-                        // The transcript's own side padding: the row starts on
-                        // the text column, not at the box's edge.
-                        .px(px(24.0))
+                        // Near the composer card's left edge rather than on
+                        // the transcript's text column, and lifted off the
+                        // card's top border: it reads as the run's status,
+                        // not as the start of the next transcript row.
+                        .pl(px(4.0))
                         .pt(px(6.0))
-                        // The transient row is the thought header itself — orb,
-                        // `Thinking`, same paddings — so a run in progress has one
-                        // shape whether or not a thought has arrived.
+                        .pb(px(8.0))
+                        // The transient row is the thought header's indicator —
+                        // orb, `Thinking` — so a run in progress has one shape
+                        // whether or not a thought has arrived.
                         .child(
                             div()
+                                .self_start()
                                 .debug_selector(|| "chat-generating-indicator".into())
-                                .child(ely_gpui_component::chat::ThinkingIndicator::new(
-                                    "chat-generating-indicator",
-                                )),
+                                .child(
+                                    ely_gpui_component::chat::ThinkingIndicator::new(
+                                        "chat-generating-indicator",
+                                    )
+                                    .glyph(orb),
+                                ),
                         ),
                 )
             })

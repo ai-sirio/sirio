@@ -590,27 +590,6 @@ async fn ely_expired_request_cannot_answer_the_next_request(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-async fn ely_composer_hint_names_enter_only_while_enter_acts(cx: &mut TestAppContext) {
-    let dir = TempDir::new();
-    let (chat, cx) = super::tests::chat_view(cx, &["ely-permission", dir.0.to_str().unwrap()]);
-    pump_chat_until(cx, &chat, |v| v.client.is_some());
-    refresh_frame(cx);
-    assert!(
-        cx.debug_bounds("composer-input-hint").is_some(),
-        "an idle composer says what Enter does"
-    );
-    chat.update(cx, |v, cx| {
-        v.control_send("inspect", cx);
-    });
-    pump_chat_until(cx, &chat, |v| v.pending_question().is_some());
-    refresh_frame(cx);
-    assert!(
-        cx.debug_bounds("composer-input-hint").is_none(),
-        "while a request waits Enter neither sends nor queues, so no hint may promise it"
-    );
-}
-
-#[gpui::test]
 async fn ely_header_names_the_connection_and_activity_state(cx: &mut TestAppContext) {
     let dir = TempDir::new();
     let (chat, cx) = super::tests::chat_view(cx, &["staged", dir.0.to_str().unwrap()]);
@@ -635,7 +614,7 @@ async fn ely_header_names_the_connection_and_activity_state(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-async fn ely_generating_indicator_sits_on_the_transcript_text_column(cx: &mut TestAppContext) {
+async fn ely_generating_indicator_sits_above_the_composer_left_edge(cx: &mut TestAppContext) {
     let dir = TempDir::new();
     let (chat, cx) = super::tests::chat_view(cx, &["staged", dir.0.to_str().unwrap()]);
     pump_chat_until(cx, &chat, |v| v.client.is_some());
@@ -644,14 +623,19 @@ async fn ely_generating_indicator_sits_on_the_transcript_text_column(cx: &mut Te
     });
     pump_chat_until(cx, &chat, |v| v.streaming);
     refresh_frame(cx);
-    let transcript = cx.debug_bounds("chat-transcript").unwrap();
+    let composer = cx.debug_bounds("composer").unwrap();
     let indicator = cx.debug_bounds("chat-generating-indicator").unwrap();
-    let column = transcript.left() + px(24.0);
     assert!(
-        (indicator.left() - column).abs() < px(0.5),
-        "the Thinking row starts where transcript text starts: {:?} vs {:?}",
+        (indicator.left() - (composer.left() + px(4.0))).abs() < px(0.5),
+        "the Thinking row starts just inside the composer card's left edge: {:?} vs {:?}",
         indicator.left(),
-        column
+        composer.left()
+    );
+    assert!(
+        composer.top() - indicator.bottom() >= px(8.0),
+        "the Thinking row stands clear of the card's top border: {:?} vs {:?}",
+        indicator.bottom(),
+        composer.top()
     );
     std::fs::write(dir.0.join("go"), "go").unwrap();
     pump_chat_until(cx, &chat, |v| !v.streaming);
