@@ -579,7 +579,7 @@ impl Sidebar {
                         .debug_selector(move || format!("{prefix}-idle-{index}"))
                         .flex_none()
                         .text_size(theme.typography.scaled(11.0))
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("idle")
                         .into_any_element()
                 }),
@@ -598,9 +598,9 @@ impl Sidebar {
             .flex_col()
             .justify_center()
             .gap(px(ROW_GAP))
-            .when(row.selected, |this| this.bg(theme.element_active))
-            .when(!row.selected, |this| this.hover(|style| style.bg(theme.element_hover)))
-            .when(cursor, |this| this.border_1().border_color(theme.accent))
+            .when(row.selected, |this| this.bg(theme.ely.active))
+            .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
+            .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
             .on_click(move |_, window, cx| {
                 let event = match &select_target {
                     SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
@@ -644,7 +644,7 @@ impl Sidebar {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(theme.typography.scaled(ROW_TITLE_FONT_SIZE))
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(row.title.clone()),
                     )
                     .when_some(status, |this, status| this.child(status))
@@ -662,12 +662,12 @@ impl Sidebar {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(row.project.clone()),
                     )
                     .child(
                         IconElement::new(Icon::GitBranch, IconSize::XSmall)
-                            .text_color(theme.text_faint),
+                            .text_color(theme.ely.fg_subtle),
                     )
                     .child(
                         div()
@@ -676,7 +676,7 @@ impl Sidebar {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(row.branch.clone()),
                     )
                     .child(
@@ -684,7 +684,7 @@ impl Sidebar {
                             .debug_selector(move || format!("{prefix}-time-{index}"))
                             .flex_none()
                             .text_size(theme.typography.scaled(11.5))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .group_hover(group.clone(), |style| style.invisible())
                             .child(time),
                     ),
@@ -705,9 +705,9 @@ impl Sidebar {
                         .bottom(px(4.0))
                         .px(px(6.0))
                         .rounded(theme.radii.chip)
-                        .bg(theme.surface_raised)
+                        .bg(theme.ely.surface)
                         .text_size(theme.typography.scaled(11.5))
-                        .text_color(theme.danger)
+                        .text_color(theme.ely.danger)
                         .on_mouse_down_out(move |_, _, cx| {
                             disarm_entity.update(cx, |sidebar, cx| {
                                 if sidebar.armed_delete.take().is_some() {
@@ -735,7 +735,7 @@ impl Sidebar {
                         .items_center()
                         .justify_center()
                         .rounded(theme.radii.chip)
-                        .bg(theme.surface_raised)
+                        .bg(theme.ely.surface)
                         .invisible()
                         .group_hover(group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
@@ -746,7 +746,7 @@ impl Sidebar {
                         .child(
                             bezel::ui::icons::icon(bezel::ui::icons::TRASH_BIN_MINIMALISTIC)
                                 .size(px(14.0))
-                                .text_color(theme.danger),
+                                .text_color(theme.ely.danger),
                         )
                         .into_any_element()
                 })
@@ -768,7 +768,7 @@ impl Sidebar {
                             .items_center()
                             .justify_center()
                             .rounded(theme.radii.chip)
-                            .bg(theme.surface_raised)
+                            .bg(theme.ely.surface)
                             .invisible()
                             .group_hover(group.clone(), |style| style.visible())
                             .on_click(move |_, _, cx| {
@@ -792,7 +792,7 @@ impl Sidebar {
                             })
                             .child(
                                 IconElement::new(Icon::Close, IconSize::XSmall)
-                                    .text_color(theme.text_muted),
+                                    .text_color(theme.ely.fg_muted),
                             ),
                     )
                 },

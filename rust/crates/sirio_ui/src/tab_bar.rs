@@ -200,7 +200,7 @@ pub(crate) fn chat_agent_row(
     let label_id = format!("{selector}-label");
     let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
     let mut mark = IconElement::new(icon, IconSize::Small);
-    if let Some(tint) = icon.agent_mark_color(theme.text) {
+    if let Some(tint) = icon.agent_mark_color(theme.ely.fg) {
         mark = mark.text_color(tint);
     }
     popover::menu_row(bezel_theme, false, Fade::new(painter, selector.clone()))
@@ -402,11 +402,11 @@ impl TabBar {
         chevron: bool,
     ) -> impl IntoElement {
         let (icon, glyph_color) = match label {
-            "New Terminal" => (Icon::SquareTerminal, theme.text_faint),
-            "Changes" => (Icon::File, theme.text_faint),
-            "New Browser" => (Icon::Globe, theme.text_faint),
-            "New Chat" => (Icon::MessageSquare, theme.text_faint),
-            _ => (Icon::File, theme.text_faint),
+            "New Terminal" => (Icon::SquareTerminal, theme.ely.fg_subtle),
+            "Changes" => (Icon::File, theme.ely.fg_subtle),
+            "New Browser" => (Icon::Globe, theme.ely.fg_subtle),
+            "New Chat" => (Icon::MessageSquare, theme.ely.fg_subtle),
+            _ => (Icon::File, theme.ely.fg_subtle),
         };
 
         popover::menu_row(
@@ -441,9 +441,9 @@ impl TabBar {
             )
             .when(chevron, |this| {
                 this.child(
-                    div().text_color(theme.text_faint).child(
+                    div().text_color(theme.ely.fg_subtle).child(
                         IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.text_faint),
+                            .text_color(theme.ely.fg_subtle),
                     ),
                 )
             })
@@ -485,12 +485,12 @@ impl TabBar {
                             .justify_center()
                             .child(
                                 IconElement::new(Icon::MessageSquare, IconSize::Small)
-                                    .text_color(theme.text),
+                                    .text_color(theme.ely.fg),
                             ),
                     )
                     .child(text!(id = "new-tab-label-New Chat", "New Chat")),
             )
-            .child(div().text_color(theme.text_faint).child(IconElement::new(
+            .child(div().text_color(theme.ely.fg_subtle).child(IconElement::new(
                 if expanded {
                     Icon::ChevronDown
                 } else {
@@ -545,7 +545,7 @@ impl TabBar {
             .child(
                 div()
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("No supported agent found on PATH"),
             )
     }
@@ -576,7 +576,7 @@ impl TabBar {
             .h(px(29.0))
             .mt(theme.spacing.titlebar_control_spacing)
             .border_t_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .text_color(bezel_theme.text_faint)
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
@@ -711,8 +711,8 @@ impl Render for TabBar {
             .justify_center()
             .rounded(theme.radii.control)
             .text_size(px(14.0))
-            .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(theme.ely.fg_subtle)
+            .hover(|style| style.bg(theme.ely.hover))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, _| {
                 this.menu_open.note_trigger_press();
             }))
@@ -757,7 +757,7 @@ impl Render for TabBar {
                 .absolute()
                 .size_full(),
             )
-            .child(IconElement::new(Icon::Plus, IconSize::Small).text_color(theme.text));
+            .child(IconElement::new(Icon::Plus, IconSize::Small).text_color(theme.ely.fg));
 
         if menu_open {
             let anchor = self
@@ -782,7 +782,7 @@ impl Render for TabBar {
             .h(px(HEIGHT))
             .flex()
             .items_center()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .child(
                 div()
                     .flex_1()

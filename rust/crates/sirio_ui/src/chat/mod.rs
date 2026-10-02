@@ -10,7 +10,7 @@ use gpui::{
     DragMoveEvent, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
     Focusable, FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
+    Hsla, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, ScrollHandle,
     SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
     quad, relative, transparent_black,
 };
@@ -39,11 +39,9 @@ use std::rc::Rc;
 use crate::caret;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
-mod ely;
 #[cfg(test)]
 mod ely_tests;
-mod identity;
-pub use ely::ChatAssets;
+pub(crate) mod identity;
 mod composer_view;
 mod controls;
 mod history;
@@ -78,7 +76,7 @@ fn highlight_markdown_code(
 /// blocks. The renderer remains usable without this registration and simply
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {
-    ely::init(cx);
+    crate::ely::init(cx);
     markdown::set_highlighter(
         cx,
         highlight_markdown_code,
@@ -1602,7 +1600,7 @@ struct TranscriptSelectableText {
     text: StyledText,
     source_range: Range<usize>,
     interaction: TranscriptInteraction,
-    selection_fill: Rgba,
+    selection_fill: Hsla,
     links: Vec<(Range<usize>, String)>,
     pressed_index: Rc<Cell<Option<usize>>>,
 }
@@ -1613,7 +1611,7 @@ impl TranscriptSelectableText {
         text: StyledText,
         source_range: Range<usize>,
         interaction: TranscriptInteraction,
-        selection_fill: Rgba,
+        selection_fill: Hsla,
         links: Vec<(Range<usize>, String)>,
     ) -> Self {
         Self {
@@ -1670,7 +1668,7 @@ pub(crate) fn paint_wrapped_span(
     layout: &gpui::TextLayout,
     bounds: Bounds<Pixels>,
     span: Range<usize>,
-    color: Rgba,
+    color: Hsla,
     window: &mut Window,
     mut on_quad: impl FnMut(Bounds<Pixels>),
 ) {
@@ -5349,7 +5347,7 @@ impl Chat {
                 .debug_selector(|| "question-answer-caret".into())
                 .child(caret::bar(
                     typography.body_line_height,
-                    theme.text,
+                    theme.ely.fg,
                     caret_visible,
                 ))
                 .into_any_element()
@@ -5368,12 +5366,12 @@ impl Chat {
             .flex_1()
             .min_w_0()
             .rounded(theme.radii.control)
-            .bg(theme.surface_raised)
+            .bg(theme.ely.surface)
             .border_1()
             .border_color(if question_answer.for_request == Some(request_id) {
-                theme.text
+                theme.ely.fg
             } else {
-                theme.border
+                theme.ely.border
             })
             .text_size(typography.headline)
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
@@ -5391,13 +5389,13 @@ impl Chat {
             .child(
                 if question_answer.draft.is_empty() {
                     caret::field_placeholder(
-                        div().text_color(theme.text_faint).child(placeholder),
+                        div().text_color(theme.ely.fg_subtle).child(placeholder),
                         Some(answer_caret()),
                     )
                 } else {
                     caret::field_value(
                         div()
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(question_answer.draft.clone()),
                     )
                 }
@@ -5421,7 +5419,7 @@ impl Chat {
                 styled,
                 source_start..source_start + text.len(),
                 interaction.clone(),
-                theme.element_active,
+                theme.ely.active,
                 Vec::new(),
             )
             .into_any_element()
@@ -5500,21 +5498,21 @@ impl Chat {
             // stay theme-wide and out of this task's `chat.rs`-only scope),
             // so the wash is built locally from the same solid colour.
             let (prefix, text_color, background) = match line {
-                DiffLine::Context { .. } => (" ", theme.text, None),
+                DiffLine::Context { .. } => (" ", theme.ely.fg, None),
                 DiffLine::Removed { .. } => (
                     "-",
-                    theme.diff_del,
-                    Some(Rgba {
+                    theme.sirio.diff_del,
+                    Some(Hsla {
                         a: 0.10,
-                        ..theme.diff_del
+                        ..theme.sirio.diff_del
                     }),
                 ),
                 DiffLine::Added { .. } => (
                     "+",
-                    theme.diff_add,
-                    Some(Rgba {
+                    theme.sirio.diff_add,
+                    Some(Hsla {
                         a: 0.10,
-                        ..theme.diff_add
+                        ..theme.sirio.diff_add
                     }),
                 ),
             };
@@ -5545,7 +5543,7 @@ impl Chat {
                         .expect("selection present in this arm")
                         .interaction
                         .clone(),
-                    theme.element_active,
+                    theme.ely.active,
                     Vec::new(),
                 )
                 .into_any_element(),
@@ -5581,7 +5579,7 @@ impl Chat {
                                 .pr(px(4.0))
                                 .flex()
                                 .justify_end()
-                                .text_color(theme.text_faint)
+                                .text_color(theme.ely.fg_subtle)
                                 .child(old_number),
                         )
                         .child(
@@ -5590,7 +5588,7 @@ impl Chat {
                                 .pr(px(8.0))
                                 .flex()
                                 .justify_end()
-                                .text_color(theme.text_faint)
+                                .text_color(theme.ely.fg_subtle)
                                 .child(new_number),
                         ),
                 )
@@ -5612,7 +5610,7 @@ impl Chat {
                 div()
                     .min_w_full()
                     .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .px(px(10.0))
                     .child(format!("… {} more lines", total - DIFF_PREVIEW_MAX_LINES)),
             );
@@ -5625,7 +5623,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(theme.input_bg)
+            .bg(theme.ely.sunken)
             .py(px(6.0))
             .child(
                 div()
@@ -5636,9 +5634,9 @@ impl Chat {
                     .gap(px(5.0))
                     .text_size(typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.file_link)
+                    .text_color(theme.ely.link)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.text_color(theme.text))
+                    .hover(|style| style.text_color(theme.ely.fg))
                     .px(px(10.0))
                     .pb(px(4.0))
                     .on_click(move |_, _, cx| {
@@ -5647,7 +5645,7 @@ impl Chat {
                         });
                     })
                     .child(
-                        IconElement::new(Icon::File, IconSize::Small).text_color(theme.file_link),
+                        IconElement::new(Icon::File, IconSize::Small).text_color(theme.ely.link),
                     )
                     .child(
                         div()
@@ -5665,10 +5663,10 @@ impl Chat {
                             .flex()
                             .flex_shrink_0()
                             .gap(px(6.0))
-                            .child(div().text_color(theme.diff_add).child(format!("+{added}")))
+                            .child(div().text_color(theme.sirio.diff_add).child(format!("+{added}")))
                             .child(
                                 div()
-                                    .text_color(theme.diff_del)
+                                    .text_color(theme.sirio.diff_del)
                                     .child(format!("-{removed}")),
                             ),
                     ),
@@ -5696,14 +5694,14 @@ impl Chat {
             .flex_col()
             .gap(px(6.0))
             .rounded(theme.radii.code_block)
-            .bg(theme.surface_raised)
+            .bg(theme.ely.surface)
             .px(px(CARD_H_PADDING))
             .py(px(CARD_V_PADDING))
             .child(
                 div()
                     .text_size(typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(if diffs.len() == 1 {
                         "1 file changed".to_string()
                     } else {
@@ -5732,9 +5730,9 @@ impl Chat {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(typography.footnote)
-                    .text_color(theme.file_link)
+                    .text_color(theme.ely.link)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.text_color(theme.text))
+                    .hover(|style| style.text_color(theme.ely.fg))
                     .on_click(move |_, _, cx| {
                         open_entity.update(cx, |_, cx| {
                             cx.emit(ChatEvent::OpenFile(open_path.clone()));
@@ -5749,7 +5747,7 @@ impl Chat {
                         .debug_selector(move || format!("edit-summary-reverted-{entry}-{index}"))
                         .flex_shrink_0()
                         .text_size(typography.caption2)
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("reverted"),
                 );
             } else if confirming {
@@ -5763,8 +5761,8 @@ impl Chat {
                             .py(px(4.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(theme.danger)
-                            .hover(|style| style.bg(theme.overlay))
+                            .text_color(theme.ely.danger)
+                            .hover(|style| style.bg(theme.sirio.overlay))
                             .on_click(move |_, _, cx| {
                                 confirm_entity.update(cx, |chat, cx| {
                                     chat.confirm_edit_revert(entry, confirm_path.clone(), cx);
@@ -5781,8 +5779,8 @@ impl Chat {
                             .py(px(4.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .hover(|style| style.bg(theme.overlay))
+                            .text_color(theme.ely.fg_subtle)
+                            .hover(|style| style.bg(theme.sirio.overlay))
                             .on_click(move |_, _, cx| {
                                 cancel_entity.update(cx, |chat, cx| {
                                     chat.cancel_edit_revert(entry, cx);
@@ -5801,11 +5799,11 @@ impl Chat {
                         .rounded(theme.radii.control)
                         .text_size(typography.footnote)
                         .text_color(if reverting {
-                            theme.text_faint
+                            theme.ely.fg_subtle
                         } else {
-                            theme.danger
+                            theme.ely.danger
                         })
-                        .hover(|style| style.bg(theme.overlay))
+                        .hover(|style| style.bg(theme.sirio.overlay))
                         .on_click(move |_, _, cx| {
                             if !reverting {
                                 request_entity.update(cx, |chat, cx| {
@@ -5824,7 +5822,7 @@ impl Chat {
                     .id(("edit-summary-error", entry))
                     .debug_selector(move || format!("edit-summary-error-{entry}"))
                     .text_size(typography.caption2)
-                    .text_color(theme.danger)
+                    .text_color(theme.ely.danger)
                     .child(error),
             );
         }
@@ -5857,16 +5855,16 @@ impl Chat {
             .px(px(8.0))
             .py(px(6.0))
             .rounded(theme.radii.code_block)
-            .bg(theme.surface_raised)
+            .bg(theme.ely.surface)
             .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.bg(theme.overlay))
+            .hover(|style| style.bg(theme.sirio.overlay))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |chat, cx| {
                     chat.toggle_turn_unfolded(turn_id, cx);
                 });
             })
             .child(
-                IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.text_faint),
+                IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.ely.fg_subtle),
             )
             .child(
                 div()
@@ -5876,7 +5874,7 @@ impl Chat {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(format!("Turn: {label}")),
             )
             .child(
@@ -5885,7 +5883,7 @@ impl Chat {
                     .debug_selector(move || at_selector.clone())
                     .flex_shrink_0()
                     .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(at),
             )
             .into_any_element()
@@ -6048,7 +6046,7 @@ fn slash_option_tooltip(description: &str) -> Option<SharedString> {
 
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        ely::sync_theme_if_changed(cx);
+        crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
         // Read before any loader renews this view's Bezel lease.
         if sirio_perf::enabled() && bezel::motion::Painter::of(cx).woken(cx) {
@@ -6105,7 +6103,7 @@ impl Render for Chat {
             .flex()
             .flex_col()
             .items_center()
-            .bg(theme.surface_raised)
+            .bg(theme.ely.surface)
             .on_action(cx.listener(Self::send_action))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::copy_transcript))
@@ -6421,7 +6419,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                 // `ExternalPaths` drag sits over the pane. Not drawn at all
                 // while the composer can't accept input, matching the
                 // top-level `on_drop` binding just above.
-                let marker = theme.text;
+                let marker = theme.ely.fg;
                 let overlay = div()
                     .id("chat-drop-overlay")
                     .debug_selector(|| "chat-drop-overlay".into())
@@ -6434,12 +6432,12 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                     .rounded(theme.radii.composer)
                     .border_1()
                     .border_color(marker)
-                    .bg(theme.overlay)
+                    .bg(theme.sirio.overlay)
                     .child(
                         div()
                             .id("chat-drop-overlay-label")
                             .debug_selector(|| "chat-drop-overlay-label".into())
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child("Drop files to attach"),
                     );
                 if can_accept_drop {
@@ -6947,7 +6945,7 @@ fn picker_chevron(theme: &Theme) -> impl IntoElement {
         .flex_none()
         .items_center()
         .justify_center()
-        .child(IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.text_faint))
+        .child(IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.ely.fg_subtle))
 }
 
 #[cfg(test)]

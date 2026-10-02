@@ -10,16 +10,14 @@ mod media;
 mod messaging;
 mod misc;
 mod onboarding;
-mod palette;
 mod platform;
 mod project;
-mod syntax;
 mod tokens;
 mod tooling;
 
 use std::time::Duration;
 
-use gpui::{App, Global, Pixels, SharedString, WindowAppearance};
+use gpui::{App, Global, Pixels, SharedString};
 use web_time::Instant;
 
 use crate::motion;
@@ -35,10 +33,12 @@ pub use media::MediaSizes;
 pub use messaging::MessagingSizes;
 pub use misc::MiscSizes;
 pub use onboarding::OnboardingSizes;
-pub use palette::{HUE_NAMES, Mix, Palette, Syntax};
+pub use ely_palette::{HUE_NAMES, Mix, Mode, Palette, Syntax, SyntaxTheme, syntax_themes};
+// The palette module's own name, kept so `palette::…` paths in this module
+// and its children resolve as they did upstream.
+use ely_palette as palette;
 pub use platform::Platform;
 pub use project::ProjectSizes;
-pub use syntax::{SyntaxTheme, syntax_themes};
 pub use tokens::{
     AvatarSize, ContainerSize, ControlSize, Density, Elevation, IconSize, Radius, TextSize,
 };
@@ -46,19 +46,16 @@ pub use tooling::ToolingSizes;
 
 const FRAME: Duration = Duration::from_millis(8);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
-    #[default]
-    Light,
-    Dark,
-}
+#[cfg(test)]
+mod palette_copy_tests {
+    use super::{Palette, Syntax};
 
-impl From<WindowAppearance> for Mode {
-    fn from(appearance: WindowAppearance) -> Self {
-        match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Mode::Dark,
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Mode::Light,
-        }
+    fn assert_copy<T: Copy>() {}
+
+    #[test]
+    fn palette_and_syntax_are_copy() {
+        assert_copy::<Palette>();
+        assert_copy::<Syntax>();
     }
 }
 
@@ -192,7 +189,7 @@ impl Theme {
 
     fn target(&self) -> Palette {
         if let Some(palette) = &self.custom[self.mode as usize] {
-            return palette.clone();
+            return *palette;
         }
         let mut palette = match self.mode {
             Mode::Light => Palette::light(self.high_contrast),
@@ -208,7 +205,7 @@ impl Theme {
         let duration = motion::duration(motion::THEME, cx);
         let theme = cx.global_mut::<Theme>();
         theme.transition += 1;
-        let (id, from, to) = (theme.transition, theme.colors.clone(), theme.target());
+        let (id, from, to) = (theme.transition, theme.colors, theme.target());
         let start = Instant::now();
         cx.spawn(async move |cx| {
             loop {

@@ -181,8 +181,8 @@ impl Render for BrowserSpike {
 
         div()
             .size_full()
-            .bg(theme.surface)
-            .text_color(theme.text)
+            .bg(theme.ely.bg)
+            .text_color(theme.ely.fg)
             .child(
                 div()
                     .h(px(52.0))
@@ -190,9 +190,9 @@ impl Render for BrowserSpike {
                     .flex()
                     .items_center()
                     .px(px(20.0))
-                    .bg(theme.bg)
+                    .bg(theme.sirio.canvas)
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(theme.ely.border)
                     .text_size(theme.typography.headline)
                     .child("P72 · Browser composition spike"),
             )
@@ -209,20 +209,20 @@ impl Render for BrowserSpike {
                             .bottom(px(0.0))
                             .w(px(336.0))
                             .p(px(20.0))
-                            .bg(theme.bg)
+                            .bg(theme.sirio.canvas)
                             .border_r_1()
-                            .border_color(theme.border)
+                            .border_color(theme.ely.border)
                             .child(
                                 div()
                                     .text_size(theme.typography.title)
-                                    .text_color(theme.text)
+                                    .text_color(theme.ely.fg)
                                     .child("Native GPUI sidebar"),
                             )
                             .child(
                                 div()
                                     .mt(px(18.0))
                                     .text_size(theme.typography.base_size)
-                                    .text_color(theme.text_muted)
+                                    .text_color(theme.ely.fg_muted)
                                     .child(
                                         "The page on the right is a real WebKitGTK child window.",
                                     ),
@@ -231,7 +231,7 @@ impl Render for BrowserSpike {
                                 div()
                                     .mt(px(18.0))
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child(status),
                             ),
                     )
@@ -249,8 +249,8 @@ impl Render for BrowserSpike {
                             .items_center()
                             .justify_start()
                             .px(px(16.0))
-                            .bg(theme.brand_coral)
-                            .text_color(theme.bg)
+                            .bg(theme.sirio.brand_coral)
+                            .text_color(theme.sirio.canvas)
                             .text_size(theme.typography.title)
                             .child("GPUI → WebKit"),
                     ),
@@ -2026,14 +2026,14 @@ impl BrowserSurface {
             .child(
                 div()
                     .text_size(theme.typography.headline)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child("Sirio needs the Microsoft Edge WebView2 Runtime"),
             )
             .child(
                 div()
                     .max_w(px(520.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(RUNTIME_MISSING_MESSAGE),
             )
             .child(
@@ -2048,8 +2048,8 @@ impl BrowserSurface {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.ely.fg)
+                    .hover(|style| style.bg(theme.ely.hover))
                     // The rebuild must NOT run under this surface's GPUI
                     // lease: creating a WebView2 pumps the platform message
                     // loop (#255), and a task queued for this surface — the
@@ -2402,9 +2402,9 @@ impl BrowserSurface {
             .items_center()
             .gap(px(6.0))
             .px(px(12.0))
-            .bg(theme.bg)
+            .bg(theme.sirio.canvas)
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .child(browser_button(
                 "browser-back",
                 "‹",
@@ -2456,7 +2456,7 @@ impl BrowserSurface {
                         div()
                             .ml(px(10.0))
                             .mr(px(8.0))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child("◎"),
                     )
                     .child(div().flex_1().min_w_0().child(address_field)),
@@ -2471,7 +2471,7 @@ impl BrowserSurface {
                     .text_ellipsis()
                     .max_w(px(220.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(page_title),
             )
             .when(self.state.agent_driving(), |this| {
@@ -2482,8 +2482,8 @@ impl BrowserSurface {
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded(theme.radii.control)
-                        .bg(theme.text)
-                        .text_color(theme.bg)
+                        .bg(theme.ely.fg)
+                        .text_color(theme.sirio.canvas)
                         .text_size(theme.typography.footnote)
                         .child("Agent driving"),
                 )
@@ -2533,12 +2533,12 @@ fn browser_button_element(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if enabled {
-            theme.text
+            theme.ely.fg
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         })
         .when(enabled, |this| {
-            this.hover(|style| style.bg(theme.element_hover))
+            this.hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| callback(cx))
         })
         .child(content)
@@ -2583,8 +2583,8 @@ impl Render for BrowserSurface {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.surface)
-            .text_color(theme.text)
+            .bg(theme.ely.bg)
+            .text_color(theme.ely.fg)
             .child(self.render_toolbar(theme, entity.clone(), window, cx))
             .when_some(
                 self.startup_failure
@@ -2599,8 +2599,8 @@ impl Render for BrowserSurface {
                             .w_full()
                             .px(px(12.0))
                             .py(px(8.0))
-                            .bg(theme.danger)
-                            .text_color(theme.bg)
+                            .bg(theme.ely.danger)
+                            .text_color(theme.sirio.canvas)
                             .text_size(theme.typography.footnote)
                             .child(selectable_text(error)),
                     )
@@ -2614,8 +2614,8 @@ impl Render for BrowserSurface {
                         .w_full()
                         .px(px(12.0))
                         .py(px(8.0))
-                        .bg(theme.danger)
-                        .text_color(theme.bg)
+                        .bg(theme.ely.danger)
+                        .text_color(theme.sirio.canvas)
                         .text_size(theme.typography.footnote)
                         .child(selectable_text(error)),
                 )
@@ -2633,8 +2633,8 @@ impl Render for BrowserSurface {
                         .gap(px(8.0))
                         .px(px(12.0))
                         .py(px(8.0))
-                        .bg(theme.warning)
-                        .text_color(theme.bg)
+                        .bg(theme.ely.warning)
+                        .text_color(theme.sirio.canvas)
                         .text_size(theme.typography.footnote)
                         .child(selectable_text(format!(
                             "Allow agent browser access to {}?",

@@ -124,7 +124,7 @@ impl Render for ReferencesList {
                     .flex()
                     .items_center()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(heading),
             );
 
@@ -135,7 +135,7 @@ impl Render for ReferencesList {
                     .px(px(10.0))
                     .py(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(selectable_text(message)),
             );
         }
@@ -159,7 +159,7 @@ impl Render for ReferencesList {
                                 .items_center()
                                 .gap(px(6.0))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.text_faint)
+                                .text_color(theme.ely.fg_subtle)
                                 .child(display)
                                 .child(format!("({count})"))
                                 .into_any_element(),
@@ -175,8 +175,8 @@ impl Render for ReferencesList {
                                     .items_center()
                                     .gap(px(8.0))
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.text)
-                                    .hover(|style| style.bg(theme.element_hover))
+                                    .text_color(theme.ely.fg)
+                                    .hover(|style| style.bg(theme.ely.hover))
                                     .on_click(cx.listener(move |_list, _event, _window, cx| {
                                         cx.emit(ReferencesEvent::Open {
                                             path: path.clone(),
@@ -187,7 +187,7 @@ impl Render for ReferencesList {
                                         div()
                                             .w(px(44.0))
                                             .flex_none()
-                                            .text_color(theme.text_faint)
+                                            .text_color(theme.ely.fg_subtle)
                                             .child(format!("{}", row.line + 1)),
                                     )
                                     .child(row.preview.clone())

@@ -4159,10 +4159,10 @@ struct GridAssemblyKey {
 impl TerminalPalette {
     fn from_theme(theme: &Theme) -> Self {
         Self {
-            background: theme.terminal_surface.into(),
-            foreground: theme.text.into(),
-            cursor: theme.text.into(),
-            selection: theme.selection.into(),
+            background: theme.sirio.terminal_surface,
+            foreground: theme.ely.fg,
+            cursor: theme.ely.fg,
+            selection: theme.ely.selection,
         }
     }
 }
@@ -4615,7 +4615,7 @@ impl gpui::Render for TerminalView {
                 .p(px(6.0))
                 .rounded(theme.radii.user_pill)
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.ely.border)
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
@@ -4648,11 +4648,11 @@ impl gpui::Render for TerminalView {
                         .gap(px(2.0))
                         .text_size(theme.typography.footnote)
                         .when(is_disabled, |this| {
-                            this.text_color(theme.text_faint).cursor_not_allowed()
+                            this.text_color(theme.ely.fg_subtle).cursor_not_allowed()
                         })
                         .when(!is_disabled, |this| {
-                            this.text_color(theme.text)
-                                .hover(|style| style.bg(theme.element_hover))
+                            this.text_color(theme.ely.fg)
+                                .hover(|style| style.bg(theme.ely.hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |terminal, cx| {
                                         terminal.handle_context_action(action, window, cx);
@@ -4667,7 +4667,7 @@ impl gpui::Render for TerminalView {
                                         format!("terminal-context-item-{index}-reason")
                                     })
                                     .text_size(px(12.0))
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child(reason),
                             )
                         }),
@@ -4695,12 +4695,12 @@ impl gpui::Render for TerminalView {
                 if !self.empty_prompt {
                     return div()
                         .size_full()
-                        .bg(theme.terminal_surface)
+                        .bg(theme.sirio.terminal_surface)
                         .into_any_element();
                 }
                 div()
                     .size_full()
-                    .bg(theme.terminal_surface)
+                    .bg(theme.sirio.terminal_surface)
                     .flex()
                     .flex_col()
                     .items_center()
@@ -4709,7 +4709,7 @@ impl gpui::Render for TerminalView {
                     .child(
                         div()
                             .text_size(px(15.0))
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child("No terminal in this pane"),
                     )
                     .child(
@@ -4723,8 +4723,8 @@ impl gpui::Render for TerminalView {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(theme.surface_raised)
-                                    .text_color(theme.text)
+                                    .bg(theme.ely.surface)
+                                    .text_color(theme.ely.fg)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(TerminalPromptAction::NewTerminal, cx);
                                     }))
@@ -4737,8 +4737,8 @@ impl gpui::Render for TerminalView {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(theme.surface_raised)
-                                    .text_color(theme.text)
+                                    .bg(theme.ely.surface)
+                                    .text_color(theme.ely.fg)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(
                                             TerminalPromptAction::NewTerminalWithCommand,
@@ -4755,7 +4755,7 @@ impl gpui::Render for TerminalView {
                 .size_full()
                 .relative()
                 .debug_selector(|| "terminal-drop-target".to_owned())
-                .bg(theme.terminal_surface)
+                .bg(theme.sirio.terminal_surface)
                 .key_context("Terminal")
                 .track_focus(&self.focus_handle)
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_mouse_down))
@@ -4815,9 +4815,9 @@ impl gpui::Render for TerminalView {
                             .px(theme.spacing.titlebar_control_spacing)
                             .py(theme.spacing.titlebar_control_spacing)
                             .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
+                            .bg(theme.ely.surface)
                             .text_size(theme.typography.caption2)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child(format!("Dropped diff: {path}")),
                     )
                 })
@@ -4838,9 +4838,9 @@ impl gpui::Render for TerminalView {
                                 .bottom(px(8.0))
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .bg(theme.surface_raised)
+                                .bg(theme.ely.surface)
                                 .text_size(px(12.0))
-                                .text_color(theme.warning)
+                                .text_color(theme.ely.warning)
                                 .child("Running"),
                         )
                     } else if let Some(label) = self.exit_status.map(TerminalExitStatus::label) {
@@ -4851,9 +4851,9 @@ impl gpui::Render for TerminalView {
                                 .bottom(px(8.0))
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .bg(theme.surface_raised)
+                                .bg(theme.ely.surface)
                                 .text_size(px(12.0))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.ely.fg_muted)
                                 .child(label),
                         )
                     } else {
@@ -4871,12 +4871,12 @@ impl gpui::Render for TerminalView {
                                     .py(px(4.0))
                                     .max_w(px(560.0))
                                     .rounded(theme.radii.control)
-                                    .bg(theme.surface_raised)
+                                    .bg(theme.ely.surface)
                                     .border_1()
-                                    .border_color(theme.border)
+                                    .border_color(theme.ely.border)
                                     .font_family(sirio_theme::terminal_family())
                                     .text_size(theme.typography.caption2)
-                                    .text_color(theme.text)
+                                    .text_color(theme.ely.fg)
                                     .child(hover.uri),
                             ),
                         )
@@ -4890,7 +4890,7 @@ impl gpui::Render for TerminalView {
                 div()
                     .size_full()
                     .relative()
-                    .bg(theme.terminal_surface)
+                    .bg(theme.sirio.terminal_surface)
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
                     .flex()
                     .flex_col()
@@ -4902,14 +4902,14 @@ impl gpui::Render for TerminalView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.warning)
+                            .text_color(theme.ely.warning)
                             .child("Terminal failed to start"),
                     )
                     .child(
                         div()
                             .w_full()
                             .text_size(px(13.0))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(message.clone()),
                     )
                     .child(
@@ -4919,10 +4919,10 @@ impl gpui::Render for TerminalView {
                             .px(px(14.0))
                             .py(px(6.0))
                             .rounded(px(6.0))
-                            .bg(theme.surface_raised)
+                            .bg(theme.ely.surface)
                             .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.element_hover))
+                            .text_color(theme.ely.fg)
+                            .hover(|style| style.bg(theme.ely.hover))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(move |_, _, cx| {
                                 retry_entity.update(cx, |view, cx| view.retry(cx));

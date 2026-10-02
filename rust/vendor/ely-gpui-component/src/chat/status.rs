@@ -103,7 +103,7 @@ impl RateLimitNotice {
 impl RenderOnce for RateLimitNotice {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let countdown = Countdown::new((self.id.clone(), "left"), self.until).size(TextSize::Sm);
         let countdown = match self.on_done {
             Some(done) => countdown.on_done(move |window, cx| done(window, cx)),
@@ -191,7 +191,7 @@ impl FeedbackForm {
 impl RenderOnce for FeedbackForm {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let ready = !self.picked.is_empty() || !self.note.read(cx).text().trim().is_empty();
         let (pick, send) = (self.on_pick, self.on_send);
         div()
@@ -300,7 +300,7 @@ impl ThinkingIndicator {
 
 impl RenderOnce for ThinkingIndicator {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = cx.theme().colors.clone();
+        let colors = cx.theme().colors;
         div()
             .flex()
             .items_center()
@@ -373,7 +373,7 @@ impl RenderOnce for ThinkingBlock {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (opened, press) = crate::expansion::resolve(&self.id, self.controlled, window, cx);
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let header: gpui::AnyElement = if self.thinking {
             ThinkingIndicator::new((self.id.clone(), "thinking")).into_any_element()
         } else if let Some(label) = self.label {

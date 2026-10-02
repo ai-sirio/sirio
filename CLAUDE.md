@@ -9,7 +9,7 @@ Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github
 ### External references
 
 - [bezel](https://github.com/crabtalk/bezel) — the UI library for the application shell and non-chat surfaces. Build their primitives from bezel (`bezel::ui`, `bezel::motion`, `bezel::theme`, `bezel::agent`); its `gallery` crate is the visual and usage reference.
-- [Ely GPUI Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components) — the AI chat's presentation library, adapted under `rust/vendor/ely-gpui-component` to the same Bezel GPUI packages. When changing chat presentation, read its `LOCAL-CHANGES.md` and `docs/superpowers/specs/2026-09-30-ely-agent-chat-design.md`; retain Sirio's theme and existing Chat controllers.
+- [Ely GPUI Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components) — the AI chat's presentation library, adapted under `rust/vendor/ely-gpui-component` to the same Bezel GPUI packages. `rust/vendor/ely-palette` holds its palette, the vocabulary of Sirio's colours. When changing chat presentation, read its `LOCAL-CHANGES.md` and `docs/superpowers/specs/2026-09-30-ely-agent-chat-design.md`; retain Sirio's theme and existing Chat controllers.
 - [gpui-component](https://github.com/longbridge/gpui-component) — secondary structural reference when the surface's primary library has no equivalent.
 - [waku](https://github.com/egoist/waku) — a comparable app (multiple coding agents, one pane each). Reference for prior art on the same problem, not a dependency.
 
@@ -105,8 +105,9 @@ sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
 sirio_forge, sirio_privacy
                                 (leaves — no local deps beyond sirio_perf;
-                                 sirio_theme and sirio_ui take the external
-                                 `bezel` crate, pinned `=0.1.4`, and
+                                 sirio_theme takes `bezel-theme` (pinned
+                                 `=0.1.4`) and the vendored `ely-palette`;
+                                 sirio_ui takes the external `bezel` crate;
                                  sirio_syntax takes `bezel-syntax` plus the
                                  fifteen tree-sitter grammars bezel does not
                                  carry; sirio_claude is Claude Code's own
@@ -139,13 +140,15 @@ sirio            (the app: main.rs — the only crate that depends on everything
                     sirio_ui itself does not touch)
 ```
 
-`sirio_theme` holds no palette of its own. Every colour, and the base radius and
-spacing steps the measurements are derived from, come from `bezel::theme` — the
-pin is on appearance as much as on API, so treat a bezel bump as a visual change
-to review rather than a dependency chore (`docs/THEME-PROVENANCE.md` records what
-is bezel's, what is derived, and the three tokens that stay Sirio's). `ThemeMode`
-is bezel's `AppearanceMode` re-exported; the only other appearance enum is
-`sirio_persistence::AppearanceMode`, which carries the serde contract, and
+`sirio_theme` holds Sirio's palette in Ely's vocabulary: `ThemeColors` is
+`{ ely: ely_palette::Palette, sirio: SirioColors }`, with values frozen in
+`presets.rs` from what bezel's `Theme::branded` and Sirio's ladders produced
+(`docs/THEME-PROVENANCE.md`). `sirio_ui::ely` feeds Ely's theme and
+bezel-theme's registry from the `Theme` global; `Theme::to_bezel_theme` still
+derives bezel's own tokens for bezel widgets and bezel-markdown. A bezel bump
+therefore changes bezel widgets and Markdown, not Sirio's tokens. `ThemeMode`
+is bezel-theme's `AppearanceMode` re-exported; the only other appearance enum
+is `sirio_persistence::AppearanceMode`, which carries the serde contract, and
 `sirio`'s `main.rs` holds the single conversion between them.
 
 There is no single crate every other crate funnels through the way Swift's `TillerCore` worked — each concern (git, persistence, agent adapters, activity detection, terminal, control socket, UI primitives) lives in its own largely-independent leaf or near-leaf crate, and `sirio`'s `main.rs` is the integration point that wires `PaneRegistry` (`sirio_control`), `AgentActivityModel` (`sirio_activity`), and the ACP/agent/git/persistence layers into the `sirio_ui` components it renders. Run `cargo build -p <crate>` to check one crate compiles in isolation before assuming a change is layered correctly.

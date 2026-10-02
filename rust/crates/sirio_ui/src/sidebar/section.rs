@@ -38,12 +38,12 @@ pub(super) fn render_section(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .bg(theme.surface_raised)
+        .bg(theme.ely.surface)
         .border_t_1()
         .border_b_1()
-        .border_color(theme.border)
+        .border_color(theme.ely.border)
         .text_size(theme.typography.scaled(13.5))
-        .text_color(theme.text_muted)
+        .text_color(theme.ely.fg_muted)
         .cursor_pointer()
         // Keep the old project-row selector as a compatibility probe for
         // existing sidebar tests while the project itself is now a header.
@@ -104,7 +104,7 @@ pub(super) fn render_section(
                 .overflow_hidden()
                 .child(row.title)
                 .child(
-                    super::fade::fade_right(theme.surface_raised, super::fade::FADE_WIDTH)
+                    super::fade::fade_right(theme.ely.surface, super::fade::FADE_WIDTH)
                         .id(("sidebar-section-fade", row_id))
                         .debug_selector(move || format!("sidebar-section-fade-{row_id}")),
                 ),
@@ -113,7 +113,7 @@ pub(super) fn render_section(
             div()
                 .debug_selector(move || format!("sidebar-section-count-{row_id}"))
                 .flex_none()
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .text_size(theme.typography.scaled(11.0))
                 .child(worktree_count.to_string()),
         )
@@ -132,7 +132,7 @@ pub(super) fn render_section(
                 // until the pointer lands made the header look inert: there
                 // was nothing on screen to say a project could be added to.
                 // The same goes for its overflow menu below.
-                .hover(|style| style.bg(theme.element_hover))
+                .hover(|style| style.bg(theme.ely.hover))
                 .child(IconElement::new(Icon::Plus, IconSize::XSmall))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
@@ -151,8 +151,8 @@ pub(super) fn render_section(
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .hover(|style| style.bg(theme.element_hover))
-                .text_color(theme.text_muted)
+                .hover(|style| style.bg(theme.ely.hover))
+                .text_color(theme.ely.fg_muted)
                 .child("⋯")
                 .on_click(move |event, window, cx| {
                     cx.stop_propagation();
@@ -183,7 +183,7 @@ pub(super) fn render_section(
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .hover(|style| style.bg(theme.element_hover))
+                .hover(|style| style.bg(theme.ely.hover))
                 .child(IconElement::new(
                     if expanded {
                         Icon::ChevronDown

@@ -30,12 +30,12 @@ pub enum ActivityStatus {
 /// the ordinary case and reads as the bright text neutral; idle is the same
 /// neutral turned down. Amber, green and red are kept for "answer me", "this
 /// finished" and "this broke".
-pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
+pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Hsla {
     match status {
-        ActivityStatus::Idle => theme.text_faint,
-        ActivityStatus::Running => theme.text,
-        ActivityStatus::NeedsInput => theme.warning,
-        ActivityStatus::Done => theme.success,
-        ActivityStatus::Error => theme.danger,
+        ActivityStatus::Idle => theme.ely.fg_subtle,
+        ActivityStatus::Running => theme.ely.fg,
+        ActivityStatus::NeedsInput => theme.ely.warning,
+        ActivityStatus::Done => theme.ely.success,
+        ActivityStatus::Error => theme.ely.danger,
     }
 }

@@ -30,7 +30,7 @@ fn field(
 fn caption(text: &'static str, theme: &Theme) -> gpui::Div {
     div()
         .text_size(theme.typography.footnote)
-        .text_color(theme.text_muted)
+        .text_color(theme.ely.fg_muted)
         .child(text)
 }
 
@@ -185,8 +185,8 @@ impl ChangeRequestTab {
                 .p(px(12.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface)
+                .border_color(theme.ely.border)
+                .bg(theme.ely.bg)
                 .child(caption("Title", theme))
                 .child(fields.title.clone())
                 .child(caption("Target branch", theme))

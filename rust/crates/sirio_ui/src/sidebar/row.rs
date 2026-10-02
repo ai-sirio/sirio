@@ -6,6 +6,7 @@
 //! `mod.rs` + one-file-per-surface arrangement `right_panel/` uses.
 
 use super::*;
+use gpui::Hsla;
 
 /// A tab rendered inside its worktree row instead of as a separate tree row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,10 +40,10 @@ pub enum RowStatusGlyph {
     /// No glyph at all.
     None,
     /// A bloom still travelling: work is in flight.
-    Running(Rgba),
+    Running(Hsla),
     /// A bloom stopped at full, tinted by which state it stopped in: green
     /// done, amber needs-input, red error.
-    Settled(Rgba),
+    Settled(Hsla),
 }
 
 impl RowStatusGlyph {
@@ -54,10 +55,10 @@ impl RowStatusGlyph {
             // from "finished" is that one of them moves. They do not collapse
             // onto each other under reduced motion either — see
             // `loading::settled_bloom_rings` and the test that pins it.
-            Some(ActivityStatus::Running) => Self::Running(theme.success),
-            Some(ActivityStatus::Done) => Self::Settled(theme.success),
-            Some(ActivityStatus::NeedsInput) => Self::Settled(theme.warning),
-            Some(ActivityStatus::Error) => Self::Settled(theme.danger),
+            Some(ActivityStatus::Running) => Self::Running(theme.ely.success),
+            Some(ActivityStatus::Done) => Self::Settled(theme.ely.success),
+            Some(ActivityStatus::NeedsInput) => Self::Settled(theme.ely.warning),
+            Some(ActivityStatus::Error) => Self::Settled(theme.ely.danger),
         }
     }
 }
@@ -126,8 +127,8 @@ impl Sidebar {
     ///
     /// A parked tab keeps the faint tone it always had: it is a record of
     /// what the worktree holds, not a live surface.
-    pub(crate) fn title_color(parked: bool, theme: Theme) -> Rgba {
-        if parked { theme.text_faint } else { theme.text }
+    pub(crate) fn title_color(parked: bool, theme: Theme) -> Hsla {
+        if parked { theme.ely.fg_subtle } else { theme.ely.fg }
     }
 
     /// The words at the end of the title line — now only the states no bloom
@@ -255,8 +256,8 @@ impl Sidebar {
     /// genuinely waiting on the reader. That bug survived one fix already,
     /// which is why the choice lives here instead of inline in the pill,
     /// where no test could reach it.
-    pub(super) fn pill_icon_color(brand: Option<AgentBrandColor>, theme: Theme) -> Rgba {
-        brand.map_or(theme.text_muted, AgentBrandColor::color)
+    pub(super) fn pill_icon_color(brand: Option<AgentBrandColor>, theme: Theme) -> Hsla {
+        brand.map_or(theme.ely.fg_muted, |brand| AgentBrandColor::color(brand).into())
     }
 
     /// Stable semantic debug/test names, independent of vendored filenames.
@@ -367,12 +368,12 @@ impl Sidebar {
                     .items_center()
                     .justify_center()
                     .rounded(theme.radii.chip)
-                    .bg(theme.surface_raised)
+                    .bg(theme.ely.surface)
                     .when(pill.selected || pill_cursor == Some(index), |this| {
-                        this.border_1().border_color(theme.accent)
+                        this.border_1().border_color(theme.sirio.quantity)
                     })
                     .when(parked.is_some(), |this| this.opacity(0.6))
-                    .hover(|style| style.bg(theme.element_hover))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .child(
                         div()
                             .debug_selector(move || {
@@ -424,9 +425,9 @@ impl Sidebar {
                         .justify_center()
                         .rounded(theme.radii.chip)
                         .border_1()
-                        .border_color(theme.border)
-                        .text_color(theme.text_faint)
-                        .hover(|style| style.bg(theme.element_hover))
+                        .border_color(theme.ely.border)
+                        .text_color(theme.ely.fg_subtle)
+                        .hover(|style| style.bg(theme.ely.hover))
                         .child("+")
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
@@ -495,8 +496,8 @@ impl Sidebar {
             RowKind::Project => project_icon
                 .as_ref()
                 .map(|icon| icon.tint.resolve(theme))
-                .unwrap_or_else(|| Self::project_color(&title)),
-            RowKind::Worktree => theme.text_faint,
+                .unwrap_or_else(|| Self::project_color(&title).into()),
+            RowKind::Worktree => theme.ely.fg_subtle,
         };
         let entity = entity.clone();
         let remove_entity = entity.clone();
@@ -540,9 +541,9 @@ impl Sidebar {
             .py(px(7.0))
             .flex()
             .gap(px(8.0))
-            .when(selected, |this| this.bg(theme.element_active))
+            .when(selected, |this| this.bg(theme.ely.active))
             .when(!selected, |this| {
-                this.hover(|style| style.bg(theme.element_hover))
+                this.hover(|style| style.bg(theme.ely.hover))
             })
             .on_click(move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
@@ -693,7 +694,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
                         .flex_none()
                         .text_size(theme.typography.scaled(10.0))
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("★"),
                 )
             })
@@ -703,7 +704,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-row-status-{row_id}"))
                         .flex_none()
                         .text_size(theme.typography.scaled(11.0))
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child(status),
                 )
             });
@@ -714,7 +715,7 @@ impl Sidebar {
             .gap(px(6.0))
             .line_height(px(ROW_SUB_LINE_HEIGHT))
             .text_size(theme.typography.scaled(12.5))
-            .text_color(theme.text_faint)
+            .text_color(theme.ely.fg_subtle)
             .child(
                 div()
                     .debug_selector(move || format!("sidebar-row-subline-{row_id}"))
@@ -741,12 +742,12 @@ impl Sidebar {
                         .w(px(16.0))
                         .flex_none()
                         .text_size(theme.typography.scaled(13.0))
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .child(
                             IconElement::new(Icon::Settings, IconSize::XSmall)
-                                .text_color(theme.text),
+                                .text_color(theme.ely.fg),
                         )
                         .on_click(move |_, _window, cx| {
                             if let Some(project_id) = project_id.clone() {
@@ -766,9 +767,9 @@ impl Sidebar {
                         .w(px(16.0))
                         .flex_none()
                         .text_size(theme.typography.scaled(12.0))
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.element_hover))
+                        .hover(|style| style.bg(theme.ely.hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |event, window, cx| {
@@ -784,7 +785,7 @@ impl Sidebar {
                         })
                         .child(
                             IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.text_faint),
+                                .text_color(theme.ely.fg_subtle),
                         ),
                 )
             })
@@ -796,9 +797,9 @@ impl Sidebar {
                         .w(px(16.0))
                         .flex_none()
                         .text_size(theme.typography.scaled(14.0))
-                        .text_color(theme.text_muted)
+                        .text_color(theme.ely.fg_muted)
                         .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.element_hover))
+                        .hover(|style| style.bg(theme.ely.hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
@@ -808,7 +809,7 @@ impl Sidebar {
                             });
                         })
                         .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text),
+                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.ely.fg),
                         ),
                 )
             })

@@ -16,6 +16,7 @@ SETTLE_SECONDS=3
 STATE_ONLY=0
 DISPLAY_TARGET="${DISPLAY-}"
 OUT_DIR=""
+SETTINGS=()
 RUN_DIR=""
 APP_PID=""
 CONTROL_PANE_ID=""
@@ -32,6 +33,8 @@ PID-matched window frames, and write a transcript plus waku comparisons.
 Options:
   --state-only          run fixture and socket state setup without capturing
   --out-dir DIR         write evidence under DIR instead of a timestamped dir
+  --bin PATH            use this Sirio binary instead of the worktree default
+  --setting KEY=JSON    seed a persisted setting before launch (repeatable)
   --display DISPLAY     use this X display for the app and captures
   --settle SECONDS      wait this long after each state change (default: 3)
   --help                show this help
@@ -52,6 +55,16 @@ while (($# > 0)); do
         --out-dir)
             (($# >= 2)) || die "--out-dir requires a directory"
             OUT_DIR="$2"
+            shift 2
+            ;;
+        --bin)
+            (($# >= 2)) || die "--bin requires a path"
+            BIN="$2"
+            shift 2
+            ;;
+        --setting)
+            (($# >= 2)) && [[ "$2" == *=* ]] || die "--setting requires KEY=JSON"
+            SETTINGS+=("$2")
             shift 2
             ;;
         --display)
@@ -187,6 +200,26 @@ printf 'untracked fixture content\n' >"$FIXTURE/untracked.md"
 # is intentionally changed after its commit; untracked.md is never added.
 printf 'fixture git status:\n'
 git -C "$FIXTURE" status --short
+
+# Persisted settings the app reads at launch, e.g.
+# --setting 'appearance.theme="dark"'. The table is the app's own (v1
+# migration); creating it first is what the migration itself does.
+if ((${#SETTINGS[@]} > 0)); then
+    command -v sqlite3 >/dev/null || die "--setting needs sqlite3"
+    command -v python3 >/dev/null || die "--setting needs python3"
+    sql="CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+    for pair in "${SETTINGS[@]}"; do
+        key="${pair%%=*}"
+        json_value="${pair#*=}"
+        # AppSettings stores scalar strings without JSON quotes; keep JSON
+        # text for non-strings such as the array-valued settings.
+        if ! value="$(python3 -c 'import json, sys; parsed = json.loads(sys.argv[1]); print(parsed if isinstance(parsed, str) else sys.argv[1])' "$json_value")"; then
+            die "--setting value must be valid JSON"
+        fi
+        sql+="INSERT OR REPLACE INTO setting (key, value) VALUES ('${key//\'/\'\'}', '${value//\'/\'\'}');"
+    done
+    sqlite3 "$DATABASE" "$sql"
+fi
 
 export SIRIO_SOCKET="$SOCKET"
 export SIRIO_DB="$DATABASE"

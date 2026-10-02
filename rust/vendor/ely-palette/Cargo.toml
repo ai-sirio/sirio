@@ -1,0 +1,15 @@
+[package]
+name = "ely-palette"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Components"
+publish = false
+description = "Ely GPUI Components' colour vocabulary, split out of ely-gpui-component so a host's theme crate can hold it without Ely's components."
+
+[dependencies]
+gpui.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }

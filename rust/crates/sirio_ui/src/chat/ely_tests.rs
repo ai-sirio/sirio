@@ -117,7 +117,7 @@ async fn ely_theme_change_preserves_chat_state_and_bezel_palette(cx: &mut TestAp
         assert_eq!(bezel.border, expected.border);
         let ely = cx.global::<ely_gpui_component::theme::Theme>();
         assert_eq!(ely.font_family.as_ref(), resolved.typography.ui_family);
-        assert_eq!(ely.colors.bg, gpui::Hsla::from(resolved.colors.surface));
+        assert_eq!(ely.colors.bg, resolved.colors.ely.bg);
         assert_eq!(
             ely.text_size(ely_gpui_component::theme::TextSize::Base),
             gpui::rems(f32::from(resolved.typography.base_size) / 16.0)

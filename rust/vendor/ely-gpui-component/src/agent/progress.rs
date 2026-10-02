@@ -51,7 +51,7 @@ impl RenderOnce for AgentStepList {
                 )
             })
             .collect();
-        let colors = cx.theme().colors.clone();
+        let colors = cx.theme().colors;
         self.steps
             .into_iter()
             .zip(marks)
@@ -111,7 +111,7 @@ impl RenderOnce for AgentPlan {
             })
             .collect();
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let done = self
             .items
             .iter()
@@ -203,7 +203,7 @@ impl AgentStatus {
 impl RenderOnce for AgentStatus {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let tone = match self.state {
             AgentState::Planning | AgentState::Working => Severity::Info,
             AgentState::Waiting => Severity::Warning,
@@ -281,7 +281,7 @@ impl AgentProgress {
 impl RenderOnce for AgentProgress {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .flex()
             .flex_col()

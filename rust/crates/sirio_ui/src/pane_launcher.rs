@@ -74,7 +74,7 @@ fn tile<A: Copy + 'static>(
 ) -> AnyElement {
     let id = item.id;
     let enabled = item.disabled.is_none();
-    let ink = if enabled { theme.text } else { theme.text_faint };
+    let ink = if enabled { theme.ely.fg } else { theme.ely.fg_subtle };
     let frame = div()
         .size(px(LAUNCHER_TILE_SIZE))
         .rounded(px(BezelTheme::panel_radius()))
@@ -85,7 +85,7 @@ fn tile<A: Copy + 'static>(
         .items_center()
         .justify_center()
         .when(enabled, |frame| {
-            frame.group_hover(id, |style| style.bg(theme.element_hover))
+            frame.group_hover(id, |style| style.bg(theme.ely.hover))
         })
         .child(IconElement::new(item.icon, IconSize::Medium).text_color(ink));
     let column = div()
@@ -107,7 +107,7 @@ fn tile<A: Copy + 'static>(
             column.child(
                 div()
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(shortcut),
             )
         });

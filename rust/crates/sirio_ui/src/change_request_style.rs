@@ -12,9 +12,9 @@ use crate::sidebar::icons::Icon;
 /// than adding a Sirio-owned token (spec §7.2).
 pub(crate) fn state_color(state: ChangeState, theme: &Theme) -> Hsla {
     match state {
-        ChangeState::Open => theme.success.into(),
-        ChangeState::Draft => theme.text_faint.into(),
-        ChangeState::Closed => theme.danger.into(),
+        ChangeState::Open => theme.ely.success,
+        ChangeState::Draft => theme.ely.fg_subtle,
+        ChangeState::Closed => theme.ely.danger,
         ChangeState::Merged => theme.syntax_palette().keyword,
     }
 }
@@ -32,10 +32,10 @@ pub(crate) fn state_label(state: ChangeState) -> &'static str {
 pub(crate) fn ci_mark(ci: CiState, theme: &Theme) -> Option<(Icon, Hsla)> {
     match ci {
         CiState::NoChecks => None,
-        CiState::Running(_) => Some((Icon::Clock, theme.warning.into())),
-        CiState::Passed => Some((Icon::Check, theme.success.into())),
-        CiState::Failed => Some((Icon::XCircle, theme.danger.into())),
-        CiState::Canceled => Some((Icon::Dash, theme.text_faint.into())),
+        CiState::Running(_) => Some((Icon::Clock, theme.ely.warning)),
+        CiState::Passed => Some((Icon::Check, theme.ely.success)),
+        CiState::Failed => Some((Icon::XCircle, theme.ely.danger)),
+        CiState::Canceled => Some((Icon::Dash, theme.ely.fg_subtle)),
     }
 }
 
@@ -58,24 +58,24 @@ pub(crate) fn review_mark(
     theme: &Theme,
 ) -> Option<(Icon, Hsla)> {
     if requested_from_me {
-        return Some((Icon::Eye, theme.accent.into()));
+        return Some((Icon::Eye, theme.sirio.quantity));
     }
     match review {
-        ReviewState::Approved { .. } => Some((Icon::UserCheck, theme.success.into())),
-        ReviewState::ChangesRequested => Some((Icon::Warning, theme.danger.into())),
-        ReviewState::ReviewRequired => Some((Icon::Eye, theme.text_faint.into())),
+        ReviewState::Approved { .. } => Some((Icon::UserCheck, theme.ely.success)),
+        ReviewState::ChangesRequested => Some((Icon::Warning, theme.ely.danger)),
+        ReviewState::ReviewRequired => Some((Icon::Eye, theme.ely.fg_subtle)),
         ReviewState::None => None,
     }
 }
 
 pub(crate) fn check_mark(status: CheckStatus, theme: &Theme) -> (Icon, Hsla) {
     match status {
-        CheckStatus::Passed => (Icon::Check, theme.success.into()),
-        CheckStatus::Failed => (Icon::XCircle, theme.danger.into()),
-        CheckStatus::Running => (Icon::Clock, theme.warning.into()),
-        CheckStatus::Queued => (Icon::Circle, theme.text_faint.into()),
+        CheckStatus::Passed => (Icon::Check, theme.ely.success),
+        CheckStatus::Failed => (Icon::XCircle, theme.ely.danger),
+        CheckStatus::Running => (Icon::Clock, theme.ely.warning),
+        CheckStatus::Queued => (Icon::Circle, theme.ely.fg_subtle),
         CheckStatus::Canceled | CheckStatus::Skipped | CheckStatus::Neutral => {
-            (Icon::Dash, theme.text_faint.into())
+            (Icon::Dash, theme.ely.fg_subtle)
         }
     }
 }

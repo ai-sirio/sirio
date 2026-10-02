@@ -46,7 +46,7 @@ use bezel::{
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
-    PromptLevel, Render, Rgba, Task, Window, canvas, div, list, prelude::*, px,
+    Hsla, PromptLevel, Render, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -1720,7 +1720,7 @@ impl ChangesTab {
                     div()
                         .w(px(DIFF_HUNK_GUTTER_WIDTH))
                         .flex_none()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("⋯"),
                 )
                 .child(
@@ -1729,7 +1729,7 @@ impl ChangesTab {
                         .min_w(px(0.0))
                         .debug_selector(|| "changes-hunk-header".into())
                         .truncate()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child(header),
                 )
                 .into_any_element(),
@@ -1783,7 +1783,7 @@ impl ChangesTab {
                 .font_family(theme.typography.ui_family)
                 .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(div().w(px(DIFF_HUNK_GUTTER_WIDTH)).flex_none().child("⋯"))
                 .child(
                     div()
@@ -1829,20 +1829,20 @@ impl ChangesTab {
             // A meta row ("N context lines"), not code: sidebar face.
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
-            .text_color(theme.text_faint)
+            .text_color(theme.ely.fg_subtle)
             .bg(ink(0.02))
-            .hover(|style| style.bg(theme.element_hover))
+            .hover(|style| style.bg(theme.ely.hover))
             .on_click(move |_, _, cx| {
                 band_entity.update(cx, |tab, cx| {
                     tab.toggle_band(section, band_path.clone(), key, cx);
                 });
             })
-            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.border))
-            .child(div().text_color(theme.text_faint).child(label))
-            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.border))
+            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.ely.border))
+            .child(div().text_color(theme.ely.fg_subtle).child(label))
+            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.ely.border))
             .child(
                 div()
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(if expanded { "⌃" } else { "⌄" }),
             )
     }
@@ -1883,7 +1883,7 @@ impl ChangesTab {
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             .bg(ink(0.02))
-            .hover(|style| style.bg(theme.element_hover))
+            .hover(|style| style.bg(theme.ely.hover))
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| tab.toggle_section(section, cx));
             })
@@ -1895,21 +1895,21 @@ impl ChangesTab {
                     .justify_center()
                     .child(if collapsed {
                         IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                     } else {
                         IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                     }),
             )
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(section.label()),
             )
             .child(
                 div()
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(format!("({count})")),
             )
             .child(div().flex_1())
@@ -1980,18 +1980,18 @@ impl ChangesTab {
             .items_center()
             .gap(px(DIFF_ROW_GAP))
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             // The row and its action buttons (Discard / Unstage / Open
             // diff) match the left sidebar's family, not the code face:
             // they are chrome, and the path is a label, not content.
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             // The path is neutral text — the +/− counts carry the status.
-            .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(theme.ely.fg)
+            .hover(|style| style.bg(theme.ely.hover))
             // #325: the keyboard selection has to be visible, or up/down
             // move something the user cannot see.
-            .when(is_selected, |this| this.bg(theme.element_hover))
+            .when(is_selected, |this| this.bg(theme.ely.hover))
             .when_some(drag_payload, |this, payload| {
                 this.on_drag(payload, move |_, _, _, cx| {
                     cx.new(|_| DiffDragPreview { theme })
@@ -2014,10 +2014,10 @@ impl ChangesTab {
                     .justify_center()
                     .child(if expanded {
                         IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                     } else {
                         IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                     }),
             )
             .child(
@@ -2042,13 +2042,13 @@ impl ChangesTab {
             .child(
                 div()
                     .text_size(theme.typography.scaled(11.5))
-                    .text_color(theme.diff_add)
+                    .text_color(theme.sirio.diff_add)
                     .child(additions),
             )
             .child(
                 div()
                     .text_size(theme.typography.scaled(11.5))
-                    .text_color(theme.diff_del)
+                    .text_color(theme.sirio.diff_del)
                     .child(deletions),
             )
             .when(expanded, |this| {
@@ -2121,8 +2121,8 @@ impl ChangesTab {
                             div()
                                 .id(format!("open-{}-{}", section.slug(), path.display()))
                                 .debug_selector(|| "changes-open-file".into())
-                                .text_color(theme.text_muted)
-                                .hover(|style| style.text_color(theme.text))
+                                .text_color(theme.ely.fg_muted)
+                                .hover(|style| style.text_color(theme.ely.fg))
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
                                     // `entry.path` is repo-relative, and the
@@ -2190,7 +2190,7 @@ impl ChangesTab {
                 div()
                     .w(px(SPLIT_DIVIDER_WIDTH))
                     .flex_none()
-                    .bg(theme.border),
+                    .bg(theme.ely.border),
             )
             .child(
                 split_cell(row.right, false, right_x, theme)
@@ -2206,9 +2206,9 @@ impl ChangesTab {
         theme: Theme,
     ) -> impl IntoElement {
         let (background, marker_color, marker, text_color) = match line.origin {
-            DiffOrigin::Context => (theme.surface, theme.text_faint, " ", theme.text_muted),
-            DiffOrigin::Addition => (diff_wash(theme.diff_add), theme.diff_add, "+", theme.text),
-            DiffOrigin::Deletion => (diff_wash(theme.diff_del), theme.diff_del, "-", theme.text),
+            DiffOrigin::Context => (theme.ely.bg, theme.ely.fg_subtle, " ", theme.ely.fg_muted),
+            DiffOrigin::Addition => (diff_wash(theme.sirio.diff_add), theme.sirio.diff_add, "+", theme.ely.fg),
+            DiffOrigin::Deletion => (diff_wash(theme.sirio.diff_del), theme.sirio.diff_del, "-", theme.ely.fg),
         };
         div()
             .id(format!(
@@ -2237,7 +2237,7 @@ impl ChangesTab {
                     .w(px(DIFF_NUMBER_WIDTH))
                     .flex_none()
                     .text_align(gpui::TextAlign::Right)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(
                         line.old_line_number
                             .map_or(String::new(), |n| n.to_string()),
@@ -2249,7 +2249,7 @@ impl ChangesTab {
                     .w(px(DIFF_NUMBER_WIDTH))
                     .flex_none()
                     .text_align(gpui::TextAlign::Right)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(
                         line.new_line_number
                             .map_or(String::new(), |n| n.to_string()),
@@ -2334,14 +2334,14 @@ impl ChangesTab {
                 bar.h_auto().flex_wrap().py(px(4.0)).gap(px(4.0))
             })
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.ely.border)
             .child(
                 div()
                     .flex_1()
                     .when(self.embedded_in_panel, |title| title.flex_none().w_full())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(theme.typography.scaled(12.5))
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(title),
             )
             // The view-mode control sits at the head of the action cluster,
@@ -2585,12 +2585,12 @@ fn split_cell(
         // has no number and a recessed ground. Leaving it unpainted made
         // the zip's own padding — half of what F-GIT-DIFF-03 asks the
         // renderer to show — invisible in a photograph.
-        return cell.bg(theme.input_bg);
+        return cell.bg(theme.ely.sunken);
     };
     let (background, marker_color, marker) = match line.origin {
-        DiffOrigin::Context => (theme.surface, theme.text_faint, " "),
-        DiffOrigin::Addition => (diff_wash(theme.diff_add), theme.diff_add, "+"),
-        DiffOrigin::Deletion => (diff_wash(theme.diff_del), theme.diff_del, "-"),
+        DiffOrigin::Context => (theme.ely.bg, theme.ely.fg_subtle, " "),
+        DiffOrigin::Addition => (diff_wash(theme.sirio.diff_add), theme.sirio.diff_add, "+"),
+        DiffOrigin::Deletion => (diff_wash(theme.sirio.diff_del), theme.sirio.diff_del, "-"),
     };
     let number = if old {
         line.old_line_number
@@ -2612,7 +2612,7 @@ fn split_cell(
                     .w(px(DIFF_NUMBER_WIDTH))
                     .flex_none()
                     .text_align(gpui::TextAlign::Right)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(number.map_or(String::new(), |number| number.to_string())),
             )
             .child(
@@ -2641,7 +2641,7 @@ fn split_cell(
                             .absolute()
                             .left(side_x)
                             .whitespace_nowrap()
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             // The two sides of a context line are the same
                             // text in the same row, so each needs its own
                             // identity or selecting one would select both.
@@ -2721,7 +2721,7 @@ impl ChangesTab {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(loading::indeterminate(
                     "changes-loading-orb",
                     loading::GENERIC_ORB,
@@ -2755,7 +2755,7 @@ impl ChangesTab {
                 .items_center()
                 .justify_center()
                 .text_size(theme.typography.headline)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child("No changes")
                 .into_any_element();
         }
@@ -2776,7 +2776,7 @@ impl ChangesTab {
                             &[gpui::TextRun {
                                 len: content.len(),
                                 font: gpui::font(theme.typography.code_family),
-                                color: theme.text.into(),
+                                color: theme.ely.fg,
                                 ..Default::default()
                             }],
                             None,
@@ -2805,7 +2805,7 @@ impl ChangesTab {
                                     &[gpui::TextRun {
                                         len: content.len(),
                                         font: gpui::font(theme.typography.code_family),
-                                        color: theme.text.into(),
+                                        color: theme.ely.fg,
                                         ..Default::default()
                                     }],
                                     None,
@@ -3125,7 +3125,7 @@ impl ChangesTab {
                 div()
                     .max_w(px(560.0))
                     .text_size(theme.typography.headline)
-                    .text_color(theme.danger)
+                    .text_color(theme.ely.danger)
                     .child(format!("Git is unavailable: {error}")),
             )
             .child(action_text_button(
@@ -3171,7 +3171,7 @@ impl Render for ChangesTab {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .child(toolbar)
             .child(body)
     }
@@ -3184,14 +3184,14 @@ impl Render for ChangesTab {
 /// `GitStatusStyle.color` and from the Files tree, so a staged-then-modified
 /// file rendered amber here and green there. Both views now resolve through
 /// [`crate::git_status_style`]; keep it that way.
-fn status_color(entry: &StatusEntry, theme: Theme) -> Rgba {
+fn status_color(entry: &StatusEntry, theme: Theme) -> Hsla {
     crate::git_status_style::entry_color(entry, theme)
 }
 
 /// The gallery derives row washes from the semantic ink rather than keeping
 /// a second palette entry for the same meaning.
-fn diff_wash(color: Rgba) -> Rgba {
-    Rgba {
+fn diff_wash(color: Hsla) -> Hsla {
+    Hsla {
         a: DIFF_WASH_ALPHA,
         ..color
     }
@@ -3238,8 +3238,8 @@ impl Render for DiffDragPreview {
             .px(self.theme.spacing.titlebar_control_spacing)
             .py(self.theme.spacing.titlebar_control_spacing)
             .rounded(self.theme.radii.control)
-            .bg(self.theme.surface_raised)
-            .text_color(self.theme.text)
+            .bg(self.theme.ely.surface)
+            .text_color(self.theme.ely.fg)
             .child("Diff")
     }
 }
@@ -3269,8 +3269,8 @@ fn action_text_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.text)
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(theme.ely.fg)
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -3302,8 +3302,8 @@ fn action_icon_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.text)
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(theme.ely.fg)
+        .hover(|style| style.bg(theme.ely.hover))
         .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -3329,8 +3329,8 @@ fn section_action_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.text_muted)
-        .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
+        .text_color(theme.ely.fg_muted)
+        .hover(|style| style.bg(theme.ely.hover).text_color(theme.ely.fg))
         .tooltip(move |window, cx| tooltip_builder(label, window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -3358,8 +3358,8 @@ where
         .py(px(4.0))
         .rounded(px(6.0))
         .text_size(theme.typography.scaled(12.5))
-        .text_color(theme.text_muted)
-        .hover(|style| style.text_color(theme.danger))
+        .text_color(theme.ely.fg_muted)
+        .hover(|style| style.text_color(theme.ely.danger))
         .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -3388,8 +3388,8 @@ where
         .py(px(4.0))
         .rounded(px(6.0))
         .text_size(theme.typography.scaled(12.5))
-        .text_color(theme.text_muted)
-        .hover(|style| style.text_color(theme.danger))
+        .text_color(theme.ely.fg_muted)
+        .hover(|style| style.text_color(theme.ely.danger))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx);
@@ -4289,13 +4289,13 @@ mod tests {
         );
         assert_eq!(
             status_color(&entry, theme),
-            theme.success,
+            theme.ely.success,
             "a staged-then-modified file reads as staged, matching Swift's \
              GitStatusStyle.color and the Files tree marker"
         );
         assert_ne!(
             status_color(&entry, theme),
-            theme.warning,
+            theme.ely.warning,
             "the pre-fix order returned git_modified here"
         );
     }

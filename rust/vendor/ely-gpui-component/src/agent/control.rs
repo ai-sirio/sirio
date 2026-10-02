@@ -128,7 +128,7 @@ impl RenderOnce for HumanInputRequest {
             None
         };
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .flex()
             .flex_col()
@@ -223,7 +223,7 @@ impl CostBreakdown {
 impl RenderOnce for CostBreakdown {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let total: f64 = self.parts.iter().map(|(_, cost)| cost).sum();
         let code = self.code;
         let bar = (total > 0.0).then(|| {

@@ -28,7 +28,7 @@ use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
     InspectorElementId, KeyDownEvent, LayoutId, ListHorizontalSizingBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollHandle,
+    Hsla, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
     StyledText, Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window, anchored,
     canvas, deferred, div, point, prelude::*, px, quad, size, transparent_black, uniform_list,
 };
@@ -1673,7 +1673,7 @@ impl FileView {
                 .items_center()
                 .justify_center()
                 .gap(theme.spacing.card_gap)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .child(loading::indeterminate(
                     "file-loading-orb",
                     loading::GENERIC_ORB,
@@ -1810,7 +1810,7 @@ impl Render for FileView {
                 .p(px(6.0))
                 .rounded(theme.radii.user_pill)
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.ely.border)
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
@@ -1818,7 +1818,7 @@ impl Render for FileView {
             let mut previous_group = None;
             for (index, item) in items.iter().enumerate() {
                 if previous_group.is_some_and(|group| group != item.group) {
-                    menu = menu.child(div().w_full().h(px(1.0)).my(px(4.0)).bg(theme.border));
+                    menu = menu.child(div().w_full().h(px(1.0)).my(px(4.0)).bg(theme.ely.border));
                 }
                 previous_group = Some(item.group);
 
@@ -1852,11 +1852,11 @@ impl Render for FileView {
                         .gap(px(2.0))
                         .text_size(theme.typography.footnote)
                         .when(is_disabled, |this| {
-                            this.text_color(theme.text_faint).cursor_not_allowed()
+                            this.text_color(theme.ely.fg_subtle).cursor_not_allowed()
                         })
                         .when(!is_disabled, |this| {
-                            this.text_color(theme.text)
-                                .hover(|style| style.bg(theme.element_hover))
+                            this.text_color(theme.ely.fg)
+                                .hover(|style| style.bg(theme.ely.hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |view, cx| {
                                         view.handle_context_action(effect, window, cx);
@@ -1871,7 +1871,7 @@ impl Render for FileView {
                                         format!("file-context-item-{index}-reason")
                                     })
                                     .text_size(px(12.0))
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child(reason),
                             )
                         }),
@@ -1923,7 +1923,7 @@ impl Render for FileView {
             .relative()
             .flex()
             .flex_col()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
@@ -1962,11 +1962,11 @@ fn render_snapshot_bar(
         .flex()
         .items_center()
         .gap(px(12.0))
-        .bg(theme.element_hover)
+        .bg(theme.ely.hover)
         .border_b_1()
-        .border_color(theme.border)
+        .border_color(theme.ely.border)
         .text_size(theme.typography.footnote)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(div().flex_1().child(format!("Read-only · {}", origin.label())))
         .when_some(local, |this, path| {
             this.child(
@@ -1974,7 +1974,7 @@ fn render_snapshot_bar(
                     .id("file-snapshot-open-local")
                     .debug_selector(|| "file-snapshot-open-local".into())
                     .cursor_pointer()
-                    .text_color(theme.accent)
+                    .text_color(theme.sirio.quantity)
                     .child("Open local copy")
                     .on_click(move |_, _, cx| {
                         let path = path.clone();
@@ -2002,7 +2002,7 @@ fn render_snapshot_failure(
         .justify_center()
         .gap(theme.spacing.card_gap)
         .p(px(24.0))
-        .text_color(theme.text_muted)
+        .text_color(theme.ely.fg_muted)
         // The reason may be a git stderr tail: bounded and wrapped, the
         // way the hover card bounds a server's answer, so it never runs
         // off the tab sideways.
@@ -2023,8 +2023,8 @@ fn render_snapshot_failure(
                 .rounded(theme.radii.control)
                 .cursor_pointer()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
-                .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
+                .text_color(theme.ely.fg_muted)
+                .hover(|style| style.bg(theme.ely.hover).text_color(theme.ely.fg))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |_, cx| cx.emit(FileViewEvent::RetrySnapshot));
                 })
@@ -2096,9 +2096,9 @@ fn render_mode_option(
         .items_center()
         .justify_center()
         .rounded(theme.radii.chip)
-        .text_color(if active { theme.text } else { theme.text_faint })
-        .when(active, |this| this.bg(theme.element_active))
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(if active { theme.ely.fg } else { theme.ely.fg_subtle })
+        .when(active, |this| this.bg(theme.ely.active))
+        .hover(|style| style.bg(theme.ely.hover))
         .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
@@ -2133,11 +2133,11 @@ fn render_conflict_banner(
         .flex()
         .items_center()
         .gap(px(12.0))
-        .bg(theme.danger_muted)
+        .bg(theme.sirio.danger_muted)
         .border_b_1()
-        .border_color(theme.border)
+        .border_color(theme.ely.border)
         .text_size(theme.typography.footnote)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(div().flex_1().child(message))
         .when(conflict == Conflict::ChangedOnDisk, |this| {
             this.child(
@@ -2147,7 +2147,7 @@ fn render_conflict_banner(
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         let _ = reload_entity.update(cx, |view, cx| view.reload(cx));
                     })
@@ -2160,7 +2160,7 @@ fn render_conflict_banner(
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         keep_entity.update(cx, |view, cx| view.keep(cx));
                     })
@@ -2197,8 +2197,8 @@ fn render_markdown_bar(
         .items_center()
         .gap(theme.spacing.titlebar_control_spacing)
         .border_b_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
+        .border_color(theme.ely.border)
+        .bg(theme.ely.surface)
         .when(mode == MarkdownMode::Code, move |this| {
             this.child(render_format_button(
                 "B",
@@ -2262,8 +2262,8 @@ fn render_format_button(
         .justify_center()
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(theme.text)
-        .hover(|style| style.bg(theme.element_hover))
+        .text_color(theme.ely.fg)
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(move |_, _, cx| {
             operation.clone().apply(&file_view, cx);
         })
@@ -2445,9 +2445,9 @@ fn render_content(
                 .px(px(10.0))
                 .py(px(6.0))
                 .rounded(theme.radii.control)
-                .bg(theme.surface_raised)
+                .bg(theme.ely.surface)
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_muted)
+                .text_color(theme.ely.fg_muted)
                 .flex()
                 .items_center()
                 .gap(px(10.0))
@@ -2459,7 +2459,7 @@ fn render_content(
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded(theme.radii.control)
-                        .hover(|style| style.bg(theme.element_hover))
+                        .hover(|style| style.bg(theme.ely.hover))
                         .on_click(move |_, _, cx| {
                             preview_entity.update(cx, |view, cx| {
                                 view.set_markdown_mode(MarkdownMode::Preview, cx);
@@ -2629,7 +2629,7 @@ fn render_source_line(
         .whitespace_nowrap()
         .font_family(theme.typography.code_family)
         .text_size(theme.typography.code_size)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         // The gutter is the line number alone. It used to carry a 10px
         // severity dot as well; the squiggle on the code says the same
         // thing where the problem actually is, so the column went with it.
@@ -2637,7 +2637,7 @@ fn render_source_line(
             div()
                 .w(px(42.0))
                 .flex_none()
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(format!("{:>5} ", index + 1)),
         )
         .child(EditableLine::new(
@@ -2703,7 +2703,7 @@ struct EditableLine {
     line_len: usize,
     view: gpui::Entity<FileView>,
     selection: Option<Selection>,
-    selection_fill: Rgba,
+    selection_fill: Hsla,
     /// Byte ranges *local to this line* of clickable Markdown link labels,
     /// paired with their raw (unresolved) target text.
     links: Vec<(Range<usize>, String)>,
@@ -2712,7 +2712,7 @@ struct EditableLine {
     /// as a thin accent quad in `Element::paint`, after any selection.
     caret_offset: Option<usize>,
     /// Colour of the caret bar (the theme's accent).
-    caret_color: Rgba,
+    caret_color: Hsla,
     /// The line's own font and size, kept so an empty selected line can ask
     /// the font for a character's advance — there is no glyph to measure.
     font: gpui::Font,
@@ -2790,9 +2790,9 @@ impl EditableLine {
             line_len,
             view,
             selection,
-            selection_fill: theme.element_active,
+            selection_fill: theme.ely.active,
             caret_offset,
-            caret_color: theme.text,
+            caret_color: theme.ely.fg,
             font: gpui::font(theme.typography.code_family),
             font_size: theme.typography.code_size,
             links,
@@ -3095,11 +3095,11 @@ fn hover_card(text: &str, theme: Theme) -> AnyElement {
         .p(px(8.0))
         .bg(theme.menu_surface())
         .border_1()
-        .border_color(theme.border)
+        .border_color(theme.ely.border)
         .rounded(theme.radii.control)
         .font_family(theme.typography.code_family)
         .text_size(theme.typography.code_size)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(text.to_owned())
         .into_any_element()
 }
@@ -3132,11 +3132,11 @@ fn message_card(
         .gap(px(6.0))
         .bg(theme.menu_surface())
         .border_1()
-        .border_color(theme.border)
+        .border_color(theme.ely.border)
         .rounded(theme.radii.control)
         .font_family(theme.typography.ui_family)
         .text_size(theme.typography.base_size)
-        .text_color(theme.text)
+        .text_color(theme.ely.fg)
         .child(text.to_owned());
     if !actions.is_empty() {
         let mut row = div().flex().items_center().gap(px(6.0));
@@ -3153,8 +3153,8 @@ fn message_card(
                     .py(px(3.0))
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_muted)
-                    .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
+                    .text_color(theme.ely.fg_muted)
+                    .hover(|style| style.bg(theme.ely.hover).text_color(theme.ely.fg))
                     // The card below reads a mouse-down on itself as a
                     // click on the body and dismisses on it. The button has
                     // to stop that event before it reaches the card:
@@ -3186,7 +3186,7 @@ fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
         .justify_center()
         .p(px(24.0))
         .text_size(theme.typography.headline)
-        .text_color(theme.text_muted)
+        .text_color(theme.ely.fg_muted)
         .child(selectable_text(message))
         .into_any_element()
 }
@@ -3395,10 +3395,10 @@ fn line_highlights(
         (
             range.clone(),
             HighlightStyle {
-                color: Some(theme.file_link.into()),
+                color: Some(theme.ely.link),
                 underline: Some(UnderlineStyle {
                     thickness: px(1.0),
-                    color: Some(theme.file_link.into()),
+                    color: Some(theme.ely.link),
                     wavy: false,
                 }),
                 ..Default::default()
@@ -3426,16 +3426,16 @@ fn underline_highlights(
         .iter()
         .map(|(range, severity)| {
             let color = match severity {
-                DiagnosticSeverity::Error => theme.danger,
-                DiagnosticSeverity::Warning => theme.warning,
-                DiagnosticSeverity::Information | DiagnosticSeverity::Hint => theme.text_faint,
+                DiagnosticSeverity::Error => theme.ely.danger,
+                DiagnosticSeverity::Warning => theme.ely.warning,
+                DiagnosticSeverity::Information | DiagnosticSeverity::Hint => theme.ely.fg_subtle,
             };
             (
                 range.clone(),
                 HighlightStyle {
                     underline: Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(color.into()),
+                        color: Some(color),
                         // Wavy, not straight: a straight rule is already
                         // the Markdown link style in this same surface.
                         wavy: true,
@@ -4737,7 +4737,7 @@ mod tests {
             let marked = style_at(&highlights, 4);
             let underline = marked.underline.expect("the diagnostic span underlines");
             assert!(underline.wavy);
-            assert_eq!(underline.color, Some(theme.warning.into()));
+            assert_eq!(underline.color, Some(theme.ely.warning));
 
             let keyword = style_at(&highlights, 0);
             assert!(

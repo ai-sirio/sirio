@@ -8,7 +8,7 @@
 //! not copied here: only its measurements are, and the gradient is built
 //! against gpui's own `linear_gradient`/`linear_color_stop`.
 
-use gpui::{Background, Div, Rgba, div, linear_color_stop, linear_gradient, prelude::*, px};
+use gpui::{Background, Div, Hsla, div, linear_color_stop, linear_gradient, prelude::*, px};
 
 pub(super) const FADE_WIDTH: f32 = 92.0;
 const FADE_STOP: f32 = 0.7;
@@ -17,12 +17,12 @@ const FADE_STOP: f32 = 0.7;
 /// caller whose background moves — a row that highlights on hover or when
 /// selected — can hand the matching fill to `group_hover` instead of
 /// leaving a patch of the wrong colour floating over the highlight.
-pub(super) fn fade_gradient(background: Rgba) -> Background {
+pub(super) fn fade_gradient(background: Hsla) -> Background {
     linear_gradient(
         90.,
         linear_color_stop(background, FADE_STOP),
         linear_color_stop(
-            Rgba {
+            Hsla {
                 a: 0.0,
                 ..background
             },
@@ -31,7 +31,7 @@ pub(super) fn fade_gradient(background: Rgba) -> Background {
     )
 }
 
-pub(super) fn fade_right(background: Rgba, width: f32) -> Div {
+pub(super) fn fade_right(background: Hsla, width: f32) -> Div {
     div()
         .absolute()
         .top_0()

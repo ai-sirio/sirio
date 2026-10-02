@@ -131,7 +131,7 @@ pub(crate) fn action_button(
     enabled: bool,
     on_click: impl Fn(&mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.element_hover;
+    let hover = theme.ely.hover;
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -143,9 +143,9 @@ pub(crate) fn action_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if enabled {
-            theme.text_muted
+            theme.ely.fg_muted
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         })
         .when(enabled, |this| {
             this.cursor_pointer()
@@ -164,7 +164,7 @@ pub(crate) fn indexed_button(
     enabled: bool,
     on_click: impl Fn(&mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.element_hover;
+    let hover = theme.ely.hover;
     div()
         .id((name, index))
         .debug_selector(move || format!("{name}-{index}"))
@@ -175,9 +175,9 @@ pub(crate) fn indexed_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if enabled {
-            theme.text_muted
+            theme.ely.fg_muted
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         })
         .when(enabled, |this| {
             this.cursor_pointer()
@@ -345,14 +345,14 @@ impl ChangeRequestTab {
     pub(crate) fn render_action_status(&self, theme: &Theme) -> Option<AnyElement> {
         let (text, tone): (String, Hsla) = match &self.actions.state {
             ActionState::Idle => return None,
-            ActionState::Working(kind) => (format!("Sending {kind}…"), theme.text_faint.into()),
-            ActionState::Failed { message, .. } => (message.clone(), theme.danger.into()),
+            ActionState::Working(kind) => (format!("Sending {kind}…"), theme.ely.fg_subtle),
+            ActionState::Failed { message, .. } => (message.clone(), theme.ely.danger),
             ActionState::Unconfirmed { .. } => (
                 "Could not confirm that it went through. Look at the conversation before sending it again."
                     .to_string(),
-                theme.warning.into(),
+                theme.ely.warning,
             ),
-            ActionState::Warning(text) => (text.clone(), theme.warning.into()),
+            ActionState::Warning(text) => (text.clone(), theme.ely.warning),
         };
         Some(
             div()

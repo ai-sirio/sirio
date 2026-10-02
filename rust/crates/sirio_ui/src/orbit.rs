@@ -82,8 +82,8 @@ fn dot_offset(t: f32, size: f32) -> (f32, f32) {
 /// `id` keys the animation and must be unique among the elements alive at the
 /// same time; two marks sharing one id would share one phase.
 pub fn orbit(id: &'static str, size: f32, color: impl Into<Hsla>) -> impl IntoElement {
-    // Sirio's theme tokens are `Rgba`; alpha is applied here in `Hsla`, which
-    // is the space gpui's own `opacity` ladder works in.
+    // Sirio's theme tokens are `Hsla`; alpha is applied in the same space
+    // gpui's own `opacity` ladder works in.
     let color = color.into();
     let planet = size * PLANET_RATIO;
     let dot = size * DOT_RATIO;

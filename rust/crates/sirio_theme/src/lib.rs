@@ -7,7 +7,7 @@
 //! contrast rather than hue, and semantic hues retain their existing state
 //! meanings. Colour is spent on two things only: data (a diff, a git status, an
 //! agent's brand) and attention (needs-input, error). The brand coral no longer
-//! has a role — see [`ThemeColors::brand_coral`].
+//! has a role — see [`SirioColors::brand_coral`].
 //!
 //! Where each value comes from is recorded in
 //! `docs/THEME-PROVENANCE.md`. The re-runnable
@@ -31,7 +31,7 @@
 //! treats a missing or silent portal as **dark**, not light. macOS keeps the
 //! old behavior: `NSAppearance` is synchronous and authoritative there.
 
-use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
+use gpui::{App, FontWeight, Global, Hsla, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -46,10 +46,13 @@ use std::sync::OnceLock;
 /// *resolved* one) and because it keeps `sirio_persistence::AppearanceMode`
 /// unambiguous at the one place both are in scope, `sirio`'s `main.rs`.
 mod base_color;
+mod presets;
+
+pub use ely_palette;
 
 pub use base_color::BaseColor;
 
-pub use bezel::theme::appearance::AppearanceMode as ThemeMode;
+pub use bezel_theme::appearance::AppearanceMode as ThemeMode;
 
 /// The resolved light/dark appearance of an active [`Theme`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,118 +106,60 @@ fn resolve_mode_linux(mode: ThemeMode, system_appearance: WindowAppearance) -> A
     }
 }
 
-/// All adaptive colors used by Sirio.
-///
-/// Names say what a value *does* in the design system (`surface_raised`,
-/// `input_bg`, `overlay`, …) rather than which component consumes it. The
-/// component-named layer this file used to carry alongside it — the
-/// `tab_focus_accent`/`filter_field_bg` aliases — has been collapsed into the
-/// roles it resolved to.
-///
-/// Where each value comes from — measured off a reference frame, or chosen by
-/// us because no frame could settle it — is in
-/// `docs/THEME-PROVENANCE.md`.
+/// The colours Ely's `Palette` has no field for, or whose value differs
+/// from the Ely field of the same meaning (spec §3.2). Each field's doc says
+/// where it is painted.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ThemeColors {
-    /// Translucent window-frame material. Its RGB value is paired with
-    /// [`ThemeColors::bg`] for platforms without translucency.
-    pub frame_surface: Rgba,
+pub struct SirioColors {
     /// Opaque fallback behind the app shell and window canvas, and behind the
     /// working columns when translucency is unavailable.
-    pub bg: Rgba,
-    /// Opaque reading surface inside the shell: panels, the sidebar, the tab
-    /// bar, the workspace column, the right panel, settings, and the chat
-    /// transcript, which reads directly on the central panel rather than on a
-    /// floating card.
-    pub surface: Rgba,
-    /// Opaque separator between shell panels, and the seam the tab chip's
-    /// underline and the sidebar draw. Opaque rather than a veil, which is
-    /// what keeps it a separate token from [`ThemeColors::border`].
-    pub border_opaque: Rgba,
+    pub canvas: Hsla,
+    /// Translucent window-frame material. Its RGB value is paired with
+    /// [`SirioColors::canvas`] for platforms without translucency.
+    pub frame_surface: Hsla,
     /// Terminal surface — the pane surface in dark mode and paper-white in
     /// light mode. Kept under its own name because the terminal renderer also
     /// uses it as the ANSI default background.
-    pub terminal_surface: Rgba,
-    /// Waiting-for-input status, a modified file, and the rail down a
-    /// question card — the one card kind that is waiting on the reader, and
-    /// so the one that keeps its colour.
-    pub warning: Rgba,
-    /// Completed status, and a staged file.
-    pub success: Rgba,
-    /// Errored status, and a conflicted file.
-    pub danger: Rgba,
-    /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
-    /// so it reads as a seam rather than a line.
-    pub border: Rgba,
-    /// Hover fill for sidebar rows — a 6% neutral layer, not a colour.
-    pub element_hover: Rgba,
-    /// Primary text neutral, and the shell's whole "this is active" channel:
-    /// row titles selected or not, the tab strip's underline and dirty dot, a
-    /// menu's checkmark, a running worktree's badge, focused-field borders,
-    /// composer body text, the insertion caret, and inline `code` glyphs. With
-    /// colour reserved for data and attention, contrast is the only channel
-    /// left to say "this one is active", so active chrome is the full text
-    /// neutral rather than a step below it, and never a second blue.
-    pub text: Rgba,
-    /// Secondary row text, and the focus ring for shell panels — one step
-    /// below [`ThemeColors::text`]: a focused pane has to be findable, not
-    /// loud. Clears WCAG AA on the panel surface at body size.
-    pub text_muted: Rgba,
-    /// Raw sampled meta text, reserved for nonessential metadata and disabled
-    /// labels. Body-size secondary text uses [`ThemeColors::text_muted`],
-    /// which clears WCAG AA on the panel surface.
-    pub text_faint: Rgba,
-    /// Tree guide stroke, including its source alpha.
-    pub tree_guide: Rgba,
-    /// Untracked-file status color — the accent blue.
-    pub git_untracked: Rgba,
-    /// Addition diff accent — the success hue.
-    pub diff_add: Rgba,
-    /// Addition diff background — translucent success wash.
-    pub diff_add_bg: Rgba,
-    /// Deletion diff accent — the danger hue.
-    pub diff_del: Rgba,
-    /// Deletion diff background — translucent danger wash.
-    pub diff_del_bg: Rgba,
-    /// Clickable file-link color — the accent blue, the one place blue means
-    /// "you can click this" rather than "this is a quantity".
-    pub file_link: Rgba,
-    // ── Role tokens: what a value does, rather than who consumes it ───────
-    /// Floating cards, popovers, tooltips, the composer and primary pills: a
-    /// step *above* the surface.
-    pub surface_raised: Rgba,
-    /// Recessed wells — filter fields, code and diff insets: a step *below*
-    /// the surface. Code sits *in* the card, the inverse of a raised move.
-    pub input_bg: Rgba,
+    pub terminal_surface: Hsla,
     /// A sheet an event opens over the shell and that reads like a panel of
     /// its own: the New Worktree prompt and the Clone/Create project forms.
-    /// The same value as [`ThemeColors::surface`], but **never faded** by
+    /// The same value as `ely.bg`, but **never faded** by
     /// [`Theme::with_translucency_at`] — translucency belongs to the main
     /// window's background, and a sheet the desktop shows through is
     /// unreadable exactly when it is asking for input.
-    pub dialog_surface: Rgba,
+    pub dialog_surface: Hsla,
     /// A card floating over the frame that an event puts up: the modal
     /// sheet (Set Title, Close confirm) and the toasts. The same value as
-    /// [`ThemeColors::surface_raised`], never faded, for the reason
-    /// [`ThemeColors::dialog_surface`] gives.
-    pub floating_surface: Rgba,
+    /// `ely.surface`, never faded, for the reason
+    /// [`SirioColors::dialog_surface`] gives.
+    pub floating_surface: Hsla,
     /// Generic hover wash — 5% neutral. Also the transcript row hover: a step
-    /// lighter than [`ThemeColors::element_hover`], because transcript rows
+    /// lighter than `ely.hover`, because transcript rows
     /// are wider and a 6% wash over that area reads as a block.
-    pub overlay: Rgba,
+    pub overlay: Hsla,
     /// Pressed wash — 9% neutral, so press reads as more than hover.
-    pub overlay_strong: Rgba,
+    pub overlay_strong: Hsla,
     /// Stronger divider, for seams that separate rather than merely delimit,
     /// and the neutral rail down a task, edit or tool card.
-    pub border_strong: Rgba,
+    pub border_strong: Hsla,
     /// Keyboard-focus ring on a text field — bezel's `ring`, the translucent
     /// hairline every bezel input, select and control lights up with. A veil
     /// on the surface's own tone (white on dark, black on light), never the
     /// body text colour: that painted an opaque white frame on the dark theme.
-    pub ring: Rgba,
+    pub ring: Hsla,
     /// Faintest text step — placeholder copy and disabled labels, below
-    /// [`ThemeColors::text_faint`].
-    pub text_dim: Rgba,
+    /// `ely.fg_subtle`.
+    pub text_dim: Hsla,
+    /// Soft danger fill (stop button hover).
+    pub danger_muted: Hsla,
+    /// Quantity blue: quota meters, and the clone and update progress bars.
+    /// Blue means "how much", which is why a progress bar is never painted in
+    /// a status hue — a bar filling up is not an alert.
+    pub quantity: Hsla,
+    /// Light fill for primary buttons, dark glyph on top.
+    pub solid: Hsla,
+    /// Glyph on primary buttons.
+    pub on_solid: Hsla,
     /// Brand coral. No role paints it any more: the shell's focus rings,
     /// caret, selection and active chrome are neutral, and every colour left in
     /// the UI is a status, a diff, a quantity or an agent's own brand.
@@ -224,43 +169,81 @@ pub struct ThemeColors {
     /// as a literal there, so the picker keeps drawing from `Theme` — and so
     /// the two invariants this value carries (it clears AA on its own surface,
     /// and it is not any agent's brand) still have something to hold.
-    pub brand_coral: Rgba,
-    /// Quantity blue: quota meters, and the clone and update progress bars.
-    /// Blue means "how much", which is why a progress bar is never painted in
-    /// a status hue — a bar filling up is not an alert.
-    pub accent: Rgba,
-    /// Selected-row fill, and the resting fill of a control the user clicks.
-    /// Must stay distinguishable from [`ThemeColors::surface_raised`]; that is
-    /// the property this token exists to preserve.
-    /// [`ThemeColors::selection`] remains reserved for text-selection under
-    /// glyphs.
-    pub element_active: Rgba,
-    /// Text-selection wash, painted *under* glyphs: the top rung of the veil
-    /// ladder, neutral in both appearances. Never used for row chrome — that
-    /// is [`ThemeColors::element_active`].
-    pub selection: Rgba,
+    pub brand_coral: Hsla,
     /// Inline `code` rounded wash, and the band under a diff hunk — the same
     /// wash, because a hunk is code too.
-    pub code_wash: Rgba,
-    /// Light fill for primary buttons, dark glyph on top.
-    pub solid: Rgba,
-    /// Glyph on primary buttons.
-    pub on_solid: Rgba,
-    /// Star/favorite amber.
-    pub favorite: Rgba,
-    /// Soft danger fill (stop button hover).
-    pub danger_muted: Rgba,
+    pub code_wash: Hsla,
+    /// Tree guide stroke, including its source alpha.
+    pub tree_guide: Hsla,
+    /// Addition diff accent — the success hue.
+    pub diff_add: Hsla,
+    /// Addition diff background — translucent success wash.
+    pub diff_add_bg: Hsla,
+    /// Deletion diff accent — the danger hue.
+    pub diff_del: Hsla,
+    /// Deletion diff background — translucent danger wash.
+    pub diff_del_bg: Hsla,
 }
 
-fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::theme::Theme {
-    let mut theme = bezel::theme::Theme::branded(
-        &bezel::theme::Brand {
+impl SirioColors {
+    /// Every field with its name, in declaration order.
+    pub fn named(&self) -> [(&'static str, Hsla); 21] {
+        [
+            ("canvas", self.canvas),
+            ("frame_surface", self.frame_surface),
+            ("terminal_surface", self.terminal_surface),
+            ("dialog_surface", self.dialog_surface),
+            ("floating_surface", self.floating_surface),
+            ("overlay", self.overlay),
+            ("overlay_strong", self.overlay_strong),
+            ("border_strong", self.border_strong),
+            ("ring", self.ring),
+            ("text_dim", self.text_dim),
+            ("danger_muted", self.danger_muted),
+            ("quantity", self.quantity),
+            ("solid", self.solid),
+            ("on_solid", self.on_solid),
+            ("brand_coral", self.brand_coral),
+            ("code_wash", self.code_wash),
+            ("tree_guide", self.tree_guide),
+            ("diff_add", self.diff_add),
+            ("diff_add_bg", self.diff_add_bg),
+            ("diff_del", self.diff_del),
+            ("diff_del_bg", self.diff_del_bg),
+        ]
+    }
+}
+
+/// All adaptive colors used by Sirio.
+///
+/// Names say what a value *does* in the design system (`ely.surface`,
+/// `ely.sunken`, `sirio.overlay`, …) rather than which component consumes it.
+/// The component-named layer this file used to carry alongside it — the
+/// `tab_focus_accent`/`filter_field_bg` aliases — has been collapsed into the
+/// roles it resolved to.
+///
+/// Where each value comes from — measured off a reference frame, or chosen by
+/// us because no frame could settle it — is in
+/// `docs/THEME-PROVENANCE.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeColors {
+    /// Ely's vocabulary, holding Sirio's values: what every Ely component
+    /// reads, and what Sirio's own call sites read where meaning and value
+    /// coincide (spec §3.2).
+    pub ely: ely_palette::Palette,
+    /// The colours Ely has no field for.
+    pub sirio: SirioColors,
+}
+
+fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel_theme::Theme {
+    let mut theme = bezel_theme::Theme::branded(
+        &bezel_theme::Brand {
             tint: base_color.tint(),
             ..Default::default()
         },
         match appearance {
-            Appearance::Dark => bezel::theme::Appearance::Dark,
-            Appearance::Light => bezel::theme::Appearance::Light,
+            Appearance::Dark => bezel_theme::Appearance::Dark,
+            Appearance::Light => bezel_theme::Appearance::Light,
         },
     );
     if let Some(ladder) = base_color.grey_ladder(appearance) {
@@ -279,14 +262,13 @@ fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::them
 /// are painted here, after `branded`, onto the seven surface tokens and
 /// nothing else: the veils (`element_hover`, `border`, `input_bg`, …) are
 /// white-alpha washes that compose over whatever is beneath them, and the
-/// text ladder and semantic hues stay bezel's. Done in this builder, not in
-/// `ThemeColors::for_appearance`, because `to_bezel_theme` calls the same
-/// function and hands the result to `install_custom` — so bezel's own widgets
-/// and Sirio's tokens see one ladder by construction.
+/// text ladder and semantic hues stay bezel's. These values in `base_color.rs`
+/// now feed only `to_bezel_theme`; Sirio's source is `presets.rs`. Keep the
+/// matching ladders in both files aligned until sub-project 7.
 ///
 /// Mutation of the local, in bezel's own `Brand::apply` style; struct-update
 /// syntax would need every one of bezel's 72 fields restated.
-fn paint_notte_ladder(theme: &mut bezel::theme::Theme) {
+fn paint_notte_ladder(theme: &mut bezel_theme::Theme) {
     let ladder = base_color::NOTTE_LADDER;
     theme.bg = opaque_hsla(ladder.page);
     theme.surface = opaque_hsla(ladder.surface);
@@ -300,11 +282,10 @@ fn paint_notte_ladder(theme: &mut bezel::theme::Theme) {
 }
 
 /// The solid grey ladders of `Neutral` and `Onice`, same mechanism as
-/// [`paint_notte_ladder`]; the values are in `base_color.rs`.
-///
-/// The tint stays `NONE` — this moves lightness only, so bezel widgets (via
-/// `to_bezel_theme`) and Sirio tokens see one ladder by construction.
-fn paint_grey_ladder(theme: &mut bezel::theme::Theme, ladder: base_color::GreyLadder) {
+/// [`paint_notte_ladder`]. These `base_color.rs` values feed only
+/// `to_bezel_theme`; Sirio's matching values are hand-maintained in
+/// `presets.rs`. Keep both copies aligned until sub-project 7.
+fn paint_grey_ladder(theme: &mut bezel_theme::Theme, ladder: base_color::GreyLadder) {
     theme.bg = opaque_hsla(ladder.page);
     theme.surface = opaque_hsla(ladder.surface);
     theme.surface_card = opaque_hsla(ladder.surface);
@@ -336,11 +317,9 @@ fn opaque_hsla(hex: u32) -> gpui::Hsla {
 /// `parameter` take the body text colour, `punctuation` the dimmed one, and
 /// `invalid` the theme's danger. Everything else is a fixed hue.
 ///
-/// This is a deliberate exception to this crate's "no palette of its own"
-/// rule, and the only one: every non-syntax colour still comes from bezel.
-/// The rule exists so a bezel bump stays reviewable as a visual change —
-/// which is exactly why the exception is confined to this one function
-/// rather than spread across `ThemeColors`.
+/// This source-code palette is Sirio's own. Adaptive colours are also
+/// hand-maintained in `presets.rs`; a bezel change affects its widgets through
+/// `to_bezel_theme`, not Sirio's preset values.
 mod zed_syntax {
     //! One Dark / One Light token hues, by role.
     pub const DARK_RED: u32 = 0xE06C75;
@@ -369,7 +348,7 @@ impl Theme {
     /// and renderer already speaks — carrying Sirio's hues. Swapping the
     /// values rather than the type is what keeps `sirio_ui` free of a second
     /// palette vocabulary.
-    pub fn syntax_palette(&self) -> bezel::theme::SyntaxPalette {
+    pub fn syntax_palette(&self) -> bezel_theme::SyntaxPalette {
         use zed_syntax::*;
         let dark = self.appearance == Appearance::Dark;
         let pick = |on_dark: u32, on_light: u32| {
@@ -384,10 +363,10 @@ impl Theme {
         let purple = pick(DARK_PURPLE, LIGHT_PURPLE);
         let comment = pick(DARK_COMMENT, LIGHT_COMMENT);
         // The theme's own, so a base-colour change still moves the text.
-        let text = gpui::Hsla::from(self.colors.text);
-        let dimmed = gpui::Hsla::from(self.colors.text_faint);
+        let text = self.colors.ely.fg;
+        let dimmed = self.colors.ely.fg_subtle;
 
-        bezel::theme::SyntaxPalette {
+        bezel_theme::SyntaxPalette {
             comment,
             keyword: purple,
             string: green,
@@ -414,7 +393,7 @@ impl Theme {
             tag: red,
             attribute: orange,
             label: orange,
-            invalid: gpui::Hsla::from(self.colors.danger),
+            invalid: self.colors.ely.danger,
         }
     }
 }
@@ -425,222 +404,16 @@ impl ThemeColors {
     /// merely seen.
     ///
     /// A menu is an event-opened surface in exactly the sense
-    /// [`ThemeColors::floating_surface`] describes, so it must not fade with
+    /// [`SirioColors::floating_surface`] describes, so it must not fade with
     /// the panels — a menu the desktop shows through is unreadable at the one
     /// moment it is being asked to be read.
-    pub fn menu_surface(&self) -> Rgba {
-        self.floating_surface
-    }
-
-    /// Picks the dark or light variant. Call sites pass dark first, then
-    /// light, matching the "dark / light" order every palette table in the
-    /// reference document uses.
-    fn adaptive(dark: Rgba, light: Rgba, appearance: Appearance) -> Rgba {
-        match appearance {
-            Appearance::Light => light,
-            Appearance::Dark => dark,
-        }
+    pub fn menu_surface(&self) -> Hsla {
+        self.sirio.floating_surface
     }
 
     fn for_appearance(appearance: Appearance, base: BaseColor) -> Self {
-        // Every neutral, status and diff token below is bezel's. What stays
-        // Sirio's is listed in `Group C` of the design doc: the coral, the
-        // window-frame material, the terminal surface, and the washes that sit
-        // between bezel's rungs.
-        //
-        // The palette is read here rather than through bezel's `wash`/`ink`
-        // helpers because those resolve against a process-global appearance,
-        // and this function is called for both appearances in one process.
-        // `branded` is the same reason the tint arrives as a parameter: a
-        // brand global would put back exactly the problem those helpers have.
-        let bezel = bezel_theme_for(base, appearance);
-        // Sirio's brand coral. Part measured, part chosen, and the seam between
-        // the two is the whole point — see `docs/THEME-PROVENANCE.md`.
-        //
-        // Measured: the hue, 24.3°, taken from the warm family the reference
-        // frames actually render (their inline-code tone, `#E0A882`, agreeing
-        // across three independent spans). Neither frame contains a coral to
-        // sample directly — both show one idle chat with no logo, caret, focus
-        // ring or activity dot, and a search of the whole frame finds zero
-        // pixels within 37 units of any coral — so hue is as much as looking
-        // can settle.
-        //
-        // Chosen: saturation 0.70 and lightness 0.60/0.40, against two
-        // constraints rather than taste. Each variant clears WCAG AA on the
-        // surface it is painted on (6.68:1 dark, 4.71:1 light against the
-        // Neutral ladder — the light step was re-derived when the light
-        // surface moved to `#E8E8E8`), held by
-        // `brand_coral_clears_contrast_on_its_own_surface`. And both stay clear of
-        // every `AgentBrandColor`, held by
-        // `worktree_activity_colours_name_the_agent_and_never_a_status`: a tab
-        // shows its coral and its agent's mark side by side, so a coral
-        // that lands on a brand makes the mark stop meaning anything. Claude's
-        // `#D97757` is the near one at 22 units, which is also why the obvious
-        // shortcut — reusing our own Swift's Claude fill for the coral — is
-        // the one coral this app cannot have.
-        let brand_coral = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0x9E5119), appearance);
-        // The state hues are not a fresh design problem: Sirio already
-        // shipped them. These four are the sRGB components of
-        // `App/AppTheme.swift`'s `tabNeedsInput`, `tabDone`, `tabError` and
-        // `tabFocusAccent`, transcribed digit for digit from our own macOS
-        // app, where they mark the same four things on the same tab strip.
-        // They are written as the float triples the Swift declares rather than
-        // as hex so the two files can be diffed by eye.
-        //
-        // Nothing here could have come off the reference frames anyway: both
-        // show one idle chat session — no error, no progress bar, no starred
-        // row, no terminal — so there is no pixel of any of these states to
-        // sample. Reusing our own is the strictly better answer than inventing
-        // a second vocabulary for a meaning we had already fixed.
-        //
-        // `accent` is the exception worth naming: in Swift this blue is the
-        // focus accent. The Rust brand colour is coral, which freed the blue, and a
-        // progress bar is the one place left that wants a cool hue.
-        let warning = Rgba::from(bezel.warning);
-        let success = Rgba::from(bezel.success);
-        let danger = Rgba::from(bezel.danger);
-        let accent = Rgba::from(bezel.accent);
-        let diff_add = Rgba::from(bezel.diff_add);
-        let diff_del = Rgba::from(bezel.diff_del);
-        // A starred row is the warning hue, not a fifth colour. Sirio used to
-        // turn its own warning up to full chroma to make the star the louder
-        // of the two; bezel's warning already is at full chroma, so there is
-        // nothing left to turn up and the two are the same value.
-        let favorite = warning;
-        let frame_fallback = Rgba::from(bezel.bg);
-        let frame_surface = match appearance {
-            Appearance::Dark => softened(frame_fallback, 0.85),
-            Appearance::Light => softened(frame_fallback, 0.80),
-        };
-        let panel_surface = Rgba::from(bezel.surface);
-        let selected_fill = Rgba::from(bezel.element_active);
-        // bezel paints body text at full contrast against its page: #E5E5E5
-        // on #0D0D0D is 15.4:1, #222222 on #F4F4F4 is 14.5:1. On a surface
-        // this dense — a sidebar, a tab strip and a file tree all in view —
-        // that reads as glare rather than as emphasis, so Sirio pulls the
-        // primary text one step back toward the surface it sits on. The
-        // result lands where Sirio's own text was before it adopted bezel
-        // (12.2:1 dark, 10.8:1 light), which is the target, not a taste:
-        // both are comfortably past WCAG AAA's 7:1, so nothing is spent.
-        //
-        // Only the primary rung moves. `text_muted` and below are already
-        // pulled back, and softening them too would collapse the ladder.
-        let text = toward(Rgba::from(bezel.text), panel_surface, TEXT_SOFTENING);
-        let text_muted = Rgba::from(bezel.text_muted);
-        let text_faint = Rgba::from(bezel.text_faint);
-        let text_dim = Rgba::from(bezel.text_dim);
-        let raised = Rgba::from(bezel.surface_raised);
-        // One step *into* the page, and derived from the measured surface for
-        // the same reason `sidebar` is: a well is a relationship to the page
-        // it is cut into, so it should move when the page does. The two
-        // factors differ because the move is not symmetric — dark has 26 units
-        // of headroom below the surface and can take a big step, light has 246
-        // and would go grey long before it read as a well. Both were picked to
-        // make the well legible at a glance and neither is a measurement;
-        // `the_depth_ladder_reads_as_depth` holds the ordering.
-        let inset = Rgba::from(bezel.input_bg);
-        // A terminal shares the pane surface in dark mode so its empty area
-        // cannot become a lighter grey than the pane around it. Light mode
-        // keeps the paper-white terminal surface.
-        let terminal_surface = Self::adaptive(panel_surface, color(1.0, 1.0, 1.0, 1.0), appearance);
-        // Everything from here to `danger_soft` is a veil off the ladder — see
-        // [`veil`] for why washes cannot be measured and must come from one
-        // rule instead.
-        let border = Rgba::from(bezel.border);
-        let border_strong = Rgba::from(bezel.border_strong);
-        let ring = Rgba::from(bezel.ring);
-        // Measured off the seam itself, which is two frame pixels wide — one
-        // logical pixel at 2x — and flat at 200/200 in both variants, so these
-        // are solid values and not a blend of the surfaces either side.
-        let row_hover = Rgba::from(bezel.element_hover);
-        // A chat row is most of the width of the pane. The same veil a sidebar
-        // row uses would read as a change of surface at that size, so the
-        // large-area hover sits one rung lower.
-        // bezel has no rung at 0.05 or 0.12; `wash` is its interactive-state
-        // helper and takes the alpha directly, so Sirio's faint and mid rungs
-        // survive as calls rather than as tokens of their own.
-        let overlay = wash(VEIL_FAINT, appearance);
-        let overlay_strong = wash(VEIL_MID, appearance);
-        // A grey ladder (Neutral's, Onice's) replaces two veil rules with solid
-        // fills: the terminal follows the page (Neutral's central panes are
-        // `#141414`), and both hovers are the ladder's own hover everywhere.
-        let ladder = base.grey_ladder(appearance);
-        let terminal_surface = if ladder.is_some() {
-            Rgba::from(bezel.bg)
-        } else {
-            terminal_surface
-        };
-        let (overlay, overlay_strong) = match ladder {
-            Some(ladder) => {
-                let hover = rgb_hex(ladder.hover);
-                (hover, hover)
-            }
-            None => (overlay, overlay_strong),
-        };
-        // A selection wash sits under its own text, so it has two jobs at
-        // once: be visible, and not swallow the glyphs. The top rung of the
-        // veil ladder is the strongest wash that still does both in either
-        // appearance; `selection_stays_under_its_text` holds the second half.
-        let selection = Rgba::from(bezel.selection);
-        let code_wash = Rgba::from(bezel.code_wash);
-        // An inverted chip — a tooltip, a keycap — is literally the other
-        // appearance's page, so it is the same measured pair, swapped. No new
-        // number, and it stays right by construction if either is ever
-        // re-measured.
-        let inverse = Rgba::from(bezel.solid);
-        let on_inverse = Rgba::from(bezel.on_solid);
-        let danger_soft = Rgba::from(bezel.danger_muted);
-
-        Self {
-            frame_surface,
-            bg: frame_fallback,
-            surface: panel_surface,
-            // Collapsed onto `border`: bezel draws every seam as a hairline
-            // veil, so the opaque separator Sirio used to carry has no source
-            // any more. Kept as a name until phase 3 removes it, so this value
-            // change does not also move five call sites.
-            border_opaque: border,
-            terminal_surface,
-            warning,
-            success,
-            danger,
-            border,
-            element_hover: row_hover,
-            text,
-            text_muted,
-            text_faint,
-            // A guide is an edge, so it scales with the surround like every
-            // other hairline rather than holding a fixed alpha.
-            tree_guide: hairline(VEIL_MID, appearance),
-            git_untracked: text_faint,
-            // The band under a diff line is the line's own colour turned down,
-            // never a second green or a second red — see [`softened`].
-            diff_add,
-            diff_add_bg: softened(diff_add, VEIL_MID),
-            diff_del,
-            diff_del_bg: softened(diff_del, VEIL_MID),
-            file_link: accent,
-            surface_raised: raised,
-            input_bg: inset,
-            // The opaque twins: same values, but `with_translucency_at` leaves
-            // them alone. See the field docs for which surfaces paint them.
-            dialog_surface: panel_surface,
-            floating_surface: raised,
-            overlay,
-            overlay_strong,
-            border_strong,
-            ring,
-            text_dim,
-            brand_coral,
-            accent,
-            selection,
-            element_active: selected_fill,
-            code_wash,
-            solid: inverse,
-            on_solid: on_inverse,
-            favorite,
-            danger_muted: danger_soft,
-        }
+        let (ely, sirio) = presets::preset(base, appearance);
+        Self { ely, sirio }
     }
 }
 
@@ -693,29 +466,25 @@ pub struct Spacing {
 }
 
 impl Default for Spacing {
-    /// Same rule as [`Radii::default`]: the measurements do not move (T2),
-    /// only their derivation, which is now bezel's four spacing steps.
+    /// Same rule as [`Radii::default`]: the measurements do not move (T2).
+    /// These literals preserve the values bezel's spacing steps produced.
     fn default() -> Self {
-        use bezel::theme::Theme as BezelTheme;
         Self {
-            shell_gap: px(BezelTheme::SPACE_XS),                     // 4.0
-            shell_outer_inset: px(BezelTheme::SPACE_XS),             // 4.0
-            card_corner_radius: px(BezelTheme::SPACE_MD * 0.5),      // 6.0
-            card_gap: px(BezelTheme::SPACE_MD * 0.833_333_3),        // 10.0
-            card_shadow_radius: px(BezelTheme::SPACE_LG * 1.125),    // 18.0
-            card_shadow_y_offset: px(BezelTheme::SPACE_MD * 0.5),    // 6.0
-            title_strip_height: px(BezelTheme::SPACE_LG * 3.0),      // 48.0
-            traffic_light_inset: px(BezelTheme::SPACE_LG * 0.875),   // 14.0
-            title_strip_icon_size: px(BezelTheme::SPACE_LG * 0.875), // 14.0
-            titlebar_control_frame: size(
-                px(BezelTheme::SPACE_LG * 1.625),
-                px(BezelTheme::SPACE_LG * 1.625),
-            ), // 26.0 square
-            titlebar_control_spacing: px(BezelTheme::SPACE_MD * 0.5), // 6.0
-            bottom_bar_height: px(BezelTheme::SPACE_LG * 2.5),       // 40.0
-            menu_width: px(BezelTheme::SPACE_LG * 15.0),             // 240.0
-            hairline_thickness: px(BezelTheme::SPACE_XS * 0.25),     // 1.0
-            compact_action: px(BezelTheme::SPACE_LG * 1.5),          // 24.0
+            shell_gap: px(4.0), // bezel SPACE_XS
+            shell_outer_inset: px(4.0), // bezel SPACE_XS
+            card_corner_radius: px(6.0), // bezel SPACE_MD * 0.5
+            card_gap: px(10.0), // bezel SPACE_MD * 0.833_333_3
+            card_shadow_radius: px(18.0), // bezel SPACE_LG * 1.125
+            card_shadow_y_offset: px(6.0), // bezel SPACE_MD * 0.5
+            title_strip_height: px(48.0), // bezel SPACE_LG * 3.0
+            traffic_light_inset: px(14.0), // bezel SPACE_LG * 0.875
+            title_strip_icon_size: px(14.0), // bezel SPACE_LG * 0.875
+            titlebar_control_frame: size(px(26.0), px(26.0)), // bezel SPACE_LG * 1.625 square
+            titlebar_control_spacing: px(6.0), // bezel SPACE_MD * 0.5
+            bottom_bar_height: px(40.0), // bezel SPACE_LG * 2.5
+            menu_width: px(240.0), // bezel SPACE_LG * 15.0
+            hairline_thickness: px(1.0), // bezel SPACE_XS * 0.25
+            compact_action: px(24.0), // bezel SPACE_LG * 1.5
         }
     }
 }
@@ -756,23 +525,22 @@ pub struct Radii {
 }
 
 impl Default for Radii {
-    /// The values are unchanged (spec decision T2); what changes is that they
-    /// now follow bezel's `Brand::radius` instead of standing alone. Ratios
+    /// The values are unchanged (spec decision T2); they are literals that
+    /// preserve the values bezel's `Brand::radius` produced. Ratios
     /// that do not land on one of bezel's five named corners carry an explicit
     /// multiplier rather than being rounded to the nearest named one —
     /// rounding would move the UI, which T2 forbids.
     fn default() -> Self {
-        use bezel::theme::Theme as BezelTheme;
         Self {
-            shell_panel: px(BezelTheme::BASE_RADIUS * 0.875), // 7.0
-            chip: px(BezelTheme::BASE_RADIUS * 0.5),          // 4.0
-            chip_active: px(BezelTheme::BASE_RADIUS * 0.625), // 5.0
-            control: px(BezelTheme::BASE_RADIUS * 0.75),      // 6.0
-            row_card: px(BezelTheme::BASE_RADIUS * 0.875),    // 7.0
-            code_block: px(BezelTheme::BASE_RADIUS),          // 8.0
-            toast: px(BezelTheme::BASE_RADIUS * 1.25),        // 10.0
-            user_pill: px(BezelTheme::BASE_RADIUS * 1.5),     // 12.0
-            composer: px(BezelTheme::BASE_RADIUS * 1.625),    // 13.0
+            shell_panel: px(7.0), // bezel BASE_RADIUS * 0.875
+            chip: px(4.0), // bezel BASE_RADIUS * 0.5
+            chip_active: px(5.0), // bezel BASE_RADIUS * 0.625
+            control: px(6.0), // bezel BASE_RADIUS * 0.75
+            row_card: px(7.0), // bezel BASE_RADIUS * 0.875
+            code_block: px(8.0), // bezel BASE_RADIUS
+            toast: px(10.0), // bezel BASE_RADIUS * 1.25
+            user_pill: px(12.0), // bezel BASE_RADIUS * 1.5
+            composer: px(13.0), // bezel BASE_RADIUS * 1.625
         }
     }
 }
@@ -1146,7 +914,7 @@ impl Default for Typography {
 // invisible until you look for it.
 //
 // One list per role, no platform split: Geist and Geist Mono (SIL OFL 1.1)
-// lead everywhere, registered by `bezel::ui::register_fonts` before the first
+// lead everywhere, registered by `register_ui_fonts` before the first
 // window opens, so they are always present. A theme that changes face per
 // platform cannot be reviewed as one design, which is why the Apple faces sit
 // at the tail as a last resort rather than leading on macOS. The JetBrains
@@ -1157,11 +925,11 @@ impl Default for Typography {
 
 /// The sans-serif families to prefer, in order, when resolving the UI font.
 ///
-/// "Geist" leads on every platform, macOS included: bezel registers it, with
-/// real 500/600/700 statics, so it is always present here — the chain behind
-/// it only matters if that registration is ever skipped. Apple's SF faces are
-/// kept at the tail as a last resort rather than led with, because a theme
-/// that changes face per platform cannot be reviewed as one design.
+/// "Geist" leads on every platform, macOS included: `register_ui_fonts`
+/// registers it with real 500/600/700 statics, so it is always present here.
+/// Apple's SF faces are kept at the tail as a last resort rather than led with,
+/// because a theme that changes face per platform cannot be reviewed as one
+/// design.
 pub const UI_FAMILY_CANDIDATES: &[&str] = &[
     "Geist",
     "JetBrains Sans",
@@ -1177,10 +945,10 @@ pub const UI_FAMILY_CANDIDATES: &[&str] = &[
 /// Monospace families to prefer, in order, when resolving the code font.
 ///
 /// "Geist Mono" leads for the same reason "Geist" leads
-/// [`UI_FAMILY_CANDIDATES`]: bezel registers it before the first window
-/// opens. Behind it, the family the visual bar is set in (waku's JetBrains
-/// Mono), then common good monospaced faces, then whatever the system's
-/// generic "monospace" resolves to (fontconfig's alias on Linux, always
+/// [`UI_FAMILY_CANDIDATES`]: `register_ui_fonts` registers it before the first
+/// window opens. Behind it is the family the visual bar is set in (waku's
+/// JetBrains Mono), then common good monospaced faces, then whatever the
+/// system's generic "monospace" resolves to (fontconfig's alias on Linux, always
 /// present). A candidate that is not installed is skipped — never guessed
 /// at.
 pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
@@ -1198,7 +966,7 @@ pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
 /// The terminal family Sirio ships: JetBrains Mono patched by Nerd Fonts
 /// (v3.5.1, `patched-fonts/JetBrainsMono/Ligatures`), the `Mono` build in
 /// which every icon and Powerline glyph is exactly one cell wide. Bundled
-/// for the same reason bezel bundles Geist — so the terminal's face does not
+/// for the same reason Sirio bundles Geist — so the terminal's face does not
 /// depend on what the host happens to have installed. The 2026-09-12
 /// Windows screenshot is what that dependence looked like: a stock box has
 /// none of the JetBrains, Nerd or Linux families below, every candidate was
@@ -1234,6 +1002,34 @@ static TERMINAL_FONT_ITALIC: &[u8] =
 static TERMINAL_FONT_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf");
 
+static UI_FONT_GEIST: &[u8] = include_bytes!("../../../assets/fonts/Geist.ttf");
+static UI_FONT_GEIST_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/Geist-Medium.ttf");
+static UI_FONT_GEIST_SEMIBOLD: &[u8] =
+    include_bytes!("../../../assets/fonts/Geist-SemiBold.ttf");
+static UI_FONT_GEIST_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Geist-Bold.ttf");
+static UI_FONT_GEIST_MONO: &[u8] = include_bytes!("../../../assets/fonts/GeistMono.ttf");
+
+/// The UI faces: Geist, its static 500/600/700 weights, and Geist Mono.
+pub fn bundled_ui_fonts() -> Vec<Cow<'static, [u8]>> {
+    [
+        UI_FONT_GEIST,
+        UI_FONT_GEIST_MEDIUM,
+        UI_FONT_GEIST_SEMIBOLD,
+        UI_FONT_GEIST_BOLD,
+        UI_FONT_GEIST_MONO,
+    ]
+    .into_iter()
+    .map(Cow::Borrowed)
+    .collect()
+}
+
+/// Registers the UI faces. Must run before [`Theme::init`], like
+/// [`register_bundled_terminal_font`]: `Theme::install` resolves the UI and
+/// code families from `all_font_names()` once.
+pub fn register_ui_fonts(cx: &App) -> anyhow::Result<()> {
+    cx.text_system().add_fonts(bundled_ui_fonts())
+}
+
 /// The bundled terminal faces, regular, bold, italic and bold italic, as
 /// the bytes `TextSystem::add_fonts` takes.
 pub fn bundled_terminal_fonts() -> Vec<Cow<'static, [u8]>> {
@@ -1246,7 +1042,7 @@ pub fn bundled_terminal_fonts() -> Vec<Cow<'static, [u8]>> {
 }
 
 /// Registers the bundled terminal faces with the text system. Must run
-/// before [`Theme::init`] for the same reason bezel's `register_fonts`
+/// before [`Theme::init`] for the same reason `register_ui_fonts`
 /// must: `Theme::install` resolves and remembers `TERMINAL_FAMILY` from
 /// `all_font_names()` on its first call, and a face registered afterwards
 /// is never seen. Failure is non-fatal: the candidate chain below still
@@ -1475,17 +1271,17 @@ impl Theme {
     /// provenance record (see `dark_palette_matches_recorded_provenance`),
     /// so every added colour is a colour someone has to measure and justify.
     /// The graph only needs its lanes to be mutually distinguishable.
-    pub fn graph_lane(&self, index: usize) -> Rgba {
-        let lanes = [
-            self.text,
-            self.git_untracked,
-            self.success,
-            self.warning,
-            self.danger,
+    pub fn graph_lane(&self, index: usize) -> Hsla {
+        let lanes: [Hsla; 6] = [
+            self.ely.fg,
+            self.ely.fg_subtle,
+            self.ely.success,
+            self.ely.warning,
+            self.ely.danger,
             // Not `favorite`: it is `warning`, which is already lane four.
             // The coral is the one hue in the theme no other lane can collide
             // with, because no role paints it.
-            self.brand_coral,
+            self.sirio.brand_coral,
         ];
         lanes[index % lanes.len()]
     }
@@ -1502,22 +1298,23 @@ impl Theme {
     /// entry points — `set_mode` delegates to `install`, but `follow_portal`
     /// swaps the global on its own.
     pub fn sync_appearance(&self) {
-        bezel::theme::set_current_appearance(match self.appearance {
-            Appearance::Light => bezel::theme::Appearance::Light,
-            Appearance::Dark => bezel::theme::Appearance::Dark,
+        bezel_theme::set_current_appearance(match self.appearance {
+            Appearance::Light => bezel_theme::Appearance::Light,
+            Appearance::Dark => bezel_theme::Appearance::Dark,
         });
     }
 
-    /// The bezel theme this Sirio theme is derived from — the same
-    /// `Theme::branded` call used to build Sirio's adaptive colors.
-    pub fn to_bezel_theme(&self) -> bezel::theme::Theme {
+    /// The bezel theme built from `base_color.rs`'s ladders. Sirio's matching
+    /// preset values are maintained separately in `presets.rs`; keep ladder
+    /// edits aligned in both until sub-project 7.
+    pub fn to_bezel_theme(&self) -> bezel_theme::Theme {
         bezel_theme_for(self.base_color, self.appearance)
     }
 
     /// Installs this theme's branded palette into bezel's registry and keeps
     /// bezel's context-free appearance mirror in sync.
-    pub fn install_into_bezel(&self, cx: &mut bezel::gpui::App) {
-        bezel::theme::Theme::install_custom(self.to_bezel_theme(), cx);
+    pub fn install_into_bezel(&self, cx: &mut gpui::App) {
+        bezel_theme::Theme::install_custom(self.to_bezel_theme(), cx);
         self.sync_appearance();
     }
 
@@ -1747,7 +1544,7 @@ impl Theme {
     /// that matters: the strips are the only place text sits directly on
     /// it, and over a white desktop (blur averages the backdrop to one tone)
     /// a 0.35 frame washed the dark shell's strips out to light grey and a
-    /// 0.70 one left `text_muted` at 3.1:1 there (2026-09-07); 0.85 clears
+    /// 0.70 one left `fg_muted` at 3.1:1 there (2026-09-07); 0.85 clears
     /// WCAG AA with room. The panel fade barely moves that contrast (≥6:1
     /// across 0.70–0.90), so it stays where the glass still reads. Held by
     /// `translucent_shell_keeps_wcag_aa_over_an_opposing_desktop`.
@@ -1768,7 +1565,7 @@ impl Theme {
     /// alpha is *scaled*, not overwritten — see
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
     /// The surfaces an event opens over the shell
-    /// ([`ThemeColors::dialog_surface`], [`ThemeColors::floating_surface`])
+    /// ([`SirioColors::dialog_surface`], [`SirioColors::floating_surface`])
     /// are not faded either: translucency is the main window's background,
     /// never a dialog's — see
     /// `event_opened_surfaces_stay_opaque_when_the_panels_fade`.
@@ -1791,17 +1588,25 @@ impl Theme {
         if !enabled {
             return theme;
         }
-        // Scale the alpha, do not overwrite it. These were all opaque once, so
-        // the two were the same thing; bezel's dark `input_bg` is a 3% white
-        // veil, and overwriting turned it into an 85% white fill.
-        let fade = |surface: Rgba| Rgba {
+        // The same surfaces under their new names, plus the copies Ely was
+        // handed *after* fading: overlay and tooltip_bg are surface_raised,
+        // on_accent is surface (spec §3.5).
+        let fade_hsla = |surface: Hsla| Hsla {
             a: surface.a * opacity,
             ..surface
         };
-        theme.colors.surface = fade(theme.colors.surface);
-        theme.colors.surface_raised = fade(theme.colors.surface_raised);
-        theme.colors.input_bg = fade(theme.colors.input_bg);
-        theme.colors.terminal_surface = fade(theme.colors.terminal_surface);
+        let ely = &mut theme.colors.ely;
+        for surface in [
+            &mut ely.bg,
+            &mut ely.surface,
+            &mut ely.sunken,
+            &mut ely.overlay,
+            &mut ely.tooltip_bg,
+            &mut ely.on_accent,
+        ] {
+            *surface = fade_hsla(*surface);
+        }
+        theme.colors.sirio.terminal_surface = fade_hsla(theme.colors.sirio.terminal_surface);
         // `dialog_surface` and `floating_surface` are deliberately absent:
         // a sheet or toast an event puts up stays opaque over the blur.
         theme
@@ -1970,10 +1775,6 @@ impl AgentBrandColor {
     }
 }
 
-fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
-    Rgba { r, g, b, a }
-}
-
 /// Opaque sRGB color from a `0xRRGGBB` literal.
 fn rgb_hex(hex: u32) -> Rgba {
     Rgba {
@@ -1984,85 +1785,28 @@ fn rgb_hex(hex: u32) -> Rgba {
     }
 }
 
-/// bezel's interactive-state wash at `alpha`, for a stated appearance.
-///
-/// A mirror of `bezel::wash`, which exists only in the form that resolves
-/// against a process-global appearance (`bezel::paint::wash_for` is
-/// `pub(crate)`). `ThemeColors::for_appearance` builds both palettes in one
-/// process, so it cannot use the global form: dark and light would come out
-/// identical. The numbers are bezel's, copied — if bezel changes them this
-/// mirror has to follow.
-fn wash(alpha: f32, appearance: Appearance) -> Rgba {
-    match appearance {
-        Appearance::Dark => color(0.92, 0.92, 0.92, alpha),
-        Appearance::Light => color(0.10, 0.10, 0.10, alpha * bezel::theme::INK_FILL_SCALE),
-    }
-}
-
-/// bezel's hairline ink at `alpha`, for a stated appearance. Mirror of
-/// `bezel::hairline`, for the same reason [`wash`] is a mirror.
-///
-/// Edges scale opposite to fills: a 1px line needs *more* ink on a bright
-/// surround, which is what [`bezel::theme::INK_HAIRLINE_SCALE`] carries.
-fn hairline(alpha: f32, appearance: Appearance) -> Rgba {
-    match appearance {
-        Appearance::Dark => color(1.0, 1.0, 1.0, alpha),
-        Appearance::Light => color(
-            0.0,
-            0.0,
-            0.0,
-            (alpha * bezel::theme::INK_HAIRLINE_SCALE).min(0.5),
-        ),
-    }
-}
-
-/// The two alphas Sirio still chooses for itself.
-///
-/// This was a four-rung ladder (0.05 · 0.08 · 0.12 · 0.18), each rung half
-/// again the one below, because every wash token in the theme was `veil(rung)`
-/// and the ladder was the only free parameter in the lot. bezel now supplies
-/// the borders, hovers, selection and code wash, so two rungs have no consumer
-/// and the "ladder" no longer describes anything: what is left is the faint
-/// wash and the mid wash, quoted in dark-mode terms the way bezel quotes its
-/// own.
-/// How far the primary text rung is pulled back toward its surface. Chosen so
-/// the result lands on the contrast Sirio shipped before adopting bezel; held
-/// by `body_text_is_softened_off_bezels_full_contrast`.
-const TEXT_SOFTENING: f32 = 0.10;
-
-const VEIL_FAINT: f32 = 0.05;
-const VEIL_MID: f32 = 0.12;
-
-/// The same colour at a lower opacity.
-///
-/// Used for the soft fills that sit *under* text of the same meaning — a
-/// deleted diff line under red text, a danger banner under a danger label. The
-/// fill is not a second red to choose; it is the one red already chosen,
-/// turned down.
-fn softened(color: Rgba, alpha: f32) -> Rgba {
-    Rgba { a: alpha, ..color }
-}
-
-/// Mixes `fraction` of `target` into `color`, opaquely.
-///
-/// Distinct from [`softened`], which lowers alpha and lets whatever is behind
-/// show through: this states one opaque colour as a step from another toward a
-/// named second one, so the result does not depend on what it is drawn over.
-fn toward(color: Rgba, target: Rgba, fraction: f32) -> Rgba {
-    Rgba {
-        r: color.r + (target.r - color.r) * fraction,
-        g: color.g + (target.g - color.g) * fraction,
-        b: color.b + (target.b - color.b) * fraction,
-        a: color.a,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// How far the frozen body text sits back from bezel's full-contrast rung
+    /// toward its surface. Moved here from the derivation it used to
+    /// parameterise: `body_text_is_softened_off_bezels_full_contrast` still
+    /// compares the frozen `ely.fg` with the rule, so the constant and mixer
+    /// live with the preset agreement test.
+    const TEXT_SOFTENING: f32 = 0.10;
+
+    /// Mixes `fraction` of `target` into `color`, opaquely.
+    fn toward(color: Rgba, target: Rgba, fraction: f32) -> Rgba {
+        Rgba {
+            r: color.r + (target.r - color.r) * fraction,
+            g: color.g + (target.g - color.g) * fraction,
+            b: color.b + (target.b - color.b) * fraction,
+            a: color.a,
+        }
+    }
+
     mod looks_like_test_harness {
-        use super::*;
         use std::path::Path;
 
         /// The name the original guard was written for.
@@ -2098,81 +1842,14 @@ mod tests {
         }
     }
 
-    /// The dark palette is bezel's.
-    ///
-    /// Sirio's dark palette used to be sampled off reference frames and pinned
-    /// hex by hex against a provenance document that has since been deleted.
-    /// It is now
-    /// bezel's, so what is worth pinning is the *link*, not the values: this
-    /// test fails the moment a `bezel` bump restyles the app, which is spec
-    /// risk R1 and the reason the dependency is pinned `=0.1.3`. The record of
-    /// where the values come from now lives in `docs/THEME-PROVENANCE.md`.
     #[test]
-    fn dark_palette_comes_from_bezel() {
-        assert_palette_comes_from_bezel(
-            Appearance::Dark,
-            bezel_theme_for(BaseColor::Neutral, Appearance::Dark),
+    fn named_covers_every_sirio_color_field() {
+        let named = Theme::dark().sirio.named();
+        assert_eq!(
+            named.len(),
+            std::mem::size_of::<SirioColors>() / std::mem::size_of::<Hsla>(),
+            "SirioColors::named() must include every field"
         );
-    }
-
-    /// The light palette is bezel's, for the same reason.
-    #[test]
-    fn light_palette_comes_from_bezel() {
-        assert_palette_comes_from_bezel(
-            Appearance::Light,
-            bezel_theme_for(BaseColor::Neutral, Appearance::Light),
-        );
-    }
-
-    /// Every token Sirio takes from bezel, checked against bezel itself.
-    ///
-    /// Group C — the coral, the window-frame material and the terminal surface
-    /// — is deliberately absent: those are Sirio's own and have no bezel
-    /// counterpart to compare against.
-    fn assert_palette_comes_from_bezel(appearance: Appearance, bezel: bezel::theme::Theme) {
-        let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-        for (name, ours, theirs) in [
-            ("bg", sirio.bg, bezel.bg),
-            ("surface", sirio.surface, bezel.surface),
-            ("surface_raised", sirio.surface_raised, bezel.surface_raised),
-            ("input_bg", sirio.input_bg, bezel.input_bg),
-            // The two opaque twins carry bezel's values too; what makes them
-            // separate tokens is that the translucency fade skips them.
-            ("dialog_surface", sirio.dialog_surface, bezel.surface),
-            (
-                "floating_surface",
-                sirio.floating_surface,
-                bezel.surface_raised,
-            ),
-            ("element_active", sirio.element_active, bezel.element_active),
-            ("element_hover", sirio.element_hover, bezel.element_hover),
-            // `text` is deliberately absent: it is bezel's, pulled one step
-            // back toward the surface. `body_text_is_softened_off_bezels_full_contrast`
-            // is its guard.
-            ("text_muted", sirio.text_muted, bezel.text_muted),
-            ("text_faint", sirio.text_faint, bezel.text_faint),
-            ("text_dim", sirio.text_dim, bezel.text_dim),
-            ("border", sirio.border, bezel.border),
-            ("border_strong", sirio.border_strong, bezel.border_strong),
-            ("ring", sirio.ring, bezel.ring),
-            ("selection", sirio.selection, bezel.selection),
-            ("code_wash", sirio.code_wash, bezel.code_wash),
-            ("solid", sirio.solid, bezel.solid),
-            ("on_solid", sirio.on_solid, bezel.on_solid),
-            ("accent", sirio.accent, bezel.accent),
-            ("success", sirio.success, bezel.success),
-            ("warning", sirio.warning, bezel.warning),
-            ("danger", sirio.danger, bezel.danger),
-            ("danger_muted", sirio.danger_muted, bezel.danger_muted),
-            ("diff_add", sirio.diff_add, bezel.diff_add),
-            ("diff_del", sirio.diff_del, bezel.diff_del),
-        ] {
-            assert_eq!(
-                ours,
-                Rgba::from(theirs),
-                "{appearance:?} {name} is not bezel's any more"
-            );
-        }
     }
 
     #[test]
@@ -2184,25 +1861,25 @@ mod tests {
             let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             let slate = ThemeColors::for_appearance(appearance, BaseColor::Slate);
 
-            assert_ne!(slate.bg, neutral.bg, "{appearance:?} page takes the tint");
-            assert_ne!(slate.surface, neutral.surface);
+            assert_ne!(slate.sirio.canvas, neutral.sirio.canvas, "{appearance:?} page takes the tint");
+            assert_ne!(slate.ely.bg, neutral.ely.bg);
             // The borders stay verbatim, on purpose: bezel 0.1.3 tints only
             // opaque achromatic ink — `Brand::apply`: "Translucent ink is
             // skipped because it paints over whatever is beneath it, which is
-            // tinted already" — and both borders are 8–10% veils. They read
-            // the page's tint through compositing, which is also exactly what
-            // keeps `assert_palette_comes_from_bezel` true under every base.
-            assert_eq!(slate.border, neutral.border);
+            // tinted already" — and both borders are 8–10% veils. Their
+            // relationship to bezel's preset values is checked across every
+            // base by `frozen_presets_match_their_bezel_ladders`.
+            assert_eq!(slate.ely.border, neutral.ely.border);
 
             assert_eq!(
-                slate.brand_coral, neutral.brand_coral,
+                slate.sirio.brand_coral, neutral.sirio.brand_coral,
                 "{appearance:?} coral is Sirio's, not bezel's to rotate"
             );
             if appearance == Appearance::Light {
                 // Tinted panes keep the paper terminal; Neutral follows its
                 // own approved page instead.
                 assert_ne!(
-                    slate.terminal_surface, neutral.terminal_surface,
+                    slate.sirio.terminal_surface, neutral.sirio.terminal_surface,
                     "light: tinted panes keep paper, neutral follows its page"
                 );
             }
@@ -2218,12 +1895,12 @@ mod tests {
                 // The grey ladders' central panes are their own plane, darker
                 // than the sidebars.
                 assert_eq!(
-                    theme.terminal_surface, theme.bg,
+                    theme.sirio.terminal_surface, theme.sirio.canvas,
                     "{base:?} dark terminal is the central pane"
                 );
             } else {
                 assert_eq!(
-                    theme.terminal_surface, theme.surface,
+                    theme.sirio.terminal_surface, theme.ely.bg,
                     "dark terminal background must match the pane for {base:?}"
                 );
             }
@@ -2239,14 +1916,14 @@ mod tests {
         let translucent = theme.with_translucency(true);
         assert_eq!(translucent.base_color, BaseColor::Slate);
         assert_eq!(
-            translucent.colors.border, theme.colors.border,
+            translucent.colors.ely.border, theme.colors.ely.border,
             "a non-faded token keeps the tinted value"
         );
     }
 
     /// The bezel theme Notte builds, read through the path bezel's own
     /// widgets use, so the test covers both consumers of the builder.
-    fn notte_bezel(appearance: Appearance) -> bezel::theme::Theme {
+    fn notte_bezel(appearance: Appearance) -> bezel_theme::Theme {
         let mode = match appearance {
             Appearance::Dark => ThemeMode::Dark,
             Appearance::Light => ThemeMode::Light,
@@ -2256,9 +1933,9 @@ mod tests {
 
     /// bezel's palette rotated onto Notte's tint and nothing else — what
     /// Notte would be if it were only a sixth base colour.
-    fn notte_tint_only(appearance: bezel::theme::Appearance) -> bezel::theme::Theme {
-        bezel::theme::Theme::branded(
-            &bezel::theme::Brand {
+    fn notte_tint_only(appearance: bezel_theme::Appearance) -> bezel_theme::Theme {
+        bezel_theme::Theme::branded(
+            &bezel_theme::Brand {
                 tint: BaseColor::Notte.tint(),
                 ..Default::default()
             },
@@ -2271,7 +1948,7 @@ mod tests {
         // Four dark surfaces were given and no light ones; inventing a light
         // ladder was rejected (spec N3).
         let notte = notte_bezel(Appearance::Light);
-        let tinted = notte_tint_only(bezel::theme::Appearance::Light);
+        let tinted = notte_tint_only(bezel_theme::Appearance::Light);
         for (name, ours, theirs) in [
             ("bg", notte.bg, tinted.bg),
             ("surface", notte.surface, tinted.surface),
@@ -2308,15 +1985,15 @@ mod tests {
         let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
         let bezel = notte_bezel(Appearance::Dark);
         for (name, surface) in [
-            ("bg", sirio.bg),
-            ("surface", sirio.surface),
-            ("surface_raised", sirio.surface_raised),
+            ("bg", sirio.sirio.canvas),
+            ("surface", sirio.ely.bg),
+            ("surface_raised", sirio.ely.surface),
             (
                 "surface_raised_hover",
-                Rgba::from(bezel.surface_raised_hover),
+                bezel.surface_raised_hover,
             ),
         ] {
-            let ratio = contrast_ratio(sirio.text, surface);
+            let ratio = contrast_ratio(sirio.ely.fg, surface);
             assert!(ratio >= 7.0, "text on {name} is {ratio:.1}:1, below AAA");
         }
     }
@@ -2351,31 +2028,25 @@ mod tests {
     /// tree at once), where that reads as glare. The target is the contrast
     /// Sirio shipped before adopting bezel, so this pins the *relationship* —
     /// softened toward the surface, still past AAA, still clearly ahead of
-    /// `text_muted`.
+    /// `fg_muted`.
     #[test]
     fn body_text_is_softened_off_bezels_full_contrast() {
         for (appearance, bezel) in [
-            (Appearance::Dark, bezel::theme::Theme::dark()),
-            (Appearance::Light, bezel::theme::Theme::light()),
+            (Appearance::Dark, bezel_theme::Theme::dark()),
+            (Appearance::Light, bezel_theme::Theme::light()),
         ] {
             let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            let full = Rgba::from(bezel.text);
+            let full = bezel.text;
 
             assert_ne!(
-                sirio.text, full,
+                sirio.ely.fg, full,
                 "{appearance:?} text must not be bezel's full-contrast rung"
             );
-            assert_eq!(
-                sirio.text,
-                toward(full, sirio.surface, TEXT_SOFTENING),
-                "{appearance:?} text must be bezel's, softened toward the surface"
-            );
-
             // Softer than bezel, but not into the muted rung's territory: the
             // ladder still has a visible first step.
-            let step = contrast_ratio(sirio.text, sirio.surface);
+            let step = contrast_ratio(sirio.ely.fg, sirio.ely.bg);
             assert!(
-                step > contrast_ratio(sirio.text_muted, sirio.surface),
+                step > contrast_ratio(sirio.ely.fg_muted, sirio.ely.bg),
                 "{appearance:?} text ({step:.1}:1) must stay ahead of text_muted"
             );
             assert!(
@@ -2383,9 +2054,54 @@ mod tests {
                 "{appearance:?} text is {step:.1}:1 — softening must not spend WCAG AAA"
             );
             assert!(
-                step < contrast_ratio(full, sirio.surface),
+                step < contrast_ratio(full, sirio.ely.bg),
                 "{appearance:?} text must be softer than bezel's"
             );
+        }
+    }
+
+    #[test]
+    fn frozen_presets_match_their_bezel_ladders() {
+        const RGB_TOLERANCE: f32 = 0.5 / 255.0;
+
+        for base in BaseColor::ALL {
+            for appearance in [Appearance::Light, Appearance::Dark] {
+                let (ely, sirio) = presets::preset(base, appearance);
+                let bezel = bezel_theme_for(base, appearance);
+                let softened_body = Hsla::from(toward(
+                    Rgba::from(bezel.text),
+                    Rgba::from(bezel.surface),
+                    TEXT_SOFTENING,
+                ));
+                let pairs = [
+                    ("ely.bg", ely.bg, bezel.surface),
+                    ("ely.surface", ely.surface, bezel.surface_raised),
+                    ("sirio.canvas", sirio.canvas, bezel.bg),
+                    ("ely.sunken", ely.sunken, bezel.input_bg),
+                    ("ely.hover", ely.hover, bezel.element_hover),
+                    ("ely.border", ely.border, bezel.border),
+                    ("ely.fg", ely.fg, softened_body),
+                    ("ely.fg_muted", ely.fg_muted, bezel.text_muted),
+                    ("ely.fg_subtle", ely.fg_subtle, bezel.text_faint),
+                    ("sirio.text_dim", sirio.text_dim, bezel.text_dim),
+                ];
+
+                for (name, preset, bezel_origin) in pairs {
+                    let preset = Rgba::from(preset);
+                    let bezel_round_trip = Hsla::from(Rgba::from(bezel_origin));
+                    let bezel = Rgba::from(bezel_round_trip);
+                    for (channel, preset, bezel) in [
+                        ("red", preset.r, bezel.r),
+                        ("green", preset.g, bezel.g),
+                        ("blue", preset.b, bezel.b),
+                    ] {
+                        assert!(
+                            (preset - bezel).abs() <= RGB_TOLERANCE,
+                            "{base:?} {appearance:?} {name} {channel} differs: preset {preset}, bezel {bezel}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2421,7 +2137,8 @@ mod tests {
     }
 
     /// WCAG 2.1 relative luminance of an opaque colour.
-    fn relative_luminance(color: Rgba) -> f32 {
+    fn relative_luminance(color: impl Into<Rgba>) -> f32 {
+        let color = color.into();
         let channel = |c: f32| {
             if c <= 0.03928 {
                 c / 12.92
@@ -2432,7 +2149,7 @@ mod tests {
         0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
     }
 
-    fn contrast_ratio(one: Rgba, other: Rgba) -> f32 {
+    fn contrast_ratio(one: impl Into<Rgba>, other: impl Into<Rgba>) -> f32 {
         let (a, b) = (relative_luminance(one), relative_luminance(other));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
@@ -2440,8 +2157,8 @@ mod tests {
     #[test]
     fn shell_body_text_meets_wcag_aa_on_its_panel() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            for (role, text) in [("primary", theme.text), ("secondary", theme.text_muted)] {
-                let ratio = contrast_ratio(text, theme.surface);
+            for (role, text) in [("primary", theme.ely.fg), ("secondary", theme.ely.fg_muted)] {
+                let ratio = contrast_ratio(text, theme.ely.bg);
                 assert!(
                     ratio >= 4.5,
                     "{label} {role} text contrast on the panel is {ratio:.2}:1, under WCAG AA"
@@ -2465,14 +2182,15 @@ mod tests {
 
     /// Composites `over` (which may be translucent) onto `under`, so a wash
     /// can be judged the way a reader actually sees it.
-    fn composite(over: Rgba, under: Rgba) -> Rgba {
+    fn composite(over: impl Into<Rgba>, under: impl Into<Rgba>) -> Hsla {
+        let (over, under) = (over.into(), under.into());
         let a = over.a;
-        Rgba {
+        Hsla::from(Rgba {
             r: over.r * a + under.r * (1.0 - a),
             g: over.g * a + under.g * (1.0 - a),
             b: over.b * a + under.b * (1.0 - a),
             a: 1.0,
-        }
+        })
     }
 
     /// A well is always tellable from the page it is cut into, and from a card
@@ -2487,18 +2205,18 @@ mod tests {
     #[test]
     fn the_depth_ladder_reads_as_depth() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let page = composite(theme.input_bg, theme.surface);
-            let card = composite(theme.input_bg, theme.surface_raised);
+            let page = composite(theme.ely.sunken, theme.ely.bg);
+            let card = composite(theme.ely.sunken, theme.ely.surface);
             assert_ne!(
-                page, theme.surface,
+                page, theme.ely.bg,
                 "{label}: the well vanishes into the page"
             );
             assert_ne!(
-                card, theme.surface_raised,
+                card, theme.ely.surface,
                 "{label}: the well vanishes into a card"
             );
             assert_ne!(
-                theme.surface, theme.surface_raised,
+                theme.ely.bg, theme.ely.surface,
                 "{label}: the page and a raised card are the same plane"
             );
         }
@@ -2513,7 +2231,7 @@ mod tests {
     #[test]
     fn an_inverted_chip_is_legible_on_its_own_fill() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let ratio = contrast_ratio(theme.on_solid, theme.solid);
+            let ratio = contrast_ratio(theme.sirio.on_solid, theme.sirio.solid);
             assert!(
                 ratio >= 4.5,
                 "{label}: on_solid against solid is {ratio:.2}:1, under WCAG AA"
@@ -2530,8 +2248,8 @@ mod tests {
     #[test]
     fn selection_stays_under_its_text() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let seen = composite(theme.selection, theme.surface);
-            let ratio = contrast_ratio(theme.text, seen);
+            let seen = composite(theme.ely.selection, theme.ely.bg);
+            let ratio = contrast_ratio(theme.ely.fg, seen);
             assert!(
                 ratio >= 4.5,
                 "{label}: selected text reads at {ratio:.2}:1 through its own wash"
@@ -2550,7 +2268,7 @@ mod tests {
     #[test]
     fn brand_coral_clears_contrast_on_its_own_surface() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let ratio = contrast_ratio(theme.brand_coral, theme.surface);
+            let ratio = contrast_ratio(theme.sirio.brand_coral, theme.ely.bg);
             assert!(
                 ratio >= 4.5,
                 "{label}: coral contrast against its surface is {ratio:.2}:1, under WCAG AA 4.5:1"
@@ -2579,8 +2297,8 @@ mod tests {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for brand in brands {
                 assert_ne!(
-                    theme.brand_coral,
-                    brand.color(),
+                    theme.sirio.brand_coral,
+                    Hsla::from(brand.color()),
                     "{label}: the coral is {brand:?}'s brand, so that agent's mark \
                      no longer marks anything"
                 );
@@ -2593,47 +2311,47 @@ mod tests {
         let light = Theme::light().colors;
         let dark = Theme::dark().colors;
         let tokens = [
-            ("frame_surface", light.frame_surface, dark.frame_surface),
-            ("bg", light.bg, dark.bg),
-            ("surface", light.surface, dark.surface),
-            ("border_opaque", light.border_opaque, dark.border_opaque),
+            ("frame_surface", light.sirio.frame_surface, dark.sirio.frame_surface),
+            ("bg", light.sirio.canvas, dark.sirio.canvas),
+            ("surface", light.ely.bg, dark.ely.bg),
+            ("border_opaque", light.ely.border, dark.ely.border),
             (
                 "terminal_surface",
-                light.terminal_surface,
-                dark.terminal_surface,
+                light.sirio.terminal_surface,
+                dark.sirio.terminal_surface,
             ),
-            ("warning", light.warning, dark.warning),
-            ("success", light.success, dark.success),
-            ("danger", light.danger, dark.danger),
-            ("border", light.border, dark.border),
-            ("element_hover", light.element_hover, dark.element_hover),
-            ("element_active", light.element_active, dark.element_active),
-            ("selection", light.selection, dark.selection),
-            ("text", light.text, dark.text),
-            ("text_muted", light.text_muted, dark.text_muted),
-            ("text_faint", light.text_faint, dark.text_faint),
-            ("tree_guide", light.tree_guide, dark.tree_guide),
-            ("git_untracked", light.git_untracked, dark.git_untracked),
-            ("diff_add", light.diff_add, dark.diff_add),
-            ("diff_add_bg", light.diff_add_bg, dark.diff_add_bg),
-            ("diff_del", light.diff_del, dark.diff_del),
-            ("diff_del_bg", light.diff_del_bg, dark.diff_del_bg),
-            ("file_link", light.file_link, dark.file_link),
-            ("surface_raised", light.surface_raised, dark.surface_raised),
-            ("input_bg", light.input_bg, dark.input_bg),
-            ("overlay", light.overlay, dark.overlay),
-            ("overlay_strong", light.overlay_strong, dark.overlay_strong),
-            ("border_strong", light.border_strong, dark.border_strong),
-            ("ring", light.ring, dark.ring),
-            ("text_dim", light.text_dim, dark.text_dim),
-            ("brand_coral", light.brand_coral, dark.brand_coral),
-            ("accent", light.accent, dark.accent),
-            ("selection", light.selection, dark.selection),
-            ("code_wash", light.code_wash, dark.code_wash),
-            ("solid", light.solid, dark.solid),
-            ("on_solid", light.on_solid, dark.on_solid),
-            ("favorite", light.favorite, dark.favorite),
-            ("danger_muted", light.danger_muted, dark.danger_muted),
+            ("warning", light.ely.warning, dark.ely.warning),
+            ("success", light.ely.success, dark.ely.success),
+            ("danger", light.ely.danger, dark.ely.danger),
+            ("border", light.ely.border, dark.ely.border),
+            ("element_hover", light.ely.hover, dark.ely.hover),
+            ("element_active", light.ely.active, dark.ely.active),
+            ("selection", light.ely.selection, dark.ely.selection),
+            ("text", light.ely.fg, dark.ely.fg),
+            ("text_muted", light.ely.fg_muted, dark.ely.fg_muted),
+            ("text_faint", light.ely.fg_subtle, dark.ely.fg_subtle),
+            ("tree_guide", light.sirio.tree_guide, dark.sirio.tree_guide),
+            ("git_untracked", light.ely.fg_subtle, dark.ely.fg_subtle),
+            ("diff_add", light.sirio.diff_add, dark.sirio.diff_add),
+            ("diff_add_bg", light.sirio.diff_add_bg, dark.sirio.diff_add_bg),
+            ("diff_del", light.sirio.diff_del, dark.sirio.diff_del),
+            ("diff_del_bg", light.sirio.diff_del_bg, dark.sirio.diff_del_bg),
+            ("file_link", light.ely.link, dark.ely.link),
+            ("surface_raised", light.ely.surface, dark.ely.surface),
+            ("input_bg", light.ely.sunken, dark.ely.sunken),
+            ("overlay", light.sirio.overlay, dark.sirio.overlay),
+            ("overlay_strong", light.sirio.overlay_strong, dark.sirio.overlay_strong),
+            ("border_strong", light.sirio.border_strong, dark.sirio.border_strong),
+            ("ring", light.sirio.ring, dark.sirio.ring),
+            ("text_dim", light.sirio.text_dim, dark.sirio.text_dim),
+            ("brand_coral", light.sirio.brand_coral, dark.sirio.brand_coral),
+            ("accent", light.sirio.quantity, dark.sirio.quantity),
+            ("selection", light.ely.selection, dark.ely.selection),
+            ("code_wash", light.sirio.code_wash, dark.sirio.code_wash),
+            ("solid", light.sirio.solid, dark.sirio.solid),
+            ("on_solid", light.sirio.on_solid, dark.sirio.on_solid),
+            ("favorite", light.ely.warning, dark.ely.warning),
+            ("danger_muted", light.sirio.danger_muted, dark.sirio.danger_muted),
         ];
 
         for (name, light, dark) in tokens {
@@ -2681,17 +2399,17 @@ mod tests {
         // ladder, so the veil regression this guards needs a tinted base.
         let base = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Slate);
         assert!(
-            base.input_bg.a < 0.5,
+            base.ely.sunken.a < 0.5,
             "precondition: dark input_bg is a veil, not a fill (got {})",
-            base.input_bg.a
+            base.ely.sunken.a
         );
 
         let translucent = base.with_translucency(true);
         assert!(
-            translucent.input_bg.a <= base.input_bg.a,
+            translucent.ely.sunken.a <= base.ely.sunken.a,
             "fading made the veil more opaque: {} -> {}",
-            base.input_bg.a,
-            translucent.input_bg.a
+            base.ely.sunken.a,
+            translucent.ely.sunken.a
         );
     }
 
@@ -2704,11 +2422,11 @@ mod tests {
     fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
         for base in [Theme::dark(), Theme::light()] {
             assert_eq!(
-                base.dialog_surface, base.surface,
+                base.sirio.dialog_surface, base.ely.bg,
                 "opaque twin of the panel surface"
             );
             assert_eq!(
-                base.floating_surface, base.surface_raised,
+                base.sirio.floating_surface, base.ely.surface,
                 "opaque twin of the raised surface"
             );
             for translucent in [
@@ -2717,17 +2435,17 @@ mod tests {
                 base.with_translucency_at(true, 0.9),
             ] {
                 assert!(
-                    translucent.surface.a < base.surface.a,
+                    translucent.ely.bg.a < base.ely.bg.a,
                     "precondition: panels fade"
                 );
                 assert!(
-                    translucent.surface_raised.a < base.surface_raised.a,
+                    translucent.ely.surface.a < base.ely.surface.a,
                     "precondition: raised cards fade"
                 );
-                assert_eq!(translucent.dialog_surface, base.dialog_surface);
-                assert_eq!(translucent.floating_surface, base.floating_surface);
-                assert_eq!(translucent.dialog_surface.a, 1.0);
-                assert_eq!(translucent.floating_surface.a, 1.0);
+                assert_eq!(translucent.sirio.dialog_surface, base.sirio.dialog_surface);
+                assert_eq!(translucent.sirio.floating_surface, base.sirio.floating_surface);
+                assert_eq!(translucent.sirio.dialog_surface.a, 1.0);
+                assert_eq!(translucent.sirio.floating_surface.a, 1.0);
             }
         }
     }
@@ -2738,7 +2456,7 @@ mod tests {
     /// palette exists to undo.
     #[test]
     fn source_tokens_keep_the_roles_zed_distinguishes() {
-        use bezel::theme::HighlightKind as Kind;
+        use bezel_theme::HighlightKind as Kind;
         for base in [Theme::dark(), Theme::light()] {
             let palette = base.syntax_palette();
             let distinct = [
@@ -2757,7 +2475,7 @@ mod tests {
             }
             assert_eq!(
                 palette.color(Kind::Variable),
-                gpui::Hsla::from(base.text),
+                base.ely.fg,
                 "a plain identifier stays the body text colour"
             );
         }
@@ -2772,20 +2490,64 @@ mod tests {
         for base in [Theme::dark(), Theme::light()] {
             let opaque = base.menu_surface();
             let translucent = base.with_translucency(true);
+            let translucent_menu = translucent.menu_surface();
             assert!(
-                translucent.surface_raised.a < 1.0,
+                translucent.ely.surface.a < 1.0,
                 "the fixture must actually fade the panels, or this proves nothing"
             );
             assert_eq!(
-                translucent.menu_surface().a,
+                translucent_menu.a,
                 1.0,
                 "a context menu the desktop shows through is unreadable"
             );
             assert_eq!(
-                (translucent.menu_surface().r, translucent.menu_surface().g),
-                (opaque.r, opaque.g),
+                (translucent_menu.h, translucent_menu.s, translucent_menu.l),
+                (opaque.h, opaque.s, opaque.l),
                 "staying opaque must not change the menu's tone"
             );
+        }
+    }
+
+    #[test]
+    fn translucency_fades_every_surface_ely_receives() {
+        for base in BaseColor::ALL {
+            for appearance in [Appearance::Dark, Appearance::Light] {
+                let mode = match appearance {
+                    Appearance::Dark => ThemeMode::Dark,
+                    Appearance::Light => ThemeMode::Light,
+                };
+                let opaque = Theme::for_appearance(mode, appearance, base);
+                let faded = opaque.with_translucency_at(true, 0.7);
+                let (o, f) = (opaque.colors, faded.colors);
+                let pairs = [
+                    ("ely.bg", o.ely.bg, f.ely.bg),
+                    ("ely.surface", o.ely.surface, f.ely.surface),
+                    ("ely.sunken", o.ely.sunken, f.ely.sunken),
+                    ("ely.overlay", o.ely.overlay, f.ely.overlay),
+                    ("ely.tooltip_bg", o.ely.tooltip_bg, f.ely.tooltip_bg),
+                    ("ely.on_accent", o.ely.on_accent, f.ely.on_accent),
+                    (
+                        "sirio.terminal_surface",
+                        o.sirio.terminal_surface,
+                        f.sirio.terminal_surface,
+                    ),
+                ];
+                for (name, before, after) in pairs {
+                    assert_eq!(
+                        after.a,
+                        before.a * 0.7,
+                        "{base:?}/{appearance:?}: {name} not faded"
+                    );
+                    assert_eq!((after.h, after.s, after.l), (before.h, before.s, before.l), "{name}");
+                }
+                // An event-opened sheet and the frame material never fade.
+                assert_eq!(f.sirio.dialog_surface, o.sirio.dialog_surface);
+                assert_eq!(f.sirio.floating_surface, o.sirio.floating_surface);
+                assert_eq!(f.sirio.frame_surface, o.sirio.frame_surface);
+                // Text and washes keep full strength.
+                assert_eq!(f.ely.fg, o.ely.fg);
+                assert_eq!(f.ely.border, o.ely.border);
+            }
         }
     }
 
@@ -2795,8 +2557,8 @@ mod tests {
             let subtle = base.with_translucency_at(true, 0.9);
             assert!(subtle.translucency_enabled);
             assert_eq!(subtle.translucent_surface_opacity, 0.9);
-            assert!((subtle.surface.a - base.surface.a * 0.9).abs() < 1e-6);
-            assert!((subtle.terminal_surface.a - base.terminal_surface.a * 0.9).abs() < 1e-6);
+            assert!((subtle.ely.bg.a - base.ely.bg.a * 0.9).abs() < 1e-6);
+            assert!((subtle.sirio.terminal_surface.a - base.sirio.terminal_surface.a * 0.9).abs() < 1e-6);
             // Re-deriving from the faded theme keeps the caller's opacity, so
             // a mode switch that rebuilds the palette cannot fall back to the
             // default fade.
@@ -2804,10 +2566,10 @@ mod tests {
                 subtle.translucency_enabled,
                 subtle.translucent_surface_opacity,
             );
-            assert_eq!(again.surface, subtle.surface);
+            assert_eq!(again.ely.bg, subtle.ely.bg);
             let opaque = subtle.with_translucency_at(false, 0.9);
             assert!(!opaque.translucency_enabled);
-            assert_eq!(opaque.surface, base.surface);
+            assert_eq!(opaque.ely.bg, base.ely.bg);
             assert_eq!(
                 opaque.translucent_surface_opacity, 0.9,
                 "disabling keeps the opacity for the next enable"
@@ -2822,25 +2584,25 @@ mod tests {
             let translucent = base.with_translucency(true);
 
             assert!(translucent.translucency_enabled);
-            let faded = |s: Rgba| Rgba {
+            let faded = |s: Hsla| Hsla {
                 a: s.a * opacity,
                 ..s
             };
-            assert_eq!(translucent.surface, faded(base.surface));
-            assert_eq!(translucent.surface_raised, faded(base.surface_raised));
-            assert_eq!(translucent.input_bg, faded(base.input_bg));
-            assert_eq!(translucent.terminal_surface, faded(base.terminal_surface));
+            assert_eq!(translucent.ely.bg, faded(base.ely.bg));
+            assert_eq!(translucent.ely.surface, faded(base.ely.surface));
+            assert_eq!(translucent.ely.sunken, faded(base.ely.sunken));
+            assert_eq!(translucent.sirio.terminal_surface, faded(base.sirio.terminal_surface));
 
             assert_eq!(
-                translucent.frame_surface, base.frame_surface,
+                translucent.sirio.frame_surface, base.sirio.frame_surface,
                 "the frame material is already translucent and is not faded twice"
             );
-            assert_eq!(translucent.bg, base.bg, "the opaque fallback stays opaque");
+            assert_eq!(translucent.sirio.canvas, base.sirio.canvas, "the opaque fallback stays opaque");
             assert_eq!(
-                translucent.border_opaque, base.border_opaque,
+                translucent.ely.border, base.ely.border,
                 "borders stay crisp on a translucent panel"
             );
-            assert_eq!(translucent.text, base.text, "text is untouched");
+            assert_eq!(translucent.ely.fg, base.ely.fg, "text is untouched");
 
             assert_eq!(
                 translucent.with_translucency(true),
@@ -2878,13 +2640,13 @@ mod tests {
             ("dark", Theme::dark().with_translucency(true), white),
             ("light", Theme::light().with_translucency(true), black),
         ] {
-            let strip = composite(theme.frame_surface, desktop);
-            let panel = composite(theme.surface, strip);
-            let terminal = composite(theme.terminal_surface, panel);
+            let strip = composite(theme.sirio.frame_surface, desktop);
+            let panel = composite(theme.ely.bg, strip);
+            let terminal = composite(theme.sirio.terminal_surface, panel);
             for (place, under, text) in [
-                ("frame strip", strip, theme.text_muted),
-                ("panel", panel, theme.text_muted),
-                ("terminal", terminal, theme.text),
+                ("frame strip", strip, theme.ely.fg_muted),
+                ("panel", panel, theme.ely.fg_muted),
+                ("terminal", terminal, theme.ely.fg),
             ] {
                 let ratio = contrast_ratio(text, under);
                 assert!(
@@ -3047,6 +2809,48 @@ mod tests {
         );
     }
 
+    /// Linux rasterises a variable font at its default instance only, so the
+    /// static 500/600/700 faces are what let it paint medium, semibold and
+    /// bold. A wrong or missing file shows up nowhere but on screen.
+    #[test]
+    fn bundled_ui_faces_are_geist_in_their_weights() {
+        let faces: Vec<(String, u16)> = bundled_ui_fonts()
+            .iter()
+            .map(|bytes| {
+                let face = ttf_parser::Face::parse(bytes, 0).expect("a font file");
+                let names: Vec<(u16, String)> = face
+                    .names()
+                    .into_iter()
+                    .filter(|name| {
+                        (name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                            || name.name_id == ttf_parser::name_id::FAMILY)
+                            && name.is_unicode()
+                    })
+                    .filter_map(|name| name.to_string().map(|value| (name.name_id, value)))
+                    .collect();
+                let family = names
+                    .iter()
+                    .find(|(name_id, _)| *name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+                    .or_else(|| {
+                        names
+                            .iter()
+                            .find(|(name_id, _)| *name_id == ttf_parser::name_id::FAMILY)
+                    })
+                    .map(|(_, family)| family.clone())
+                    .expect("a family name");
+                (family, face.weight().to_number())
+            })
+            .collect();
+        for weight in [500, 600, 700] {
+            assert!(
+                faces.iter().any(|(family, w)| family == "Geist" && *w == weight),
+                "no static Geist {weight} in {faces:?}"
+            );
+        }
+        assert!(faces.iter().any(|(family, _)| family == "Geist Mono"), "{faces:?}");
+        assert_eq!(faces.len(), 5, "{faces:?}");
+    }
+
     /// With nothing installed, the fallback is the system's generic
     /// monospace answer — and that answer must be a face fontdb actually
     /// loaded, i.e. a family that exists here (on this machine fontconfig
@@ -3103,19 +2907,22 @@ mod agent_brand_tests {
         ];
         for theme in [Theme::dark(), Theme::light()] {
             let statuses = [
-                ("warning", theme.warning),
-                ("success", theme.success),
-                ("danger", theme.danger),
+                ("warning", theme.ely.warning),
+                ("success", theme.ely.success),
+                ("danger", theme.ely.danger),
             ];
             for brand in brands {
-                let brand_color = brand.color();
+                let brand_color = Rgba::from(brand.color());
                 for (name, status) in statuses {
+                    let status = Rgba::from(status);
+                    let separation = (brand_color.r - status.r)
+                        .abs()
+                        .max((brand_color.g - status.g).abs())
+                        .max((brand_color.b - status.b).abs());
                     assert!(
-                        (brand_color.r - status.r).abs() > f32::EPSILON
-                            || (brand_color.g - status.g).abs() > f32::EPSILON
-                            || (brand_color.b - status.b).abs() > f32::EPSILON,
-                        "{brand:?} is byte-identical to {name}: a running \
-                         worktree would be indistinguishable from that status"
+                        separation > 0.5 / 255.0,
+                        "{brand:?} is too close to {name}: a running worktree \
+                         would be indistinguishable from that status"
                     );
                 }
             }

@@ -350,7 +350,7 @@ impl ProjectSettingsView {
                 div()
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child("Default Worktree Base"),
             )
             .child(
@@ -366,13 +366,13 @@ impl ProjectSettingsView {
                             .child(
                                 div()
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.text)
+                                    .text_color(theme.ely.fg)
                                     .child(effective_base),
                             )
                             .child(
                                 div()
                                     .text_size(theme.typography.scaled(11.0))
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child(subtitle),
                             ),
                     )
@@ -382,8 +382,8 @@ impl ProjectSettingsView {
                             .debug_selector(|| "project-worktree-base-use-primary".to_owned())
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_faint)
-                            .hover(|style| style.text_color(theme.text))
+                            .text_color(theme.ely.fg_subtle)
+                            .hover(|style| style.text_color(theme.ely.fg))
                             .on_click(move |_, _, cx| {
                                 primary_entity.update(cx, |view, cx| {
                                     view.use_primary_worktree_base(cx);
@@ -404,14 +404,14 @@ impl ProjectSettingsView {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
+                    .bg(theme.ely.sunken)
                     .border_1()
-                    .border_color(theme.border)
+                    .border_color(theme.ely.border)
                     .text_size(theme.typography.footnote)
                     .text_color(if draft.trim().is_empty() {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     } else {
-                        theme.text
+                        theme.ely.fg
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -430,7 +430,7 @@ impl ProjectSettingsView {
                         if draft_is_empty {
                             caret::field_placeholder(
                                 "Search branches by name…".to_owned(),
-                                focused.then(|| caret::bar(px(14.0), theme.text, caret_visible)),
+                                focused.then(|| caret::bar(px(14.0), theme.ely.fg, caret_visible)),
                             )
                         } else {
                             caret::field_value(draft)
@@ -439,7 +439,7 @@ impl ProjectSettingsView {
                         .debug_selector(|| "sidebar-branch-search-text".to_owned()),
                     )
                     .when(focused && !draft_is_empty, |this| {
-                        this.child(caret::bar(px(14.0), theme.text, caret_visible))
+                        this.child(caret::bar(px(14.0), theme.ely.fg, caret_visible))
                     })
             })
     }
@@ -472,13 +472,13 @@ impl ProjectSettingsView {
                 div()
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child("Worktree Location"),
             )
             .child(
                 div()
                     .text_size(theme.typography.scaled(11.0))
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(format!(
                         "Parent folder for new worktrees. Empty uses the default: {default_location}"
                     )),
@@ -499,11 +499,11 @@ impl ProjectSettingsView {
                             .flex()
                             .items_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.input_bg)
+                            .bg(theme.ely.sunken)
                             .border_1()
-                            .border_color(theme.border)
+                            .border_color(theme.ely.border)
                             .text_size(theme.typography.footnote)
-                            .text_color(if has_override { theme.text } else { theme.text_faint })
+                            .text_color(if has_override { theme.ely.fg } else { theme.ely.fg_subtle })
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 focus_entity.update(cx, |view, cx| {
@@ -527,7 +527,7 @@ impl ProjectSettingsView {
                                 .debug_selector(|| "sidebar-location-override-text".to_owned()),
                             )
                             .when(focused, |this| {
-                                this.child(caret::bar(px(14.0), theme.text, caret_visible))
+                                this.child(caret::bar(px(14.0), theme.ely.fg, caret_visible))
                             }),
                     )
                     .child(
@@ -541,9 +541,9 @@ impl ProjectSettingsView {
                             .items_center()
                             .justify_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
+                            .bg(theme.ely.surface)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .on_click(move |_, window, cx| {
                                 choose_entity.update(cx, |view, cx| {
                                     view.choose_worktree_location(window, cx);
@@ -559,8 +559,8 @@ impl ProjectSettingsView {
                         .debug_selector(|| "project-worktree-location-restore".to_owned())
                         .cursor(gpui::CursorStyle::PointingHand)
                         .text_size(theme.typography.scaled(11.0))
-                        .text_color(theme.text_faint)
-                        .hover(|style| style.text_color(theme.text))
+                        .text_color(theme.ely.fg_subtle)
+                        .hover(|style| style.text_color(theme.ely.fg))
                         .on_click(move |_, _, cx| {
                             restore_entity.update(cx, |view, cx| {
                                 view.restore_default_worktree_location(cx);
@@ -611,7 +611,7 @@ impl Render for ProjectSettingsView {
             .size_full()
             .overflow_y_scroll()
             .p(px(16.0))
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -619,19 +619,19 @@ impl Render for ProjectSettingsView {
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(format!("Project Settings · {heading_name}")),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(display_path(&self.path)),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
+                    .text_color(theme.ely.fg)
                     .child(if is_git {
                         "Repository: Git"
                     } else {
@@ -650,14 +650,14 @@ impl Render for ProjectSettingsView {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
+                    .bg(theme.ely.sunken)
                     .border_1()
-                    .border_color(theme.border)
+                    .border_color(theme.ely.border)
                     .text_size(theme.typography.footnote)
                     .text_color(if display_name.trim().is_empty() {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     } else {
-                        theme.text
+                        theme.ely.fg
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -677,7 +677,7 @@ impl Render for ProjectSettingsView {
                             caret::field_placeholder(
                                 "Display name".to_owned(),
                                 name_focused
-                                    .then(|| caret::bar(px(14.0), theme.text, caret_visible)),
+                                    .then(|| caret::bar(px(14.0), theme.ely.fg, caret_visible)),
                             )
                         } else {
                             caret::field_value(display_name)
@@ -686,7 +686,7 @@ impl Render for ProjectSettingsView {
                         .debug_selector(|| "sidebar-display-name-text".to_owned()),
                     )
                     .when(name_focused && !name_is_empty, |this| {
-                        this.child(caret::bar(px(14.0), theme.text, caret_visible))
+                        this.child(caret::bar(px(14.0), theme.ely.fg, caret_visible))
                     })
             })
             .when(!is_git, |this| {
@@ -700,9 +700,9 @@ impl Render for ProjectSettingsView {
                         .items_center()
                         .justify_center()
                         .rounded(theme.radii.control)
-                        .bg(theme.surface_raised)
+                        .bg(theme.ely.surface)
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .on_click(move |_, _, cx| {
                             initialize_entity.update(cx, |_, cx| {
                                 cx.emit(ProjectSettingsEvent::ContextAction {
@@ -721,7 +721,7 @@ impl Render for ProjectSettingsView {
                     .w_full()
                     .p(px(8.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.surface)
+                    .bg(theme.ely.bg)
                     .child(self.icon_picker.clone()),
             )
             .when(is_git, |this| {
@@ -742,7 +742,7 @@ impl Render for ProjectSettingsView {
                 this.child(
                     div()
                         .text_size(theme.typography.scaled(11.0))
-                        .text_color(theme.diff_del)
+                        .text_color(theme.sirio.diff_del)
                         .child(notice),
                 )
             })
@@ -760,22 +760,22 @@ impl Render for ProjectSettingsView {
                     .gap(px(6.0))
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_del)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.sirio.diff_del)
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, window, cx| {
                         remove_entity.update(cx, |view, cx| {
                             view.request_remove_project(window, cx);
                         });
                     })
                     .child(
-                        IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.diff_del),
+                        IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.sirio.diff_del),
                     )
                     .child("Remove Project"),
             )
             .child(
                 div()
                     .text_size(theme.typography.scaled(11.0))
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child(self.id.clone()),
             )
     }

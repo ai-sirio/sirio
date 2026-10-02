@@ -197,7 +197,7 @@ impl DragDropOverlay {
 impl RenderOnce for DragDropOverlay {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let take = self.on_drop;
         div()
             .absolute()
@@ -426,7 +426,7 @@ impl PromptInput {
 impl RenderOnce for PromptInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let (radius, text_size) = (theme.radius(Radius::Xl), theme.text_size(TextSize::Base));
         let ready = self.ready.unwrap_or_else(|| {
             self.field

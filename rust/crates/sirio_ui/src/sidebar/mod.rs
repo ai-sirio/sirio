@@ -3046,7 +3046,7 @@ impl Sidebar {
             div()
                 .flex_shrink_0()
                 .debug_selector(move || format!("{id}-caret"))
-                .child(caret::bar(px(14.0), theme.text, caret_shown))
+                .child(caret::bar(px(14.0), theme.ely.fg, caret_shown))
                 .into_any_element()
         });
         // bezel's `TextField` convention: an empty field keeps its hint,
@@ -3083,15 +3083,15 @@ impl Sidebar {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.input_bg)
+            .bg(theme.ely.sunken)
             .border_1()
-            .border_color(if focused { theme.ring } else { theme.border })
+            .border_color(if focused { theme.sirio.ring } else { theme.ely.border })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
             .text_color(if value.is_empty() {
-                theme.text_faint
+                theme.ely.fg_subtle
             } else {
-                theme.text
+                theme.ely.fg
             })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
@@ -3206,7 +3206,7 @@ impl Sidebar {
                         },
                         IconSize::XSmall,
                     )
-                    .text_color(theme.text_faint),
+                    .text_color(theme.ely.fg_subtle),
                 );
             }
             card = card.child(row);
@@ -3514,8 +3514,8 @@ impl Sidebar {
                     .w(px(300.0))
                     .rounded(theme.radii.toast)
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.dialog_surface)
+                    .border_color(theme.ely.border)
+                    .bg(theme.sirio.dialog_surface)
                     .on_mouse_down_out(move |_, _, cx| {
                         backdrop_close_entity.update(cx, |sidebar, cx| {
                             sidebar.close_project_surface(cx);
@@ -3532,8 +3532,8 @@ impl Sidebar {
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(theme.radii.control)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.element_hover))
+                            .text_color(theme.ely.fg)
+                            .hover(|style| style.bg(theme.ely.hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |sidebar, cx| {
                                     sidebar.project_form = None;
@@ -3579,7 +3579,7 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
         ),
     };
     let active = tab == current;
-    let tone = if active { theme.text } else { theme.text_muted };
+    let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -3599,7 +3599,7 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
         })
         .text_color(tone)
         .cursor_pointer()
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .child(
             div()
                 .debug_selector(move || icon_id.to_owned())
@@ -3625,7 +3625,7 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
                     .left_0()
                     .right_0()
                     .h(px(2.0))
-                    .bg(theme.text),
+                    .bg(theme.ely.fg),
             )
         })
 }
@@ -3649,9 +3649,9 @@ fn header_icon_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
+        .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
         .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
-        .child(IconElement::new(icon, IconSize::Small).text_color(theme.text_faint))
+        .child(IconElement::new(icon, IconSize::Small).text_color(theme.ely.fg_subtle))
 }
 
 impl Render for Sidebar {
@@ -3853,10 +3853,10 @@ impl Render for Sidebar {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .bg(theme.surface_raised)
+                    .bg(theme.ely.surface)
                     .border_t_1()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(theme.ely.border)
                     .cursor_pointer()
                     .on_click(move |_, _, cx| {
                         group_entity.update(cx, |sidebar, cx| {
@@ -3869,13 +3869,13 @@ impl Render for Sidebar {
                         div()
                             .flex_1()
                             .text_size(theme.typography.scaled(13.5))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child("Closed"),
                     )
                     .child(
                         div()
                             .text_size(theme.typography.scaled(11.0))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(session_list.closed.len().to_string()),
                     )
                     .child(
@@ -3887,7 +3887,7 @@ impl Render for Sidebar {
                             },
                             IconSize::XSmall,
                         )
-                        .text_color(theme.text_faint),
+                        .text_color(theme.ely.fg_subtle),
                     )
                     .into_any_element()
             });
@@ -3979,9 +3979,9 @@ impl Render for Sidebar {
             .h_full()
             .text_size(theme.typography.scaled(16.0))
             .overflow_hidden()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .border_r_1()
-            .border_color(theme.border_opaque)
+            .border_color(theme.ely.border)
             .pt(px(8.0))
             .child(
                 div()
@@ -3997,10 +3997,10 @@ impl Render for Sidebar {
                     .justify_between()
                     // The hairline the tabs sit on (bezel's `tab_bar()`).
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(theme.ely.border)
                     .text_size(theme.typography.scaled(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child({
                         let projects_entity = entity.clone();
                         let sessions_entity = entity.clone();
@@ -4023,8 +4023,8 @@ impl Render for Sidebar {
                                 view_tab(SidebarView::Sessions, view, &theme)
                                     .when_some(badge, |this, status| {
                                         let (color, name) = match status {
-                                            ActivityStatus::Error => (theme.danger, "error"),
-                                            _ => (theme.warning, "needs-input"),
+                                            ActivityStatus::Error => (theme.ely.danger, "error"),
+                                            _ => (theme.ely.warning, "needs-input"),
                                         };
                                         this.child(
                                             div()
@@ -4088,8 +4088,8 @@ impl Render for Sidebar {
                                         .items_center()
                                         .justify_center()
                                         .text_size(theme.typography.scaled(17.0))
-                                        .text_color(theme.text_faint)
-                                        .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
+                                        .text_color(theme.ely.fg_subtle)
+                                        .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
                                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
                                             this.add_project_menu.note_trigger_press();
                                         }))
@@ -4120,9 +4120,9 @@ impl Render for Sidebar {
                     // edge it keeps is the rule that separates the two.
                     .border_b_1()
                     .border_color(if filter_is_focused {
-                        theme.ring
+                        theme.sirio.ring
                     } else {
-                        theme.border
+                        theme.ely.border
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(
@@ -4135,7 +4135,7 @@ impl Render for Sidebar {
                     .child(
                         div()
                             .text_size(theme.typography.scaled(16.0))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child("⌕"),
                     )
                             .min_w_0()
@@ -4150,9 +4150,9 @@ impl Render for Sidebar {
                             .items_center()
                             .text_size(theme.typography.scaled(12.5))
                             .text_color(if filter_is_empty {
-                                theme.text_faint
+                                theme.ely.fg_subtle
                             } else {
-                                theme.text
+                                theme.ely.fg
                             })
                             // Keep the placeholder as its own conditional
                             // element. Its absence is then the renderer's
@@ -4176,7 +4176,7 @@ impl Render for Sidebar {
                                             .debug_selector(|| "filter-caret".to_owned())
                                             .child(caret::bar(
                                                 px(12.0),
-                                                theme.text,
+                                                theme.ely.fg,
                                                 field_caret_visible,
                                             ))
                                             .into_any_element()
@@ -4196,7 +4196,7 @@ impl Render for Sidebar {
                                         .debug_selector(|| "filter-caret".to_owned())
                                         .child(caret::bar(
                                             px(12.0),
-                                            theme.text,
+                                            theme.ely.fg,
                                             field_caret_visible,
                                         )),
                                 )
@@ -4322,7 +4322,7 @@ impl Render for Sidebar {
                                     .flex()
                                     .justify_center()
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child("No sessions"),
                             )
                         }),
@@ -4336,7 +4336,7 @@ impl Render for Sidebar {
                         .px(px(FILTER_LEFT_INSET))
                         .py(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.diff_del)
+                        .text_color(theme.sirio.diff_del)
                         .child(selectable_text(notice.unwrap_or_default())),
                 )
             })
@@ -4372,9 +4372,9 @@ impl Render for Sidebar {
                                 .rounded(theme.radii.toast)
                                 // A sheet the user is typing into stays
                                 // opaque when the shell is translucent.
-                                .bg(theme.dialog_surface)
+                                .bg(theme.sirio.dialog_surface)
                                 .border_1()
-                                .border_color(theme.border)
+                                .border_color(theme.ely.border)
                                 .px(px(14.0))
                                 .py(px(12.0))
                                 .flex()
@@ -4402,7 +4402,7 @@ impl Render for Sidebar {
                                             div()
                                                 .text_size(theme.typography.headline)
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(theme.text)
+                                                .text_color(theme.ely.fg)
                                                 .child(format!(
                                                     "New worktree in {}",
                                                     prompt.project_name
@@ -4415,9 +4415,9 @@ impl Render for Sidebar {
                                                 .py(px(2.0))
                                                 .rounded(theme.radii.control)
                                                 .text_size(theme.typography.headline)
-                                                .text_color(theme.text_muted)
+                                                .text_color(theme.ely.fg_muted)
                                                 .cursor_pointer()
-                                                .hover(|this| this.text_color(theme.text))
+                                                .hover(|this| this.text_color(theme.ely.fg))
                                                 .on_click({
                                                     let close_entity = prompt_owner.clone();
                                                     move |_, _, cx| {
@@ -4485,7 +4485,7 @@ impl Render for Sidebar {
                                     this.child(
                                         div()
                                             .text_size(theme.typography.footnote)
-                                            .text_color(theme.diff_del)
+                                            .text_color(theme.sirio.diff_del)
                                             .child(selectable_text(
                                                 prompt.error.clone().unwrap_or_default(),
                                             )),
@@ -4502,10 +4502,10 @@ impl Render for Sidebar {
                                                 .px(px(12.0))
                                                 .py(px(6.0))
                                                 .rounded(theme.radii.control)
-                                                .bg(theme.element_active)
+                                                .bg(theme.ely.active)
                                                 .text_size(theme.typography.footnote)
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(theme.text)
+                                                .text_color(theme.ely.fg)
                                                 .cursor_pointer()
                                                 .on_click({
                                                     let confirm_entity = prompt_owner.clone();
@@ -4567,7 +4567,7 @@ pub(super) mod tests_support {
                     title: "Chat".to_string(),
                     selected: true,
                     kind: TabKind::AgentChat,
-                    agent: AgentMark::for_agent_id("claude").into(),
+                    agent: AgentMark::for_agent_id("claude"),
                     persistence_id: "test-tab-1".into(),
                     status: None,
                     last_event_at: None,
@@ -6991,16 +6991,16 @@ mod tests {
         for theme in [Theme::dark(), Theme::light()] {
             let plain = Sidebar::pill_icon_color(None, theme);
             assert_eq!(
-                plain, theme.text_muted,
+                plain, theme.ely.fg_muted,
                 "a pill with no agent takes the row grey"
             );
             assert_ne!(
-                plain, theme.warning,
+                plain, theme.ely.warning,
                 "an idle pill must not wear the colour of one waiting on an answer"
             );
             assert_eq!(
                 Sidebar::pill_icon_color(Some(AgentBrandColor::Codex), theme),
-                AgentBrandColor::Codex.color(),
+                gpui::Hsla::from(AgentBrandColor::Codex.color()),
                 "a branded mark is drawn in its brand"
             );
         }
@@ -7026,19 +7026,19 @@ mod tests {
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Running), theme),
-            RowStatusGlyph::Running(theme.success)
+            RowStatusGlyph::Running(theme.ely.success)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
-            RowStatusGlyph::Settled(theme.success)
+            RowStatusGlyph::Settled(theme.ely.success)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), theme),
-            RowStatusGlyph::Settled(theme.warning)
+            RowStatusGlyph::Settled(theme.ely.warning)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Error), theme),
-            RowStatusGlyph::Settled(theme.danger)
+            RowStatusGlyph::Settled(theme.ely.danger)
         );
         assert_ne!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Idle), theme),

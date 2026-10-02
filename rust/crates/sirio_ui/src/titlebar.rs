@@ -73,10 +73,10 @@
 //! from `Theme::get(cx)` like every other surface: the row itself paints
 //! *no* fill and lets the window surface through (a deliberate choice,
 //! because the screenshot wants **one continuous surface**, no seam between
-//! chrome and content), its text is the theme's `text`, the
+//! chrome and content), its text is the theme's `fg`, the
 //! lights are the theme's own `danger`/`warning`/`success` (already red/
 //! amber/green — no new colour tokens needed), and the cluster buttons read
-//! [`IconButtonColors`], which is `text` on `element_hover`/`element_active`.
+//! [`IconButtonColors`], which is `fg` on `hover`/`active`.
 //! The caption buttons read it too, except for the close button's red, which
 //! is a *system* constant and lives in [`sirio_theme::WindowsCaption`] —
 //! that type's docs explain why a theme `danger` cannot stand in for it.
@@ -99,7 +99,7 @@
 
 use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
-    Rgba, SharedString, Window, WindowControlArea, div, prelude::*, px,
+    Hsla, Rgba, SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
 use bezel::theme::Theme as BezelTheme;
 use sirio_theme::{BrowserChrome, Theme, WindowsCaption};
@@ -507,13 +507,14 @@ fn maximize_glyph(is_maximized: bool) -> &'static str {
 /// re-picked by eye.
 const LIGHT_HOVER_SHADE: f32 = 0.88;
 
-fn darkened(color: Rgba, factor: f32) -> Rgba {
-    Rgba {
-        r: color.r * factor,
-        g: color.g * factor,
-        b: color.b * factor,
-        a: color.a,
-    }
+fn darkened(color: Hsla, factor: f32) -> Hsla {
+    let rgb = Rgba::from(color);
+    Hsla::from(Rgba {
+        r: rgb.r * factor,
+        g: rgb.g * factor,
+        b: rgb.b * factor,
+        a: rgb.a,
+    })
 }
 
 /// One traffic-light dot: a real, circular window control, not a decoration.
@@ -523,7 +524,7 @@ fn traffic_light(
     id: &'static str,
     area: WindowControlArea,
     diameter: gpui::Pixels,
-    fill: Rgba,
+    fill: Hsla,
     handler: Rc<dyn Fn(&mut Window)>,
 ) -> impl IntoElement {
     div()
@@ -544,17 +545,17 @@ fn traffic_light(
 /// This replaces COSMIC's `Component`, which carried six fields where this
 /// file read three. It is local rather than a theme type because nothing
 /// outside the titlebar draws a control with its own resting/hover/pressed
-/// set — the rest of the app composes those from `element_hover` and
-/// `element_active` at the call site, which is what this does too.
+/// set — the rest of the app composes those from `hover` and `active` at the
+/// call site, which is what this does too.
 #[derive(Clone, Copy)]
 struct IconButtonColors {
     /// The glyph colour, drawn on the bar itself — these buttons have no
     /// resting fill.
-    on: Rgba,
+    on: Hsla,
     /// Fill on hover.
-    hover: Rgba,
+    hover: Hsla,
     /// Fill while pressed.
-    pressed: Rgba,
+    pressed: Hsla,
 }
 
 /// One cluster-style icon button (sidebar toggle, back, forward, `+`, the
@@ -637,10 +638,10 @@ fn caption_button(
 ) -> impl IntoElement {
     let (hover_bg, hover_on, pressed_bg, pressed_on) = if is_close {
         (
-            caption.close_hover,
-            caption.close_on,
-            caption.close_pressed,
-            caption.close_on,
+            Hsla::from(caption.close_hover),
+            Hsla::from(caption.close_on),
+            Hsla::from(caption.close_pressed),
+            Hsla::from(caption.close_on),
         )
     } else {
         (
@@ -696,11 +697,11 @@ impl Render for Titlebar {
         let theme = Theme::get(cx);
         let chrome = theme.browser_chrome;
         let caption = theme.windows_caption;
-        let bar_on = theme.text;
+        let bar_on = theme.ely.fg;
         let icon_button = IconButtonColors {
-            on: theme.text,
-            hover: theme.element_hover,
-            pressed: theme.element_active,
+            on: theme.ely.fg,
+            hover: theme.ely.hover,
+            pressed: theme.ely.active,
         };
         let control_radius = px(BezelTheme::BASE_RADIUS * 0.5); // 4.0
         let button_size = theme.spacing.compact_action;
@@ -747,21 +748,21 @@ impl Render for Titlebar {
                     "titlebar-close",
                     WindowControlArea::Close,
                     chrome.traffic_light_diameter,
-                    theme.danger,
+                    theme.ely.danger,
                     on_close,
                 ))
                 .child(traffic_light(
                     "titlebar-minimize",
                     WindowControlArea::Min,
                     chrome.traffic_light_diameter,
-                    theme.warning,
+                    theme.ely.warning,
                     on_minimize,
                 ))
                 .child(traffic_light(
                     "titlebar-maximize",
                     WindowControlArea::Max,
                     chrome.traffic_light_diameter,
-                    theme.success,
+                    theme.ely.success,
                     on_maximize,
                 ))
         });

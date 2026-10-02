@@ -241,7 +241,7 @@ pub(crate) fn day_name(day: Date, today: Date) -> String {
 impl RenderOnce for DateSeparator {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let rule = || div().flex_1().h_px().bg(colors.border);
         let name = day_name(self.day, self.today);
         let shown = format!("date-separator-{name}");

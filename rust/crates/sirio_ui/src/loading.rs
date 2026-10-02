@@ -20,7 +20,7 @@ use bezel::ui::loaders;
 use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
 use gpui::{
-    AnyElement, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba, Styled, Window,
+    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Styled, Window,
     div, px,
 };
 use sirio_theme::Theme;
@@ -91,13 +91,13 @@ fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
         sirio_theme::Appearance::Light => bezel::theme::Theme::light(),
         sirio_theme::Appearance::Dark => bezel::theme::Theme::dark(),
     };
-    bezel_theme.accent = theme.brand_coral.into();
+    bezel_theme.accent = theme.sirio.brand_coral;
     bezel_theme
 }
 
 /// The neutral gray the thinking and loading orbs paint in.
-fn loading_accent(theme: &Theme) -> Rgba {
-    theme.text_muted
+fn loading_accent(theme: &Theme) -> Hsla {
+    theme.ely.fg_muted
 }
 
 /// The view whose render is leasing the shared Bezel animation clock.
@@ -113,7 +113,7 @@ pub fn thinking_indicator(
     cx: &mut App,
 ) -> AnyElement {
     let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = loading_accent(theme).into();
+    bezel_theme.accent = loading_accent(theme);
     loaders::orb(
         loaders::Orb::Cluster,
         id,
@@ -134,7 +134,7 @@ pub fn indeterminate(
     cx: &mut App,
 ) -> AnyElement {
     let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = loading_accent(theme).into();
+    bezel_theme.accent = loading_accent(theme);
     loaders::orb(
         loaders::Orb::Cluster,
         id,
@@ -155,13 +155,13 @@ pub fn indeterminate(
 pub fn bloom(
     id: &'static str,
     size: f32,
-    tint: Rgba,
+    tint: Hsla,
     theme: &Theme,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = tint.into();
+    bezel_theme.accent = tint;
     loaders::orb(
         loaders::Orb::Bloom,
         id,
@@ -234,7 +234,7 @@ pub fn settled_bloom_rings(slot: f32) -> Vec<(f32, f32)> {
 /// `size` is the *slot*, not the mark: the rings are drawn at
 /// [`settled_bloom_span`] of it and centred, so the element a caller lays out
 /// keeps the same footprint as the travelling bloom it stands in for.
-pub fn settled_bloom(id: &'static str, size: f32, tint: Rgba) -> AnyElement {
+pub fn settled_bloom(id: &'static str, size: f32, tint: Hsla) -> AnyElement {
     // The stroke belongs to the mark it outlines, not to the slot around it:
     // scaling it off `size` would leave a 6px figure wearing a 14px figure's
     // border and fill itself in.

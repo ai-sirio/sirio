@@ -108,7 +108,7 @@ pub(super) fn render_search_row(
     // repo's one way to draw a caret. An empty field carries it at the
     // hint's start (`caret::field_placeholder`), a value after its last
     // character.
-    let search_caret = || crate::caret::bar(px(14.0), theme.text, caret_visible);
+    let search_caret = || crate::caret::bar(px(14.0), theme.ely.fg, caret_visible);
     div()
         .id("history-toolbar")
         .debug_selector(|| "history-toolbar".to_owned())
@@ -133,12 +133,12 @@ pub(super) fn render_search_row(
                 .py(px(3.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.ely.border)
                 .text_size(theme.typography.footnote)
                 .text_color(if draft.is_empty() {
-                    theme.text_faint
+                    theme.ely.fg_subtle
                 } else {
-                    theme.text
+                    theme.ely.fg
                 })
                 .flex()
                 .items_center()
@@ -204,13 +204,13 @@ fn toggle(
         .justify_center()
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if on { theme.text } else { theme.text_faint })
+        .text_color(if on { theme.ely.fg } else { theme.ely.fg_subtle })
         .bg(if on {
-            theme.element_hover
+            theme.ely.hover
         } else {
-            theme.surface
+            theme.ely.bg
         })
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(move |_, _, cx| on_click(cx))
         .child(label)
 }
@@ -243,16 +243,16 @@ pub(super) fn render_filter_chip(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if active > 0 {
-            theme.text
+            theme.ely.fg
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         })
         .bg(if open {
-            theme.element_hover
+            theme.ely.hover
         } else {
-            theme.surface
+            theme.ely.bg
         })
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |history, cx| {
                 history.open_chip = (history.open_chip != Some(chip)).then_some(chip);
@@ -284,8 +284,8 @@ pub(super) fn render_chip_popup(
         .p(px(4.0))
         .rounded(theme.radii.user_pill)
         .border_1()
-        .border_color(theme.border)
-        .bg(theme.floating_surface)
+        .border_color(theme.ely.border)
+        .bg(theme.sirio.floating_surface)
         .shadow_lg();
 
     if chip == FilterChip::User {
@@ -294,7 +294,7 @@ pub(super) fn render_chip_popup(
                 .px(px(6.0))
                 .py(px(3.0))
                 .text_size(theme.typography.caption2)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child("Authors in the loaded history"),
         );
     }
@@ -315,8 +315,8 @@ pub(super) fn render_chip_popup(
                     .items_center()
                     .gap(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.ely.fg)
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         row_entity.update(cx, |history, cx| {
                             history.set_date_preset(value.clone(), cx);
@@ -337,7 +337,7 @@ pub(super) fn render_chip_popup(
                 .px(px(6.0))
                 .py(px(4.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child("Nothing to choose from"),
         );
     }
@@ -359,8 +359,8 @@ pub(super) fn render_chip_popup(
                 .items_center()
                 .gap(px(6.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text)
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(theme.ely.fg)
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| {
                     row_entity.update(cx, |history, cx| {
                         history.toggle_chip_option(chip, value.clone(), cx);
@@ -390,7 +390,7 @@ pub(super) fn render_paths_popup(
     let path_caret = || {
         div()
             .debug_selector(|| "history-path-caret".to_owned())
-            .child(crate::caret::bar(px(14.0), theme.text, caret_visible))
+            .child(crate::caret::bar(px(14.0), theme.ely.fg, caret_visible))
             .into_any_element()
     };
     div()
@@ -402,8 +402,8 @@ pub(super) fn render_paths_popup(
         .p(px(4.0))
         .rounded(theme.radii.user_pill)
         .border_1()
-        .border_color(theme.border)
-        .bg(theme.floating_surface)
+        .border_color(theme.ely.border)
+        .bg(theme.sirio.floating_surface)
         .shadow_lg()
         .child(
             div()
@@ -418,12 +418,12 @@ pub(super) fn render_paths_popup(
                 .py(px(3.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.ely.border)
                 .text_size(theme.typography.footnote)
                 .text_color(if draft.is_empty() {
-                    theme.text_faint
+                    theme.ely.fg_subtle
                 } else {
-                    theme.text
+                    theme.ely.fg
                 })
                 .flex()
                 .items_center()
@@ -478,16 +478,16 @@ pub(super) fn render_collapsed_chips(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if active > 0 {
-            theme.text
+            theme.ely.fg
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         })
         .bg(if open {
-            theme.element_hover
+            theme.ely.hover
         } else {
-            theme.surface
+            theme.ely.bg
         })
-        .hover(|style| style.bg(theme.element_hover))
+        .hover(|style| style.bg(theme.ely.hover))
         .on_click(move |_, _, cx| {
             // ponytail: the combined four-in-one popup is not drawn yet; the
             // click only dismisses any open chip popup until it lands.

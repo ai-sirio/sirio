@@ -8643,9 +8643,9 @@ impl SirioWorkspace {
                 .size_full()
                 .when(targeted, |this| {
                     let this = this
-                        .bg(theme.element_active)
+                        .bg(theme.ely.active)
                         .border_2()
-                        .border_color(theme.border_strong);
+                        .border_color(theme.sirio.border_strong);
                     #[cfg(test)]
                     let this = this.child(
                         div()
@@ -14568,8 +14568,8 @@ impl SirioWorkspace {
             .w(theme.spacing.menu_width)
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.floating_surface)
+            .border_color(theme.ely.border)
+            .bg(theme.sirio.floating_surface)
             .shadow_lg()
             .text_size(theme.typography.footnote)
             .on_mouse_down_out(move |_, _, cx| {
@@ -14590,8 +14590,8 @@ impl SirioWorkspace {
                     .px(theme.spacing.card_gap)
                     .py(theme.spacing.titlebar_control_spacing)
                     .rounded(theme.radii.control)
-                    .text_color(theme.text_faint)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.ely.fg_subtle)
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         settings_entity.update(cx, |workspace, cx| {
                             workspace.empty_chat_picker_open = None;
@@ -14619,8 +14619,8 @@ impl SirioWorkspace {
                         .px(theme.spacing.card_gap)
                         .py(theme.spacing.titlebar_control_spacing)
                         .rounded(theme.radii.control)
-                        .text_color(theme.text)
-                        .hover(|style| style.bg(theme.element_hover))
+                        .text_color(theme.ely.fg)
+                        .hover(|style| style.bg(theme.ely.hover))
                         .on_click(move |_, window, cx| {
                             row_entity.update(cx, |workspace, cx| {
                                 workspace.empty_chat_picker_open = None;
@@ -14634,7 +14634,7 @@ impl SirioWorkspace {
                                 );
                             });
                         })
-                        .child(IconElement::new(icon, IconSize::Small).text_color(theme.text))
+                        .child(IconElement::new(icon, IconSize::Small).text_color(theme.ely.fg))
                         .child(div().id(format!("{prefix}label-{id}")).child(display_name)),
                 );
             }
@@ -14646,8 +14646,8 @@ impl SirioWorkspace {
                     .px(theme.spacing.card_gap)
                     .py(theme.spacing.titlebar_control_spacing)
                     .rounded(theme.radii.control)
-                    .text_color(theme.text_faint)
-                    .hover(|style| style.bg(theme.element_hover))
+                    .text_color(theme.ely.fg_subtle)
+                    .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         other_entity.update(cx, |workspace, cx| {
                             workspace.empty_chat_picker_open = None;
@@ -16078,7 +16078,7 @@ impl SirioWorkspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("No worktree")
                         .into_any_element()
                 } else if role == PaneRole::Secondary {
@@ -16161,7 +16161,7 @@ impl SirioWorkspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(theme.text_faint)
+                        .text_color(theme.ely.fg_subtle)
                         .child("No tabs in this pane")
                         .into_any_element()
                 }
@@ -16170,7 +16170,7 @@ impl SirioWorkspace {
             .flex()
             .flex_row()
             .size_full()
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             .child(surface)
             .into_any_element()
     }
@@ -16267,11 +16267,11 @@ impl SirioWorkspace {
         // it — `Icon::is_chromatic`, omp's gradient — exactly as `OmpShape`
         // ignores any inherited tint.
         let glyph_color = if icon.is_agent_mark() {
-            agent.map_or(theme.text, |agent| agent.brand.color())
+            agent.map_or(theme.ely.fg, |agent| agent.brand.color().into())
         } else if tab.kind == TabKind::AgentChat {
-            if is_file { theme.file_link } else { theme.text }
+            if is_file { theme.ely.link } else { theme.ely.fg }
         } else {
-            theme.text_faint
+            theme.ely.fg_subtle
         };
         let change_request_tint = (tab.kind == TabKind::ChangeRequest)
             .then(|| {
@@ -16321,8 +16321,8 @@ impl SirioWorkspace {
             } else {
                 FontWeight::NORMAL
             })
-            .text_color(if active { theme.text } else { theme.text_muted })
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(if active { theme.ely.fg } else { theme.ely.fg_muted })
+            .hover(|style| style.bg(theme.ely.hover))
             .when_some(drop_edge, |this, before| {
                 this.child(
                     div()
@@ -16334,7 +16334,7 @@ impl SirioWorkspace {
                         .w(px(2.0))
                         .when(before, |bar| bar.left_0())
                         .when(!before, |bar| bar.right_0())
-                        .bg(theme.text),
+                        .bg(theme.ely.fg),
                 )
             })
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
@@ -16394,7 +16394,7 @@ impl SirioWorkspace {
                 div()
                     .w(px(14.0))
                     .flex_none()
-                    .text_color(change_request_tint.unwrap_or(glyph_color.into()))
+                    .text_color(change_request_tint.unwrap_or(glyph_color))
                     .child(IconElement::new(icon, IconSize::Small)),
             )
             .when(!renaming, |this| {
@@ -16420,8 +16420,8 @@ impl SirioWorkspace {
                         .min_w_0()
                         .px(theme.spacing.titlebar_control_spacing)
                         .rounded(theme.radii.control)
-                        .bg(theme.input_bg)
-                        .text_color(theme.text)
+                        .bg(theme.ely.sunken)
+                        .text_color(theme.ely.fg)
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             focus_for_click.focus(window, cx);
                         })
@@ -16439,7 +16439,7 @@ impl SirioWorkspace {
                                 .debug_selector(|| "tab-rename-caret".to_owned())
                                 .child(sirio_ui::caret::bar(
                                     px(14.0),
-                                    theme.text,
+                                    theme.ely.fg,
                                     rename_caret_visible,
                                 )),
                         ),
@@ -16471,7 +16471,7 @@ impl SirioWorkspace {
                                 .id(format!("workspace-tab-exit-{id}"))
                                 .debug_selector(move || format!("workspace-tab-exit-{id}"))
                                 .text_size(theme.typography.scaled(10.0))
-                                .text_color(theme.text_faint)
+                                .text_color(theme.ely.fg_subtle)
                                 .child(label),
                         )
                     }),
@@ -16502,12 +16502,12 @@ impl SirioWorkspace {
                             .items_center()
                             .justify_center()
                             .rounded(theme.radii.control)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .when(!active || dirty_mark, |this| {
                                 this.invisible()
                                     .group_hover(hover_group.clone(), |style| style.visible())
                             })
-                            .hover(|style| style.bg(theme.element_hover))
+                            .hover(|style| style.bg(theme.ely.hover))
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
                                 close_entity.update(cx, |this, cx| {
@@ -16516,7 +16516,7 @@ impl SirioWorkspace {
                             })
                             .child(
                                 IconElement::new(Icon::Close, IconSize::XSmall)
-                                    .text_color(theme.text_muted),
+                                    .text_color(theme.ely.fg_muted),
                             ),
                     )
                     .when(dirty_mark, |this| {
@@ -16535,7 +16535,7 @@ impl SirioWorkspace {
                                         .w(px(TAB_STATUS_DOT))
                                         .h(px(TAB_STATUS_DOT))
                                         .rounded_full()
-                                        .bg(theme.text),
+                                        .bg(theme.ely.fg),
                                 ),
                         )
                     }),
@@ -16551,9 +16551,9 @@ impl SirioWorkspace {
             // flip without reading a colour.
             .when(active, |this| {
                 let (focus_state, color) = if pane_focused {
-                    ("focused", theme.text)
+                    ("focused", theme.ely.fg)
                 } else {
-                    ("unfocused", theme.text_faint)
+                    ("unfocused", theme.ely.fg_subtle)
                 };
                 this.child(
                     div()
@@ -16591,8 +16591,8 @@ impl SirioWorkspace {
             .items_center()
             .justify_center()
             .rounded(theme.radii.control)
-            .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(theme.ely.fg_subtle)
+            .hover(|style| style.bg(theme.ely.hover))
             .tooltip(|window, cx| {
                 bezel::ui::tooltip::Tooltip::with_keystroke(
                     "Hide Pane",
@@ -16606,7 +16606,7 @@ impl SirioWorkspace {
                     workspace.set_secondary_pane_hidden(true, cx);
                 });
             })
-            .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text_faint))
+            .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.ely.fg_subtle))
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -17442,8 +17442,8 @@ impl SirioWorkspace {
             .gap(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.floating_surface)
+            .border_color(theme.ely.border)
+            .bg(theme.sirio.floating_surface)
             .shadow_lg()
             .on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |workspace, cx| {
@@ -17472,8 +17472,8 @@ impl SirioWorkspace {
                 .gap(theme.spacing.titlebar_control_spacing)
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(if active { theme.ely.fg } else { theme.ely.fg_muted })
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, window, cx| {
                     select_entity.update(cx, |workspace, cx| {
                         workspace.select_tab(id, Some(window), cx);
@@ -17493,7 +17493,7 @@ impl SirioWorkspace {
                         div()
                             .id(selected_selector.clone())
                             .debug_selector(move || selected_selector.clone())
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child("✓"),
                     )
                 });
@@ -17552,7 +17552,7 @@ impl SirioWorkspace {
             .flex()
             .items_center()
             .gap(px(2.0))
-            .bg(theme.surface)
+            .bg(theme.ely.bg)
             // F-TAB-24: a drop either commits the live reorder or, with a
             // cross-half target, moves the tab (`drop_on_pane`). Attached to
             // this stable strip container, not a per-tab row, because rows
@@ -17642,8 +17642,8 @@ impl SirioWorkspace {
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .text_color(theme.text_faint)
-                .hover(|style| style.bg(theme.element_hover))
+                .text_color(theme.ely.fg_subtle)
+                .hover(|style| style.bg(theme.ely.hover))
                 .on_click(move |_, _, cx| {
                     overflow_entity.update(cx, |workspace, cx| {
                         workspace.overflow_menu_open = !workspace.overflow_menu_open;
@@ -17653,7 +17653,7 @@ impl SirioWorkspace {
                 })
                 .child(
                     IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                        .text_color(theme.text_faint),
+                        .text_color(theme.ely.fg_subtle),
                 );
             tabs = tabs.child(overflow_button);
             if self.overflow_menu_open {
@@ -17719,11 +17719,11 @@ impl SirioWorkspace {
                 .items_center()
                 .justify_center()
                 .gap(theme.spacing.card_gap)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(orbit(
                     "no-worktree-selected-orbit",
                     EMPTY_SURFACE_MARK,
-                    theme.text_faint,
+                    theme.ely.fg_subtle,
                 ));
             if self.project_catalog.projects().is_empty() {
                 let add_project_entity = entity.clone();
@@ -17732,7 +17732,7 @@ impl SirioWorkspace {
                         div()
                             .text_size(theme.typography.headline)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child("No projects yet"),
                     )
                     .child("Add a project, then select a worktree.")
@@ -17743,9 +17743,9 @@ impl SirioWorkspace {
                             .px(theme.spacing.card_gap)
                             .py(theme.spacing.titlebar_control_spacing)
                             .rounded(theme.radii.control)
-                            .bg(theme.solid)
+                            .bg(theme.sirio.solid)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.on_solid)
+                            .text_color(theme.sirio.on_solid)
                             .hover(|style| style.opacity(0.9))
                             .on_click(move |_, window, cx| {
                                 add_project_entity.update(cx, |workspace, cx| {
@@ -17762,7 +17762,7 @@ impl SirioWorkspace {
                         div()
                             .text_size(theme.typography.headline)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
+                            .text_color(theme.ely.fg)
                             .child("Select a worktree"),
                     )
                     .child(self.worktree_picker.clone());
@@ -17820,7 +17820,7 @@ impl SirioWorkspace {
                     // share one rule, and the active tab's underline can
                     // overlap it from above.
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(theme.ely.border)
                     // The one `+`: it routes a new surface to its own half by
                     // what the surface is, so a second copy in the Secondary
                     // strip would be a button that sends you elsewhere.
@@ -17865,7 +17865,7 @@ impl SirioWorkspace {
                         .w(px(CENTER_DIVIDER_WIDTH))
                         .h_full()
                         .flex_none()
-                        .bg(theme.border_strong)
+                        .bg(theme.sirio.border_strong)
                         // The rule is one pixel; the grab area is the same
                         // `SPLIT_DIVIDER_SIZE` the side panels use, centred on
                         // it, because a one-pixel target is not a handle.
@@ -17920,9 +17920,9 @@ impl SirioWorkspace {
                                 // The tabs paint `surface` only up to the `×`
                                 // slot; without this the `×` sits on the
                                 // darker window behind the strip.
-                                .bg(theme.surface)
+                                .bg(theme.ely.bg)
                                 .border_b_1()
-                                .border_color(theme.border)
+                                .border_color(theme.ely.border)
                                 .child(self.render_open_tabs(
                                     PaneRole::Secondary,
                                     *theme,
@@ -19117,15 +19117,15 @@ impl SirioWorkspace {
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
                     .text_color(if entry.is_enabled() {
-                        if active { theme.text } else { theme.text }
+                        if active { theme.ely.fg } else { theme.ely.fg }
                     } else {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     })
                     .when(active && entry.is_enabled(), |this| {
-                        this.bg(theme.element_active)
+                        this.bg(theme.ely.active)
                     })
                     .when(entry.is_enabled(), move |this| {
-                        this.hover(|style| style.bg(theme.element_hover)).on_click(
+                        this.hover(|style| style.bg(theme.ely.hover)).on_click(
                             move |_, window, cx| {
                                 entity.update(cx, |workspace, cx| {
                                     workspace.dispatch_palette_command(entry.command, window, cx)
@@ -19139,7 +19139,7 @@ impl SirioWorkspace {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.ely.fg_subtle)
                             .child(entry.shortcut.unwrap_or(""))
                             .when_some(entry.disabled_reason, |this, reason| {
                                 this.child(
@@ -19170,7 +19170,7 @@ impl SirioWorkspace {
                 .flex()
                 .items_center()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text_faint)
+                .text_color(theme.ely.fg_subtle)
                 .child(EMPTY_RESULT_LABEL)
                 .into_any_element()
         } else {
@@ -19207,8 +19207,8 @@ impl SirioWorkspace {
             .p(px(8.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.floating_surface)
+            .border_color(theme.ely.border)
+            .bg(theme.sirio.floating_surface)
             .shadow_lg()
             .child(
                 div()
@@ -19220,14 +19220,14 @@ impl SirioWorkspace {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
+                    .bg(theme.ely.sunken)
                     .border_1()
-                    .border_color(theme.text)
+                    .border_color(theme.ely.fg)
                     .text_size(theme.typography.headline)
                     .text_color(if query.is_empty() {
-                        theme.text_faint
+                        theme.ely.fg_subtle
                     } else {
-                        theme.text
+                        theme.ely.fg
                     })
                     .child(if query.is_empty() {
                         "Type to filter commands".to_owned()
@@ -19241,7 +19241,7 @@ impl SirioWorkspace {
                             .debug_selector(|| "command-palette-caret".to_owned())
                             .child(sirio_ui::caret::bar(
                                 px(18.0),
-                                theme.text,
+                                theme.ely.fg,
                                 self.palette_caret_visible,
                             )),
                     ),
@@ -19252,7 +19252,7 @@ impl SirioWorkspace {
                     .mb(px(5.0))
                     .px(px(10.0))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("Commands · substring filter"),
             )
             .child(
@@ -19288,11 +19288,11 @@ impl SirioWorkspace {
                 .py(px(10.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.border)
-                .bg(theme.floating_surface)
+                .border_color(theme.ely.border)
+                .bg(theme.sirio.floating_surface)
                 .shadow_lg()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.text)
+                .text_color(theme.ely.fg)
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     dismiss_entity.update(cx, |workspace, cx| workspace.dismiss_toast(cx));
                 })
@@ -19311,11 +19311,11 @@ impl SirioWorkspace {
     /// live-looking dead control. Dismiss is the one action every state
     /// actually supports, and is fully wired to `UpdateEvent::Reset`.
     fn render_update_toast(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
-        let (message, action_label, message_tone): (String, Option<&'static str>, gpui::Rgba) =
+        let (message, action_label, message_tone): (String, Option<&'static str>, gpui::Hsla) =
             match &self.update_state {
                 UpdateState::Idle => return None,
                 UpdateState::Checking => {
-                    ("Checking for updates…".to_string(), None, theme.text_muted)
+                    ("Checking for updates…".to_string(), None, theme.ely.fg_muted)
                 }
                 // An available update is the one state waiting on the reader,
                 // so it is the one state that spends a colour. Checking,
@@ -19323,21 +19323,21 @@ impl SirioWorkspace {
                 UpdateState::Available { version } => (
                     format!("Sirio {version} is available"),
                     Some("Download"),
-                    theme.warning,
+                    theme.ely.warning,
                 ),
                 UpdateState::Downloading { progress_percent } => (
                     format!("Downloading Sirio… {progress_percent}%"),
                     None,
-                    theme.text_muted,
+                    theme.ely.fg_muted,
                 ),
                 UpdateState::Installing => {
-                    ("Installing update…".to_string(), None, theme.text_muted)
+                    ("Installing update…".to_string(), None, theme.ely.fg_muted)
                 }
-                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.success),
+                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.ely.success),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
                     Some("Retry"),
-                    theme.danger,
+                    theme.ely.danger,
                 ),
             };
         let progress_percent = match &self.update_state {
@@ -19360,8 +19360,8 @@ impl SirioWorkspace {
                 .py(px(10.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.border)
-                .bg(theme.floating_surface)
+                .border_color(theme.ely.border)
+                .bg(theme.sirio.floating_surface)
                 .shadow_lg()
                 .child(
                     div()
@@ -19383,7 +19383,7 @@ impl SirioWorkspace {
                                 .id("update-toast-dismiss")
                                 .debug_selector(|| "update-toast-dismiss".to_owned())
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.text_faint)
+                                .text_color(theme.ely.fg_subtle)
                                 .cursor_pointer()
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     dismiss_entity.update(cx, |workspace, cx| {
@@ -19401,13 +19401,13 @@ impl SirioWorkspace {
                             .w_full()
                             .h(px(5.0))
                             .rounded(px(3.0))
-                            .bg(theme.surface_raised)
+                            .bg(theme.ely.surface)
                             .child(
                                 div()
                                     .h(px(5.0))
                                     .rounded(px(3.0))
                                     // A bar filling up is a quantity, not a status.
-                                    .bg(theme.accent)
+                                    .bg(theme.sirio.quantity)
                                     .w(px(280.0 * (progress_percent as f32 / 100.0))),
                             ),
                     )
@@ -19418,7 +19418,7 @@ impl SirioWorkspace {
                             .id("update-toast-action")
                             .debug_selector(|| "update-toast-action".to_owned())
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.text_muted)
+                            .text_color(theme.ely.fg_muted)
                             .child(label),
                     )
                 })
@@ -21785,11 +21785,11 @@ fn app_icon() -> Arc<image::RgbaImage> {
 }
 
 /// Registers the bundled faces with the text system, on every platform:
-/// bezel's Geist for the UI and code, and `sirio_theme`'s JetBrainsMono Nerd
-/// Font Mono for the terminal. Sirio used to carry its own Geist copies in
+/// Sirio's Geist faces for the UI and code, and `sirio_theme`'s JetBrainsMono
+/// Nerd Font Mono for the terminal. Sirio used to carry its own Geist copy in
 /// `assets/fonts` and skip macOS, which kept SF Pro there; B3 makes one face
-/// the face everywhere, and bezel's copies include the 500/600/700 statics
-/// Sirio's never had. The terminal face came back into `assets/fonts` for
+/// the face everywhere, with static 500/600/700 weights. The terminal face
+/// came back into `assets/fonts` for
 /// the reason recorded at `sirio_theme::BUNDLED_TERMINAL_FAMILY`: on a stock
 /// Windows box no candidate in the terminal chain existed, and the generic
 /// answer was Courier New with no Nerd Font glyph in it.
@@ -21808,7 +21808,7 @@ fn app_icon() -> Arc<image::RgbaImage> {
 /// terminal, as a Cascadia Mono or Consolas pane whose Powerline glyphs are
 /// tofu.
 fn register_fonts(cx: &App) {
-    if let Err(error) = bezel::ui::register_fonts(cx) {
+    if let Err(error) = sirio_theme::register_ui_fonts(cx) {
         eprintln!("[fonts] failed to register Geist: {error}");
     }
     if let Err(error) = sirio_theme::register_bundled_terminal_font(cx) {
@@ -21924,14 +21924,14 @@ fn main() {
     // bezel's icons are `svg().path("icons/…")`; without an asset source
     // gpui finds nothing and paints nothing. Sirio's own icons embed their
     // bytes and never needed this.
-    let app = application().with_assets(sirio_ui::chat::ChatAssets);
+    let app = application().with_assets(sirio_ui::ely::AppAssets);
     app.run(|cx: &mut App| {
         #[cfg(feature = "perf-native")]
         native_perf::init(cx);
-        // Must land before `Theme::init` — see `register_fonts`'s own doc
-        // comment for why the order is load-bearing.
+        // Must land before `Theme::init`: Theme caches resolved font names.
         register_fonts(cx);
         Theme::init(cx);
+        sirio_ui::ely::init(cx);
         init_motion(cx);
         bezel::ui::input::init(cx);
         bezel::ui::combobox::init(cx);
@@ -29425,8 +29425,8 @@ done
     fn worktree_activity_colours_name_the_agent_and_never_a_status() {
         let theme = Theme::dark();
         assert_ne!(
-            AgentBrandColor::for_agent_id("claude").color(),
-            theme.warning,
+            gpui::Hsla::from(AgentBrandColor::for_agent_id("claude").color()),
+            theme.ely.warning,
             "running Claude and needs-input used to be the identical #E0B36A"
         );
         for (id, brand) in [
@@ -29441,8 +29441,8 @@ done
             assert_eq!(mark.brand, brand);
             assert_eq!(mark.icon, Icon::for_agent_id(id).expect("catalog icon"));
             assert_ne!(
-                mark.brand.color(),
-                theme.text,
+                gpui::Hsla::from(mark.brand.color()),
+                theme.ely.fg,
                 "{id}'s mark used to be tinted tab_focus_accent -- Claude's own coral"
             );
         }

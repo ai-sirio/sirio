@@ -101,7 +101,7 @@ impl RenderOnce for SearchProgress {
             })
             .collect();
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         div()
             .flex()
             .flex_col()
@@ -160,7 +160,7 @@ impl WebResultCard {
 impl RenderOnce for WebResultCard {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let open = self.on_open;
         div()
             .id(self.id.clone())
@@ -266,7 +266,7 @@ impl DocumentChunkPreview {
 impl RenderOnce for DocumentChunkPreview {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let colors = theme.colors.clone();
+        let colors = theme.colors;
         let wash = HighlightStyle {
             background_color: Some(colors.warning.opacity(0.25)),
             ..HighlightStyle::default()

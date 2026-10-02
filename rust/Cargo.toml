@@ -7,6 +7,7 @@ resolver = "2"
 # (which conflicts with its own `[workspace]` table).
 exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/libghostty-vt-sys"]
 members = [
+    "vendor/ely-palette",
     "vendor/ely-gpui-component",
     "crates/sirio_perf",
     "crates/sirio",
@@ -41,6 +42,7 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+ely-palette = { path = "vendor/ely-palette" }
 ely-gpui-component = { path = "vendor/ely-gpui-component", default-features = false, features = ["sirio-chat"] }
 # GPUI used to be an absolute path into a zed checkout on one particular Mac, which meant the
 # workspace failed to resolve — not to build, to *resolve* — anywhere else, taking all thirteen
@@ -72,18 +74,15 @@ gpui = { package = "bezel-gpui", version = "=0.3.8", default-features = false }
 # "font-kit" is not Linux-specific (unlike wayland/x11 above) so it stays unconditional here,
 # matching gpui_platform's pre-portability-wave feature set on every platform.
 gpui_platform = { package = "bezel-gpui-platform", version = "=0.3.8", default-features = false, features = ["font-kit"] }
-# Geist is the face on every platform now (B3), and `geist-weights` is not
-# optional decoration: gpui's cosmic-text path rasterizes a variable font at its
-# default instance only, so without the 500/600/700 statics the Linux build
-# cannot paint semibold or bold and nothing reports it.
-bezel = { version = "=0.1.4", default-features = false, features = [
-    "geist-sans",
-    "geist-mono",
-    "geist-weights",
-] }
+# Geist ships from rust/assets/fonts (sirio_theme::register_ui_fonts).
+bezel = { version = "=0.1.4", default-features = false }
 bezel-markdown = "=0.1.4"
 bezel-editor = "=0.1.4"
 bezel-syntax = "=0.1.4"
+# Renamed: the package's lib target is `theme`, so the extern name is
+# `bezel_theme` and `sirio_theme` reads `bezel_theme::…` (the same types as
+# `bezel::theme::…`). Cf. `gpui = { package = "bezel-gpui" }` above.
+bezel_theme = { version = "=0.1.4", package = "bezel-theme" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use gpui::{AnyElement, Context, Div, IntoElement, ParentElement, Pixels, Rgba, Styled, div, px};
+use gpui::{AnyElement, Context, Div, Hsla, IntoElement, ParentElement, Pixels, Styled, div, px};
 
 /// Blink cadence. 530ms matches the conventional text-caret cycle closely
 /// enough that nobody perceives the difference from a native field.
@@ -92,7 +92,7 @@ pub fn schedule<T: 'static>(
 /// occupying layout so surrounding text doesn't shift as it blinks, and
 /// never shrinking: in a row whose value overflows, flex shrink would take
 /// its share out of the bar too and leave a sliver.
-pub fn bar(height: Pixels, color: Rgba, visible: bool) -> gpui::AnyElement {
+pub fn bar(height: Pixels, color: Hsla, visible: bool) -> gpui::AnyElement {
     let bar = gpui::div()
         .w(BAR_WIDTH)
         .h(height)
@@ -203,7 +203,7 @@ mod tests {
                     )
                     .child(div().debug_selector(|| "bar".to_owned()).child(bar(
                         px(16.0),
-                        black().into(),
+                        black(),
                         true,
                     ))),
             )
@@ -316,7 +316,7 @@ mod tests {
                             Some(
                                 div()
                                     .debug_selector(|| "bar".to_owned())
-                                    .child(bar(px(16.0), black().into(), true))
+                                    .child(bar(px(16.0), black(), true))
                                     .into_any_element(),
                             ),
                         )

@@ -346,12 +346,12 @@ impl Chat {
                         .rounded(theme.radii.control)
                         .border_1()
                         .border_color(bezel_theme.border)
-                        .when(highlighted, |badge| badge.bg(theme.border_strong))
+                        .when(highlighted, |badge| badge.bg(theme.sirio.border_strong))
                         .text_size(typography.caption2)
                         .text_color(if highlighted {
-                            theme.text
+                            theme.ely.fg
                         } else {
-                            theme.text_faint
+                            theme.ely.fg_subtle
                         })
                         .child(label)
                 });
@@ -365,12 +365,12 @@ impl Chat {
                     .p(px(8.0))
                     .rounded(theme.radii.control)
                     .bg(if highlighted {
-                        theme.element_active
+                        theme.ely.active
                     } else {
-                        gpui::transparent_black().into()
+                        gpui::transparent_black()
                     })
                     .cursor_pointer()
-                    .hover(|row| row.bg(theme.element_hover))
+                    .hover(|row| row.bg(theme.ely.hover))
                     .when(!highlighted, |row| row.bg(gpui::transparent_black()))
                     .id(("question-dock-row", index))
                     .items_start()
@@ -407,13 +407,13 @@ impl Chat {
                                     .child(
                                         div()
                                             .text_size(typography.callout)
-                                            .text_color(theme.text)
+                                            .text_color(theme.ely.fg)
                                             .child(option.label),
                                     )
                                     .children(option.description.map(|description| {
                                         div()
                                             .text_size(typography.footnote)
-                                            .text_color(theme.text_muted)
+                                            .text_color(theme.ely.fg_muted)
                                             .child(description)
                                     })),
                             )
@@ -437,7 +437,7 @@ impl Chat {
                             div()
                                 .flex_1()
                                 .text_size(typography.callout)
-                                .text_color(theme.text)
+                                .text_color(theme.ely.fg)
                                 .child("Dismiss"),
                         )
                         .into_any_element(),
@@ -456,7 +456,7 @@ impl Chat {
                         .max_h(px(DOCK_BODY_MAX_HEIGHT))
                         .overflow_y_scroll()
                         .text_size(typography.callout)
-                        .text_color(theme.text)
+                        .text_color(theme.ely.fg)
                         .child(selectable_text(view.body)),
                 )
             });
@@ -476,7 +476,7 @@ impl Chat {
                     .flex()
                     .justify_end()
                     .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(theme.ely.fg_subtle)
                     .child("↑↓ select · ⏎ confirm · esc cancel"),
             );
         let id: gpui::ElementId = (

@@ -217,16 +217,17 @@ fn percent_decode(text: &str) -> String {
 pub(crate) fn palette(theme: &Theme) -> Palette {
     Palette {
         dark: matches!(theme.appearance, Appearance::Dark),
-        background: hex(theme.surface),
-        text: hex(theme.text),
-        node_fill: hex(theme.surface_raised),
-        node_border: hex(theme.border_opaque),
-        line: hex(theme.text_muted),
-        label_background: hex(theme.surface),
+        background: hex(theme.ely.bg),
+        text: hex(theme.ely.fg),
+        node_fill: hex(theme.ely.surface),
+        node_border: hex(theme.ely.border),
+        line: hex(theme.ely.fg_muted),
+        label_background: hex(theme.ely.bg),
     }
 }
 
-fn hex(color: gpui::Rgba) -> String {
+fn hex(color: gpui::Hsla) -> String {
+    let color = gpui::Rgba::from(color);
     let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!(
         "#{:02x}{:02x}{:02x}",

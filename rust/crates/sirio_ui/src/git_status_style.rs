@@ -24,17 +24,17 @@
 //! impossible rather than merely absent, which is the part of Swift's design
 //! worth porting.
 
-use gpui::Rgba;
+use gpui::Hsla;
 use sirio_git::{DirectoryGitStatus, StatusEntry};
 use sirio_theme::Theme;
 
 /// Map a resolved status to its theme colour. The only mapping in the crate.
-pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
+pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Hsla {
     match status {
-        DirectoryGitStatus::Conflicted => theme.danger,
-        DirectoryGitStatus::Staged => theme.success,
-        DirectoryGitStatus::Changed => theme.warning,
-        DirectoryGitStatus::Untracked => theme.git_untracked,
+        DirectoryGitStatus::Conflicted => theme.ely.danger,
+        DirectoryGitStatus::Staged => theme.ely.success,
+        DirectoryGitStatus::Changed => theme.ely.warning,
+        DirectoryGitStatus::Untracked => theme.ely.fg_subtle,
     }
 }
 
@@ -48,13 +48,13 @@ pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
 /// expected to hold such an entry, but it rendered them neutral before this
 /// module existed, and a shared resolver should not quietly change an
 /// unrelated case on its way to fixing the one it was written for.
-pub fn entry_color(entry: &StatusEntry, theme: Theme) -> Rgba {
+pub fn entry_color(entry: &StatusEntry, theme: Theme) -> Hsla {
     if !entry.is_conflicted()
         && !entry.is_untracked()
         && !entry.is_staged()
         && !entry.has_worktree_changes()
     {
-        return theme.text;
+        return theme.ely.fg;
     }
     status_color(DirectoryGitStatus::for_file(entry), theme)
 }
@@ -80,19 +80,19 @@ mod tests {
 
         // Conflicted outranks everything, including a staged index entry.
         let conflicted = entry(Some(StatusKind::Unmerged), Some(StatusKind::Modified));
-        assert_eq!(entry_color(&conflicted, theme), theme.danger);
+        assert_eq!(entry_color(&conflicted, theme), theme.ely.danger);
 
         // Untracked outranks staged.
         let untracked = entry(Some(StatusKind::Untracked), None);
-        assert_eq!(entry_color(&untracked, theme), theme.git_untracked);
+        assert_eq!(entry_color(&untracked, theme), theme.ely.fg_subtle);
 
         // Staged alone.
         let staged = entry(Some(StatusKind::Added), None);
-        assert_eq!(entry_color(&staged, theme), theme.success);
+        assert_eq!(entry_color(&staged, theme), theme.ely.success);
 
         // Modified alone is the fallback.
         let modified = entry(None, Some(StatusKind::Modified));
-        assert_eq!(entry_color(&modified, theme), theme.warning);
+        assert_eq!(entry_color(&modified, theme), theme.ely.warning);
     }
 
     /// The fallback `for_file` alone would not give: an entry carrying no
@@ -101,6 +101,6 @@ mod tests {
     #[test]
     fn an_entry_with_no_status_stays_neutral() {
         let theme = Theme::dark();
-        assert_eq!(entry_color(&entry(None, None), theme), theme.text);
+        assert_eq!(entry_color(&entry(None, None), theme), theme.ely.fg);
     }
 }
