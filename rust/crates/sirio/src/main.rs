@@ -4105,7 +4105,7 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
         TabKind::AgentChat => Icon::MessageSquare,
         TabKind::Terminal => Icon::SquareTerminal,
         TabKind::Editor => Icon::File,
-        TabKind::Browser => Icon::Globe,
+        TabKind::Browser => Icon::Browser,
         TabKind::Diff => Icon::File,
         TabKind::ProjectSettings => Icon::Settings,
         TabKind::ChangeRequest => Icon::PullRequest,
@@ -14387,7 +14387,7 @@ impl SirioWorkspace {
             LauncherItem {
                 id: "launcher-browser",
                 action: LauncherAction::NewBrowser,
-                icon: Icon::Globe,
+                icon: Icon::Browser,
                 label: "Browser".into(),
                 shortcut: None,
                 disabled: None,

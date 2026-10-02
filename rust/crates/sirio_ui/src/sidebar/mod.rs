@@ -4133,10 +4133,8 @@ impl Render for Sidebar {
                     )
                     .on_key_down(cx.listener(Self::on_filter_key))
                     .child(
-                        div()
-                            .text_size(theme.typography.scaled(16.0))
-                            .text_color(theme.ely.fg_subtle)
-                            .child("⌕"),
+                        IconElement::new(Icon::MagnifyingGlass, IconSize::Small)
+                            .text_color(theme.ely.fg_subtle),
                     )
                             .min_w_0()
                     .child(

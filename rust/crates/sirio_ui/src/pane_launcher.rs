@@ -87,7 +87,7 @@ fn tile<A: Copy + 'static>(
         .when(enabled, |frame| {
             frame.group_hover(id, |style| style.bg(theme.ely.hover))
         })
-        .child(IconElement::new(item.icon, IconSize::Medium).text_color(ink));
+        .child(IconElement::new(item.icon, IconSize::Custom(px(22.0))).text_color(ink));
     let column = div()
         .id(id)
         .debug_selector(move || id.to_owned())

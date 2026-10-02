@@ -280,6 +280,7 @@ impl Sidebar {
             Icon::Sparkles => "sparkle-thin",
             Icon::Shield => "shield-thin",
             Icon::SunMoon => "sun-dim-thin",
+            Icon::Browser => "screen",
             Icon::Globe => "global",
             Icon::ClaudeCode => "claude-mark",
             Icon::Codex => "openai-mark",
