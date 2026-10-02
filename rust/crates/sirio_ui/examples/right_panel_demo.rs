@@ -16,7 +16,7 @@ fn main() {
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
             .canonicalize()
             .expect("resolve checkout root");
-        let bounds = Bounds::centered(None, size(px(405.0), px(833.0)), cx);
+        let bounds = Bounds::centered(None, size(px(320.0), px(833.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

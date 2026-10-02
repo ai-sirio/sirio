@@ -55,11 +55,17 @@
 //! - **Tab bar 34px, toolbars 34px** (tab_bar, changes, right panel): waku
 //!   has no tab strip and no toolbars — it is one conversation. Sirio's
 //!   chrome rows are its own; no waku measurement exists for them.
+//!   The Diff toolbar embedded in the right sidebar wraps its title and
+//!   actions so narrow panels retain every button.
 //! - **Right panel header 40px, right panel 220–640px
-//!   (default 405)**: Sirio-only surface (waku's right panel is a native
+//!   (default 320)**: Sirio-only surface (waku's right panel is a native
 //!   webview, "not part of Sirio's UI"). No waku measurement exists. The
 //!   width stopped being a frozen constant when the panel became
-//!   user-resizable; 405 survives as the default, not as the geometry.
+//!   user-resizable; 320 is the compact default, not the geometry.
+//! - **Sidebar text is 1px smaller than the interface scale**: both panels
+//!   derive a local theme with `with_sidebar_typography`, including their
+//!   nested views, menus and explicit text sizes. The persisted interface
+//!   size still shifts them, and the centre uses the regular scale.
 //! - **`caption2` is 13.0, off the measured scale**: waku's smallest
 //!   step is 10.5, and Sirio first sized its dense strips there for fit
 //!   — the status bar (three provider segments + worktree context), tab
@@ -83,10 +89,10 @@
 //! - **Full circles are spelled as half the box** (6×6 dot at r3, 44×22
 //!   swatch at r11, 20px toggle at r10): numerically identical to
 //!   `rounded_full`; naming each would invent tokens for one value.
-//! - **`DEFAULT_SIDEBAR_WIDTH` 325, sidebar 220–480px**: 325 is inside
+//! - **`DEFAULT_SIDEBAR_WIDTH` 280, sidebar 220–480px**: 280 is inside
 //!   waku's resizable 180–420 range, and the reference freezes the range,
 //!   not a default. Same course as the right panel above: the width stopped
-//!   being a frozen constant when the sidebar became user-resizable, so 325
+//!   being a frozen constant when the sidebar became user-resizable, so 280
 //!   survives as the default, not as the geometry. Sirio's range is the
 //!   wider one because its rows carry a checkout path under the branch name.
 //! - **Icons are sized by the iconography scale (9–16px), not the type

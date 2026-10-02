@@ -175,7 +175,7 @@ impl GitHistory {
             path_draft: String::new(),
             path_blink: crate::caret::Blink::new(),
             path_caret_visible: false,
-            panel_width: 405.0,
+            panel_width: 320.0,
             search_task: None,
             search_generation: 0,
             search_focus: None,
@@ -583,7 +583,7 @@ impl EventEmitter<GitHistoryEvent> for GitHistory {}
 
 impl Render for GitHistory {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         let entity = cx.entity();
 
         self.search_focus
@@ -2052,7 +2052,11 @@ mod tests {
         cx.update(Theme::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
-        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let window = cx.add_window(|_window, cx| {
+            let mut history = GitHistory::new(dir.0.clone(), cx);
+            history.panel_width = 405.0;
+            history
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let history =
@@ -2062,7 +2066,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // The panel's own default width: nothing is dropped there.
+        // A wide panel keeps the metadata before narrowing gives it up.
         assert!(cx.debug_bounds("history-row-author").is_some());
         assert!(cx.debug_bounds("history-row-date").is_some());
 
@@ -2100,7 +2104,11 @@ mod tests {
         cx.update(Theme::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
-        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let window = cx.add_window(|_window, cx| {
+            let mut history = GitHistory::new(dir.0.clone(), cx);
+            history.panel_width = 405.0;
+            history
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let history =
@@ -2112,10 +2120,10 @@ mod tests {
 
         let author = cx
             .debug_bounds("history-row-author")
-            .expect("author column is drawn at the default width");
+            .expect("author column is drawn in a wide panel");
         let date = cx
             .debug_bounds("history-row-date")
-            .expect("date column is drawn at the default width");
+            .expect("date column is drawn in a wide panel");
 
         let author_h: f32 = author.size.height.into();
         let date_h: f32 = date.size.height.into();

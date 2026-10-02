@@ -326,7 +326,7 @@ impl RightPanel {
             references_subscription: None,
             change_requests: None,
             change_requests_subscription: None,
-            panel_width: 405.0,
+            panel_width: 320.0,
             is_stale: false,
             updating: false,
         }
@@ -798,7 +798,7 @@ impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("RightPanel.render", cx.entity_id().as_u64());
-        let theme = *Theme::get(cx);
+        let theme = Theme::get(cx).with_sidebar_typography();
         let view = PanelView::get(cx);
         // The selected view is a global, and nothing here observes it, so
         // switching surfaces schedules no frame of its own. Each surface
@@ -851,6 +851,7 @@ impl Render for RightPanel {
             .flex_col()
             .w_full()
             .h_full()
+            .text_size(theme.typography.scaled(16.0))
             .overflow_hidden()
             .bg(theme.surface)
             .child(self.render_header(entity.clone(), theme, cx))

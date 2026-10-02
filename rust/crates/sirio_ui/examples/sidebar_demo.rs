@@ -8,7 +8,7 @@ use sirio_ui::sidebar::Sidebar;
 fn main() {
     application().run(|cx: &mut App| {
         Theme::init(cx);
-        let bounds = Bounds::centered(None, size(px(325.0), px(833.0)), cx);
+        let bounds = Bounds::centered(None, size(px(280.0), px(833.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
