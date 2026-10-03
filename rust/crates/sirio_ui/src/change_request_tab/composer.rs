@@ -2,17 +2,15 @@
 //! and the three ways to send what is in it — a comment, an approval, a
 //! request for changes.
 
-use bezel::ui::input::{Shape, TextField};
-use gpui::{Global, KeyBinding, actions};
+use ely_gpui_component::{
+    buttons::ButtonVariant,
+    forms::InputEvent,
+    menus::{Menu, MenuItem, SplitButton},
+};
 use sirio_forge::{Action, ReviewVerdict};
 
-use super::actions::action_button;
+use super::ely_ui::{ButtonState, new_input, text_button};
 use super::*;
-
-actions!(change_request_composer, [SendComment]);
-
-/// The key context the composer's field claims; `bind_keys` scopes to it.
-pub(crate) const KEY_CONTEXT: &str = "ChangeRequestComposer";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ComposerSend {
@@ -21,35 +19,28 @@ pub(crate) enum ComposerSend {
     RequestChanges,
 }
 
-struct KeysBound;
-
-impl Global for KeysBound {}
-
-/// Cmd/Ctrl+Enter sends the comment. Bound once, whichever tab asks first.
-pub(crate) fn bind_keys(cx: &mut App) {
-    if cx.try_global::<KeysBound>().is_some() {
-        return;
-    }
-    cx.set_global(KeysBound);
-    #[cfg(target_os = "macos")]
-    let chord = "cmd-enter";
-    #[cfg(not(target_os = "macos"))]
-    let chord = "ctrl-enter";
-    cx.bind_keys([KeyBinding::new(chord, SendComment, Some(KEY_CONTEXT))]);
-}
-
-/// The composer's field, ready to be kept in the tab's state.
-pub(crate) fn new_field(cx: &mut Context<ChangeRequestTab>) -> Entity<TextField> {
-    bind_keys(cx);
-    cx.new(|cx| {
-        TextField::new(cx)
-            .with_shape(Shape::Grow { min: 3, max: 12 })
-            .with_placeholder("Leave a comment…")
-            .with_key_context(KEY_CONTEXT)
-    })
-}
-
 impl ChangeRequestTab {
+    /// Builds the composer the first time there is a window to build it with.
+    pub(crate) fn ensure_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.actions.composer.is_some() {
+            return;
+        }
+        let input = new_input(window, cx, "", Some((3, 12)), "Leave a comment…");
+        cx.subscribe(&input, |tab: &mut Self, input, event: &InputEvent, cx| match event {
+            InputEvent::Changed => {
+                tab.actions.composer_blank = input.read(cx).text().trim().is_empty();
+                cx.notify();
+            }
+            // Cmd/Ctrl+Enter: the same send as the *Comment* button.
+            InputEvent::Submit => {
+                let _ = tab.send_composer(ComposerSend::Comment, cx);
+            }
+            InputEvent::Focus | InputEvent::Blur => {}
+        })
+        .detach();
+        self.actions.composer = Some(input);
+    }
+
     /// One of the composer's three buttons. `Err` when nothing was sent.
     pub(crate) fn send_composer(
         &mut self,
@@ -61,7 +52,10 @@ impl ChangeRequestTab {
         if self.action_busy() {
             return Err("an action is already in flight".to_string());
         }
-        let body = self.actions.composer.read(cx).content().to_string();
+        let Some(composer) = self.actions.composer.clone() else {
+            return Err("the composer is not built yet".to_string());
+        };
+        let body = composer.read(cx).text().to_string();
         self.actions.sent = Some(body.clone());
         let action = match how {
             ComposerSend::Comment => Action::Comment { body },
@@ -81,7 +75,7 @@ impl ChangeRequestTab {
         sent
     }
 
-    pub(crate) fn render_composer(&self, theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_composer(&self, _theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
         let caps = self.header.value()?.capabilities;
         if !caps.can_comment {
             return None;
@@ -96,7 +90,48 @@ impl ChangeRequestTab {
                 })
             }
         };
-        let on_key = entity.clone();
+        let comment = send(ComposerSend::Comment);
+        let can_comment_now = !busy && !blank;
+        let control: AnyElement = if caps.can_approve || caps.can_request_changes {
+            let mut menu = Menu::new();
+            if caps.can_approve {
+                let run = send(ComposerSend::Approve);
+                menu = menu.item(
+                    MenuItem::new("Approve")
+                        .disabled(busy)
+                        .on_click(move |_, cx| run(cx)),
+                );
+            }
+            if caps.can_request_changes {
+                let run = send(ComposerSend::RequestChanges);
+                menu = menu.item(
+                    MenuItem::new("Request changes")
+                        .disabled(busy || blank)
+                        .on_click(move |_, cx| run(cx)),
+                );
+            }
+            div()
+                .id("change-request-send")
+                .debug_selector(|| "change-request-send".into())
+                .child(
+                    SplitButton::new("change-request-send-split", "Comment", menu)
+                        .variant(ButtonVariant::Primary)
+                        .on_click(move |_, _, cx| {
+                            if can_comment_now {
+                                comment(cx)
+                            }
+                        }),
+                )
+                .into_any_element()
+        } else {
+            text_button(
+                "change-request-send-comment",
+                "Comment",
+                None,
+                ButtonState::enabled(can_comment_now).primary().loading(busy),
+                move |_, cx| comment(cx),
+            )
+        };
         Some(
             div()
                 .id("change-request-composer")
@@ -104,43 +139,10 @@ impl ChangeRequestTab {
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .on_action(move |_: &SendComment, _window, cx| {
-                    on_key.update(cx, |tab, cx| {
-                        let _ = tab.send_composer(ComposerSend::Comment, cx);
-                    })
-                })
-                .child(self.actions.composer.clone())
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap(px(6.0))
-                        .when(caps.can_request_changes, |row| {
-                            row.child(action_button(
-                                "change-request-send-request-changes",
-                                "Request changes",
-                                theme,
-                                !busy && !blank,
-                                send(ComposerSend::RequestChanges),
-                            ))
-                        })
-                        .when(caps.can_approve, |row| {
-                            row.child(action_button(
-                                "change-request-send-approve",
-                                "Approve",
-                                theme,
-                                !busy,
-                                send(ComposerSend::Approve),
-                            ))
-                        })
-                        .child(action_button(
-                            "change-request-send-comment",
-                            "Comment",
-                            theme,
-                            !busy && !blank,
-                            send(ComposerSend::Comment),
-                        )),
-                )
+                .children(self.actions.composer.clone().map(|input| {
+                    ely_gpui_component::forms::Input::new(&input)
+                }))
+                .child(div().flex().justify_end().child(control))
                 .into_any_element(),
         )
     }

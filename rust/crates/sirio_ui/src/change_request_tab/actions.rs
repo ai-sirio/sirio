@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use bezel::ui::input::TextField;
+use ely_gpui_component::forms::TextInput;
 use ely_gpui_component::primitives::{IconName, Severity};
 use sirio_forge::{Action, ActionOutcome, ChangeState, CommentRef};
 
@@ -53,15 +53,15 @@ impl ActionState {
 
 /// The title, target branch and description of an edit in progress.
 pub(crate) struct EditFields {
-    pub(crate) title: Entity<TextField>,
-    pub(crate) target: Entity<TextField>,
-    pub(crate) body: Entity<TextField>,
+    pub(crate) title: Entity<TextInput>,
+    pub(crate) target: Entity<TextInput>,
+    pub(crate) body: Entity<TextInput>,
 }
 
 /// One of the viewer's own timeline entries, open for editing.
 pub(crate) struct CommentEdit {
     pub(crate) comment: CommentRef,
-    pub(crate) field: Entity<TextField>,
+    pub(crate) field: Entity<TextInput>,
 }
 
 pub(crate) struct ActionsState {
@@ -71,7 +71,8 @@ pub(crate) struct ActionsState {
     pub(crate) comment_edit: Option<CommentEdit>,
     /// The composer's field, and whether it holds only blanks (kept by an
     /// observer, so a render never has to read it).
-    pub(crate) composer: Entity<TextField>,
+    /// Built by the first render: Ely's input needs a window the constructors lack.
+    pub(crate) composer: Option<Entity<TextInput>>,
     pub(crate) composer_blank: bool,
     /// What the composer held when it was sent: on success the field is
     /// cleared only if it still holds exactly that, so words typed while the
@@ -80,13 +81,13 @@ pub(crate) struct ActionsState {
 }
 
 impl ActionsState {
-    pub(crate) fn new(composer: Entity<TextField>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: ActionState::Idle,
             task: None,
             edit: None,
             comment_edit: None,
-            composer,
+            composer: None,
             composer_blank: true,
             sent: None,
         }
@@ -130,14 +131,14 @@ pub(crate) fn action_button(
     label: &'static str,
     _theme: &Theme,
     enabled: bool,
-    on_click: impl Fn(&mut App) + 'static,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     super::ely_ui::text_button(
         id,
         label,
         None,
         super::ely_ui::ButtonState::enabled(enabled),
-        move |_, cx| on_click(cx),
+        on_click,
     )
 }
 
@@ -148,7 +149,7 @@ pub(crate) fn indexed_button(
     label: &'static str,
     _theme: &Theme,
     enabled: bool,
-    on_click: impl Fn(&mut App) + 'static,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     use ely_gpui_component::buttons::{Button, ButtonVariant};
     div()
@@ -159,7 +160,7 @@ pub(crate) fn indexed_button(
             Button::new((name, index), label)
                 .variant(ButtonVariant::Ghost)
                 .disabled(!enabled)
-                .on_click(move |_, _, cx| on_click(cx)),
+                .on_click(move |_, window, cx| on_click(window, cx)),
         )
         .into_any_element()
 }
@@ -245,9 +246,12 @@ impl ChangeRequestTab {
             "edit-comment" => self.actions.comment_edit = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();
-                let composer = self.actions.composer.clone();
-                if !warned && sent.is_some_and(|sent| composer.read(cx).content().as_ref() == sent) {
-                    composer.update(cx, |field, cx| field.clear(cx));
+                if let (false, Some(sent), Some(composer)) =
+                    (warned, sent, self.actions.composer.clone())
+                {
+                    if composer.read(cx).text() == sent {
+                        composer.update(cx, |input, cx| input.set_text("", cx));
+                    }
                 }
             }
             _ => {}
@@ -314,9 +318,9 @@ impl ChangeRequestTab {
                 .gap(px(4.0))
                 .children(items.into_iter().map(|(id, icon, tooltip, what)| {
                     let entity = entity.clone();
-                    super::ely_ui::icon_button(id, icon, tooltip, enabled, move |_, cx| {
+                    super::ely_ui::icon_button(id, icon, tooltip, enabled, move |window, cx| {
                         entity.update(cx, |tab, cx| match &what {
-                            HeaderAction::Edit => tab.start_edit(cx),
+                            HeaderAction::Edit => tab.start_edit(window, cx),
                             HeaderAction::Do(action) => {
                                 let _ = tab.perform(action.clone(), cx);
                             }
@@ -394,6 +398,7 @@ impl ChangeRequestTab {
         &mut self,
         name: &str,
         params: &BTreeMap<String, String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let text = |key: &str| params.get(key).cloned();
@@ -404,9 +409,9 @@ impl ChangeRequestTab {
             "draft" => self.perform(Action::ConvertToDraft, cx),
             "compose" => {
                 let words = text("text").ok_or("compose needs text")?;
-                self.actions
-                    .composer
-                    .update(cx, |field, cx| field.set_content(words, cx));
+                self.ensure_composer(window, cx);
+                let composer = self.actions.composer.clone().ok_or("the composer is not built")?;
+                composer.update(cx, |input, cx| input.set_text(words, cx));
                 Ok(())
             }
             "send" => match text("how").as_deref() {
@@ -416,7 +421,7 @@ impl ChangeRequestTab {
                 _ => Err("send needs how: comment, approve or request-changes".to_string()),
             },
             "edit" => {
-                self.start_edit(cx);
+                self.start_edit(window, cx);
                 let fields = self.actions.edit.as_ref().ok_or("the change request is not loaded")?;
                 for (key, field) in [
                     ("title", fields.title.clone()),
@@ -424,7 +429,7 @@ impl ChangeRequestTab {
                     ("body", fields.body.clone()),
                 ] {
                     if let Some(words) = text(key) {
-                        field.update(cx, |field, cx| field.set_content(words, cx));
+                        field.update(cx, |input, cx| input.set_text(words, cx));
                     }
                 }
                 self.save_edit(cx)
@@ -434,14 +439,14 @@ impl ChangeRequestTab {
                     .and_then(|index| index.parse().ok())
                     .ok_or("edit-comment needs index")?;
                 self.actions.comment_edit = None;
-                self.start_comment_edit(index, cx);
+                self.start_comment_edit(index, window, cx);
                 let edit = self
                     .actions
                     .comment_edit
                     .as_ref()
                     .ok_or("that timeline entry cannot be edited")?;
                 let words = text("text").ok_or("edit-comment needs text")?;
-                edit.field.update(cx, |field, cx| field.set_content(words, cx));
+                edit.field.update(cx, |input, cx| input.set_text(words, cx));
                 self.save_comment_edit(cx)
             }
             other => Err(format!("unknown action {other}")),
