@@ -1,0 +1,5 @@
+query ReviewerCandidates($fullPath: ID!, $q: String) {
+  project(fullPath: $fullPath) {
+    projectMembers(search: $q, first: 20) { nodes { user { username name } } }
+  }
+}

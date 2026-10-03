@@ -1,0 +1,3 @@
+mutation MergeRequestSetLabels($input: MergeRequestSetLabelsInput!) {
+  mergeRequestSetLabels(input: $input) { errors }
+}

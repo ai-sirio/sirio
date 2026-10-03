@@ -5,6 +5,7 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
       id
       discussionLocked
       userPermissions { createNote updateMergeRequest }
+      labels { nodes { id title color } }
       description
       diffRefs { baseSha headSha startSha }
       notes(last: 100) {

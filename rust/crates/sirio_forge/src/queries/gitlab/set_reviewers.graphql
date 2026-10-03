@@ -1,0 +1,3 @@
+mutation MergeRequestSetReviewers($input: MergeRequestSetReviewersInput!) {
+  mergeRequestSetReviewers(input: $input) { errors }
+}

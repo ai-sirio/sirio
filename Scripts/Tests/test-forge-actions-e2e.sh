@@ -624,6 +624,10 @@ expect_var gitlab ReviewerCandidates q ann
 expect_line "CANDIDATE ann ann Ann Lee"
 probe "${GL[@]}" candidates labels 201 --text fe
 expect_line "CANDIDATE gid://gitlab/ProjectLabel/2 feature -"
+echo "  a GitLab without the reviewers mutation says so, rather than failing to read"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token old act 201 set-reviewers --add ann
+expect_code 20 "reviewers on an old gitlab"
+expect_line "ERR Unsupported"
 fi
 
 if wanted scopes; then

@@ -64,8 +64,10 @@ A write that succeeded is remembered, and a read then serves
 `<Operation>.after.<Mutation>.json` when it exists (the newest write that has
 one wins): a change request closed by a mutation reads as closed. GitLab's
 `MergeRequestUpdate` and `MergeRequestSetDraft` are told apart by their input,
-`<Mutation>.CLOSED`, `<Mutation>.OPEN`, `<Mutation>.true`, `<Mutation>.false`;
-the REST approval is `approve`. `POST /__reset` forgets every write.
+`<Mutation>.CLOSED`, `<Mutation>.OPEN`, `<Mutation>.true`, `<Mutation>.false`, and an
+accept with a strategy `MergeRequestAccept.MERGE_WHEN_CHECKS_PASS`;
+the REST approval is `approve`, the REST cancel `cancel-auto-merge`. `POST /__reset`
+forgets every write.
 
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
 2.100 and glab 1.119), so chunked bodies are decoded here.
@@ -104,7 +106,12 @@ def load_fixtures(root):
 
 # Operations that have a baseline variant, and the fields those variants omit.
 BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext"}
-NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove"}
+NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove",
+                       "canMerge", "detailedMergeStatus", "squashOnMerge", "squashReadOnly", "autoMergeEnabled",
+                       "availableAutoMergeStrategies", "shouldRemoveSourceBranch"}
+# Mutations an older GitLab lacks: the `old` credential answers them as such a
+# server would, with a schema error naming the field.
+NEWER_GITLAB_MUTATIONS = {"mergeRequestSetReviewers", "mergeRequestSetLabels"}
 # The newer fields a query can name, and the type an older GitLab would say lacks them.
 NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"))
 
@@ -374,6 +381,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.credential() == "dropped":
             self.close_connection = True
             return
+        if self.flavor == "gitlab" and self.credential() == "old" and field in NEWER_GITLAB_MUTATIONS:
+            return self.answer(200, {"errors": [{"message": f"Field '{field}' doesn't exist on type 'Mutation'"}]})
         if self.credential() == "notefails" and self.flavor == "gitlab" and operation == "CreateNote":
             return self.answer(200, {"data": {field: {"errors": ["Note creation failed"]}}})
         failure = self.write_failure(field)
@@ -381,7 +390,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(failure[0], failure[1], failure[2])
         given = (variables.get("input") or {}) if isinstance(variables.get("input"), dict) else {}
         key = operation
-        for discriminator in ("state", "draft"):
+        for discriminator in ("state", "draft", "strategy"):
             if discriminator in given:
                 key = f"{operation}.{str(given[discriminator]).lower() if isinstance(given[discriminator], bool) else given[discriminator]}"
         self.remember(key)
