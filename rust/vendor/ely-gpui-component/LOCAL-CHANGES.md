@@ -155,3 +155,29 @@ what each check does and does not prove.
 - **Not established:** a real IME, and rewind natively.
 
 Every deviation from upstream is listed above, with the file it changes.
+
+## Change-request surfaces (2026-10-03)
+
+Vendored from the same revision for Sirio's change-request surfaces and its
+Changes view (`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` §4):
+
+- `src/navigation/tabs.rs` — verbatim. `navigation/mod.rs` is local and
+  declares only this module; the rest of upstream's `navigation/` is excluded.
+- `src/git/badges.rs` — verbatim except one import: `GitStatus` comes from
+  `super::status` instead of `crate::lists`.
+- `src/git/status.rs` — upstream's `GitStatus` and its `impl`, verbatim from
+  `src/lists/files.rs`, plus `use crate::data_display::Tone;`. Upstream's
+  `lists/` (file tree, virtual lists, sortable lists) is excluded; only this
+  type is needed. `git/mod.rs` is local and declares only `badges` and `status`.
+
+Caveats a host must respect:
+
+- `Tabs` panics when `selected` names no tab's `value`. Build `selected`
+  from the same list passed as tabs.
+- `Tabs`' arrow keys act only while its strip holds focus, and a click on a
+  tab does not give it focus (`prevent_default` on mouse-down). This build
+  registers no Tab traversal (see `init_chat`), so in Sirio the tabs are used
+  with the pointer; keyboard use is not established.
+
+Native rendering evidence: `sirio_ui/examples/ely_forge_probe.rs`, driven by
+`Scripts/Tests/test-ely-forge-probe.sh` (`docs/testing/ely-forge-probe.md`).
