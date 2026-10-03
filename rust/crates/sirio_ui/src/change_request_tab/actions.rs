@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use bezel::ui::input::TextField;
+use ely_gpui_component::primitives::{IconName, Severity};
 use sirio_forge::{Action, ActionOutcome, ChangeState, CommentRef};
 
 use super::composer::ComposerSend;
@@ -127,32 +128,17 @@ pub(crate) fn action_error_text(error: &ForgeError, forge: Forge) -> String {
 pub(crate) fn action_button(
     id: &'static str,
     label: &'static str,
-    theme: &Theme,
+    _theme: &Theme,
     enabled: bool,
     on_click: impl Fn(&mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.ely.hover;
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .flex()
-        .flex_none()
-        .items_center()
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.footnote)
-        .text_color(if enabled {
-            theme.ely.fg_muted
-        } else {
-            theme.ely.fg_subtle
-        })
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(move |style| style.bg(hover))
-                .on_click(move |_, _, cx| on_click(cx))
-        })
-        .child(label)
+) -> AnyElement {
+    super::ely_ui::text_button(
+        id,
+        label,
+        None,
+        super::ely_ui::ButtonState::enabled(enabled),
+        move |_, cx| on_click(cx),
+    )
 }
 
 /// `action_button` for one of many: the timeline's *Edit* on entry `index`.
@@ -160,31 +146,22 @@ pub(crate) fn indexed_button(
     name: &'static str,
     index: usize,
     label: &'static str,
-    theme: &Theme,
+    _theme: &Theme,
     enabled: bool,
     on_click: impl Fn(&mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.ely.hover;
+) -> AnyElement {
+    use ely_gpui_component::buttons::{Button, ButtonVariant};
     div()
         .id((name, index))
         .debug_selector(move || format!("{name}-{index}"))
-        .flex()
         .flex_none()
-        .items_center()
-        .px(px(6.0))
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.footnote)
-        .text_color(if enabled {
-            theme.ely.fg_muted
-        } else {
-            theme.ely.fg_subtle
-        })
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(move |style| style.bg(hover))
-                .on_click(move |_, _, cx| on_click(cx))
-        })
-        .child(label)
+        .child(
+            Button::new((name, index), label)
+                .variant(ButtonVariant::Ghost)
+                .disabled(!enabled)
+                .on_click(move |_, _, cx| on_click(cx)),
+        )
+        .into_any_element()
 }
 
 impl ChangeRequestTab {
@@ -279,23 +256,30 @@ impl ChangeRequestTab {
 
     /// The header's own buttons: whichever of *Edit*, draft ↔ ready and
     /// close ↔ reopen the forge says the viewer may use on this state.
-    pub(crate) fn render_action_bar(&self, theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_action_bar(&self, _theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
         let header = self.header.value()?;
         let caps = header.capabilities;
         let state = header.summary.state;
-        let mut items: Vec<(&'static str, &'static str, HeaderAction)> = Vec::new();
+        let mut items: Vec<(&'static str, IconName, &'static str, HeaderAction)> = Vec::new();
         if caps.can_edit {
-            items.push(("change-request-edit", "Edit", HeaderAction::Edit));
+            items.push((
+                "change-request-edit",
+                IconName::Pencil,
+                "Edit",
+                HeaderAction::Edit,
+            ));
         }
         if caps.can_toggle_draft {
             match state {
                 ChangeState::Draft => items.push((
                     "change-request-ready",
+                    IconName::GitPullRequest,
                     "Ready for review",
                     HeaderAction::Do(Action::MarkReady),
                 )),
                 ChangeState::Open => items.push((
                     "change-request-draft",
+                    IconName::GitPullRequestDraft,
                     "Convert to draft",
                     HeaderAction::Do(Action::ConvertToDraft),
                 )),
@@ -306,11 +290,13 @@ impl ChangeRequestTab {
             match state {
                 ChangeState::Open | ChangeState::Draft => items.push((
                     "change-request-close-request",
+                    IconName::GitPullRequestClosed,
                     "Close",
                     HeaderAction::Do(Action::Close),
                 )),
                 ChangeState::Closed => items.push((
                     "change-request-reopen",
+                    IconName::RotateCcw,
                     "Reopen",
                     HeaderAction::Do(Action::Reopen),
                 )),
@@ -326,9 +312,9 @@ impl ChangeRequestTab {
                 .flex()
                 .items_center()
                 .gap(px(4.0))
-                .children(items.into_iter().map(|(id, label, what)| {
+                .children(items.into_iter().map(|(id, icon, tooltip, what)| {
                     let entity = entity.clone();
-                    action_button(id, label, theme, enabled, move |cx| {
+                    super::ely_ui::icon_button(id, icon, tooltip, enabled, move |_, cx| {
                         entity.update(cx, |tab, cx| match &what {
                             HeaderAction::Edit => tab.start_edit(cx),
                             HeaderAction::Do(action) => {
@@ -342,25 +328,27 @@ impl ChangeRequestTab {
     }
 
     /// One line under the header: what is being sent, or why it failed.
-    pub(crate) fn render_action_status(&self, theme: &Theme) -> Option<AnyElement> {
-        let (text, tone): (String, Hsla) = match &self.actions.state {
+    pub(crate) fn render_action_status(&self, _theme: &Theme) -> Option<AnyElement> {
+        let severity = match &self.actions.state {
             ActionState::Idle => return None,
-            ActionState::Working(kind) => (format!("Sending {kind}…"), theme.ely.fg_subtle),
-            ActionState::Failed { message, .. } => (message.clone(), theme.ely.danger),
-            ActionState::Unconfirmed { .. } => (
+            ActionState::Working(_) => Severity::Info,
+            ActionState::Failed { .. } => Severity::Danger,
+            ActionState::Unconfirmed { .. } | ActionState::Warning(_) => Severity::Warning,
+        };
+        let text = match &self.actions.state {
+            ActionState::Working(kind) => format!("Sending {kind}…"),
+            ActionState::Failed { message, .. } | ActionState::Warning(message) => message.clone(),
+            ActionState::Unconfirmed { .. } => {
                 "Could not confirm that it went through. Look at the conversation before sending it again."
-                    .to_string(),
-                theme.ely.warning,
-            ),
-            ActionState::Warning(text) => (text.clone(), theme.ely.warning),
+                    .to_string()
+            }
+            ActionState::Idle => return None,
         };
         Some(
             div()
                 .id("change-request-action-status")
                 .debug_selector(|| "change-request-action-status".into())
-                .text_size(theme.typography.footnote)
-                .text_color(tone)
-                .child(selectable_text(text))
+                .child(super::ely_ui::message(severity, text))
                 .into_any_element(),
         )
     }
