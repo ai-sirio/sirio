@@ -322,7 +322,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.plain_path()
         self.body()
         self.record("DELETE", path, None, None, None)
-        if self.flavor != "github" or not re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/git/refs/heads/.+", path):
+        if self.flavor != "github" or not re.fullmatch(r"(/api/v3)?/repos/[^/]+/[^/]+/git/refs/heads/.+", path):
             return self.answer(404, {"message": "Not Found"})
         error = self.scenario_error()
         if error:

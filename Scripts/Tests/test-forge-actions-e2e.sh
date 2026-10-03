@@ -678,6 +678,13 @@ if command -v gh >/dev/null; then
   expect_body_is_file github AddComment "$BODY_FILE"
   probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" act 101 approve --body "Via gh"
   expect_input github AddPullRequestReview "{\"body\":\"Via gh\",\"event\":\"APPROVE\",$GH_ID}"
+  reset_forge github "$GH_PORT"
+  probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Via gh" --delete-branch yes
+  expect_code 0 "a merge through gh, then the branch deletion (REST DELETE)"
+  expect_line "ACT ok"
+  ! echo "$PROBE_OUT" | grep -q "^WARNING" || { dump; fail "the branch deletion through gh failed"; }
+  expect_input github MergePullRequest "{\"commitHeadline\":\"Via gh\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
+  expect_rest github "DELETE /repos/acme/widgets/git/refs/heads/feat/login"  # gh drops /api/v3 for *.localhost
 else
   echo "SKIP: gh is not on PATH -- writes through gh were not exercised"
 fi
@@ -689,8 +696,15 @@ if command -v glab >/dev/null; then
   probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" "${GL_CLI_ARGS[@]}" act 201 approve
   expect_code 0 "an approval (REST) through glab"
   expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/approve"
+  reset_forge gitlab "$GL_PORT"
+  write_glab_config "$WORK/glab-waiting" waiting
+  probe GLAB_CONFIG_DIR="$WORK/glab-waiting" "$PROBE" "${GL_CLI_ARGS[@]}" act 201 merge --method merge --head "$GL_HEAD" --when-checks-pass yes
+  expect_code 0 "an auto-merge through glab"
+  probe GLAB_CONFIG_DIR="$WORK/glab-waiting" "$PROBE" "${GL_CLI_ARGS[@]}" act 201 cancel-auto-merge
+  expect_code 0 "a cancel of the auto-merge (REST) through glab"
+  expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/cancel_merge_when_pipeline_succeeds"
 else
-  echo "SKIP: glab is not on PATH -- writes through glab (and the REST approval) were not exercised"
+  echo "SKIP: glab is not on PATH -- writes through glab (the REST approval and the REST cancel of an auto-merge) were not exercised"
 fi
 fi
 
