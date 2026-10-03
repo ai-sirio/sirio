@@ -998,5 +998,43 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
             UPDATE_REVIEW,
             json!({ "pullRequestReviewId": "PRR_sirio_live_check_0", "body": "x" }),
         ),
+        write(
+            "MergePullRequest",
+            MERGE,
+            json!({ "pullRequestId": id, "mergeMethod": "SQUASH", "commitHeadline": "x", "commitBody": "x",
+                    "expectedHeadOid": "0000000000000000000000000000000000000000" }),
+        ),
+        write(
+            "EnablePullRequestAutoMerge",
+            ENABLE_AUTO_MERGE,
+            json!({ "pullRequestId": id, "mergeMethod": "MERGE",
+                    "expectedHeadOid": "0000000000000000000000000000000000000000" }),
+        ),
+        write("DisablePullRequestAutoMerge", DISABLE_AUTO_MERGE, json!({ "pullRequestId": id })),
+        write(
+            "RequestReviews",
+            REQUEST_REVIEWS,
+            json!({ "pullRequestId": id, "userIds": ["U_sirio_live_check_0"], "teamIds": [], "union": false }),
+        ),
+        write(
+            "AddLabelsToLabelable",
+            ADD_LABELS,
+            json!({ "labelableId": id, "labelIds": ["LA_sirio_live_check_0"] }),
+        ),
+        write(
+            "RemoveLabelsFromLabelable",
+            REMOVE_LABELS,
+            json!({ "labelableId": id, "labelIds": ["LA_sirio_live_check_0"] }),
+        ),
+        LiveProbe {
+            operation: "ReviewerCandidates",
+            document: REVIEWER_CANDIDATES,
+            variables: json!({ "owner": "ai-sirio", "name": "sirio", "number": 588, "q": "e" }),
+        },
+        LiveProbe {
+            operation: "LabelCandidates",
+            document: LABEL_CANDIDATES,
+            variables: json!({ "owner": "ai-sirio", "name": "sirio", "q": "bug" }),
+        },
     ]
 }

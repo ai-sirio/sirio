@@ -275,6 +275,19 @@ nothing.
 `docs/superpowers/specs/2026-09-29-change-request-actions-design.md` has the
 design; `Scripts/Tests/test-forge-actions-e2e.sh` proves it.
 
+**Merge, reviewers and labels** (B2b) go through the same door.
+`Action::Merge` carries the head the user saw when the confirmation opened, and
+`act` refuses `HeadMoved` before sending, ahead of the forge's own
+`expectedHeadOid` / `sha` guard. The strip is drawn from `MergeCapability`,
+whose `Unreported` verdict draws nothing. GitHub deletes the branch with a REST
+`DELETE` after a successful merge, never for a fork's head; if only that call
+fails, the outcome is a merge with a warning. GitLab deletes it with a flag of
+the accept, offers no rebase (its method is per project), and cancels an
+auto-merge over REST, since GraphQL has no mutation for it. A reviewer or label
+picker sends one `Set*` when its popover closes; that relies on two vendored
+Ely hooks, `Popover::on_close` and `Popover::open` (`LOCAL-CHANGES.md`). The
+`merge`, `metadata` and `ui` stages of `test-forge-actions-e2e.sh` prove it.
+
 ### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
 
 `sirio_ui::editor::Language` is the list of what Sirio recognises — twenty-three

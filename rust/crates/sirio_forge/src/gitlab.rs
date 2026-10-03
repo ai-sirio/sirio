@@ -987,5 +987,32 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
             REQUEST_CHANGES,
             json!({ "projectPath": project, "iid": "0" }),
         ),
+        write(
+            "MergeRequestAccept",
+            ACCEPT,
+            json!({ "projectPath": project, "iid": "0", "sha": "0", "squash": false,
+                    "shouldRemoveSourceBranch": false, "commitMessage": "x",
+                    "strategy": "MERGE_WHEN_CHECKS_PASS" }),
+        ),
+        write(
+            "MergeRequestSetLabels",
+            SET_LABELS,
+            json!({ "projectPath": project, "iid": "0", "labelIds": ["gid://gitlab/ProjectLabel/0"], "operationMode": "APPEND" }),
+        ),
+        write(
+            "MergeRequestSetReviewers",
+            SET_REVIEWERS,
+            json!({ "projectPath": project, "iid": "0", "reviewerUsernames": ["sirio-live-check-0"], "operationMode": "APPEND" }),
+        ),
+        LiveProbe {
+            operation: "ReviewerCandidates",
+            document: REVIEWER_CANDIDATES,
+            variables: json!({ "fullPath": project, "q": "a" }),
+        },
+        LiveProbe {
+            operation: "LabelCandidates",
+            document: LABEL_CANDIDATES,
+            variables: json!({ "fullPath": project, "q": "bug" }),
+        },
     ]
 }
