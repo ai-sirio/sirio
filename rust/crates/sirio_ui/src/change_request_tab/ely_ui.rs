@@ -134,7 +134,9 @@ pub(crate) fn new_input(
     rows: Option<(usize, usize)>,
     placeholder: &'static str,
 ) -> Entity<TextInput> {
-    let text = text.to_string();
+    // The old field folded line endings on the way in; Ely's keeps them, and a
+    // description from GitHub arrives with CRLF, which must not read as an edit.
+    let text = normalize(text, rows.is_some());
     cx.new(|cx| {
         let mut input = TextInput::new(window, cx).placeholder(placeholder);
         if let Some((min, max)) = rows {

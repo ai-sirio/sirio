@@ -252,12 +252,6 @@ impl ChangeRequestTab {
         worktree: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let composer = composer::new_field(cx);
-        cx.observe(&composer, |tab: &mut Self, field, cx| {
-            tab.actions.composer_blank = field.read(cx).content().trim().is_empty();
-            cx.notify();
-        })
-        .detach();
         Self {
             reference,
             title,
@@ -289,7 +283,7 @@ impl ChangeRequestTab {
             pending_reveal: None,
             commit_error: None,
             commit_task: None,
-            actions: actions::ActionsState::new(composer),
+            actions: actions::ActionsState::new(),
         }
     }
 
@@ -922,7 +916,11 @@ impl ChangeRequestTab {
             ("caps".to_string(), self.caps_words()),
             (
                 "composer_len".to_string(),
-                self.actions.composer.read(cx).content().len().to_string(),
+                self.actions
+                    .composer
+                    .as_ref()
+                    .map_or(0, |input| input.read(cx).text().len())
+                    .to_string(),
             ),
             (
                 "editing".to_string(),
@@ -1963,7 +1961,7 @@ impl ChangeRequestTab {
 }
 
 impl Render for ChangeRequestTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangeRequestTab.render", cx.entity_id().as_u64());
         // Ely follows Sirio's theme only through an observer that runs after the
         // app's start-up closure; without this a Light user sees Ely's dark
@@ -1977,6 +1975,7 @@ impl Render for ChangeRequestTab {
                 let _ = this.update(cx, |tab, cx| tab.connect(cx));
             });
         }
+        self.ensure_composer(window, cx);
         let theme = *Theme::get(cx);
         let entity = cx.entity();
         let body = match self.unreachable.clone() {
@@ -2109,6 +2108,45 @@ mod tests {
                 ("local".to_string(), None),
             ]
         );
+    }
+
+    /// The composer is built by a render, not the constructor: the constructor
+    /// has no window, and Ely's input needs one.
+    #[gpui::test]
+    fn the_composer_is_built_by_a_render_and_not_by_the_constructor(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let windowless = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        assert!(windowless.read_with(cx, |tab, _| tab.actions.composer.is_none()));
+        let (tab, cx) = cx.add_window_view(|_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(tab.read_with(cx, |tab, _| tab.actions.composer.is_some()));
+    }
+
+    /// A composer holding only blanks reads as blank, so *Comment* stays off;
+    /// the E2E reads the same flag through the report.
+    #[gpui::test]
+    fn a_blank_composer_is_blank_and_a_typed_one_is_not(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let (tab, cx) = cx.add_window_view(|_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        let input = tab.update_in(cx, |tab, window, cx| {
+            tab.ensure_composer(window, cx);
+            tab.actions.composer.clone().expect("built")
+        });
+        assert!(tab.read_with(cx, |tab, _| tab.actions.composer_blank));
+        input.update(cx, |input, cx| input.set_text("  \n ", cx));
+        assert!(tab.read_with(cx, |tab, _| tab.actions.composer_blank), "whitespace is blank");
+        input.update(cx, |input, cx| input.set_text("looks good", cx));
+        assert!(!tab.read_with(cx, |tab, _| tab.actions.composer_blank));
     }
 
     #[gpui::test]
