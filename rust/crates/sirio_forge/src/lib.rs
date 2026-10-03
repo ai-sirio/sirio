@@ -29,7 +29,8 @@ pub use model::{
     Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check,
     CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
     FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
-    ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem,
+    ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem, BlockReason, Candidate, Label,
+    MergeCapability, MergeMethod, MergeMethods, MergeVerdict,
 };
 pub use scopes::TokenScopes;
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};

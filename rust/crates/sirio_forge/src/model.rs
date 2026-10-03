@@ -125,6 +125,9 @@ pub enum ReviewOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reviewer {
+    /// What the reviewer mutation names: a GitHub node id, a GitLab
+    /// username; `None` for a team or an id the forge did not give.
+    pub id: Option<String>,
     pub login: String,
     pub outcome: ReviewOutcome,
 }
@@ -268,7 +271,135 @@ pub enum TimelineItem {
 /// button Sirio is unsure of is not offered — except commenting, which is
 /// offered unless the conversation is locked. The forge's refusal is shown
 /// either way: this is a courtesy, the server has the last word.
+/// How a change request's commits land on its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "Merge commit",
+            Self::Squash => "Squash and merge",
+            Self::Rebase => "Rebase and merge",
+        }
+    }
+
+    /// A content-free word for reports and the control socket.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+}
+
+/// The merge methods a repository allows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MergeMethods {
+    pub merge: bool,
+    pub squash: bool,
+    pub rebase: bool,
+}
+
+impl MergeMethods {
+    pub fn contains(self, method: MergeMethod) -> bool {
+        match method {
+            MergeMethod::Merge => self.merge,
+            MergeMethod::Squash => self.squash,
+            MergeMethod::Rebase => self.rebase,
+        }
+    }
+
+    /// In a fixed order: merge, squash, rebase.
+    pub fn list(self) -> Vec<MergeMethod> {
+        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase]
+            .into_iter()
+            .filter(|method| self.contains(*method))
+            .collect()
+    }
+
+    pub fn is_empty(self) -> bool {
+        !(self.merge || self.squash || self.rebase)
+    }
+}
+
+/// Why a change request cannot be merged now, as the forge put it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockReason {
+    Conflicts,
+    ReviewRequired,
+    ChangesRequested,
+    ChecksFailing,
+    Behind,
+    Draft,
+    Discussions,
+    /// The repository allows no merge method Sirio supports.
+    NoMethod,
+    /// The forge's own word, for a status Sirio does not know.
+    Other(String),
+}
+
+impl BlockReason {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Conflicts => "merge conflicts".to_string(),
+            Self::ReviewRequired => "a review is required".to_string(),
+            Self::ChangesRequested => "changes were requested".to_string(),
+            Self::ChecksFailing => "checks are failing".to_string(),
+            Self::Behind => "the branch is behind its target".to_string(),
+            Self::Draft => "it is a draft".to_string(),
+            Self::Discussions => "discussions are not resolved".to_string(),
+            Self::NoMethod => "the repository allows no merge method Sirio supports".to_string(),
+            Self::Other(word) => word.to_lowercase().replace('_', " "),
+        }
+    }
+}
+
+/// Whether the forge would merge now. `Unreported` is "the forge did not
+/// say" — nothing is offered for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MergeVerdict {
+    #[default]
+    Unreported,
+    Ready,
+    WaitingOnChecks,
+    Blocked(BlockReason),
+}
+
+/// What the merge strip offers (spec §6).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MergeCapability {
+    pub verdict: MergeVerdict,
+    pub methods: MergeMethods,
+    pub default_method: Option<MergeMethod>,
+    pub can_auto_merge: bool,
+    /// Set when an auto-merge is enabled, with the method it will use.
+    pub auto_merge_enabled: Option<MergeMethod>,
+    pub delete_branch_default: bool,
+}
+
+/// A label on a change request; `id` is what its forge's mutation names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Label {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+/// A reviewer or a label found by a search, with the id its mutation needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: String,
+    pub label: String,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     pub can_comment: bool,
     pub can_approve: bool,
@@ -280,6 +411,9 @@ pub struct Capabilities {
     pub can_change_state: bool,
     /// Draft ↔ ready, on an open change request.
     pub can_toggle_draft: bool,
+    pub can_edit_reviewers: bool,
+    pub can_edit_labels: bool,
+    pub merge: MergeCapability,
 }
 
 /// The detail tab's header and Conversation.
@@ -289,6 +423,7 @@ pub struct ChangeHeader {
     pub capabilities: Capabilities,
     pub body: String,
     pub reviewers: Vec<Reviewer>,
+    pub labels: Vec<Label>,
     /// `None` where the forge did not say (a GitLab on the baseline query).
     pub additions: Option<u32>,
     pub deletions: Option<u32>,

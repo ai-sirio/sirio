@@ -262,7 +262,7 @@ impl ChangeRequestTab {
     /// close ↔ reopen the forge says the viewer may use on this state.
     pub(crate) fn render_action_bar(&self, _theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
         let header = self.header.value()?;
-        let caps = header.capabilities;
+        let caps = &header.capabilities;
         let state = header.summary.state;
         let mut items: Vec<(&'static str, IconName, &'static str, HeaderAction)> = Vec::new();
         if caps.can_edit {
@@ -363,7 +363,7 @@ impl ChangeRequestTab {
         let Some(header) = self.header.value() else {
             return String::new();
         };
-        let caps = header.capabilities;
+        let caps = &header.capabilities;
         let words: Vec<&str> = [
             (caps.can_comment, "comment"),
             (caps.can_approve, "approve"),

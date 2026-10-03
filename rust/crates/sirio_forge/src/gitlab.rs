@@ -359,6 +359,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         capabilities: capabilities(client, node),
         body: str_at(node, "/description"),
         reviewers: reviewers(node),
+        labels: Vec::new(),
         additions: opt_u32(node, "/diffStatsSummary/additions"),
         deletions: opt_u32(node, "/diffStatsSummary/deletions"),
         changed_files: opt_u32(node, "/diffStatsSummary/fileCount"),
@@ -402,8 +403,10 @@ fn reviewers(node: &Value) -> Vec<Reviewer> {
     let mut reviewers: Vec<Reviewer> = array_at(node, "/reviewers/nodes")
         .into_iter()
         .filter_map(|reviewer| {
+            let login = opt_str(reviewer, "/username")?.to_string();
             Some(Reviewer {
-                login: opt_str(reviewer, "/username")?.to_string(),
+                id: Some(login.clone()),
+                login,
                 outcome: mapping::gitlab_reviewer_outcome(opt_str(
                     reviewer,
                     "/mergeRequestInteraction/reviewState",
@@ -421,6 +424,7 @@ fn reviewers(node: &Value) -> Vec<Reviewer> {
         {
             Some(existing) => existing.outcome = ReviewOutcome::Approved,
             None => reviewers.push(Reviewer {
+                id: Some(login.to_string()),
                 login: login.to_string(),
                 outcome: ReviewOutcome::Approved,
             }),

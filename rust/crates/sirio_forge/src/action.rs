@@ -209,7 +209,7 @@ pub fn live_probes(forge: Forge) -> Vec<LiveProbe> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CommentKind;
+    use crate::model::{CommentKind, MergeCapability};
 
     fn everything() -> Capabilities {
         Capabilities {
@@ -219,6 +219,9 @@ mod tests {
             can_edit: true,
             can_change_state: true,
             can_toggle_draft: true,
+            can_edit_reviewers: true,
+            can_edit_labels: true,
+            merge: MergeCapability::default(),
         }
     }
 
@@ -272,14 +275,14 @@ mod tests {
             Action::Close,
             Action::Edit { title: Some("t".into()), body: None, target_branch: None },
         ] {
-            assert!(check(&action, ChangeState::Open, denied).is_err(), "{action:?}");
+            assert!(check(&action, ChangeState::Open, denied.clone()).is_err(), "{action:?}");
         }
         for (action, state) in [
             (Action::Reopen, ChangeState::Closed),
             (Action::MarkReady, ChangeState::Draft),
             (Action::ConvertToDraft, ChangeState::Open),
         ] {
-            assert!(check(&action, state, denied).is_err(), "{action:?}");
+            assert!(check(&action, state, denied.clone()).is_err(), "{action:?}");
         }
     }
 

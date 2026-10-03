@@ -318,6 +318,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         capabilities: capabilities(node),
         body: str_at(node, "/body"),
         reviewers,
+        labels: Vec::new(),
         additions: opt_u32(node, "/additions"),
         deletions: opt_u32(node, "/deletions"),
         changed_files: opt_u32(node, "/changedFiles"),
@@ -461,6 +462,7 @@ fn reviewers(timeline: &[TimelineItem], requests: &[&Value]) -> Vec<Reviewer> {
                 }
             }
             None => reviewers.push(Reviewer {
+                id: None,
                 login: author.clone(),
                 outcome: *outcome,
             }),
@@ -478,6 +480,7 @@ fn reviewers(timeline: &[TimelineItem], requests: &[&Value]) -> Vec<Reviewer> {
         {
             Some(existing) => existing.outcome = ReviewOutcome::Requested,
             None => reviewers.push(Reviewer {
+                id: None,
                 login: login.to_string(),
                 outcome: ReviewOutcome::Requested,
             }),
