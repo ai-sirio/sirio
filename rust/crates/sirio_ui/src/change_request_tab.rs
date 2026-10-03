@@ -26,6 +26,7 @@ mod ely_ui;
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
+    data_display::{Timeline, TimelineItem as RailItem, Tone},
     forms::Choice,
     navigation::Tabs,
     primitives::{IconName, Severity},
@@ -250,7 +251,7 @@ impl ChangeRequestTab {
         title: String,
         inner: InnerTab,
         worktree: PathBuf,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Self {
         Self {
             reference,
@@ -1352,9 +1353,11 @@ impl ChangeRequestTab {
                             )),
                     );
                 }
+                let mut rail = Timeline::new();
                 for (index, item) in header.timeline.iter().enumerate() {
-                    column = column.child(self.render_timeline_item(index, item, theme, entity));
+                    rail = rail.item(self.render_timeline_item(index, item, theme, entity));
                 }
+                column = column.child(rail);
                 if let Some(composer) = self.render_composer(theme, entity) {
                     column = column.child(composer);
                 }
@@ -1369,38 +1372,40 @@ impl ChangeRequestTab {
         item: &TimelineItem,
         theme: &Theme,
         entity: &Entity<Self>,
-    ) -> AnyElement {
+    ) -> RailItem {
         let now = style::now();
-        let line = |who: String, what: String, at: Option<i64>| {
+        let head = |who: String, what: String| {
             div()
+                .id(("change-request-timeline-item", index))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .text_size(theme.typography.footnote)
-                .text_color(theme.ely.fg_muted)
                 .child(
                     div()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.ely.fg)
                         .child(selectable_text(who)),
                 )
-                .child(selectable_text(what))
                 .child(
                     div()
-                        .text_color(theme.ely.fg_subtle)
-                        .child(selectable_text(style::age(now, at))),
+                        .text_color(theme.ely.fg_muted)
+                        .child(selectable_text(what)),
                 )
         };
-        let body = self.bodies.get(index).cloned().flatten().map(|doc| {
+        // Each piece of an entry is its own element outside `head`'s id scope, so
+        // each carries the entry's index: two with the same id panic gpui's a11y
+        // tree in a debug build.
+        let when = |at: Option<i64>| {
             div()
-                .pl(px(12.0))
-                .border_l_2()
-                .border_color(theme.ely.border)
-                .child(Chat::render_markdown_document_with_link_override(
-                    doc,
-                    theme,
-                    open_links(),
-                ))
+                .id(("change-request-timeline-time", index))
+                .text_color(theme.ely.fg_subtle)
+                .child(selectable_text(style::age(now, at)))
+        };
+        let body = self.bodies.get(index).cloned().flatten().map(|doc| {
+            div().id(("change-request-timeline-body", index)).child(Chat::render_markdown_document_with_link_override(
+                doc,
+                theme,
+                open_links(),
+            ))
         });
         let own = match item {
             TimelineItem::Comment { edit, .. } | TimelineItem::Review { edit, .. } => edit.as_ref(),
@@ -1412,17 +1417,12 @@ impl ChangeRequestTab {
         let pencil = self.edit_pencil(index, own, theme, entity);
         let body: Option<AnyElement> = editor.or_else(|| body.map(IntoElement::into_any_element));
         match item {
-            TimelineItem::Comment { author, at, .. } => div()
-                .id(("change-request-timeline-item", index))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(
-                    line(author.clone(), "commented".to_string(), *at)
-                        .when_some(pencil, |row, pencil| row.child(pencil)),
-                )
-                .when_some(body, |this, body| this.child(body))
-                .into_any_element(),
+            TimelineItem::Comment { author, at, .. } => RailItem::new(
+                head(author.clone(), "commented".to_string()).children(pencil),
+            )
+            .time(when(*at))
+            .icon(IconName::MessageSquare)
+            .children(body),
             TimelineItem::Review {
                 author,
                 outcome,
@@ -1430,26 +1430,29 @@ impl ChangeRequestTab {
                 line_comments,
                 ..
             } => {
-                let verb = match outcome {
-                    ReviewOutcome::Approved => "approved",
-                    ReviewOutcome::ChangesRequested => "requested changes",
-                    ReviewOutcome::Commented | ReviewOutcome::Other => "reviewed",
-                    ReviewOutcome::Dismissed => "had a review dismissed",
-                    ReviewOutcome::Requested => "was asked to review",
+                let (verb, icon, tone) = match outcome {
+                    ReviewOutcome::Approved => ("approved", IconName::CircleCheck, Tone::Success),
+                    ReviewOutcome::ChangesRequested => {
+                        ("requested changes", IconName::CircleAlert, Tone::Warning)
+                    }
+                    ReviewOutcome::Commented | ReviewOutcome::Other => {
+                        ("reviewed", IconName::MessageSquare, Tone::Neutral)
+                    }
+                    ReviewOutcome::Dismissed => {
+                        ("had a review dismissed", IconName::Ban, Tone::Neutral)
+                    }
+                    ReviewOutcome::Requested => {
+                        ("was asked to review", IconName::Eye, Tone::Neutral)
+                    }
                 };
-                div()
-                    .id(("change-request-timeline-item", index))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        line(author.clone(), verb.to_string(), *at)
-                            .when_some(pencil, |row, pencil| row.child(pencil)),
-                    )
-                    .when_some(body, |this, body| this.child(body))
+                RailItem::new(head(author.clone(), verb.to_string()).children(pencil))
+                    .time(when(*at))
+                    .icon(icon)
+                    .tone(tone)
+                    .children(body)
                     .children(line_comments.iter().enumerate().map(|(position, comment)| {
                         div()
-                            .pl(px(12.0))
+                            .id(("change-request-line-comment-row", index * 1000 + position))
                             .flex()
                             .gap(px(6.0))
                             .text_size(theme.typography.footnote)
@@ -1470,19 +1473,13 @@ impl ChangeRequestTab {
                             ))
                             .child(selectable_text(format!("— {}", comment.body)))
                     }))
-                    .into_any_element()
             }
-            TimelineItem::LineComment(comment) => div()
-                .id(("change-request-timeline-item", index))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(line(comment.author.clone(), "commented".to_string(), comment.at))
-                .child(
-                    div()
-                        .pl(px(12.0))
-                        .text_size(theme.typography.footnote)
-                        .child(line_link(
+            TimelineItem::LineComment(comment) => {
+                RailItem::new(head(comment.author.clone(), "commented".to_string()))
+                    .time(when(comment.at))
+                    .icon(IconName::MessageSquareDiff)
+                    .child(
+                        div().id(("change-request-line-comment-row", index * 1000)).text_size(theme.typography.footnote).child(line_link(
                             ("change-request-line-comment", index * 1000),
                             format!(
                                 "on {}:{}",
@@ -1496,27 +1493,33 @@ impl ChangeRequestTab {
                             theme,
                             entity.clone(),
                         )),
-                )
-                .when_some(body, |this, body| this.child(body))
-                .into_any_element(),
+                    )
+                    .children(body)
+            }
             TimelineItem::Event { actor, kind, at } => {
-                let what = match kind {
-                    EventKind::CommitsPushed { count } => {
-                        format!("added {count} commit{}", if *count == 1 { "" } else { "s" })
-                    }
+                let (what, tone) = match kind {
+                    EventKind::CommitsPushed { count } => (
+                        format!("added {count} commit{}", if *count == 1 { "" } else { "s" }),
+                        Tone::Neutral,
+                    ),
                     EventKind::ReviewRequested { reviewer } => {
-                        format!("asked {reviewer} to review")
+                        (format!("asked {reviewer} to review"), Tone::Neutral)
                     }
-                    EventKind::Merged => "merged".to_string(),
-                    EventKind::Closed => "closed".to_string(),
-                    EventKind::Reopened => "reopened".to_string(),
-                    EventKind::ReadyForReview => "marked it ready for review".to_string(),
-                    EventKind::ConvertedToDraft => "marked it as a draft".to_string(),
-                    EventKind::Other(text) => text.clone(),
+                    EventKind::Merged => ("merged".to_string(), Tone::Accent),
+                    EventKind::Closed => ("closed".to_string(), Tone::Danger),
+                    EventKind::Reopened => ("reopened".to_string(), Tone::Success),
+                    EventKind::ReadyForReview => {
+                        ("marked it ready for review".to_string(), Tone::Success)
+                    }
+                    EventKind::ConvertedToDraft => {
+                        ("marked it as a draft".to_string(), Tone::Neutral)
+                    }
+                    EventKind::Other(text) => (text.clone(), Tone::Neutral),
                 };
-                line(actor.clone().unwrap_or_default(), what, *at)
-                    .id(("change-request-timeline-item", index))
-                    .into_any_element()
+                RailItem::new(head(actor.clone().unwrap_or_default(), what))
+                    .time(when(*at))
+                    .icon(IconName::Dot)
+                    .tone(tone)
             }
         }
     }
