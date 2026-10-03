@@ -589,6 +589,11 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
     Ok(ActionContext {
         node_id,
         state,
+        head_sha: None,
+        head_ref_name: None,
+        cross_repository: false,
+        reviewer_ids: Vec::new(),
+        team_ids: Vec::new(),
         capabilities: capabilities(client, node),
     })
 }
@@ -717,6 +722,15 @@ pub(crate) fn act(
                 fields["targetBranch"] = json!(branch);
             }
             update(client, number, fields)?
+        }
+        Action::Merge { .. }
+        | Action::CancelAutoMerge
+        | Action::SetReviewers { .. }
+        | Action::SetLabels { .. } => {
+            return Err(ForgeError::Unsupported {
+                host: client.host.clone(),
+                what: action.kind().to_string(),
+            });
         }
         Action::EditComment { comment, body } => mutate(
             client,

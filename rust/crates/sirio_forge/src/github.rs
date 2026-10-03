@@ -619,6 +619,11 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
     Ok(ActionContext {
         node_id,
         state: mapping::github_change_state(&str_at(node, "/state"), bool_at(node, "/isDraft")),
+        head_sha: None,
+        head_ref_name: None,
+        cross_repository: false,
+        reviewer_ids: Vec::new(),
+        team_ids: Vec::new(),
         capabilities: capabilities(node),
     })
 }
@@ -700,6 +705,15 @@ pub(crate) fn act(
                 input["baseRefName"] = json!(branch);
             }
             mutate(client, "UpdatePullRequest", UPDATE, input)?
+        }
+        Action::Merge { .. }
+        | Action::CancelAutoMerge
+        | Action::SetReviewers { .. }
+        | Action::SetLabels { .. } => {
+            return Err(ForgeError::Unsupported {
+                host: client.host.clone(),
+                what: action.kind().to_string(),
+            });
         }
         Action::EditComment { comment, body } => match comment.kind {
             CommentKind::Comment => mutate(
