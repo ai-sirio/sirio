@@ -78,6 +78,7 @@ pub(crate) struct ActionsState {
     /// cleared only if it still holds exactly that, so words typed while the
     /// request was in flight are never wiped.
     pub(crate) sent: Option<String>,
+    pub(crate) merge: super::merge::MergeUi,
 }
 
 impl ActionsState {
@@ -90,6 +91,7 @@ impl ActionsState {
             composer: None,
             composer_blank: true,
             sent: None,
+            merge: super::merge::MergeUi::default(),
         }
     }
 }
@@ -219,6 +221,8 @@ impl ChangeRequestTab {
             Err(error) => {
                 self.note_rate_limited(&error);
                 if matches!(error, ForgeError::HeadMoved { .. }) {
+                    // What was being confirmed is not what is there now.
+                    self.actions.merge.dialog = None;
                     self.refresh(cx);
                 }
                 self.actions.state = ActionState::Failed {
@@ -244,6 +248,7 @@ impl ChangeRequestTab {
         match kind {
             "edit" => self.actions.edit = None,
             "edit-comment" => self.actions.comment_edit = None,
+            "merge" | "auto-merge" => self.actions.merge.dialog = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();
                 if let (false, Some(sent), Some(composer)) =
@@ -448,6 +453,9 @@ impl ChangeRequestTab {
                 let words = text("text").ok_or("edit-comment needs text")?;
                 edit.field.update(cx, |input, cx| input.set_text(words, cx));
                 self.save_comment_edit(cx)
+            }
+            "merge-open" | "merge-confirm" | "merge-close" | "cancel-auto-merge" => {
+                self.control_merge(name, params, window, cx)
             }
             other => Err(format!("unknown action {other}")),
         }

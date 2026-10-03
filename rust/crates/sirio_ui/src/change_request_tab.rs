@@ -23,6 +23,7 @@ mod actions;
 mod composer;
 mod edit;
 mod ely_ui;
+mod merge;
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -954,6 +955,17 @@ impl ChangeRequestTab {
             ("action".to_string(), self.actions.state.word().to_string()),
             ("action_kind".to_string(), self.actions.state.kind().to_string()),
             ("action_message".to_string(), self.action_message()),
+            ("merge_strip".to_string(), self.strip().word().to_string()),
+            ("merge_message".to_string(), self.strip().text()),
+            ("merge_verdict".to_string(), self.merge_verdict_word()),
+            (
+                "merge_method".to_string(),
+                self.merge_method().map_or("", |method| method.word()).to_string(),
+            ),
+            (
+                "merge_dialog".to_string(),
+                if self.actions.merge.dialog.is_some() { "open" } else { "closed" }.to_string(),
+            ),
         ]
     }
 }
@@ -2023,7 +2035,9 @@ impl Render for ChangeRequestTab {
             .bg(theme.sirio.canvas)
             .text_color(theme.ely.fg)
             .child(self.render_header(&theme, &entity))
+            .children(self.render_merge_strip(&theme, &entity))
             .child(body)
+            .children(self.render_merge_dialog(&entity))
     }
 }
 

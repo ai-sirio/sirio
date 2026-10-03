@@ -67,7 +67,8 @@ one wins): a change request closed by a mutation reads as closed. GitLab's
 `<Mutation>.CLOSED`, `<Mutation>.OPEN`, `<Mutation>.true`, `<Mutation>.false`, and an
 accept with a strategy `MergeRequestAccept.MERGE_WHEN_CHECKS_PASS`;
 the REST approval is `approve`, the REST cancel `cancel-auto-merge`. `POST /__reset`
-forgets every write.
+forgets every write; `POST /__push` stands for a push to the head branch, and
+reads then serve `<Operation>.after.push.json`.
 
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
 2.100 and glab 1.119), so chunked bodies are decoded here.
@@ -336,6 +337,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.plain_path()
         raw = self.body()
+        if path == "/__push":
+            # Someone pushed to the head branch: reads serve `.after.push`.
+            self.remember("push")
+            return self.answer(200, {"pushed": True})
         if path == "/__reset":
             with self.applied_lock:
                 del self.applied[:]

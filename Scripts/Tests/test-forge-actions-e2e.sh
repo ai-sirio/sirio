@@ -710,7 +710,7 @@ fi
 
 
 if wanted ui; then
-echo "stage ui: a real Sirio, the change request tab, every action of B2a"
+echo "stage ui: a real Sirio, the change request tab, every action of B2a and B2b"
 BIN="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirioctl"
 if [ "$STATE_ONLY" -eq 0 ]; then
@@ -917,6 +917,94 @@ PY
   ctl surface change-request act edit-comment --index "$comment_index" --text "Edited comment" >/dev/null
   wait_for comment_editing "" surface change-request read
   expect_sent "$flavour" "$comment_op" 1
+
+  echo "  [$flavour] merge: the strip, the dialog, and the head the user saw"
+  local merge_op=MergePullRequest head=$GH_HEAD head_key=expectedHeadOid
+  local auto_op=EnablePullRequestAutoMerge
+  local reviewers_op=RequestReviews labels_op=AddLabelsToLabelable ann=U_kwDOann feature=LA_kwDOfeat
+  if [ "$flavour" = gitlab ]; then
+    merge_op=MergeRequestAccept head=$GL_HEAD head_key=sha auto_op=MergeRequestAccept
+    reviewers_op=MergeRequestSetReviewers labels_op=MergeRequestSetLabels ann=ann feature=gid://gitlab/ProjectLabel/2
+  fi
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  wait_for merge_strip merge surface change-request read
+  wait_for merge_verdict ready surface change-request read
+  capture "$flavour-merge-strip"
+  ctl surface change-request act merge-open --method squash >/dev/null
+  wait_for merge_dialog open surface change-request read
+  capture "$flavour-merge-dialog"
+  ctl surface change-request act merge-confirm --title "Ship it" --message "because" >/dev/null
+  wait_for merge_dialog closed surface change-request read
+  wait_for cr_state merged surface change-request read
+  wait_for merge_strip none surface change-request read
+  expect_sent "$flavour" "$merge_op" 1
+  [ "$(sent_input "$flavour" "$merge_op" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$head_key")" = "$head" ] || fail "the merge did not carry the head the user saw"
+
+  echo "  [$flavour] someone pushes between the dialog and the click: nothing is merged"
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  ctl surface change-request act merge-open --method merge >/dev/null
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__push"
+  ctl surface change-request act merge-confirm >/dev/null
+  wait_for merge_dialog closed surface change-request read
+  wait_for action failed surface change-request read
+  case "$(key action_message surface change-request read)" in *"The branch changed since you opened this"*) ;; *) fail "a moved head was not named" ;; esac
+  expect_sent "$flavour" "$merge_op" 0
+
+  echo "  [$flavour] a blocked change request offers no merge"
+  saved_token "$host" "$flavour" blocked
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  wait_for merge_strip blocked surface change-request read
+  case "$(key merge_message surface change-request read)" in *"a review is required"*) ;; *) fail "the block's reason was not shown" ;; esac
+  capture "$flavour-merge-blocked"
+  if ctl surface change-request act merge-open >/dev/null 2>&1; then fail "a blocked change request opened the merge dialog"; fi
+  expect_sent "$flavour" "$merge_op" 0
+
+  echo "  [$flavour] checks still running: merge when they pass, then cancel it"
+  saved_token "$host" "$flavour" waiting
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  wait_for merge_strip auto-merge surface change-request read
+  ctl surface change-request act merge-open --when-checks-pass yes >/dev/null
+  ctl surface change-request act merge-confirm >/dev/null
+  wait_for action idle surface change-request read
+  wait_for merge_strip cancel surface change-request read
+  expect_sent "$flavour" "$auto_op" 1
+  capture "$flavour-merge-cancel"
+  ctl surface change-request act cancel-auto-merge >/dev/null
+  wait_for action idle surface change-request read
+  if [ "$flavour" = gitlab ]; then expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/cancel_merge_when_pipeline_succeeds"; else expect_sent github DisablePullRequestAutoMerge 1; fi
+
+  echo "  [$flavour] reviewers and labels: one write when the picker closes, none when nothing changed"
+  saved_token "$host" "$flavour" good
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  ctl surface change-request act picker-open --kind reviewers >/dev/null
+  wait_for picker reviewers surface change-request read
+  ctl surface change-request act picker-type --text ann --now yes >/dev/null
+  wait_for picker_candidates 1 surface change-request read
+  capture "$flavour-picker"
+  ctl surface change-request act picker-pick --id "$ann" >/dev/null
+  ctl surface change-request act picker-close >/dev/null
+  wait_for picker closed surface change-request read
+  wait_for action idle surface change-request read
+  expect_sent "$flavour" "$reviewers_op" 1
+  ctl surface change-request act picker-open --kind labels >/dev/null
+  wait_for picker labels surface change-request read
+  ctl surface change-request act picker-close >/dev/null
+  wait_for picker closed surface change-request read
+  expect_sent "$flavour" "$labels_op" 0
+  ctl surface change-request act picker-open --kind labels >/dev/null
+  ctl surface change-request act picker-type --text fe --now yes >/dev/null
+  wait_for picker_candidates 1 surface change-request read
+  ctl surface change-request act picker-pick --id "$feature" >/dev/null
+  ctl surface change-request act picker-pick --id "$feature" >/dev/null
+  ctl surface change-request act picker-pick --id "$feature" >/dev/null
+  ctl surface change-request act picker-close >/dev/null
+  wait_for action idle surface change-request read
+  expect_sent "$flavour" "$labels_op" 1
 
   echo "  [$flavour] a double send while the first is in flight is one request; words typed meanwhile stay"
   saved_token "$host" "$flavour" slow
