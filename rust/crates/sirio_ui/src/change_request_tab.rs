@@ -22,6 +22,7 @@ use sirio_theme::Theme;
 mod actions;
 mod composer;
 mod edit;
+mod ely_ui;
 
 use crate::change_request_style as style;
 use crate::changes::{ChangesTab, ChangesTabEvent};
@@ -2025,6 +2026,10 @@ impl ChangeRequestTab {
 impl Render for ChangeRequestTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangeRequestTab.render", cx.entity_id().as_u64());
+        // Ely follows Sirio's theme only through an observer that runs after the
+        // app's start-up closure; without this a Light user sees Ely's dark
+        // palette (docs/testing/ely-forge-probe.md).
+        crate::ely::sync_theme_if_changed(cx);
         // A restored tab loads the first time it is drawn (spec §8).
         if !self.started {
             self.started = true;
