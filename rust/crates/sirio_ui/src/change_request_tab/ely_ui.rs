@@ -34,10 +34,16 @@ impl ButtonState {
         primary: false,
     };
     pub(crate) fn enabled(enabled: bool) -> Self {
-        Self { enabled, ..Self::IDLE }
+        Self {
+            enabled,
+            ..Self::IDLE
+        }
     }
     pub(crate) fn primary(self) -> Self {
-        Self { primary: true, ..self }
+        Self {
+            primary: true,
+            ..self
+        }
     }
     pub(crate) fn loading(self, loading: bool) -> Self {
         Self { loading, ..self }
