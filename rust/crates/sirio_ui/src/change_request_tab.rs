@@ -386,6 +386,14 @@ impl ChangeRequestTab {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.rate_paused() {
+            // Stay armed: the pause ends by itself, and a running CI is still
+            // worth looking at once it does.
+            if matches!(
+                self.header.value().map(|header| header.summary.ci),
+                Some(CiState::Running(_))
+            ) {
+                self.schedule_ci_refresh(CiState::Running(None), cx);
+            }
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -2124,6 +2132,32 @@ mod tests {
         assert!(tab.read_with(cx, |tab, _| tab.actions.composer_blank), "whitespace is blank");
         input.update(cx, |input, cx| input.set_text("looks good", cx));
         assert!(!tab.read_with(cx, |tab, _| tab.actions.composer_blank));
+    }
+
+    /// A refresh refused because the forge is rate-limited must leave the CI
+    /// timer armed while CI is still running, or the tab never looks again.
+    #[gpui::test]
+    fn a_paused_refresh_keeps_the_ci_timer_armed_while_ci_runs(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let tab = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.header.value().is_some()));
+        tab.update(cx, |tab, cx| {
+            if let Slot::Loaded { value, .. } = &mut tab.header {
+                value.summary.ci = CiState::Running(None);
+            }
+            tab.ci_timer = None;
+            tab.paused_until = Some(style::now() + 3600);
+            tab.refresh(cx);
+            assert!(
+                tab.ci_timer.is_some(),
+                "a refresh refused by the rate limit dropped the CI timer"
+            );
+        });
     }
 
     #[gpui::test]
