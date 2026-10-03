@@ -24,6 +24,7 @@ mod composer;
 mod edit;
 mod ely_ui;
 mod merge;
+mod people;
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -963,6 +964,23 @@ impl ChangeRequestTab {
                 self.merge_method().map_or("", |method| method.word()).to_string(),
             ),
             (
+                "picker".to_string(),
+                self.actions
+                    .picker
+                    .as_ref()
+                    .map_or("closed", |picker| picker.kind.word())
+                    .to_string(),
+            ),
+            ("picker_candidates".to_string(), self.picker_candidates().to_string()),
+            (
+                "picker_chosen".to_string(),
+                self.actions
+                    .picker
+                    .as_ref()
+                    .map(|picker| picker.chosen.iter().cloned().collect::<Vec<_>>().join(","))
+                    .unwrap_or_default(),
+            ),
+            (
                 "merge_dialog".to_string(),
                 if self.actions.merge.dialog.is_some() { "open" } else { "closed" }.to_string(),
             ),
@@ -1256,6 +1274,7 @@ impl ChangeRequestTab {
                         ),
                 )
             })
+            .when_some(self.render_people_row(theme, entity), |this, row| this.child(row))
             .when_some(self.render_action_status(theme), |this, status| this.child(status))
     }
 

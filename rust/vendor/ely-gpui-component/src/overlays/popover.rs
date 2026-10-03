@@ -36,17 +36,25 @@ struct Pop {
     host: Bounds<Pixels>,
     height: Pixels,
     takeover: Option<Entity<Takeover>>,
+    /// The owner's hook, refreshed on every render (Sirio: LOCAL-CHANGES.md).
+    on_close: Option<Run>,
 }
 
 fn close(state: &Entity<Pop>, window: &mut Window, cx: &mut App) {
     log::info!("popover: closed");
-    let takeover = state.update(cx, |pop, cx| {
+    let (was_open, takeover, on_close) = state.update(cx, |pop, cx| {
+        let was_open = pop.open;
         pop.open = false;
         cx.notify();
-        pop.takeover.take()
+        (was_open, pop.takeover.take(), pop.on_close.clone())
     });
     if let Some(takeover) = takeover {
         give_back(&takeover, window, cx);
+    }
+    // Every way out — the trigger, Escape, a press outside, focus leaving —
+    // comes through here; the owner hears of each close once.
+    if was_open && let Some(on_close) = on_close {
+        on_close(window, cx);
     }
 }
 
@@ -56,6 +64,7 @@ pub struct Popover {
     id: ElementId,
     opener: Opener,
     content: Content,
+    on_close: Option<Run>,
 }
 
 impl Popover {
@@ -74,6 +83,7 @@ impl Popover {
                 size: ControlSize::default(),
             }),
             content: Box::new(move |_, window, cx| content(window, cx).into_any_element()),
+            on_close: None,
         }
     }
 
@@ -89,7 +99,15 @@ impl Popover {
             content: Box::new(move |close, window, cx| {
                 content(close, window, cx).into_any_element()
             }),
+            on_close: None,
         }
+    }
+
+    /// Runs each time the panel closes, however it closed: its trigger,
+    /// Escape, a press outside, or focus leaving it.
+    pub fn on_close(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(handler));
+        self
     }
 
     /// The popover's own button, which a popover with an opener of the owner's does not have.
@@ -120,6 +138,8 @@ impl Popover {
 impl RenderOnce for Popover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state((self.id.clone(), "popover"), cx, |_, _| Pop::default());
+        let on_close = self.on_close.clone();
+        state.update(cx, |pop, _| pop.on_close = on_close);
         let open = state.read(cx).open;
         let toggle: Run = {
             let state = state.clone();

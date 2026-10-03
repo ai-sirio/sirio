@@ -79,6 +79,7 @@ pub(crate) struct ActionsState {
     /// request was in flight are never wiped.
     pub(crate) sent: Option<String>,
     pub(crate) merge: super::merge::MergeUi,
+    pub(crate) picker: Option<super::people::PickerState>,
 }
 
 impl ActionsState {
@@ -92,6 +93,7 @@ impl ActionsState {
             composer_blank: true,
             sent: None,
             merge: super::merge::MergeUi::default(),
+            picker: None,
         }
     }
 }
@@ -456,6 +458,9 @@ impl ChangeRequestTab {
             }
             "merge-open" | "merge-confirm" | "merge-close" | "cancel-auto-merge" => {
                 self.control_merge(name, params, window, cx)
+            }
+            "picker-open" | "picker-type" | "picker-pick" | "picker-close" => {
+                self.control_picker(name, params, window, cx)
             }
             other => Err(format!("unknown action {other}")),
         }
