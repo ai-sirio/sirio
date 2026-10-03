@@ -29,13 +29,13 @@ use ely_gpui_component::{
     data_display::{Timeline, TimelineItem as RailItem, Tone},
     forms::Choice,
     navigation::Tabs,
-    primitives::{IconName, Severity},
+    primitives::{Icon as EIcon, IconName, Severity},
+    theme::IconSize as EIconSize,
 };
 use ely_ui::ButtonState;
 use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
-use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
 /// The inner tab a change request shows.
@@ -1018,33 +1018,6 @@ fn open_links() -> LinkClickOverride {
     Rc::new(|url, _window, cx| cx.open_url(url))
 }
 
-fn button(
-    id: &'static str,
-    icon: Icon,
-    label: Option<&'static str>,
-    theme: &Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.ely.hover;
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.fg_muted)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .on_click(move |_, _, cx| on_click(cx))
-        .child(IconElement::new(icon, IconSize::Small))
-        .when_some(label, |this, label| this.child(label))
-}
-
 fn error_panel(
     message: String,
     theme: &Theme,
@@ -1325,12 +1298,12 @@ impl ChangeRequestTab {
                 }
                 if header.timeline_truncated {
                     let url = header.summary.web_url.clone();
-                    column = column.child(button(
+                    column = column.child(ely_ui::text_button(
                         "change-request-earlier",
-                        Icon::ArrowUpRight,
-                        Some("Earlier activity is on the forge"),
-                        theme,
-                        move |cx| cx.open_url(&url),
+                        "Earlier activity is on the forge",
+                        Some(IconName::ArrowUpRight),
+                        ButtonState::IDLE,
+                        move |_, cx| cx.open_url(&url),
                     ));
                 }
                 if let Some(doc) = self
@@ -1547,12 +1520,12 @@ impl ChangeRequestTab {
                         .text_size(theme.typography.footnote)
                         .text_color(theme.ely.danger)
                         .child(div().flex_1().child(error.to_string()))
-                        .child(button(
+                        .child(ely_ui::text_button(
                             "change-request-commit-forge",
-                            Icon::ArrowUpRight,
-                            Some("Open on the forge"),
-                            theme,
-                            move |cx| cx.open_url(&web_url),
+                            "Open on the forge",
+                            Some(IconName::ArrowUpRight),
+                            ButtonState::IDLE,
+                            move |_, cx| cx.open_url(&web_url),
                         )),
                 )
                 .when_some(hint, |this, hint| {
@@ -1584,8 +1557,9 @@ impl ChangeRequestTab {
                         entity.update(cx, |tab, cx| tab.open_commit(sha.clone(), url.clone(), cx))
                     })
                     .child(
-                        IconElement::new(Icon::GitCommit, IconSize::Small)
-                            .text_color(theme.ely.fg_subtle),
+                        EIcon::new(IconName::GitCommitHorizontal)
+                            .size(EIconSize::Sm)
+                            .color(theme.ely.fg_subtle),
                     )
                     .child(
                         div()
@@ -1649,7 +1623,7 @@ impl ChangeRequestTab {
         let toggle = entity.clone();
         let hover = theme.ely.hover;
         let row = |index: usize, check: &Check| {
-            let (icon, tint) = style::check_mark(check.status, theme);
+            let (icon, tint) = style::check_icon(check.status, theme);
             let url = check.url.clone();
             div()
                 .id(("change-request-check", index))
@@ -1667,7 +1641,7 @@ impl ChangeRequestTab {
                         cx.open_url(url)
                     }
                 })
-                .child(IconElement::new(icon, IconSize::Small).text_color(tint))
+                .child(EIcon::new(icon).size(EIconSize::Sm).color(tint))
                 .when_some(check.group.clone(), |this, group| {
                     this.child(div().flex_none().text_color(theme.ely.fg_subtle).child(group))
                 })
@@ -1710,14 +1684,14 @@ impl ChangeRequestTab {
                                 cx.notify();
                             })
                         })
-                        .child(IconElement::new(
-                            if self.show_settled_checks {
-                                Icon::ChevronDown
+                        .child(
+                            EIcon::new(if self.show_settled_checks {
+                                IconName::ChevronDown
                             } else {
-                                Icon::ChevronRight
-                            },
-                            IconSize::Small,
-                        ))
+                                IconName::ChevronRight
+                            })
+                            .size(EIconSize::Sm),
+                        )
                         .child(format!("{passed} passed, {} other", settled.len() - passed)),
                 )
             })
@@ -1883,20 +1857,20 @@ impl ChangeRequestTab {
                             .gap(px(8.0))
                             .text_color(theme.ely.danger)
                             .child(div().flex_1().child(error.to_string()))
-                            .child(button(
+                            .child(ely_ui::text_button(
                                 "change-request-range-retry",
-                                Icon::RefreshCw,
-                                Some("Retry"),
-                                theme,
-                                move |cx| retry.update(cx, |tab, cx| tab.retry_range(cx)),
+                                "Retry",
+                                Some(IconName::RefreshCw),
+                                ButtonState::IDLE,
+                                move |_, cx| retry.update(cx, |tab, cx| tab.retry_range(cx)),
                             ))
                             .when_some(forge_url, |this, url| {
-                                this.child(button(
+                                this.child(ely_ui::text_button(
                                     "change-request-range-forge",
-                                    Icon::ArrowUpRight,
-                                    Some("Open on the forge"),
-                                    theme,
-                                    move |cx| cx.open_url(&url),
+                                    "Open on the forge",
+                                    Some(IconName::ArrowUpRight),
+                                    ButtonState::IDLE,
+                                    move |_, cx| cx.open_url(&url),
                                 ))
                             }),
                     )

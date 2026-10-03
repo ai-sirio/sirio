@@ -2,7 +2,6 @@
 //! the tab already calls: a `debug_selector` wrapper so tests and scripts find
 //! it, a busy flag, and `selectable_text` for any message a person may copy.
 //! No tab state lives here.
-#![allow(dead_code)]
 
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},

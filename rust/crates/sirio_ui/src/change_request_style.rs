@@ -69,27 +69,6 @@ pub(crate) fn review_mark(
     }
 }
 
-pub(crate) fn check_mark(status: CheckStatus, theme: &Theme) -> (Icon, Hsla) {
-    match status {
-        CheckStatus::Passed => (Icon::Check, theme.ely.success),
-        CheckStatus::Failed => (Icon::XCircle, theme.ely.danger),
-        CheckStatus::Running => (Icon::Clock, theme.ely.warning),
-        CheckStatus::Queued => (Icon::Circle, theme.ely.fg_subtle),
-        CheckStatus::Canceled | CheckStatus::Skipped | CheckStatus::Neutral => {
-            (Icon::Dash, theme.ely.fg_subtle)
-        }
-    }
-}
-
-pub(crate) fn state_icon(state: ChangeState) -> IconName {
-    match state {
-        ChangeState::Open => IconName::GitPullRequest,
-        ChangeState::Draft => IconName::GitPullRequestDraft,
-        ChangeState::Closed => IconName::GitPullRequestClosed,
-        ChangeState::Merged => IconName::GitMerge,
-    }
-}
-
 /// Twin of [`ci_mark`] in Ely's icons; `None` draws nothing.
 pub(crate) fn ci_icon(ci: CiState, theme: &Theme) -> Option<(IconName, Hsla)> {
     match ci {
