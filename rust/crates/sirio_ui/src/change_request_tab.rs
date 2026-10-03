@@ -1038,7 +1038,7 @@ fn error_panel(
         .items_center()
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
-        .child(ely_ui::message(Severity::Danger, message))
+        .child(ely_ui::message(Severity::Danger, message, theme))
         .child(
             div()
                 .flex()
@@ -1064,7 +1064,6 @@ fn error_panel(
 }
 
 fn stale_line(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> AnyElement {
-    let _ = theme;
     div()
         .flex()
         .items_center()
@@ -1076,6 +1075,7 @@ fn stale_line(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> An
                 .child(ely_ui::message(
                     Severity::Warning,
                     format!("Refresh failed · {message}"),
+                    theme,
                 )),
         )
         .child(ely_ui::text_button(
@@ -1281,6 +1281,8 @@ impl ChangeRequestTab {
             .id("change-request-inner-tabs")
             .debug_selector(|| "change-request-inner-tabs".to_owned())
             .px(px(10.0))
+            // A narrow pane scrolls the strip instead of clipping its last tab.
+            .overflow_x_scroll()
             .child(
                 Tabs::new("change-request-tabs", choices, self.inner.as_str()).on_change(
                     move |value, _, cx| {
@@ -1918,7 +1920,7 @@ impl ChangeRequestTab {
             .child(
                 div()
                     .max_w(px(520.0))
-                    .child(ely_ui::message(Severity::Warning, message)),
+                    .child(ely_ui::message(Severity::Warning, message, theme)),
             )
             .child(
                 div()

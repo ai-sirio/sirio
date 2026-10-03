@@ -6,12 +6,13 @@
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     data_display::{Badge, Tone},
-    feedback::Callout,
     forms::TextInput,
-    primitives::{IconName, Severity},
+    primitives::{Icon, IconName, Severity},
+    theme::IconSize,
 };
-use gpui::{AnyElement, App, Context, Entity, IntoElement, Window, div, prelude::*};
+use gpui::{AnyElement, App, Context, Entity, IntoElement, Window, div, prelude::*, px};
 use sirio_forge::ChangeState;
+use sirio_theme::Theme;
 
 use super::ChangeRequestTab;
 use crate::change_request_style as style;
@@ -97,10 +98,24 @@ pub(crate) fn icon_button(
         .into_any_element()
 }
 
-/// A message in the severity's colour whose words can be selected and copied.
-pub(crate) fn message(severity: Severity, text: String) -> AnyElement {
-    Callout::new(severity)
-        .child(selectable_text(text))
+/// A message in the severity's colour whose words can be selected and copied:
+/// a compact line, not Ely's titled `Callout`, whose fixed "Danger" heading
+/// would sit above every error.
+pub(crate) fn message(severity: Severity, text: String, theme: &Theme) -> AnyElement {
+    let tone = severity.color(&theme.ely);
+    div()
+        .flex()
+        .items_start()
+        .gap(px(6.0))
+        .text_size(theme.typography.footnote)
+        .text_color(tone)
+        .child(
+            div()
+                .flex_none()
+                .pt(px(1.0))
+                .child(Icon::new(severity.icon()).size(IconSize::Sm).color(tone)),
+        )
+        .child(div().min_w_0().child(selectable_text(text)))
         .into_any_element()
 }
 
