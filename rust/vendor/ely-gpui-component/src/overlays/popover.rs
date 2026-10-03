@@ -65,6 +65,7 @@ pub struct Popover {
     opener: Opener,
     content: Content,
     on_close: Option<Run>,
+    held: Option<bool>,
 }
 
 impl Popover {
@@ -84,6 +85,7 @@ impl Popover {
             }),
             content: Box::new(move |_, window, cx| content(window, cx).into_any_element()),
             on_close: None,
+            held: None,
         }
     }
 
@@ -100,6 +102,7 @@ impl Popover {
                 content(close, window, cx).into_any_element()
             }),
             on_close: None,
+            held: None,
         }
     }
 
@@ -107,6 +110,16 @@ impl Popover {
     /// Escape, a press outside, or focus leaving it.
     pub fn on_close(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_close = Some(Rc::new(handler));
+        self
+    }
+
+    /// The owner holds the panel open or closed, and it follows on the next
+    /// draw — for an owner that starts and ends the panel's work by other
+    /// means too. The usual ways out still close it, and every close, the
+    /// owner's included, runs `on_close`; after one the owner should stop
+    /// holding it open.
+    pub fn open(mut self, open: bool) -> Self {
+        self.held = Some(open);
         self
     }
 
@@ -138,8 +151,22 @@ impl Popover {
 impl RenderOnce for Popover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state((self.id.clone(), "popover"), cx, |_, _| Pop::default());
-        let on_close = self.on_close.clone();
-        state.update(cx, |pop, _| pop.on_close = on_close);
+        let (on_close, held) = (self.on_close.clone(), self.held);
+        let owner_closed = state.update(cx, |pop, _| {
+            pop.on_close = on_close;
+            match held {
+                Some(true) if !pop.open => {
+                    log::info!("popover: opened by its owner");
+                    pop.open = true;
+                    false
+                }
+                Some(false) => pop.open,
+                _ => false,
+            }
+        });
+        if owner_closed {
+            close(&state, window, cx);
+        }
         let open = state.read(cx).open;
         let toggle: Run = {
             let state = state.clone();

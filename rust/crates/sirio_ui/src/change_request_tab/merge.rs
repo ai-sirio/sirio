@@ -330,7 +330,8 @@ impl ChangeRequestTab {
         let confirm = entity.clone();
         let mut card = Dialog::new(
             "change-request-merge-dialog",
-            format!("Merge #{}", self.reference.number),
+            // `#101` on GitHub, `!201` on GitLab.
+            format!("Merge {}", self.reference.label()),
             move |_, cx| close.update(cx, |tab, cx| tab.close_merge_dialog(cx)),
         )
         .detail(format!(

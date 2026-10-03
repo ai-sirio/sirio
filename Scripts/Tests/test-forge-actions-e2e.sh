@@ -979,8 +979,8 @@ PY
 
   echo "  [$flavour] reviewers and labels: one write when the picker closes, none when nothing changed"
   saved_token "$host" "$flavour" good
-  reopen_tab "$number"
   reset_forge "$flavour" "$port"
+  reopen_tab "$number"
   ctl surface change-request act picker-open --kind reviewers >/dev/null
   wait_for picker reviewers surface change-request read
   ctl surface change-request act picker-type --text ann --now yes >/dev/null

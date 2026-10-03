@@ -193,3 +193,10 @@ for an owner to learn the panel closed, and the change-request pickers send
 their one write when it does (spec §6). `src/overlays/tests.rs` drives each
 path in a real window
 (`every_way_a_popover_closes_tells_its_owner_once`).
+
+`Popover::open(bool)` lets the owner hold the panel open or closed; it
+follows on the next draw, the usual ways out still close it, and every close
+(the owner's included) runs `on_close`. The change-request pickers are opened
+and closed over the control socket too (debug builds), and the panel must
+follow the picker's own state rather than drift from it.
+`a_popover_follows_its_owner_open_and_closed` proves both directions.

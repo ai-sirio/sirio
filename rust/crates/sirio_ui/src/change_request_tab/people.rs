@@ -94,6 +94,10 @@ impl ChangeRequestTab {
             .map_or(0, Vec::len)
     }
 
+    pub(crate) fn picker_is(&self, kind: PickerKind) -> bool {
+        self.actions.picker.as_ref().is_some_and(|picker| picker.kind == kind)
+    }
+
     fn picker_offered(&self, kind: PickerKind) -> bool {
         self.header.value().is_some_and(|header| match kind {
             PickerKind::Reviewers => header.capabilities.can_edit_reviewers,
@@ -126,6 +130,10 @@ impl ChangeRequestTab {
                 .collect(),
         };
         let original: BTreeSet<String> = current.keys().cloned().collect();
+        // One picker at a time: the other one sends what changed first.
+        if self.actions.picker.is_some() {
+            let _ = self.close_picker(cx);
+        }
         let query = new_input(window, cx, "", None, "Search");
         let typing = cx.subscribe(&query, |tab, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Changed) {
@@ -351,6 +359,7 @@ impl ChangeRequestTab {
             PickerKind::Labels => ("change-request-labels-picker", "change-request-labels-add"),
         };
         let disabled = self.action_busy();
+        let open = self.picker_is(kind);
         let (opener, closer, body) = (entity.clone(), entity.clone(), entity.clone());
         let theme = *theme;
         Some(
@@ -359,25 +368,36 @@ impl ChangeRequestTab {
                 .child(
                     Popover::with_opener(
                         id,
-                        move |toggle| {
+                        move |_toggle| {
                             IconButton::new(SharedString::from(format!("{id}-plus")), IconName::Plus)
                                 .tooltip(match kind {
                                     PickerKind::Reviewers => "Change reviewers",
                                     PickerKind::Labels => "Change labels",
                                 })
                                 .disabled(disabled)
+                                // The popover follows the tab's picker (`open` below):
+                                // a click opens or closes the picker, not the panel.
                                 .on_click(move |_, window, cx| {
-                                    let opened = opener.update(cx, |tab, cx| tab.open_picker(kind, window, cx));
-                                    if opened.is_ok() {
-                                        toggle(window, cx);
-                                    }
+                                    opener.update(cx, |tab, cx| {
+                                        if tab.picker_is(kind) {
+                                            let _ = tab.close_picker(cx);
+                                        } else {
+                                            let _ = tab.open_picker(kind, window, cx);
+                                        }
+                                    })
                                 })
                         },
                         move |_, window, cx| body.update(cx, |tab, cx| tab.picker_body(&theme, &body, window, cx)),
                     )
+                    // A picker opened over the control socket shows its panel too.
+                    .open(open)
+                    // Escape, a press outside or focus leaving: the panel
+                    // closed, so this kind's picker sends what changed.
                     .on_close(move |_, cx| {
                         closer.update(cx, |tab, cx| {
-                            let _ = tab.close_picker(cx);
+                            if tab.picker_is(kind) {
+                                let _ = tab.close_picker(cx);
+                            }
                         })
                     }),
                 )
@@ -400,7 +420,6 @@ impl ChangeRequestTab {
                     Some("labels") => PickerKind::Labels,
                     _ => return Err("picker-open needs kind: reviewers or labels".to_string()),
                 };
-                self.actions.picker = None;
                 self.open_picker(kind, window, cx)
             }
             "picker-type" => {
