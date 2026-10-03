@@ -443,6 +443,14 @@ impl ChangeRequestTab {
         }
         if let Err(error) = &result {
             self.note_rate_limited(error);
+            // The timer cleared itself before asking; a failed answer must not
+            // end the polling while the header we still show says CI runs.
+            if matches!(
+                self.header.value().map(|header| header.summary.ci),
+                Some(CiState::Running(_))
+            ) {
+                self.schedule_ci_refresh(CiState::Running(None), cx);
+            }
         }
         self.header.finish(result);
         self.ensure_range(cx);
@@ -2158,6 +2166,36 @@ mod tests {
             assert!(
                 tab.ci_timer.is_some(),
                 "a refresh refused by the rate limit dropped the CI timer"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_timer_refresh_that_hits_the_rate_limit_keeps_the_ci_timer_armed(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let tab = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.header.value().is_some()));
+        tab.update(cx, |tab, cx| {
+            if let Slot::Loaded { value, .. } = &mut tab.header {
+                value.summary.ci = CiState::Running(None);
+            }
+            // The state the timer's task leaves: it cleared itself, then asked.
+            tab.ci_timer = None;
+            tab.apply_header(
+                Err(ForgeError::RateLimited {
+                    host: "github.com".into(),
+                    reset_at: Some(style::now() + 3600),
+                }),
+                cx,
+            );
+            assert!(
+                tab.ci_timer.is_some(),
+                "a rate-limited timer refresh stopped the CI polling for good"
             );
         });
     }
