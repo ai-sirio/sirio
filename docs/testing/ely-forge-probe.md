@@ -24,7 +24,7 @@ Mesa's lavapipe (`VK_DRIVER_FILES`) unless `--no-software-vulkan`. A run ends
 | The right window | input and captures go only to the window whose `_NET_WM_PID` is the probe's |
 | A click reaches `on_change` with the tab clicked | the probe prints `probe tab: <value>`; the script expects `checks`, then `conversation` |
 | A disabled tab ignores a click | the count of `probe tab:` lines stays at two |
-| The badge tooltip | the hover frame differs from the frame before it |
+| The badge tooltip | the pointer starts on a neutral spot; the hover frame differs from the frame before it inside a crop around the badge and its tooltip |
 | Dark and light | both drawn, and different |
 
 The probe's three strips share one state; the second and third are rotated
@@ -49,8 +49,16 @@ tab in the middle of a strip.
 Ely's theme follows Sirio's through an observer that runs once the app's
 start-up closure returns. A window opened in that same closure after
 `set_mode(Light)` drew Ely's dark palette. The probe calls
-`sirio_ui::ely::init` after choosing the mode; a surface in the running app
-is not affected, because its theme changes in an event, not at start-up.
+`sirio_ui::ely::init` after choosing the mode.
+
+**This is not probe-only.** `sirio`'s `main.rs` has the same order in one
+start-up closure (`ely::init`, then `Theme::set_mode`, then `open_window`).
+The chat is unaffected because `Chat::render` calls `ely::sync_theme_if_changed`
+on every frame. A surface that does not, such as the change-request tab and
+list in deliveries 2 to 4, would draw Ely's dark palette after launch for a
+Light user. Those deliveries must call `sync_theme_if_changed` in their render
+(or `main.rs` must sync after its start-up `set_mode`), and prove it with a
+light-mode frame.
 
 ## Not established
 
@@ -61,5 +69,11 @@ is not affected, because its theme changes in an event, not at start-up.
   driver also draws under Xvfb (`--no-software-vulkan` passed), so the
   200-colour guard was never seen to fire. Lavapipe is a portability choice
   here, not a necessity.
+- **`--display :N`** is weaker than `--xvfb`: it finds the probe window only
+  as a direct child of the root, and without a window manager input goes to
+  whatever is on screen at those coordinates. Use `--xvfb` for evidence.
+- **The disabled tab's click has no positive control:** the count staying at
+  two would also hold if the click missed. The geometry is fixed, so it hits
+  today.
 - **Platforms.** Linux X11 under Xvfb only — not a physical Wayland session,
   macOS or Windows.

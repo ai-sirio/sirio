@@ -23,7 +23,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROBE="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/examples/ely_forge_probe"
-LVP=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1)
+LVP=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
 OUT_DIR=""
 DISPLAY_TARGET=""
 START_XVFB=0
@@ -44,7 +44,7 @@ mkdir -p "$OUT_DIR/frames"
 exec > >(tee "$OUT_DIR/transcript.log") 2>&1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-for tool in xwininfo xprop xdotool import identify compare; do
+for tool in python3 xwininfo xprop xdotool import identify compare magick; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
 
@@ -143,6 +143,16 @@ differs() { # a b what
   echo "DIFFERS: $1 vs $2 ($pixels pixels) — $3"
 }
 xd() { DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool "$@"; }
+differs_in() { # a b geometry what — the frames must differ inside the WxH+X+Y crop
+  local pixels a b
+  a=$(mktemp --suffix=.png); b=$(mktemp --suffix=.png)
+  magick "$OUT_DIR/frames/$1.png" -crop "$3" +repage "$a"
+  magick "$OUT_DIR/frames/$2.png" -crop "$3" +repage "$b"
+  pixels=$(compare -metric AE "$a" "$b" null: 2>&1 | awk '{printf "%d", $1}' || true)
+  rm -f "$a" "$b"
+  [ "${pixels:-0}" -gt 0 ] || fail "$4: $1 and $2 are identical inside $3"
+  echo "DIFFERS: $1 vs $2 inside $3 ($pixels pixels) — $4"
+}
 click() { # x y
   xd mousemove --window "$WINDOW" "$1" "$2" click 1
 }
@@ -161,12 +171,13 @@ expect_tab() { # value
 # and 400 (Files first, disabled); the first tab of a strip contains x 30.
 echo "step 1: dark, as drawn"
 launch dark
+xd mousemove --window "$WINDOW" 600 560   # a neutral spot: no hover colour in the baseline
 capture dark-initial
 
 echo "step 2: hovering the first badge shows its tooltip"
 xd mousemove --window "$WINDOW" 24 36
 capture dark-badge-hover
-differs dark-initial dark-badge-hover "the badge tooltip"
+differs_in dark-initial dark-badge-hover 160x50+10+56 "the badge tooltip"
 xd mousemove --window "$WINDOW" 600 560
 
 echo "step 3: a click on the strip whose first tab is Checks selects checks"
