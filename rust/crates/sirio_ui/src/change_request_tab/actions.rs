@@ -332,7 +332,7 @@ impl ChangeRequestTab {
     }
 
     /// One line under the header: what is being sent, or why it failed.
-    pub(crate) fn render_action_status(&self, _theme: &Theme) -> Option<AnyElement> {
+    pub(crate) fn render_action_status(&self, theme: &Theme) -> Option<AnyElement> {
         let severity = match &self.actions.state {
             ActionState::Idle => return None,
             ActionState::Working(_) => Severity::Info,
@@ -352,7 +352,7 @@ impl ChangeRequestTab {
             div()
                 .id("change-request-action-status")
                 .debug_selector(|| "change-request-action-status".into())
-                .child(super::ely_ui::message(severity, text))
+                .child(super::ely_ui::message(severity, text, theme))
                 .into_any_element(),
         )
     }
