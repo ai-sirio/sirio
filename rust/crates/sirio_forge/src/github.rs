@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::action::{
     Action, ActionContext, ActionOutcome, LiveProbe, ReviewVerdict, check_action,
 };
-use crate::client::{ForgeClient, page, paged, pick_for_branch};
+use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
     array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor,
@@ -21,7 +21,7 @@ use crate::mapping;
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CiState, CommentKind,
+    Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CiState, CommentKind,
     CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
     PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -56,6 +56,14 @@ const DRAFT: &str = include_str!("queries/github/draft.graphql");
 const UPDATE: &str = include_str!("queries/github/update.graphql");
 const UPDATE_COMMENT: &str = include_str!("queries/github/update_comment.graphql");
 const UPDATE_REVIEW: &str = include_str!("queries/github/update_review.graphql");
+const MERGE: &str = include_str!("queries/github/merge.graphql");
+const ENABLE_AUTO_MERGE: &str = include_str!("queries/github/enable_auto_merge.graphql");
+const DISABLE_AUTO_MERGE: &str = include_str!("queries/github/disable_auto_merge.graphql");
+const REQUEST_REVIEWS: &str = include_str!("queries/github/request_reviews.graphql");
+const ADD_LABELS: &str = include_str!("queries/github/add_labels.graphql");
+const REMOVE_LABELS: &str = include_str!("queries/github/remove_labels.graphql");
+const REVIEWER_CANDIDATES: &str = include_str!("queries/github/reviewer_candidates.graphql");
+const LABEL_CANDIDATES: &str = include_str!("queries/github/label_candidates.graphql");
 
 /// A GitHub query. GitHub has no baseline to fall back to, so a field the
 /// server does not know is an answer Sirio cannot read.
@@ -313,12 +321,13 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
     })?;
     let timeline = timeline(&array_at(node, "/timelineItems/nodes"));
     let reviewers = reviewers(&timeline, &array_at(node, "/reviewRequests/nodes"));
+    let repository = data.pointer("/repository").unwrap_or(&Value::Null);
     Ok(ChangeHeader {
         summary,
-        capabilities: capabilities(node),
+        capabilities: capabilities(node, repository),
         body: str_at(node, "/body"),
         reviewers,
-        labels: Vec::new(),
+        labels: labels(node),
         additions: opt_u32(node, "/additions"),
         deletions: opt_u32(node, "/deletions"),
         changed_files: opt_u32(node, "/changedFiles"),
@@ -329,16 +338,59 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
     })
 }
 
+fn labels(node: &Value) -> Vec<Label> {
+    array_at(node, "/labels/nodes")
+        .into_iter()
+        .filter_map(|label| {
+            Some(Label {
+                id: opt_str(label, "/id")?.to_string(),
+                name: opt_str(label, "/name")?.to_string(),
+                color: opt_str(label, "/color").map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// The merge strip's facts: the pull request's merge state beside the
+/// repository's merge settings.
+fn merge_capability(node: &Value, repository: &Value) -> MergeCapability {
+    let state = mapping::github_change_state(&str_at(node, "/state"), bool_at(node, "/isDraft"));
+    let state_word = match state {
+        ChangeState::Open => "OPEN",
+        ChangeState::Draft => "DRAFT",
+        ChangeState::Closed => "CLOSED",
+        ChangeState::Merged => "MERGED",
+    };
+    let rollup = array_at(node, "/commits/nodes")
+        .last()
+        .and_then(|commit| opt_str(commit, "/commit/statusCheckRollup/state"));
+    mapping::github_merge(mapping::GitHubMergeFacts {
+        state: state_word,
+        merge_state_status: opt_str(node, "/mergeStateStatus"),
+        review_decision: opt_str(node, "/reviewDecision"),
+        rollup,
+        merge_commit_allowed: bool_at(repository, "/mergeCommitAllowed"),
+        squash_merge_allowed: bool_at(repository, "/squashMergeAllowed"),
+        rebase_merge_allowed: bool_at(repository, "/rebaseMergeAllowed"),
+        auto_merge_allowed: bool_at(repository, "/autoMergeAllowed"),
+        viewer_can_enable_auto_merge: bool_at(node, "/viewerCanEnableAutoMerge"),
+        auto_merge_method: opt_str(node, "/autoMergeRequest/mergeMethod"),
+        delete_branch_on_merge: bool_at(repository, "/deleteBranchOnMerge"),
+    })
+}
+
 /// What the viewer may do, from the `viewerCan…` fields the header asks for.
-fn capabilities(node: &Value) -> Capabilities {
-    mapping::github_capabilities(mapping::GitHubFacts {
+fn capabilities(node: &Value, repository: &Value) -> Capabilities {
+    let mut caps = mapping::github_capabilities(mapping::GitHubFacts {
         state: opt_str(node, "/state").unwrap_or(""),
         locked: bool_at(node, "/locked"),
         viewer_did_author: bool_at(node, "/viewerDidAuthor"),
         viewer_can_update: bool_at(node, "/viewerCanUpdate"),
         viewer_can_close: bool_at(node, "/viewerCanClose"),
         viewer_can_reopen: bool_at(node, "/viewerCanReopen"),
-    })
+    });
+    caps.merge = merge_capability(node, repository);
+    caps
 }
 
 /// An edit handle, only where the forge says the viewer may use it.
@@ -474,13 +526,20 @@ fn reviewers(timeline: &[TimelineItem], requests: &[&Value]) -> Vec<Reviewer> {
         else {
             continue;
         };
+        // Only a user's id is what `requestReviews` takes in `userIds`.
+        let id = (opt_str(request, "/requestedReviewer/__typename") == Some("User"))
+            .then(|| opt_str(request, "/requestedReviewer/id").map(str::to_string))
+            .flatten();
         match reviewers
             .iter_mut()
             .find(|reviewer| reviewer.login == login)
         {
-            Some(existing) => existing.outcome = ReviewOutcome::Requested,
+            Some(existing) => {
+                existing.outcome = ReviewOutcome::Requested;
+                existing.id = id;
+            }
             None => reviewers.push(Reviewer {
-                id: None,
+                id,
                 login: login.to_string(),
                 outcome: ReviewOutcome::Requested,
             }),
@@ -616,15 +675,23 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
             detail: "a pull request without an id".to_string(),
         })?
         .to_string();
+    let repository = data.pointer("/repository").unwrap_or(&Value::Null);
+    let requested = |typename: &str| -> Vec<String> {
+        array_at(node, "/reviewRequests/nodes")
+            .into_iter()
+            .filter(|request| opt_str(request, "/requestedReviewer/__typename") == Some(typename))
+            .filter_map(|request| opt_str(request, "/requestedReviewer/id").map(str::to_string))
+            .collect()
+    };
     Ok(ActionContext {
         node_id,
         state: mapping::github_change_state(&str_at(node, "/state"), bool_at(node, "/isDraft")),
-        head_sha: None,
-        head_ref_name: None,
-        cross_repository: false,
-        reviewer_ids: Vec::new(),
-        team_ids: Vec::new(),
-        capabilities: capabilities(node),
+        head_sha: opt_str(node, "/headRefOid").map(str::to_string),
+        head_ref_name: opt_str(node, "/headRefName").map(str::to_string),
+        cross_repository: bool_at(node, "/isCrossRepository"),
+        reviewer_ids: requested("User"),
+        team_ids: requested("Team"),
+        capabilities: capabilities(node, repository),
     })
 }
 
@@ -706,14 +773,96 @@ pub(crate) fn act(
             }
             mutate(client, "UpdatePullRequest", UPDATE, input)?
         }
-        Action::Merge { .. }
-        | Action::CancelAutoMerge
-        | Action::SetReviewers { .. }
-        | Action::SetLabels { .. } => {
-            return Err(ForgeError::Unsupported {
-                host: client.host.clone(),
-                what: action.kind().to_string(),
-            });
+        Action::Merge {
+            method,
+            commit_title,
+            commit_message,
+            delete_branch,
+            when_checks_pass,
+            expected_head,
+        } => {
+            let word = match method {
+                MergeMethod::Merge => "MERGE",
+                MergeMethod::Squash => "SQUASH",
+                MergeMethod::Rebase => "REBASE",
+            };
+            let mut input =
+                json!({ "pullRequestId": id, "mergeMethod": word, "expectedHeadOid": expected_head });
+            if *method != MergeMethod::Rebase {
+                if let Some(title) = commit_title {
+                    input["commitHeadline"] = json!(title);
+                }
+                if let Some(message) = commit_message.as_deref().filter(|m| !m.trim().is_empty()) {
+                    input["commitBody"] = json!(message);
+                }
+            }
+            if *when_checks_pass {
+                // GitHub's auto-merge has no delete flag: the repository's
+                // own setting decides (plan ruling 4).
+                mutate(client, "EnablePullRequestAutoMerge", ENABLE_AUTO_MERGE, input)?;
+            } else {
+                mutate(client, "MergePullRequest", MERGE, input)?;
+                if *delete_branch && !context.cross_repository {
+                    if let Some(branch) = &context.head_ref_name {
+                        return Ok(delete_head(client, branch));
+                    }
+                }
+            }
+        }
+        Action::CancelAutoMerge => mutate(
+            client,
+            "DisablePullRequestAutoMerge",
+            DISABLE_AUTO_MERGE,
+            json!({ "pullRequestId": id }),
+        )?,
+        Action::SetReviewers { add, remove } => {
+            // `union: false` replaces the whole set of requests, so the set
+            // is built from the fresh read, never from the tab's copy.
+            let mut users: Vec<String> = context
+                .reviewer_ids
+                .iter()
+                .filter(|user| !remove.contains(user))
+                .cloned()
+                .collect();
+            for user in add {
+                if !users.contains(user) {
+                    users.push(user.clone());
+                }
+            }
+            let teams: Vec<&String> = context.team_ids.iter().filter(|team| !remove.contains(team)).collect();
+            mutate(
+                client,
+                "RequestReviews",
+                REQUEST_REVIEWS,
+                json!({ "pullRequestId": id, "userIds": users, "teamIds": teams, "union": false }),
+            )?
+        }
+        Action::SetLabels { add, remove } => {
+            if !add.is_empty() {
+                mutate(
+                    client,
+                    "AddLabelsToLabelable",
+                    ADD_LABELS,
+                    json!({ "labelableId": id, "labelIds": add }),
+                )?;
+            }
+            if !remove.is_empty() {
+                let removed = mutate(
+                    client,
+                    "RemoveLabelsFromLabelable",
+                    REMOVE_LABELS,
+                    json!({ "labelableId": id, "labelIds": remove }),
+                );
+                match removed {
+                    Ok(()) => {}
+                    Err(error) if !add.is_empty() => {
+                        return Ok(ActionOutcome {
+                            warning: Some(format!("labels added, but removing the others failed: {error}")),
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         }
         Action::EditComment { comment, body } => match comment.kind {
             CommentKind::Comment => mutate(
@@ -731,6 +880,71 @@ pub(crate) fn act(
         },
     }
     Ok(ActionOutcome::default())
+}
+
+/// After a merge: the head branch goes, through REST — the merge stands
+/// whatever this answers (spec §5, *delete branch*).
+fn delete_head(client: &ForgeClient, branch: &str) -> ActionOutcome {
+    let result = owner_and_name(client).and_then(|(owner, name)| {
+        let request = RestRequest {
+            method: RestMethod::Delete,
+            path: format!("repos/{owner}/{name}/git/refs/heads/{}", percent_encode(branch, true)),
+            body: None,
+        };
+        execute_rest(client, &request).map(|_| ())
+    });
+    match result {
+        Ok(()) => ActionOutcome::default(),
+        Err(error) => ActionOutcome {
+            warning: Some(format!("merged; deleting the branch failed: {error}")),
+        },
+    }
+}
+
+pub(crate) fn reviewer_candidates(
+    client: &ForgeClient,
+    number: u64,
+    text: &str,
+) -> Result<Vec<Candidate>, ForgeError> {
+    let (owner, name) = owner_and_name(client)?;
+    let data = run(
+        client,
+        "ReviewerCandidates",
+        REVIEWER_CANDIDATES,
+        json!({ "owner": owner, "name": name, "number": number, "q": text }),
+    )?;
+    // Nobody reviews their own pull request.
+    let author = opt_str(&data, "/repository/pullRequest/author/login").unwrap_or("");
+    Ok(array_at(&data, "/repository/assignableUsers/nodes")
+        .into_iter()
+        .filter_map(|user| {
+            let login = opt_str(user, "/login")?;
+            (!login.eq_ignore_ascii_case(author)).then(|| Candidate {
+                id: opt_str(user, "/id").unwrap_or_default().to_string(),
+                label: login.to_string(),
+                note: opt_str(user, "/name").filter(|name| !name.is_empty()).map(str::to_string),
+            })
+        })
+        .filter(|candidate| !candidate.id.is_empty())
+        .collect())
+}
+
+pub(crate) fn label_candidates(client: &ForgeClient, text: &str) -> Result<Vec<Candidate>, ForgeError> {
+    let (owner, name) = owner_and_name(client)?;
+    let data = run(
+        client,
+        "LabelCandidates",
+        LABEL_CANDIDATES,
+        json!({ "owner": owner, "name": name, "q": text }),
+    )?;
+    Ok(labels(data.pointer("/repository").unwrap_or(&Value::Null))
+        .into_iter()
+        .map(|label| Candidate {
+            id: label.id,
+            label: label.name,
+            note: None,
+        })
+        .collect())
 }
 
 /// A classic token lists its scopes in `X-OAuth-Scopes` on any answer; the

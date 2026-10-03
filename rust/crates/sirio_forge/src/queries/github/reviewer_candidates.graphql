@@ -1,0 +1,6 @@
+query ReviewerCandidates($owner: String!, $name: String!, $number: Int!, $q: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { author { login } }
+    assignableUsers(first: 20, query: $q) { nodes { id login name } }
+  }
+}

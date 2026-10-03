@@ -13,7 +13,7 @@ fragment ChangeSummary on PullRequest {
   reviewDecision
   approvals: reviews(states: APPROVED) { totalCount }
   reviewRequests(first: 20) {
-    nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } }
+    nodes { requestedReviewer { __typename ... on User { id login } ... on Team { id slug } } }
   }
   commits(last: 1) {
     nodes {

@@ -1,0 +1,1 @@
+{"data": {"repository": {"pullRequest": {"author": {"login": "alice"}}, "assignableUsers": {"nodes": [{"id": "U_kwDOalice", "login": "alice", "name": "Alice"}, {"id": "U_kwDOann", "login": "ann", "name": "Ann Lee"}, {"id": "U_kwDObob", "login": "bob", "name": "Bob"}]}}}}

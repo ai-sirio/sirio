@@ -15,7 +15,8 @@ set -euo pipefail
 # have gone through.
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
-# `--stage NAME` runs one: wire-github, wire-gitlab, failures, cli, scopes, ui. Nothing
+# `--stage NAME` runs one: wire-github, wire-gitlab, failures, merge, metadata, cli,
+# scopes, ui. Nothing
 # is published and the user's own gh/glab configuration is never read.
 #
 # The `ui` stage launches a real, isolated Sirio (debug build) against the
@@ -448,6 +449,181 @@ probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token lim
 expect_code 20 "a rate limited host"
 expect_line "ERR RateLimited"
 [ "$(sent_count github AddComment)" = "$before" ] || fail "a comment was sent to a rate limited host"
+fi
+
+# Every input the fake forge saw of an operation, one canonical JSON per line.
+sent_inputs() { # flavour Operation
+  "$PYTHON" - "$WORK/$1-requests.log" "$2" <<'PY'
+import json, re, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    found = re.match(r"^POST \S+ (\S+) interaction=\w+ vars=(.*)$", line)
+    if found and found.group(1) == sys.argv[2]:
+        print(json.dumps(json.loads(found.group(2)).get("input"), sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+PY
+}
+expect_nth_input() { # flavour Operation n(1-based) json
+  local got want
+  got=$(sent_inputs "$1" "$2" | sed -n "${3}p")
+  want=$("$PYTHON" -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":"), ensure_ascii=False))' "$4")
+  [ "$got" = "$want" ] || { cat "$WORK/$1-requests.log" >&2; fail "$1 $2 #$3 was sent as $got, expected $want"; }
+}
+expect_prefix() { echo "$PROBE_OUT" | grep -q -- "^$1" || { dump; fail "no line starting: $1"; }; }
+no_rest() { # flavour "METHOD /path-prefix"
+  ! grep -q -- "^$2" "$WORK/$1-requests.log" || { cat "$WORK/$1-requests.log" >&2; fail "the $1 forge saw: $2"; }
+}
+expect_var() { # flavour Operation key value -- a read's variable, as the forge saw it
+  "$PYTHON" - "$WORK/$1-requests.log" "$2" "$3" "$4" <<'PY' || { cat "$WORK/$1-requests.log" >&2; fail "$1 $2 never carried $3=$4"; }
+import json, re, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    found = re.match(r"^POST \S+ (\S+) interaction=\w+ vars=(.*)$", line)
+    if found and found.group(1) == sys.argv[2] and json.loads(found.group(2)).get(sys.argv[3]) == sys.argv[4]:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+GH_HEAD=b2c3d4e5f60718293a4b5c6d7e8f901234567890
+GL_HEAD=d4e5f60718293a4b5c6d7e8f901234567890a1b2
+
+if wanted merge; then
+echo "stage merge: a merge reaches each forge with the head the user saw, and only when the forge would take it"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" header 101
+expect_code 0 "github header"
+expect_line "MERGE ready methods=merge,squash,rebase default=merge auto=yes enabled=- delete-default=no"
+probe "${GH[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Ship it" --message "because"
+expect_code 0 "a squash merge"
+expect_input github MergePullRequest "{\"commitBody\":\"because\",\"commitHeadline\":\"Ship it\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
+no_rest github "DELETE "
+echo "  a rebase carries no message; delete-branch is a REST call after the merge"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" act 101 merge --method rebase --head "$GH_HEAD" --title "ignored" --delete-branch yes
+expect_code 0 "a rebase merge"
+expect_input github MergePullRequest "{\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"REBASE\",$GH_ID}"
+expect_rest github "DELETE /api/v3/repos/acme/widgets/git/refs/heads/feat/login"
+echo "  a moved head is refused before the wire"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" act 101 merge --method merge --head 0000000000000000000000000000000000000000
+expect_code 20 "a merge of a head that moved"
+expect_line "ERR HeadMoved"
+expect_sent github MergePullRequest 0
+echo "  a failed branch deletion leaves the merge done, with a warning"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token deletefails act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
+expect_code 0 "a merge whose branch deletion fails"
+expect_line "ACT ok"
+expect_prefix "WARNING merged; deleting the branch failed:"
+echo "  a head in a fork is never deleted"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token fork act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
+expect_code 0 "a merge of a fork's head"
+expect_sent github MergePullRequest 1
+no_rest github "DELETE "
+echo "  a blocked pull request sends nothing and says why"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token blocked header 101
+expect_line "MERGE blocked:a-review-is-required methods=merge,squash,rebase default=merge auto=yes enabled=- delete-default=no"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token blocked act 101 merge --method merge --head "$GH_HEAD"
+expect_code 20 "a blocked merge"
+expect_line "MESSAGE It cannot be merged yet: a review is required."
+expect_sent github MergePullRequest 0
+echo "  waiting on checks: only merge-when-checks-pass, then cancel it"
+reset_forge github "$GH_PORT"
+GHW=("$PROBE" --forge github --host ghe.test --project acme/widgets --token waiting)
+probe "${GHW[@]}" act 101 merge --method merge --head "$GH_HEAD"
+expect_code 20 "a merge while checks run"
+expect_line "MESSAGE Checks are still running."
+probe "${GHW[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Ship it" --when-checks-pass yes --delete-branch yes
+expect_code 0 "auto-merge"
+expect_input github EnablePullRequestAutoMerge "{\"commitHeadline\":\"Ship it\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
+no_rest github "DELETE "
+probe "${GHW[@]}" header 101
+expect_line "MERGE waiting methods=merge,squash,rebase default=merge auto=yes enabled=squash delete-default=no"
+probe "${GHW[@]}" act 101 cancel-auto-merge
+expect_code 0 "cancel auto-merge"
+expect_input github DisablePullRequestAutoMerge "{$GH_ID}"
+echo "  a token without a write scope is Forbidden on a merge too"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token scopeless act 101 merge --method merge --head "$GH_HEAD"
+expect_line "ERR Forbidden"
+
+reset_forge gitlab "$GL_PORT"
+MR_ID='"iid":"201","projectPath":"team/app"'
+probe "${GL[@]}" header 201
+expect_code 0 "gitlab header"
+expect_line "MERGE ready methods=merge,squash default=merge auto=yes enabled=- delete-default=yes"
+probe "${GL[@]}" act 201 merge --method squash --head "$GL_HEAD" --title "Ship it" --message "because" --delete-branch yes
+expect_code 0 "a gitlab squash merge"
+expect_input gitlab MergeRequestAccept "{$MR_ID,\"sha\":\"$GL_HEAD\",\"shouldRemoveSourceBranch\":true,\"squash\":true,\"squashCommitMessage\":\"Ship it\\n\\nbecause\"}"
+reset_forge gitlab "$GL_PORT"
+probe "${GL[@]}" act 201 merge --method merge --head "$GL_HEAD" --title "Merge it"
+expect_input gitlab MergeRequestAccept "{\"commitMessage\":\"Merge it\",$MR_ID,\"sha\":\"$GL_HEAD\",\"shouldRemoveSourceBranch\":false,\"squash\":false}"
+probe "${GL[@]}" act 201 merge --method rebase --head "$GL_HEAD"
+expect_code 20 "a rebase on gitlab"
+expect_line "ERR Rejected"
+probe "${GL[@]}" act 201 merge --method merge --head 0000000000000000000000000000000000000000
+expect_line "ERR HeadMoved"
+expect_sent gitlab MergeRequestAccept 1
+reset_forge gitlab "$GL_PORT"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token blocked act 201 merge --method merge --head "$GL_HEAD"
+expect_line "MESSAGE It cannot be merged yet: a review is required."
+expect_sent gitlab MergeRequestAccept 0
+GLW=("$PROBE" --forge gitlab --host gitlab.test --project team/app --token waiting)
+probe "${GLW[@]}" act 201 merge --method merge --head "$GL_HEAD" --when-checks-pass yes
+expect_code 0 "gitlab auto-merge"
+expect_input gitlab MergeRequestAccept "{$MR_ID,\"sha\":\"$GL_HEAD\",\"shouldRemoveSourceBranch\":false,\"squash\":false,\"strategy\":\"MERGE_WHEN_CHECKS_PASS\"}"
+probe "${GLW[@]}" act 201 cancel-auto-merge
+expect_code 0 "gitlab cancel auto-merge"
+expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/cancel_merge_when_pipeline_succeeds"
+echo "  an older GitLab reports no merge capability, and nothing is offered"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token old header 201
+expect_code 0 "an old gitlab header"
+expect_line "MERGE unreported methods=- default=- auto=no enabled=- delete-default=no"
+fi
+
+if wanted metadata; then
+echo "stage metadata: reviewers and labels change by one write each, with ids the forge gave"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" header 101
+expect_line "REVIEWER_ID fake-user U_kwDOfake"
+expect_line "LABEL LA_kwDObug bug"
+probe "${GH[@]}" act 101 set-reviewers --add U_kwDOann --remove U_kwDOfake
+expect_code 0 "github reviewers"
+expect_input github RequestReviews "{$GH_ID,\"teamIds\":[\"T_kwDOcore\"],\"union\":false,\"userIds\":[\"U_kwDOann\"]}"
+probe "${GH[@]}" act 101 set-reviewers
+expect_code 20 "reviewers with nothing to change"
+expect_line "MESSAGE There is nothing to change."
+expect_sent github RequestReviews 1
+probe "${GH[@]}" act 101 set-labels --add LA_kwDOfeat --remove LA_kwDObug
+expect_code 0 "github labels"
+expect_input github AddLabelsToLabelable '{"labelIds":["LA_kwDOfeat"],"labelableId":"PR_kwDOfake101"}'
+expect_input github RemoveLabelsFromLabelable '{"labelIds":["LA_kwDObug"],"labelableId":"PR_kwDOfake101"}'
+probe "${GH[@]}" candidates reviewers 101 --text ann
+expect_code 0 "github reviewer candidates"
+expect_var github ReviewerCandidates q ann
+expect_line "CANDIDATE U_kwDOann ann Ann Lee"
+no_line "CANDIDATE U_kwDOalice alice Alice"
+probe "${GH[@]}" candidates labels 101 --text fe
+expect_line "CANDIDATE LA_kwDOfeat feature -"
+
+reset_forge gitlab "$GL_PORT"
+probe "${GL[@]}" header 201
+expect_line "REVIEWER_ID carol carol"
+expect_line "LABEL gid://gitlab/ProjectLabel/1 bug"
+probe "${GL[@]}" act 201 set-reviewers --add ann --remove carol
+expect_code 0 "gitlab reviewers"
+expect_sent gitlab MergeRequestSetReviewers 2
+expect_nth_input gitlab MergeRequestSetReviewers 1 '{"iid":"201","operationMode":"APPEND","projectPath":"team/app","reviewerUsernames":["ann"]}'
+expect_nth_input gitlab MergeRequestSetReviewers 2 '{"iid":"201","operationMode":"REMOVE","projectPath":"team/app","reviewerUsernames":["carol"]}'
+probe "${GL[@]}" act 201 set-labels --add gid://gitlab/ProjectLabel/2
+expect_code 0 "gitlab labels"
+expect_sent gitlab MergeRequestSetLabels 1
+expect_input gitlab MergeRequestSetLabels '{"iid":"201","labelIds":["gid://gitlab/ProjectLabel/2"],"operationMode":"APPEND","projectPath":"team/app"}'
+probe "${GL[@]}" candidates reviewers 201 --text ann
+expect_var gitlab ReviewerCandidates q ann
+expect_line "CANDIDATE ann ann Ann Lee"
+probe "${GL[@]}" candidates labels 201 --text fe
+expect_line "CANDIDATE gid://gitlab/ProjectLabel/2 feature -"
 fi
 
 if wanted scopes; then

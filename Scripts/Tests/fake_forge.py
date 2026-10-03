@@ -47,6 +47,18 @@ normal -- so one server covers every error path of an action:
     finegrained  a token that reports no scopes at all
     notefails    GitLab only: `createNote` is refused with the reason in the
                  payload's `errors`, while the REST approval still answers 201
+    blocked, waiting, fork
+                 reads serve `<Operation>.<credential>.json` where it exists
+                 (a merge blocked by a review, checks still running, a head
+                 in a fork) -- the same rule as `readonly`
+    deletefails  GitHub's REST `DELETE .../git/refs/heads/<branch>` answers
+                 422, so a merge whose branch deletion fails can be told apart
+
+Merge (B2b): GitHub's branch deletion is REST `DELETE /api/v3/repos/<o>/<r>/
+git/refs/heads/<branch>` (204); GitLab's cancel of an auto-merge is REST
+`POST /api/v4/projects/<p>/merge_requests/<iid>/cancel_merge_when_pipeline_
+succeeds` (200). `ReviewerCandidates` and `LabelCandidates` answer their
+fixture with the rows whose words contain the `q` variable.
 
 A write that succeeded is remembered, and a read then serves
 `<Operation>.after.<Mutation>.json` when it exists (the newest write that has
@@ -107,6 +119,20 @@ def strip_newer(value, parent=None):
         }
     if isinstance(value, list):
         return [strip_newer(item, parent) for item in value]
+    return value
+
+
+def only_matching(value, text):
+    """A candidate search: every list of nodes keeps the rows whose words
+    contain `text`, as the forge's own search would."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "nodes" and isinstance(item, list):
+                out[key] = [row for row in item if text in json.dumps(row).lower()]
+            else:
+                out[key] = only_matching(item, text)
+        return out
     return value
 
 
@@ -193,8 +219,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             overlay = fixtures.get(f"{name}.after.{key}")
             if overlay:
                 return overlay
-        if self.credential() == "readonly" and fixtures.get(f"{name}.readonly"):
-            return fixtures[f"{name}.readonly"]
+        credential = self.credential()
+        if credential in ("readonly", "blocked", "waiting", "fork") and fixtures.get(f"{name}.{credential}"):
+            return fixtures[f"{name}.{credential}"]
         return fixtures.get(name)
 
     def write_failure(self, field):
@@ -224,6 +251,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def rest_write(self, path):
         """GitLab's approval: the only REST write B2a sends."""
         self.record("POST", path, None, None, None)
+        if self.flavor == "gitlab" and re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/cancel_merge_when_pipeline_succeeds", path):
+            error = self.scenario_error()
+            if error:
+                return self.answer(error[0], error[1], error[2])
+            self.remember("cancel-auto-merge")
+            return self.answer(200, {"iid": 201, "merge_when_pipeline_succeeds": False})
         if self.flavor != "gitlab" or not re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/approve", path):
             return self.answer(404, {"message": "404 Not Found"})
         error = self.scenario_error()
@@ -277,6 +310,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         scopes = {"readonly": "read:org", "finegrained": None}.get(self.credential(), "repo, read:org")
         return self.answer(200, who, [("X-OAuth-Scopes", scopes)] if scopes is not None else [])
 
+    def do_DELETE(self):
+        """GitHub's branch deletion after a merge: the only DELETE Sirio sends."""
+        path = self.plain_path()
+        self.body()
+        self.record("DELETE", path, None, None, None)
+        if self.flavor != "github" or not re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/git/refs/heads/.+", path):
+            return self.answer(404, {"message": "Not Found"})
+        error = self.scenario_error()
+        if error:
+            return self.answer(error[0], error[1], error[2])
+        if self.credential() == "deletefails":
+            return self.answer(422, {"message": "Reference does not exist"})
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         path = self.plain_path()
         raw = self.body()
@@ -313,6 +362,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})
         with open(path, encoding="utf-8") as fixture:
             payload = json.load(fixture)
+        if operation in ("ReviewerCandidates", "LabelCandidates"):
+            payload = only_matching(payload, (variables.get("q") or "").lower())
         if old and operation in BASELINE_OPERATIONS:
             payload = strip_newer(payload)
         return self.answer(200, payload, [("X-RateLimit-Remaining", "4999")])

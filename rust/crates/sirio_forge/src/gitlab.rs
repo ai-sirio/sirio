@@ -27,6 +27,7 @@ use crate::graphql::{
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
+    Candidate,
     Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
     ReviewOutcome, Reviewer, TimelineItem,
@@ -740,6 +741,20 @@ pub(crate) fn act(
         )?,
     }
     Ok(ActionOutcome::default())
+}
+
+pub(crate) fn reviewer_candidates(client: &ForgeClient, _text: &str) -> Result<Vec<Candidate>, ForgeError> {
+    Err(ForgeError::Unsupported {
+        host: client.host.clone(),
+        what: "reviewer search".to_string(),
+    })
+}
+
+pub(crate) fn label_candidates(client: &ForgeClient, _text: &str) -> Result<Vec<Candidate>, ForgeError> {
+    Err(ForgeError::Unsupported {
+        host: client.host.clone(),
+        what: "label search".to_string(),
+    })
 }
 
 /// A personal access token describes itself at `personal_access_tokens/self`.
