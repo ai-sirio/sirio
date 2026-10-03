@@ -25,7 +25,11 @@ mod edit;
 mod ely_ui;
 
 use crate::change_request_style as style;
-use ely_gpui_component::primitives::{IconName, Severity};
+use ely_gpui_component::{
+    forms::Choice,
+    navigation::Tabs,
+    primitives::{IconName, Severity},
+};
 use ely_ui::ButtonState;
 use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
@@ -1275,80 +1279,37 @@ impl ChangeRequestTab {
 
     fn render_inner_strip(&self, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
         let ci = self.header.value().map(|header| header.summary.ci);
-        let hover = theme.ely.hover;
+        // `Tabs` panics when `selected` names no tab: both come from InnerTab::ALL.
+        let choices: Vec<Choice> = InnerTab::ALL
+            .into_iter()
+            .map(|inner| {
+                // The pane is narrow: only Checks carries an icon, because it is
+                // the one that carries state (the CI result).
+                let choice = Choice::new(inner.as_str(), inner.title());
+                let choice = match (inner, ci.and_then(|ci| style::ci_icon(ci, theme))) {
+                    (InnerTab::Checks, Some((icon, _))) => choice.icon(icon),
+                    _ => choice,
+                };
+                match self.inner_count(inner) {
+                    Some(count) => choice.note(count),
+                    None => choice,
+                }
+            })
+            .collect();
+        let entity = entity.clone();
         div()
             .id("change-request-inner-tabs")
-            .h(px(32.0))
+            .debug_selector(|| "change-request-inner-tabs".to_owned())
             .px(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .border_b_1()
-            .border_color(theme.ely.border)
-            .children(InnerTab::ALL.into_iter().map(|inner| {
-                let active = inner == self.inner;
-                let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
-                let (icon, tint): (Icon, Hsla) = match inner {
-                    InnerTab::Conversation => (Icon::MessageSquare, tone),
-                    InnerTab::Commits => (Icon::GitCommit, tone),
-                    InnerTab::Checks => ci
-                        .and_then(|ci| style::ci_mark(ci, theme))
-                        .unwrap_or((Icon::Circle, tone)),
-                    InnerTab::Files => (Icon::File, tone),
-                };
-                let id = match inner {
-                    InnerTab::Conversation => "change-request-inner-conversation",
-                    InnerTab::Commits => "change-request-inner-commits",
-                    InnerTab::Checks => "change-request-inner-checks",
-                    InnerTab::Files => "change-request-inner-files",
-                };
-                let entity = entity.clone();
-                div()
-                    .id(id)
-                    .debug_selector(move || id.to_owned())
-                    .relative()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .text_size(theme.typography.footnote)
-                    .font_weight(if active {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(tone)
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |tab, cx| tab.select_inner(inner, cx))
-                    })
-                    .child(IconElement::new(icon, IconSize::Small).text_color(tint))
-                    .child(inner.title())
-                    .when_some(self.inner_count(inner), |this, count| {
-                        this.child(
-                            div()
-                                .px(px(6.0))
-                                .rounded(px(999.0))
-                                .bg(theme.ely.hover)
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.ely.fg_muted)
-                                .child(count),
-                        )
-                    })
-                    .when(active, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .bottom(px(-1.0))
-                                .left_0()
-                                .right_0()
-                                .h(px(2.0))
-                                .bg(theme.ely.fg),
-                        )
-                    })
-            }))
+            .child(
+                Tabs::new("change-request-tabs", choices, self.inner.as_str()).on_change(
+                    move |value, _, cx| {
+                        // An unknown value opens the conversation, never panics.
+                        let inner = InnerTab::parse(value);
+                        entity.update(cx, |tab, cx| tab.select_inner(inner, cx));
+                    },
+                ),
+            )
     }
 
     fn render_conversation(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
