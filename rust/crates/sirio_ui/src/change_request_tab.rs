@@ -25,6 +25,8 @@ mod edit;
 mod ely_ui;
 
 use crate::change_request_style as style;
+use ely_gpui_component::primitives::{IconName, Severity};
+use ely_ui::ButtonState;
 use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
@@ -1040,19 +1042,6 @@ fn button(
         .when_some(label, |this, label| this.child(label))
 }
 
-fn badge(label: &'static str, color: Hsla, theme: &Theme) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px(px(8.0))
-        .py(px(1.0))
-        .rounded(px(999.0))
-        .text_size(theme.typography.caption2)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .bg(color.opacity(0.14))
-        .child(label)
-}
-
 fn error_panel(
     message: String,
     theme: &Theme,
@@ -1065,29 +1054,25 @@ fn error_panel(
         .items_center()
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
-        .child(
-            div()
-                .text_color(theme.ely.danger)
-                .child(selectable_text(message)),
-        )
+        .child(ely_ui::message(Severity::Danger, message))
         .child(
             div()
                 .flex()
                 .gap(px(8.0))
-                .child(button(
+                .child(ely_ui::text_button(
                     "change-request-retry",
-                    Icon::RefreshCw,
-                    Some("Retry"),
-                    theme,
-                    move |cx| retry(cx),
+                    "Retry",
+                    Some(IconName::RefreshCw),
+                    ButtonState::IDLE,
+                    move |_, cx| retry(cx),
                 ))
                 .when_some(close, |this, close| {
-                    this.child(button(
+                    this.child(ely_ui::text_button(
                         "change-request-close",
-                        Icon::Close,
-                        Some("Close"),
-                        theme,
-                        move |cx| close(cx),
+                        "Close",
+                        Some(IconName::X),
+                        ButtonState::IDLE,
+                        move |_, cx| close(cx),
                     ))
                 }),
         )
@@ -1095,26 +1080,26 @@ fn error_panel(
 }
 
 fn stale_line(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> AnyElement {
+    let _ = theme;
     div()
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.danger)
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(format!("Refresh failed · {message}")),
+                .child(ely_ui::message(
+                    Severity::Warning,
+                    format!("Refresh failed · {message}"),
+                )),
         )
-        .child(button(
+        .child(ely_ui::text_button(
             "change-request-stale-retry",
-            Icon::RefreshCw,
-            Some("Retry"),
-            theme,
-            move |cx| retry(cx),
+            "Retry",
+            Some(IconName::RefreshCw),
+            ButtonState::IDLE,
+            move |_, cx| retry(cx),
         ))
         .into_any_element()
 }
@@ -1223,24 +1208,20 @@ impl ChangeRequestTab {
                             ),
                     )
                     .when_some(web_url, |this, url| {
-                        let forge = self.reference.forge;
-                        this.child(
-                            button(
-                                "change-request-open-browser",
-                                style::forge_mark(forge),
-                                Some("Open in browser"),
-                                theme,
-                                move |cx| cx.open_url(&url),
-                            )
-                            .child(IconElement::new(Icon::ArrowUpRight, IconSize::XSmall)),
-                        )
+                        this.child(ely_ui::icon_button(
+                            "change-request-open-browser",
+                            IconName::ExternalLink,
+                            "Open on the forge",
+                            true,
+                            move |_, cx| cx.open_url(&url),
+                        ))
                     })
-                    .child(button(
+                    .child(ely_ui::icon_button(
                         "change-request-refresh",
-                        Icon::RefreshCw,
-                        None,
-                        theme,
-                        move |cx| refresh.update(cx, |tab, cx| tab.refresh(cx)),
+                        IconName::RefreshCw,
+                        "Refresh",
+                        true,
+                        move |_, cx| refresh.update(cx, |tab, cx| tab.refresh(cx)),
                     )),
             )
             .when_some(self.render_action_bar(theme, entity), |this, bar| this.child(bar))
@@ -1259,11 +1240,7 @@ impl ChangeRequestTab {
                         .gap(px(8.0))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.ely.fg_muted)
-                        .child(badge(
-                            style::state_label(summary.state),
-                            style::state_color(summary.state, theme),
-                            theme,
-                        ))
+                        .child(ely_ui::state_badge(summary.state))
                         .child(
                             div()
                                 .debug_selector(|| "change-request-meta".into())
@@ -1997,26 +1974,27 @@ impl ChangeRequestTab {
             .child(
                 div()
                     .max_w(px(520.0))
-                    .text_color(theme.ely.fg_muted)
-                    .child(selectable_text(message)),
+                    .child(ely_ui::message(Severity::Warning, message)),
             )
             .child(
                 div()
                     .flex()
                     .gap(px(8.0))
-                    .child(button(
+                    .child(ely_ui::text_button(
                         "change-request-reconnect",
-                        Icon::RefreshCw,
-                        Some("Retry"),
-                        theme,
-                        move |cx| retry.update(cx, |tab, cx| tab.retry(cx)),
+                        "Retry",
+                        Some(IconName::RefreshCw),
+                        ButtonState::IDLE,
+                        move |_, cx| retry.update(cx, |tab, cx| tab.retry(cx)),
                     ))
-                    .child(button(
+                    .child(ely_ui::text_button(
                         "change-request-close",
-                        Icon::Close,
-                        Some("Close"),
-                        theme,
-                        move |cx| close.update(cx, |_, cx| cx.emit(ChangeRequestTabEvent::Close)),
+                        "Close",
+                        Some(IconName::X),
+                        ButtonState::IDLE,
+                        move |_, cx| {
+                            close.update(cx, |_, cx| cx.emit(ChangeRequestTabEvent::Close))
+                        },
                     )),
             )
             .into_any_element()
