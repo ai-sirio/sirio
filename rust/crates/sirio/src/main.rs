@@ -5225,24 +5225,24 @@ impl SirioWorkspace {
                                     let _ = reply.send(workspace.control_read_change_request(cx));
                                 }
                                 ControlAction::RevealChangeRequestFile { path, line, reply } => {
-                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
                                         tab.reveal(PathBuf::from(&path), line, cx);
                                         Ok(())
                                     }));
                                 }
                                 ControlAction::OpenChangeRequestFile { path, line, reply } => {
-                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
                                         tab.open_file(PathBuf::from(&path), line, cx)
                                     }));
                                 }
                                 ControlAction::OpenChangeRequestCommit { sha, reply } => {
-                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
                                         tab.open_commit_by_sha(&sha, cx)
                                     }));
                                 }
                                 ControlAction::ActChangeRequest { action, params, reply } => {
-                                    let _ = reply.send(workspace.control_change_request(cx, |tab, cx| {
-                                        tab.control_act(&action, &params, cx)
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, window, cx| {
+                                        tab.control_act(&action, &params, window, cx)
                                     }));
                                 }
                                 ControlAction::ReadTabs { reply } => {
@@ -14956,13 +14956,18 @@ impl SirioWorkspace {
     /// Runs `act` on the active change request tab, then reports the tab.
     fn control_change_request(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
-        act: impl FnOnce(&mut ChangeRequestTab, &mut Context<ChangeRequestTab>) -> Result<(), String>,
+        act: impl FnOnce(
+            &mut ChangeRequestTab,
+            &mut Window,
+            &mut Context<ChangeRequestTab>,
+        ) -> Result<(), String>,
     ) -> Result<Vec<(String, String)>, String> {
         let view = self
             .active_change_request()
             .ok_or_else(|| "the active tab is not a change request".to_string())?;
-        view.update(cx, act)?;
+        view.update(cx, |tab, cx| act(tab, window, cx))?;
         self.control_read_change_request(cx)
     }
 

@@ -1,6 +1,7 @@
 //! How a change request's facts look, shared by the right panel's list and
 //! the detail tab so that one state always wears one glyph and one colour.
 
+use ely_gpui_component::primitives::IconName;
 use gpui::Hsla;
 use sirio_forge::{ChangeState, CheckStatus, CiState, Forge, ReviewState};
 use sirio_theme::Theme;
@@ -68,14 +69,26 @@ pub(crate) fn review_mark(
     }
 }
 
-pub(crate) fn check_mark(status: CheckStatus, theme: &Theme) -> (Icon, Hsla) {
+/// Twin of [`ci_mark`] in Ely's icons; `None` draws nothing.
+pub(crate) fn ci_icon(ci: CiState, theme: &Theme) -> Option<(IconName, Hsla)> {
+    match ci {
+        CiState::NoChecks => None,
+        CiState::Running(_) => Some((IconName::Clock, theme.ely.warning)),
+        CiState::Passed => Some((IconName::CircleCheck, theme.ely.success)),
+        CiState::Failed => Some((IconName::CircleX, theme.ely.danger)),
+        CiState::Canceled => Some((IconName::Minus, theme.ely.fg_subtle)),
+    }
+}
+
+/// Twin of [`check_mark`] in Ely's icons.
+pub(crate) fn check_icon(status: CheckStatus, theme: &Theme) -> (IconName, Hsla) {
     match status {
-        CheckStatus::Passed => (Icon::Check, theme.ely.success),
-        CheckStatus::Failed => (Icon::XCircle, theme.ely.danger),
-        CheckStatus::Running => (Icon::Clock, theme.ely.warning),
-        CheckStatus::Queued => (Icon::Circle, theme.ely.fg_subtle),
+        CheckStatus::Passed => (IconName::CircleCheck, theme.ely.success),
+        CheckStatus::Failed => (IconName::CircleX, theme.ely.danger),
+        CheckStatus::Running => (IconName::Clock, theme.ely.warning),
+        CheckStatus::Queued => (IconName::Circle, theme.ely.fg_subtle),
         CheckStatus::Canceled | CheckStatus::Skipped | CheckStatus::Neutral => {
-            (Icon::Dash, theme.ely.fg_subtle)
+            (IconName::Minus, theme.ely.fg_subtle)
         }
     }
 }

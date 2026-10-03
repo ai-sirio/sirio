@@ -2,30 +2,15 @@
 //! description as fields at the top of the Conversation, and one of the
 //! viewer's own comments turned into a field where it stands.
 
-use bezel::ui::input::{Shape, TextField, normalize};
+use ely_gpui_component::forms::Input;
 use sirio_forge::{Action, CommentRef};
 
 use super::actions::{ActionState, CommentEdit, EditFields, action_button, indexed_button};
+use super::ely_ui::{ButtonState, new_input, normalize, text_button};
 use super::*;
 
 /// A description or a comment: wraps, grows, then scrolls.
-const BODY_SHAPE: Shape = Shape::Grow { min: 4, max: 16 };
-
-fn field(
-    cx: &mut Context<ChangeRequestTab>,
-    text: &str,
-    shape: Shape,
-    placeholder: &'static str,
-) -> Entity<TextField> {
-    let text = text.to_string();
-    cx.new(|cx| {
-        let mut field = TextField::new(cx)
-            .with_shape(shape)
-            .with_placeholder(placeholder);
-        field.set_content(text, cx);
-        field
-    })
-}
+const BODY_ROWS: Option<(usize, usize)> = Some((4, 16));
 
 fn caption(text: &'static str, theme: &Theme) -> gpui::Div {
     div()
@@ -36,7 +21,7 @@ fn caption(text: &'static str, theme: &Theme) -> gpui::Div {
 
 impl ChangeRequestTab {
     /// *Edit*: the three fields, filled with what the forge holds now.
-    pub(crate) fn start_edit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.action_busy() || self.actions.edit.is_some() {
             return;
         }
@@ -49,9 +34,9 @@ impl ChangeRequestTab {
             header.body.clone(),
         );
         self.actions.edit = Some(EditFields {
-            title: field(cx, &title, Shape::Line, "Title"),
-            target: field(cx, &target, Shape::Line, "Target branch"),
-            body: field(cx, &body, BODY_SHAPE, "Description"),
+            title: new_input(window, cx, &title, None, "Title"),
+            target: new_input(window, cx, &target, None, "Target branch"),
+            body: new_input(window, cx, &body, BODY_ROWS, "Description"),
         });
         cx.notify();
     }
@@ -71,15 +56,15 @@ impl ChangeRequestTab {
         let (title, target, body) = {
             let fields = self.actions.edit.as_ref().ok_or("nothing is being edited")?;
             (
-                fields.title.read(cx).content().to_string(),
-                fields.target.read(cx).content().to_string(),
-                fields.body.read(cx).content().to_string(),
+                normalize(fields.title.read(cx).text(), false),
+                normalize(fields.target.read(cx).text(), false),
+                normalize(fields.body.read(cx).text(), true),
             )
         };
         let header = self.header.value().ok_or("the change request is not loaded")?;
         let title = (title != header.summary.title).then_some(title);
         let target_branch = (target != header.summary.target_branch).then_some(target);
-        let body = (body != normalize(&header.body, BODY_SHAPE)).then_some(body);
+        let body = (body != normalize(&header.body, true)).then_some(body);
         if title.is_none() && target_branch.is_none() && body.is_none() {
             self.actions.edit = None;
             cx.notify();
@@ -96,7 +81,12 @@ impl ChangeRequestTab {
     }
 
     /// The pencil on one of the viewer's own comments.
-    pub(crate) fn start_comment_edit(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn start_comment_edit(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.action_busy() {
             return;
         }
@@ -120,7 +110,7 @@ impl ChangeRequestTab {
         };
         self.actions.comment_edit = Some(CommentEdit {
             comment,
-            field: field(cx, &body, BODY_SHAPE, "Comment"),
+            field: new_input(window, cx, &body, BODY_ROWS, "Comment"),
         });
         cx.notify();
     }
@@ -142,7 +132,7 @@ impl ChangeRequestTab {
                 .ok_or("no comment is being edited")?;
             (
                 edit.comment.clone(),
-                edit.field.read(cx).content().to_string(),
+                normalize(edit.field.read(cx).text(), true),
             )
         };
         // Like the header edit's untouched path: words that match what the
@@ -158,7 +148,7 @@ impl ChangeRequestTab {
                 edit: Some(edit),
                 body: current,
                 ..
-            } => edit.id == comment.id && body == normalize(current, BODY_SHAPE),
+            } => edit.id == comment.id && body == normalize(current, true),
             _ => false,
         });
         if unchanged {
@@ -188,11 +178,11 @@ impl ChangeRequestTab {
                 .border_color(theme.ely.border)
                 .bg(theme.ely.bg)
                 .child(caption("Title", theme))
-                .child(fields.title.clone())
+                .child(Input::new(&fields.title))
                 .child(caption("Target branch", theme))
-                .child(fields.target.clone())
+                .child(Input::new(&fields.target))
                 .child(caption("Description", theme))
-                .child(fields.body.clone())
+                .child(Input::new(&fields.body))
                 .child(
                     div()
                         .flex()
@@ -203,14 +193,14 @@ impl ChangeRequestTab {
                             "Cancel",
                             theme,
                             enabled,
-                            move |cx| cancel.update(cx, |tab, cx| tab.cancel_edit(cx)),
+                            move |_, cx| cancel.update(cx, |tab, cx| tab.cancel_edit(cx)),
                         ))
-                        .child(action_button(
+                        .child(text_button(
                             "change-request-edit-save",
                             "Save",
-                            theme,
-                            enabled,
-                            move |cx| {
+                            None,
+                            ButtonState::enabled(enabled).primary().loading(!enabled),
+                            move |_, cx| {
                                 save.update(cx, |tab, cx| {
                                     let _ = tab.save_edit(cx);
                                 })
@@ -257,7 +247,9 @@ impl ChangeRequestTab {
                 "Edit",
                 theme,
                 !self.action_busy(),
-                move |cx| entity.update(cx, |tab, cx| tab.start_comment_edit(index, cx)),
+                move |window, cx| {
+                    entity.update(cx, |tab, cx| tab.start_comment_edit(index, window, cx))
+                },
             )
             .into_any_element(),
         )
@@ -279,7 +271,7 @@ impl ChangeRequestTab {
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(edit.field.clone())
+            .child(Input::new(&edit.field))
             .child(
                 div()
                     .flex()
@@ -290,14 +282,14 @@ impl ChangeRequestTab {
                         "Cancel",
                         theme,
                         enabled,
-                        move |cx| cancel.update(cx, |tab, cx| tab.cancel_comment_edit(cx)),
+                        move |_, cx| cancel.update(cx, |tab, cx| tab.cancel_comment_edit(cx)),
                     ))
-                    .child(action_button(
+                    .child(text_button(
                         "change-request-comment-edit-save",
                         "Save",
-                        theme,
-                        enabled,
-                        move |cx| {
+                        None,
+                        ButtonState::enabled(enabled).primary().loading(!enabled),
+                        move |_, cx| {
                             save.update(cx, |tab, cx| {
                                 let _ = tab.save_comment_edit(cx);
                             })

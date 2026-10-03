@@ -22,12 +22,20 @@ use sirio_theme::Theme;
 mod actions;
 mod composer;
 mod edit;
+mod ely_ui;
 
 use crate::change_request_style as style;
+use ely_gpui_component::{
+    data_display::{Timeline, TimelineItem as RailItem, Tone},
+    forms::Choice,
+    navigation::Tabs,
+    primitives::{Icon as EIcon, IconName, Severity},
+    theme::IconSize as EIconSize,
+};
+use ely_ui::ButtonState;
 use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
-use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
 /// The inner tab a change request shows.
@@ -243,14 +251,8 @@ impl ChangeRequestTab {
         title: String,
         inner: InnerTab,
         worktree: PathBuf,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Self {
-        let composer = composer::new_field(cx);
-        cx.observe(&composer, |tab: &mut Self, field, cx| {
-            tab.actions.composer_blank = field.read(cx).content().trim().is_empty();
-            cx.notify();
-        })
-        .detach();
         Self {
             reference,
             title,
@@ -282,7 +284,7 @@ impl ChangeRequestTab {
             pending_reveal: None,
             commit_error: None,
             commit_task: None,
-            actions: actions::ActionsState::new(composer),
+            actions: actions::ActionsState::new(),
         }
     }
 
@@ -384,6 +386,14 @@ impl ChangeRequestTab {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.rate_paused() {
+            // Stay armed: the pause ends by itself, and a running CI is still
+            // worth looking at once it does.
+            if matches!(
+                self.header.value().map(|header| header.summary.ci),
+                Some(CiState::Running(_))
+            ) {
+                self.schedule_ci_refresh(CiState::Running(None), cx);
+            }
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -433,6 +443,14 @@ impl ChangeRequestTab {
         }
         if let Err(error) = &result {
             self.note_rate_limited(error);
+            // The timer cleared itself before asking; a failed answer must not
+            // end the polling while the header we still show says CI runs.
+            if matches!(
+                self.header.value().map(|header| header.summary.ci),
+                Some(CiState::Running(_))
+            ) {
+                self.schedule_ci_refresh(CiState::Running(None), cx);
+            }
         }
         self.header.finish(result);
         self.ensure_range(cx);
@@ -915,7 +933,11 @@ impl ChangeRequestTab {
             ("caps".to_string(), self.caps_words()),
             (
                 "composer_len".to_string(),
-                self.actions.composer.read(cx).content().len().to_string(),
+                self.actions
+                    .composer
+                    .as_ref()
+                    .map_or(0, |input| input.read(cx).text().len())
+                    .to_string(),
             ),
             (
                 "editing".to_string(),
@@ -1012,46 +1034,6 @@ fn open_links() -> LinkClickOverride {
     Rc::new(|url, _window, cx| cx.open_url(url))
 }
 
-fn button(
-    id: &'static str,
-    icon: Icon,
-    label: Option<&'static str>,
-    theme: &Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.ely.hover;
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.fg_muted)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .on_click(move |_, _, cx| on_click(cx))
-        .child(IconElement::new(icon, IconSize::Small))
-        .when_some(label, |this, label| this.child(label))
-}
-
-fn badge(label: &'static str, color: Hsla, theme: &Theme) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px(px(8.0))
-        .py(px(1.0))
-        .rounded(px(999.0))
-        .text_size(theme.typography.caption2)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .bg(color.opacity(0.14))
-        .child(label)
-}
-
 fn error_panel(
     message: String,
     theme: &Theme,
@@ -1064,29 +1046,25 @@ fn error_panel(
         .items_center()
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
-        .child(
-            div()
-                .text_color(theme.ely.danger)
-                .child(selectable_text(message)),
-        )
+        .child(ely_ui::message(Severity::Danger, message, theme))
         .child(
             div()
                 .flex()
                 .gap(px(8.0))
-                .child(button(
+                .child(ely_ui::text_button(
                     "change-request-retry",
-                    Icon::RefreshCw,
-                    Some("Retry"),
-                    theme,
-                    move |cx| retry(cx),
+                    "Retry",
+                    Some(IconName::RefreshCw),
+                    ButtonState::IDLE,
+                    move |_, cx| retry(cx),
                 ))
                 .when_some(close, |this, close| {
-                    this.child(button(
+                    this.child(ely_ui::text_button(
                         "change-request-close",
-                        Icon::Close,
-                        Some("Close"),
-                        theme,
-                        move |cx| close(cx),
+                        "Close",
+                        Some(IconName::X),
+                        ButtonState::IDLE,
+                        move |_, cx| close(cx),
                     ))
                 }),
         )
@@ -1098,22 +1076,22 @@ fn stale_line(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> An
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.danger)
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(format!("Refresh failed · {message}")),
+                .child(ely_ui::message(
+                    Severity::Warning,
+                    format!("Refresh failed · {message}"),
+                    theme,
+                )),
         )
-        .child(button(
+        .child(ely_ui::text_button(
             "change-request-stale-retry",
-            Icon::RefreshCw,
-            Some("Retry"),
-            theme,
-            move |cx| retry(cx),
+            "Retry",
+            Some(IconName::RefreshCw),
+            ButtonState::IDLE,
+            move |_, cx| retry(cx),
         ))
         .into_any_element()
 }
@@ -1222,24 +1200,20 @@ impl ChangeRequestTab {
                             ),
                     )
                     .when_some(web_url, |this, url| {
-                        let forge = self.reference.forge;
-                        this.child(
-                            button(
-                                "change-request-open-browser",
-                                style::forge_mark(forge),
-                                Some("Open in browser"),
-                                theme,
-                                move |cx| cx.open_url(&url),
-                            )
-                            .child(IconElement::new(Icon::ArrowUpRight, IconSize::XSmall)),
-                        )
+                        this.child(ely_ui::icon_button(
+                            "change-request-open-browser",
+                            IconName::ExternalLink,
+                            "Open on the forge",
+                            true,
+                            move |_, cx| cx.open_url(&url),
+                        ))
                     })
-                    .child(button(
+                    .child(ely_ui::icon_button(
                         "change-request-refresh",
-                        Icon::RefreshCw,
-                        None,
-                        theme,
-                        move |cx| refresh.update(cx, |tab, cx| tab.refresh(cx)),
+                        IconName::RefreshCw,
+                        "Refresh",
+                        true,
+                        move |_, cx| refresh.update(cx, |tab, cx| tab.refresh(cx)),
                     )),
             )
             .when_some(self.render_action_bar(theme, entity), |this, bar| this.child(bar))
@@ -1258,11 +1232,7 @@ impl ChangeRequestTab {
                         .gap(px(8.0))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.ely.fg_muted)
-                        .child(badge(
-                            style::state_label(summary.state),
-                            style::state_color(summary.state, theme),
-                            theme,
-                        ))
+                        .child(ely_ui::state_badge(summary.state))
                         .child(
                             div()
                                 .debug_selector(|| "change-request-meta".into())
@@ -1297,80 +1267,39 @@ impl ChangeRequestTab {
 
     fn render_inner_strip(&self, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
         let ci = self.header.value().map(|header| header.summary.ci);
-        let hover = theme.ely.hover;
+        // `Tabs` panics when `selected` names no tab: both come from InnerTab::ALL.
+        let choices: Vec<Choice> = InnerTab::ALL
+            .into_iter()
+            .map(|inner| {
+                // The pane is narrow: only Checks carries an icon, because it is
+                // the one that carries state (the CI result).
+                let choice = Choice::new(inner.as_str(), inner.title());
+                let choice = match (inner, ci.and_then(|ci| style::ci_icon(ci, theme))) {
+                    (InnerTab::Checks, Some((icon, _))) => choice.icon(icon),
+                    _ => choice,
+                };
+                match self.inner_count(inner) {
+                    Some(count) => choice.note(count),
+                    None => choice,
+                }
+            })
+            .collect();
+        let entity = entity.clone();
         div()
             .id("change-request-inner-tabs")
-            .h(px(32.0))
+            .debug_selector(|| "change-request-inner-tabs".to_owned())
             .px(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .border_b_1()
-            .border_color(theme.ely.border)
-            .children(InnerTab::ALL.into_iter().map(|inner| {
-                let active = inner == self.inner;
-                let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
-                let (icon, tint): (Icon, Hsla) = match inner {
-                    InnerTab::Conversation => (Icon::MessageSquare, tone),
-                    InnerTab::Commits => (Icon::GitCommit, tone),
-                    InnerTab::Checks => ci
-                        .and_then(|ci| style::ci_mark(ci, theme))
-                        .unwrap_or((Icon::Circle, tone)),
-                    InnerTab::Files => (Icon::File, tone),
-                };
-                let id = match inner {
-                    InnerTab::Conversation => "change-request-inner-conversation",
-                    InnerTab::Commits => "change-request-inner-commits",
-                    InnerTab::Checks => "change-request-inner-checks",
-                    InnerTab::Files => "change-request-inner-files",
-                };
-                let entity = entity.clone();
-                div()
-                    .id(id)
-                    .debug_selector(move || id.to_owned())
-                    .relative()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .text_size(theme.typography.footnote)
-                    .font_weight(if active {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(tone)
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |tab, cx| tab.select_inner(inner, cx))
-                    })
-                    .child(IconElement::new(icon, IconSize::Small).text_color(tint))
-                    .child(inner.title())
-                    .when_some(self.inner_count(inner), |this, count| {
-                        this.child(
-                            div()
-                                .px(px(6.0))
-                                .rounded(px(999.0))
-                                .bg(theme.ely.hover)
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.ely.fg_muted)
-                                .child(count),
-                        )
-                    })
-                    .when(active, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .bottom(px(-1.0))
-                                .left_0()
-                                .right_0()
-                                .h(px(2.0))
-                                .bg(theme.ely.fg),
-                        )
-                    })
-            }))
+            // A narrow pane scrolls the strip instead of clipping its last tab.
+            .overflow_x_scroll()
+            .child(
+                Tabs::new("change-request-tabs", choices, self.inner.as_str()).on_change(
+                    move |value, _, cx| {
+                        // An unknown value opens the conversation, never panics.
+                        let inner = InnerTab::parse(value);
+                        entity.update(cx, |tab, cx| tab.select_inner(inner, cx));
+                    },
+                ),
+            )
     }
 
     fn render_conversation(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
@@ -1387,12 +1316,12 @@ impl ChangeRequestTab {
                 }
                 if header.timeline_truncated {
                     let url = header.summary.web_url.clone();
-                    column = column.child(button(
+                    column = column.child(ely_ui::text_button(
                         "change-request-earlier",
-                        Icon::ArrowUpRight,
-                        Some("Earlier activity is on the forge"),
-                        theme,
-                        move |cx| cx.open_url(&url),
+                        "Earlier activity is on the forge",
+                        Some(IconName::ArrowUpRight),
+                        ButtonState::IDLE,
+                        move |_, cx| cx.open_url(&url),
                     ));
                 }
                 if let Some(doc) = self
@@ -1415,9 +1344,11 @@ impl ChangeRequestTab {
                             )),
                     );
                 }
+                let mut rail = Timeline::new();
                 for (index, item) in header.timeline.iter().enumerate() {
-                    column = column.child(self.render_timeline_item(index, item, theme, entity));
+                    rail = rail.item(self.render_timeline_item(index, item, theme, entity));
                 }
+                column = column.child(rail);
                 if let Some(composer) = self.render_composer(theme, entity) {
                     column = column.child(composer);
                 }
@@ -1432,38 +1363,40 @@ impl ChangeRequestTab {
         item: &TimelineItem,
         theme: &Theme,
         entity: &Entity<Self>,
-    ) -> AnyElement {
+    ) -> RailItem {
         let now = style::now();
-        let line = |who: String, what: String, at: Option<i64>| {
+        let head = |who: String, what: String| {
             div()
+                .id(("change-request-timeline-item", index))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .text_size(theme.typography.footnote)
-                .text_color(theme.ely.fg_muted)
                 .child(
                     div()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.ely.fg)
                         .child(selectable_text(who)),
                 )
-                .child(selectable_text(what))
                 .child(
                     div()
-                        .text_color(theme.ely.fg_subtle)
-                        .child(selectable_text(style::age(now, at))),
+                        .text_color(theme.ely.fg_muted)
+                        .child(selectable_text(what)),
                 )
         };
-        let body = self.bodies.get(index).cloned().flatten().map(|doc| {
+        // Each piece of an entry is its own element outside `head`'s id scope, so
+        // each carries the entry's index: two with the same id panic gpui's a11y
+        // tree in a debug build.
+        let when = |at: Option<i64>| {
             div()
-                .pl(px(12.0))
-                .border_l_2()
-                .border_color(theme.ely.border)
-                .child(Chat::render_markdown_document_with_link_override(
-                    doc,
-                    theme,
-                    open_links(),
-                ))
+                .id(("change-request-timeline-time", index))
+                .text_color(theme.ely.fg_subtle)
+                .child(selectable_text(style::age(now, at)))
+        };
+        let body = self.bodies.get(index).cloned().flatten().map(|doc| {
+            div().id(("change-request-timeline-body", index)).child(Chat::render_markdown_document_with_link_override(
+                doc,
+                theme,
+                open_links(),
+            ))
         });
         let own = match item {
             TimelineItem::Comment { edit, .. } | TimelineItem::Review { edit, .. } => edit.as_ref(),
@@ -1475,17 +1408,12 @@ impl ChangeRequestTab {
         let pencil = self.edit_pencil(index, own, theme, entity);
         let body: Option<AnyElement> = editor.or_else(|| body.map(IntoElement::into_any_element));
         match item {
-            TimelineItem::Comment { author, at, .. } => div()
-                .id(("change-request-timeline-item", index))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(
-                    line(author.clone(), "commented".to_string(), *at)
-                        .when_some(pencil, |row, pencil| row.child(pencil)),
-                )
-                .when_some(body, |this, body| this.child(body))
-                .into_any_element(),
+            TimelineItem::Comment { author, at, .. } => RailItem::new(
+                head(author.clone(), "commented".to_string()).children(pencil),
+            )
+            .time(when(*at))
+            .icon(IconName::MessageSquare)
+            .children(body),
             TimelineItem::Review {
                 author,
                 outcome,
@@ -1493,26 +1421,29 @@ impl ChangeRequestTab {
                 line_comments,
                 ..
             } => {
-                let verb = match outcome {
-                    ReviewOutcome::Approved => "approved",
-                    ReviewOutcome::ChangesRequested => "requested changes",
-                    ReviewOutcome::Commented | ReviewOutcome::Other => "reviewed",
-                    ReviewOutcome::Dismissed => "had a review dismissed",
-                    ReviewOutcome::Requested => "was asked to review",
+                let (verb, icon, tone) = match outcome {
+                    ReviewOutcome::Approved => ("approved", IconName::CircleCheck, Tone::Success),
+                    ReviewOutcome::ChangesRequested => {
+                        ("requested changes", IconName::CircleAlert, Tone::Warning)
+                    }
+                    ReviewOutcome::Commented | ReviewOutcome::Other => {
+                        ("reviewed", IconName::MessageSquare, Tone::Neutral)
+                    }
+                    ReviewOutcome::Dismissed => {
+                        ("had a review dismissed", IconName::Ban, Tone::Neutral)
+                    }
+                    ReviewOutcome::Requested => {
+                        ("was asked to review", IconName::Eye, Tone::Neutral)
+                    }
                 };
-                div()
-                    .id(("change-request-timeline-item", index))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        line(author.clone(), verb.to_string(), *at)
-                            .when_some(pencil, |row, pencil| row.child(pencil)),
-                    )
-                    .when_some(body, |this, body| this.child(body))
+                RailItem::new(head(author.clone(), verb.to_string()).children(pencil))
+                    .time(when(*at))
+                    .icon(icon)
+                    .tone(tone)
+                    .children(body)
                     .children(line_comments.iter().enumerate().map(|(position, comment)| {
                         div()
-                            .pl(px(12.0))
+                            .id(("change-request-line-comment-row", index * 1000 + position))
                             .flex()
                             .gap(px(6.0))
                             .text_size(theme.typography.footnote)
@@ -1533,19 +1464,13 @@ impl ChangeRequestTab {
                             ))
                             .child(selectable_text(format!("— {}", comment.body)))
                     }))
-                    .into_any_element()
             }
-            TimelineItem::LineComment(comment) => div()
-                .id(("change-request-timeline-item", index))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(line(comment.author.clone(), "commented".to_string(), comment.at))
-                .child(
-                    div()
-                        .pl(px(12.0))
-                        .text_size(theme.typography.footnote)
-                        .child(line_link(
+            TimelineItem::LineComment(comment) => {
+                RailItem::new(head(comment.author.clone(), "commented".to_string()))
+                    .time(when(comment.at))
+                    .icon(IconName::MessageSquareDiff)
+                    .child(
+                        div().id(("change-request-line-comment-row", index * 1000)).text_size(theme.typography.footnote).child(line_link(
                             ("change-request-line-comment", index * 1000),
                             format!(
                                 "on {}:{}",
@@ -1559,27 +1484,33 @@ impl ChangeRequestTab {
                             theme,
                             entity.clone(),
                         )),
-                )
-                .when_some(body, |this, body| this.child(body))
-                .into_any_element(),
+                    )
+                    .children(body)
+            }
             TimelineItem::Event { actor, kind, at } => {
-                let what = match kind {
-                    EventKind::CommitsPushed { count } => {
-                        format!("added {count} commit{}", if *count == 1 { "" } else { "s" })
-                    }
+                let (what, tone) = match kind {
+                    EventKind::CommitsPushed { count } => (
+                        format!("added {count} commit{}", if *count == 1 { "" } else { "s" }),
+                        Tone::Neutral,
+                    ),
                     EventKind::ReviewRequested { reviewer } => {
-                        format!("asked {reviewer} to review")
+                        (format!("asked {reviewer} to review"), Tone::Neutral)
                     }
-                    EventKind::Merged => "merged".to_string(),
-                    EventKind::Closed => "closed".to_string(),
-                    EventKind::Reopened => "reopened".to_string(),
-                    EventKind::ReadyForReview => "marked it ready for review".to_string(),
-                    EventKind::ConvertedToDraft => "marked it as a draft".to_string(),
-                    EventKind::Other(text) => text.clone(),
+                    EventKind::Merged => ("merged".to_string(), Tone::Accent),
+                    EventKind::Closed => ("closed".to_string(), Tone::Danger),
+                    EventKind::Reopened => ("reopened".to_string(), Tone::Success),
+                    EventKind::ReadyForReview => {
+                        ("marked it ready for review".to_string(), Tone::Success)
+                    }
+                    EventKind::ConvertedToDraft => {
+                        ("marked it as a draft".to_string(), Tone::Neutral)
+                    }
+                    EventKind::Other(text) => (text.clone(), Tone::Neutral),
                 };
-                line(actor.clone().unwrap_or_default(), what, *at)
-                    .id(("change-request-timeline-item", index))
-                    .into_any_element()
+                RailItem::new(head(actor.clone().unwrap_or_default(), what))
+                    .time(when(*at))
+                    .icon(IconName::Dot)
+                    .tone(tone)
             }
         }
     }
@@ -1607,12 +1538,12 @@ impl ChangeRequestTab {
                         .text_size(theme.typography.footnote)
                         .text_color(theme.ely.danger)
                         .child(div().flex_1().child(error.to_string()))
-                        .child(button(
+                        .child(ely_ui::text_button(
                             "change-request-commit-forge",
-                            Icon::ArrowUpRight,
-                            Some("Open on the forge"),
-                            theme,
-                            move |cx| cx.open_url(&web_url),
+                            "Open on the forge",
+                            Some(IconName::ArrowUpRight),
+                            ButtonState::IDLE,
+                            move |_, cx| cx.open_url(&web_url),
                         )),
                 )
                 .when_some(hint, |this, hint| {
@@ -1644,8 +1575,9 @@ impl ChangeRequestTab {
                         entity.update(cx, |tab, cx| tab.open_commit(sha.clone(), url.clone(), cx))
                     })
                     .child(
-                        IconElement::new(Icon::GitCommit, IconSize::Small)
-                            .text_color(theme.ely.fg_subtle),
+                        EIcon::new(IconName::GitCommitHorizontal)
+                            .size(EIconSize::Sm)
+                            .color(theme.ely.fg_subtle),
                     )
                     .child(
                         div()
@@ -1709,7 +1641,7 @@ impl ChangeRequestTab {
         let toggle = entity.clone();
         let hover = theme.ely.hover;
         let row = |index: usize, check: &Check| {
-            let (icon, tint) = style::check_mark(check.status, theme);
+            let (icon, tint) = style::check_icon(check.status, theme);
             let url = check.url.clone();
             div()
                 .id(("change-request-check", index))
@@ -1727,7 +1659,7 @@ impl ChangeRequestTab {
                         cx.open_url(url)
                     }
                 })
-                .child(IconElement::new(icon, IconSize::Small).text_color(tint))
+                .child(EIcon::new(icon).size(EIconSize::Sm).color(tint))
                 .when_some(check.group.clone(), |this, group| {
                     this.child(div().flex_none().text_color(theme.ely.fg_subtle).child(group))
                 })
@@ -1770,14 +1702,14 @@ impl ChangeRequestTab {
                                 cx.notify();
                             })
                         })
-                        .child(IconElement::new(
-                            if self.show_settled_checks {
-                                Icon::ChevronDown
+                        .child(
+                            EIcon::new(if self.show_settled_checks {
+                                IconName::ChevronDown
                             } else {
-                                Icon::ChevronRight
-                            },
-                            IconSize::Small,
-                        ))
+                                IconName::ChevronRight
+                            })
+                            .size(EIconSize::Sm),
+                        )
                         .child(format!("{passed} passed, {} other", settled.len() - passed)),
                 )
             })
@@ -1943,20 +1875,20 @@ impl ChangeRequestTab {
                             .gap(px(8.0))
                             .text_color(theme.ely.danger)
                             .child(div().flex_1().child(error.to_string()))
-                            .child(button(
+                            .child(ely_ui::text_button(
                                 "change-request-range-retry",
-                                Icon::RefreshCw,
-                                Some("Retry"),
-                                theme,
-                                move |cx| retry.update(cx, |tab, cx| tab.retry_range(cx)),
+                                "Retry",
+                                Some(IconName::RefreshCw),
+                                ButtonState::IDLE,
+                                move |_, cx| retry.update(cx, |tab, cx| tab.retry_range(cx)),
                             ))
                             .when_some(forge_url, |this, url| {
-                                this.child(button(
+                                this.child(ely_ui::text_button(
                                     "change-request-range-forge",
-                                    Icon::ArrowUpRight,
-                                    Some("Open on the forge"),
-                                    theme,
-                                    move |cx| cx.open_url(&url),
+                                    "Open on the forge",
+                                    Some(IconName::ArrowUpRight),
+                                    ButtonState::IDLE,
+                                    move |_, cx| cx.open_url(&url),
                                 ))
                             }),
                     )
@@ -1996,26 +1928,27 @@ impl ChangeRequestTab {
             .child(
                 div()
                     .max_w(px(520.0))
-                    .text_color(theme.ely.fg_muted)
-                    .child(selectable_text(message)),
+                    .child(ely_ui::message(Severity::Warning, message, theme)),
             )
             .child(
                 div()
                     .flex()
                     .gap(px(8.0))
-                    .child(button(
+                    .child(ely_ui::text_button(
                         "change-request-reconnect",
-                        Icon::RefreshCw,
-                        Some("Retry"),
-                        theme,
-                        move |cx| retry.update(cx, |tab, cx| tab.retry(cx)),
+                        "Retry",
+                        Some(IconName::RefreshCw),
+                        ButtonState::IDLE,
+                        move |_, cx| retry.update(cx, |tab, cx| tab.retry(cx)),
                     ))
-                    .child(button(
+                    .child(ely_ui::text_button(
                         "change-request-close",
-                        Icon::Close,
-                        Some("Close"),
-                        theme,
-                        move |cx| close.update(cx, |_, cx| cx.emit(ChangeRequestTabEvent::Close)),
+                        "Close",
+                        Some(IconName::X),
+                        ButtonState::IDLE,
+                        move |_, cx| {
+                            close.update(cx, |_, cx| cx.emit(ChangeRequestTabEvent::Close))
+                        },
                     )),
             )
             .into_any_element()
@@ -2023,8 +1956,12 @@ impl ChangeRequestTab {
 }
 
 impl Render for ChangeRequestTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangeRequestTab.render", cx.entity_id().as_u64());
+        // Ely follows Sirio's theme only through an observer that runs after the
+        // app's start-up closure; without this a Light user sees Ely's dark
+        // palette (docs/testing/ely-forge-probe.md).
+        crate::ely::sync_theme_if_changed(cx);
         // A restored tab loads the first time it is drawn (spec §8).
         if !self.started {
             self.started = true;
@@ -2033,6 +1970,7 @@ impl Render for ChangeRequestTab {
                 let _ = this.update(cx, |tab, cx| tab.connect(cx));
             });
         }
+        self.ensure_composer(window, cx);
         let theme = *Theme::get(cx);
         let entity = cx.entity();
         let body = match self.unreachable.clone() {
@@ -2165,6 +2103,101 @@ mod tests {
                 ("local".to_string(), None),
             ]
         );
+    }
+
+    /// The composer is built by a render, not the constructor: the constructor
+    /// has no window, and Ely's input needs one.
+    #[gpui::test]
+    fn the_composer_is_built_by_a_render_and_not_by_the_constructor(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let windowless = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        assert!(windowless.read_with(cx, |tab, _| tab.actions.composer.is_none()));
+        let (tab, cx) = cx.add_window_view(|_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(tab.read_with(cx, |tab, _| tab.actions.composer.is_some()));
+    }
+
+    /// A composer holding only blanks reads as blank, so *Comment* stays off;
+    /// the E2E reads the same flag through the report.
+    #[gpui::test]
+    fn a_blank_composer_is_blank_and_a_typed_one_is_not(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let (tab, cx) = cx.add_window_view(|_, cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        let input = tab.update_in(cx, |tab, window, cx| {
+            tab.ensure_composer(window, cx);
+            tab.actions.composer.clone().expect("built")
+        });
+        assert!(tab.read_with(cx, |tab, _| tab.actions.composer_blank));
+        input.update(cx, |input, cx| input.set_text("  \n ", cx));
+        assert!(tab.read_with(cx, |tab, _| tab.actions.composer_blank), "whitespace is blank");
+        input.update(cx, |input, cx| input.set_text("looks good", cx));
+        assert!(!tab.read_with(cx, |tab, _| tab.actions.composer_blank));
+    }
+
+    /// A refresh refused because the forge is rate-limited must leave the CI
+    /// timer armed while CI is still running, or the tab never looks again.
+    #[gpui::test]
+    fn a_paused_refresh_keeps_the_ci_timer_armed_while_ci_runs(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let tab = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.header.value().is_some()));
+        tab.update(cx, |tab, cx| {
+            if let Slot::Loaded { value, .. } = &mut tab.header {
+                value.summary.ci = CiState::Running(None);
+            }
+            tab.ci_timer = None;
+            tab.paused_until = Some(style::now() + 3600);
+            tab.refresh(cx);
+            assert!(
+                tab.ci_timer.is_some(),
+                "a refresh refused by the rate limit dropped the CI timer"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_timer_refresh_that_hits_the_rate_limit_keeps_the_ci_timer_armed(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let tab = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), String::new(), std::env::temp_dir(), cx)
+        });
+        tab.update(cx, |tab, cx| tab.on_selected(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.header.value().is_some()));
+        tab.update(cx, |tab, cx| {
+            if let Slot::Loaded { value, .. } = &mut tab.header {
+                value.summary.ci = CiState::Running(None);
+            }
+            // The state the timer's task leaves: it cleared itself, then asked.
+            tab.ci_timer = None;
+            tab.apply_header(
+                Err(ForgeError::RateLimited {
+                    host: "github.com".into(),
+                    reset_at: Some(style::now() + 3600),
+                }),
+                cx,
+            );
+            assert!(
+                tab.ci_timer.is_some(),
+                "a rate-limited timer refresh stopped the CI polling for good"
+            );
+        });
     }
 
     #[gpui::test]
