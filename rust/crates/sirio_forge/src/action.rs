@@ -263,6 +263,9 @@ pub(crate) fn check_action(
                 (MergeVerdict::Unreported, _) => {
                     return refuse("This forge did not say whether it can be merged.");
                 }
+                (MergeVerdict::Checking, _) => {
+                    return refuse("The forge is still working out whether it can be merged; try again in a moment.");
+                }
             }
         }
         Action::CancelAutoMerge => {

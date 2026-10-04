@@ -548,6 +548,7 @@ fn merge_line(merge: &MergeCapability) -> String {
         MergeVerdict::Unreported => "unreported".to_string(),
         MergeVerdict::Ready => "ready".to_string(),
         MergeVerdict::WaitingOnChecks => "waiting".to_string(),
+        MergeVerdict::Checking => "checking".to_string(),
         MergeVerdict::Blocked(reason) => format!("blocked:{}", reason.text().replace(' ', "-")),
     };
     let methods: Vec<&str> = merge.methods.list().into_iter().map(MergeMethod::word).collect();

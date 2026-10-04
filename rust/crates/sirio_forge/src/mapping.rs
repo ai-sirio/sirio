@@ -377,6 +377,8 @@ pub(crate) fn github_merge(facts: GitHubMergeFacts<'_>) -> MergeCapability {
             (_, Some("FAILURE" | "ERROR")) => MergeVerdict::Blocked(BlockReason::ChecksFailing),
             _ => MergeVerdict::Blocked(BlockReason::Other("BLOCKED".to_string())),
         },
+        // GitHub works mergeability out lazily, after a push to either side.
+        Some("UNKNOWN") => MergeVerdict::Checking,
         Some(word) => MergeVerdict::Blocked(BlockReason::Other(word.to_string())),
     };
     MergeCapability {
@@ -434,6 +436,8 @@ pub(crate) fn gitlab_merge(facts: GitLabMergeFacts<'_>) -> MergeCapability {
             "NEED_REBASE" => MergeVerdict::Blocked(BlockReason::Behind),
             "DRAFT_STATUS" => MergeVerdict::Blocked(BlockReason::Draft),
             "DISCUSSIONS_NOT_RESOLVED" => MergeVerdict::Blocked(BlockReason::Discussions),
+            // Passing states: GitLab has not finished its checks yet.
+            "UNCHECKED" | "CHECKING" | "PREPARING" | "APPROVALS_SYNCING" => MergeVerdict::Checking,
             word => MergeVerdict::Blocked(BlockReason::Other(word.to_string())),
         }
     };
@@ -1067,6 +1071,16 @@ mod tests {
             auto_merge_strategies: Some(&["merge_when_checks_pass"]),
             remove_source_branch: Some(false),
         }
+    }
+
+    #[test]
+    fn a_forge_still_working_out_mergeability_is_checking_not_blocked() {
+        for status in ["UNCHECKED", "CHECKING", "PREPARING", "APPROVALS_SYNCING"] {
+            let cap = gitlab_merge(GitLabMergeFacts { detailed_status: Some(status), ..gl() });
+            assert_eq!(cap.verdict, MergeVerdict::Checking, "{status}");
+        }
+        let cap = github_merge(GitHubMergeFacts { merge_state_status: Some("UNKNOWN"), ..gh() });
+        assert_eq!(cap.verdict, MergeVerdict::Checking);
     }
 
     #[test]

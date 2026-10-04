@@ -23,6 +23,8 @@ pub(crate) enum StripKind {
     AutoMerge,
     /// Checks are running and nothing can wait for them.
     Waiting,
+    /// The forge is still working out whether it can merge.
+    Checking,
     Blocked(String),
     /// An auto-merge is set, with the method it will use.
     Cancel(MergeMethod),
@@ -36,6 +38,7 @@ impl StripKind {
             Self::Merge => "merge",
             Self::AutoMerge => "auto-merge",
             Self::Waiting => "waiting",
+            Self::Checking => "checking",
             Self::Blocked(_) => "blocked",
             Self::Cancel(_) => "cancel",
         }
@@ -46,6 +49,7 @@ impl StripKind {
             Self::None => String::new(),
             Self::Merge => "Ready to merge".to_string(),
             Self::AutoMerge | Self::Waiting => "Waiting for checks".to_string(),
+            Self::Checking => "Checking whether it can merge…".to_string(),
             Self::Blocked(reason) => format!("Blocked: {reason}"),
             Self::Cancel(method) => format!("Auto-merge enabled · {}", method.word()),
         }
@@ -72,6 +76,7 @@ pub(crate) fn strip_kind(state: ChangeState, merge: &MergeCapability) -> StripKi
         MergeVerdict::Ready => StripKind::Merge,
         MergeVerdict::WaitingOnChecks if merge.can_auto_merge => StripKind::AutoMerge,
         MergeVerdict::WaitingOnChecks => StripKind::Waiting,
+        MergeVerdict::Checking => StripKind::Checking,
         MergeVerdict::Blocked(reason) => StripKind::Blocked(reason.text()),
     }
 }
@@ -146,6 +151,7 @@ impl ChangeRequestTab {
             Some(MergeVerdict::Unreported) => "unreported".to_string(),
             Some(MergeVerdict::Ready) => "ready".to_string(),
             Some(MergeVerdict::WaitingOnChecks) => "waiting".to_string(),
+            Some(MergeVerdict::Checking) => "checking".to_string(),
             Some(MergeVerdict::Blocked(reason)) => format!("blocked:{}", reason.text()),
         }
     }

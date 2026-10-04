@@ -368,6 +368,9 @@ pub enum MergeVerdict {
     Unreported,
     Ready,
     WaitingOnChecks,
+    /// The forge has not yet worked out whether it can merge (right after
+    /// a push): nothing is offered, and it is worth asking again shortly.
+    Checking,
     Blocked(BlockReason),
 }
 

@@ -72,7 +72,9 @@ one wins): a change request closed by a mutation reads as closed. GitLab's
 accept with a strategy `MergeRequestAccept.MERGE_WHEN_CHECKS_PASS`;
 the REST approval is `approve`, the REST cancel `cancel-auto-merge`. `POST /__reset`
 forgets every write; `POST /__push` stands for a push to the head branch, and
-reads then serve `<Operation>.after.push.json`.
+reads then serve `<Operation>.after.push.json`; `POST /__checking` stands for
+the forge still working out whether it can merge (`.after.checking.json`)
+until the next `/__reset`.
 
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
 2.100 and glab 1.119), so chunked bodies are decoded here.
@@ -361,6 +363,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Someone pushed to the head branch: reads serve `.after.push`.
             self.remember("push")
             return self.answer(200, {"pushed": True})
+        if path == "/__checking":
+            # The forge has not yet worked out whether it can merge.
+            self.remember("checking")
+            return self.answer(200, {"checking": True})
         if path == "/__reset":
             with self.applied_lock:
                 del self.applied[:]

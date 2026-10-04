@@ -320,6 +320,15 @@ fi
 
 if wanted wire-gitlab; then
 echo "stage wire-gitlab: every action of B2a reaches GitLab as the mutation or REST call it means"
+echo "  a merge request gitlab is still checking offers nothing yet"
+reset_forge gitlab "$GL_PORT"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$GL_PORT/__checking"
+probe "${GL[@]}" header 201
+expect_prefix "MERGE checking "
+probe "${GL[@]}" act 201 merge --method merge --head "$GL_HEAD"
+expect_code 20 "a merge while gitlab is checking"
+expect_line "ERR Rejected"
+expect_sent gitlab MergeRequestAccept 0
 reset_forge gitlab "$GL_PORT"
 MR_ID='"iid":"201","projectPath":"team/app"'
 probe "${GL[@]}" header 201
@@ -496,6 +505,15 @@ probe "${GH[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Ship i
 expect_code 0 "a squash merge"
 expect_input github MergePullRequest "{\"commitBody\":\"because\",\"commitHeadline\":\"Ship it\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
 no_rest github "DELETE "
+echo "  a forge still working out whether it can merge offers nothing yet"
+reset_forge github "$GH_PORT"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$GH_PORT/__checking"
+probe "${GH[@]}" header 101
+expect_prefix "MERGE checking "
+probe "${GH[@]}" act 101 merge --method merge --head "$GH_HEAD"
+expect_code 20 "a merge while github is checking"
+expect_line "ERR Rejected"
+expect_sent github MergePullRequest 0
 echo "  a rebase carries no message; delete-branch is a REST call after the merge"
 reset_forge github "$GH_PORT"
 probe "${GH[@]}" act 101 merge --method rebase --head "$GH_HEAD" --title "ignored" --delete-branch yes
@@ -985,6 +1003,16 @@ PY
   ctl surface change-request act merge-close >/dev/null
   wait_for merge_dialog closed surface change-request read
   expect_sent "$flavour" "$merge_op" 0
+
+  echo "  [$flavour] a forge still checking offers no merge, and the tab looks again by itself"
+  reset_forge "$flavour" "$port"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__checking"
+  reopen_tab "$number"
+  wait_for merge_strip checking surface change-request read
+  if ctl surface change-request act merge-open >/dev/null 2>&1; then fail "a change request being checked opened the merge dialog"; fi
+  capture "$flavour-merge-checking"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__reset"
+  wait_for merge_strip merge surface change-request read
 
   echo "  [$flavour] a blocked change request offers no merge"
   saved_token "$host" "$flavour" blocked
