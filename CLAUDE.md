@@ -54,6 +54,11 @@ Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 # --state-only skips the ui stage's window captures.
 Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
 
+# Ely's Tabs and git badges with Sirio's theme, on a private Xvfb with
+# Mesa's lavapipe: PID-matched captures, a click per tab, the badge tooltip,
+# dark and light (docs/testing/ely-forge-probe.md).
+Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
