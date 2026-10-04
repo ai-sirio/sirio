@@ -320,15 +320,6 @@ fi
 
 if wanted wire-gitlab; then
 echo "stage wire-gitlab: every action of B2a reaches GitLab as the mutation or REST call it means"
-echo "  a merge request gitlab is still checking offers nothing yet"
-reset_forge gitlab "$GL_PORT"
-curl -s -o /dev/null -X POST "http://127.0.0.1:$GL_PORT/__checking"
-probe "${GL[@]}" header 201
-expect_prefix "MERGE checking "
-probe "${GL[@]}" act 201 merge --method merge --head "$GL_HEAD"
-expect_code 20 "a merge while gitlab is checking"
-expect_line "ERR Rejected"
-expect_sent gitlab MergeRequestAccept 0
 reset_forge gitlab "$GL_PORT"
 MR_ID='"iid":"201","projectPath":"team/app"'
 probe "${GL[@]}" header 201
@@ -572,6 +563,15 @@ reset_forge github "$GH_PORT"
 probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token scopeless act 101 merge --method merge --head "$GH_HEAD"
 expect_line "ERR Forbidden"
 
+echo "  a merge request gitlab is still checking offers nothing yet"
+reset_forge gitlab "$GL_PORT"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$GL_PORT/__checking"
+probe "${GL[@]}" header 201
+expect_prefix "MERGE checking "
+probe "${GL[@]}" act 201 merge --method merge --head "$GL_HEAD"
+expect_code 20 "a merge while gitlab is checking"
+expect_line "ERR Rejected"
+expect_sent gitlab MergeRequestAccept 0
 reset_forge gitlab "$GL_PORT"
 MR_ID='"iid":"201","projectPath":"team/app"'
 probe "${GL[@]}" header 201
