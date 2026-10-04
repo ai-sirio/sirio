@@ -14,7 +14,7 @@ use sirio_forge::{Action, Candidate};
 use gpui::{SharedString, Subscription};
 
 use super::actions::ActionState;
-use super::ely_ui::{message, new_input};
+use crate::ely_ui::{message, new_input};
 use super::*;
 
 /// How long typing must pause before the forge is asked: the right panel's

@@ -29,6 +29,16 @@ pub(crate) fn state_label(state: ChangeState) -> &'static str {
     }
 }
 
+/// The state's git glyph in Ely's icons.
+pub(crate) fn state_icon(state: ChangeState) -> IconName {
+    match state {
+        ChangeState::Open => IconName::GitPullRequest,
+        ChangeState::Draft => IconName::GitPullRequestDraft,
+        ChangeState::Closed => IconName::GitPullRequestClosed,
+        ChangeState::Merged => IconName::GitMerge,
+    }
+}
+
 /// `None` draws nothing: a change request with no checks.
 pub(crate) fn ci_mark(ci: CiState, theme: &Theme) -> Option<(Icon, Hsla)> {
     match ci {
@@ -65,6 +75,23 @@ pub(crate) fn review_mark(
         ReviewState::Approved { .. } => Some((Icon::UserCheck, theme.ely.success)),
         ReviewState::ChangesRequested => Some((Icon::Warning, theme.ely.danger)),
         ReviewState::ReviewRequired => Some((Icon::Eye, theme.ely.fg_subtle)),
+        ReviewState::None => None,
+    }
+}
+
+/// Twin of [`review_mark`] in Ely's icons; `None` draws nothing.
+pub(crate) fn review_icon(
+    review: ReviewState,
+    requested_from_me: bool,
+    theme: &Theme,
+) -> Option<(IconName, Hsla)> {
+    if requested_from_me {
+        return Some((IconName::Eye, theme.sirio.quantity));
+    }
+    match review {
+        ReviewState::Approved { .. } => Some((IconName::CheckCheck, theme.ely.success)),
+        ReviewState::ChangesRequested => Some((IconName::TriangleAlert, theme.ely.danger)),
+        ReviewState::ReviewRequired => Some((IconName::Eye, theme.ely.fg_subtle)),
         ReviewState::None => None,
     }
 }

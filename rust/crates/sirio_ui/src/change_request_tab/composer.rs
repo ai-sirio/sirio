@@ -9,7 +9,7 @@ use ely_gpui_component::{
 };
 use sirio_forge::{Action, ReviewVerdict};
 
-use super::ely_ui::{ButtonState, new_input, text_button};
+use crate::ely_ui::{ButtonState, new_input, text_button};
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
