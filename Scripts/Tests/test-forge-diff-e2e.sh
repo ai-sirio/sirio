@@ -521,6 +521,9 @@ scenario_success() { # flavour host forge number label remote-url order(commit-f
   [ "$gone_text" = "$(git -C "$BARE" show "$BASE:gone.txt" | escape_text)" ] ||
     fail "a deleted file's snapshot is not the file at the base"
   echo "OK: a deleted file opens at the base"
+  [ -n "$(reply surface tabs read | python3 "$RUN_DIR/tabs.py" titled file yes "gone.txt (deleted in $5)")" ] ||
+    { reply surface tabs read || true; fail "the deleted file's snapshot is not titled 'gone.txt (deleted in $5)'"; }
+  echo "OK: the deleted file's snapshot says so in its title"
   local before
   before=$(tab_count)
   select_kind change_request
@@ -533,6 +536,16 @@ scenario_success() { # flavour host forge number label remote-url order(commit-f
   echo "OK: the same snapshot is one tab"
 
   echo "step 3b: a graceful quit and a relaunch restore the snapshots and keep their refs"
+  # Worktree files named like both snapshots (the worktree is otherwise
+  # empty): the restored login.rs offers its local copy, the restored snapshot
+  # of the deleted gone.txt must not. Removed again before step 4.
+  MADE_LOCAL=()
+  for local in gone.txt src/login.rs; do
+    [ -e "$WT/$local" ] && continue
+    mkdir -p "$(dirname "$WT/$local")"
+    echo "a different file" > "$WT/$local"
+    MADE_LOCAL+=("$WT/$local")
+  done
   quit_app
   # A second orphan: once the relaunch's sweep has removed it, the sweep has
   # run, and whatever it left is what it chose to keep.
@@ -548,17 +561,24 @@ scenario_success() { # flavour host forge number label remote-url order(commit-f
       restored_origin="$5 at ${HEAD_SHA:0:7}"
       restored_text=$login_text
     else
-      select_titled file yes "gone.txt @ $5"
+      select_titled file yes "gone.txt (deleted in $5)"
       restored_origin="$5 at ${BASE:0:7}"
       restored_text=$gone_text
     fi
     wait_for state loaded surface file read
     wait_for read_only true surface file read
     wait_for origin "$restored_origin" surface file read
+    if [ "$restored_name" = login ]; then
+      assert_contains local_copy src/login.rs surface file read
+    else
+      wait_for local_copy "" surface file read
+    fi
     [ "$(read_field content surface file read)" = "$restored_text" ] ||
       fail "the restored $restored_name snapshot's text is not what it showed before the restart"
     echo "OK: the restored $restored_name snapshot is the same text, byte for byte"
   done
+  [ "${#MADE_LOCAL[@]}" -eq 0 ] || rm -f "${MADE_LOCAL[@]}"
+  rmdir "$WT/src" 2>/dev/null || true
   for _ in $(seq 1 50); do
     sirio_refs | grep -q /998/ || break
     sleep 0.2

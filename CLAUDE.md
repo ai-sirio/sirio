@@ -47,6 +47,12 @@ Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
 # against a bare repository and the fake forge; same flags as above.
 Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 
+# The Changes surface on Ely against a real repository: unified and split,
+# git failing and recovering, the in-window Discard confirmation (confirmed
+# through the debug-only `surface changes confirm`); same flags as above,
+# plus --appearance light|dark.
+Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME
@@ -253,7 +259,9 @@ are swept — at startup, on a worktree switch and when a tab that held them
 closes — of whatever no tab, open or parked with another worktree, holds.
 *Open in editor* opens the local file when the worktree is at the head, and
 a read-only snapshot tab otherwise; a persisted snapshot's sha and path are
-refused before they reach a label or a path.
+refused before they reach a label or a path. Its Discard asks inside the
+window (an Ely `Dialog`), and a row's right-click offers *Copy path* and, on
+a change request, *Open on the forge*.
 `docs/superpowers/specs/2026-09-28-change-request-diff-design.md` has the
 design; `Scripts/Tests/test-forge-diff-e2e.sh` proves it.
 

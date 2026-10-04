@@ -39,34 +39,39 @@
 //! numbers, and the report's `error` field covers the git-broken case. The
 //! human surface is the honest one.
 
-use bezel::{
-    theme::ink,
-    ui::{icons as bezel_icons, tooltip::Tooltip},
-};
 use gpui::{
-    AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
+    AnyElement, App, AppContext, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
-    Hsla, PromptLevel, Render, Task, Window, canvas, div, list, prelude::*, px,
+    HighlightStyle, Hsla, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
     GitDiffSideBySide, GitError, StatusEntry, StatusKind, StatusSnapshot, commit_diff_entry,
-    commit_files, diff_entry, discard, discard_all, range_file_diff, range_files, range_stats,
+    commit_files, diff_entry, discard, range_file_diff, range_files, range_stats,
     stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::controls;
+use ely_gpui_component::{
+    buttons::{Button, ButtonVariant, IconButton, ToggleGroup, ToggleItem},
+    data_display::CountBadge,
+    feedback::Callout,
+    menus::{ContextMenu, Menu, MenuItem},
+    motion::Skeleton,
+    overlays::Dialog,
+    git::{DiffStat as EDiffStat, GitStatus, GitStatusBadge},
+    primitives::{Icon as EIcon, IconName, Severity},
+    theme::{ControlSize, IconSize as EIconSize},
+};
 use crate::horizontal_scroll::{self, HorizontalBarState};
-use crate::loading;
-use crate::sidebar::icons::{Icon, IconElement, IconSize};
-use crate::text_selection::selectable_text;
+use crate::text_selection::{SelectableText, selectable_text};
 
 #[cfg(test)]
 mod perf_baseline;
@@ -99,7 +104,10 @@ const DIFF_NUMBER_WIDTH: f32 = 40.0;
 const DIFF_SIGN_WIDTH: f32 = 12.0;
 const DIFF_ROW_GAP: f32 = 8.0;
 const DIFF_ROW_PADDING: f32 = 10.0;
-const DIFF_WASH_ALPHA: f32 = 0.10;
+/// A line's wash and its changed words' wash, as Ely's `DiffViewer` draws
+/// them from the palette.
+const LINE_WASH: f32 = 0.08;
+const WORD_WASH: f32 = 0.25;
 
 fn clamped_x(x: Pixels, content: Pixels, viewport: Pixels) -> Pixels {
     x.clamp(-(content - viewport).max(px(0.0)), px(0.0))
@@ -188,20 +196,6 @@ struct DiffViewModeSetting(DiffViewMode);
 impl gpui::Global for DiffViewModeSetting {}
 
 impl DiffViewMode {
-    /// Display order; index into this is the segmented control's index.
-    const ORDER: [DiffViewMode; 2] = [DiffViewMode::Unified, DiffViewMode::Split];
-
-    fn index(self) -> usize {
-        match self {
-            DiffViewMode::Unified => 0,
-            DiffViewMode::Split => 1,
-        }
-    }
-
-    fn from_index(index: usize) -> Self {
-        Self::ORDER.get(index).copied().unwrap_or_default()
-    }
-
     /// The current choice. Defaults to `Unified` when nothing has set it,
     /// so a test (or a first launch) never has to install the global.
     pub fn get(cx: &App) -> Self {
@@ -215,6 +209,22 @@ impl DiffViewMode {
     /// Records the choice for every Changes surface in the app.
     pub fn set(mode: Self, cx: &mut App) {
         cx.set_global(DiffViewModeSetting(mode));
+    }
+
+    /// The mode as the control socket names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            DiffViewMode::Unified => "unified",
+            DiffViewMode::Split => "split",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "unified" => Some(DiffViewMode::Unified),
+            "split" => Some(DiffViewMode::Split),
+            _ => None,
+        }
     }
 }
 
@@ -265,6 +275,9 @@ pub struct ChangesReport {
     pub sections: Vec<ChangesSectionReport>,
     pub loading: bool,
     pub error: Option<String>,
+    /// The Discard confirmation open over the surface, if any:
+    /// `discard:<path>` or `discard-all`.
+    pub dialog: Option<String>,
 }
 
 /// The three buckets `git status` reports, in display order. A file can
@@ -292,6 +305,16 @@ impl ChangeSection {
             ChangeSection::Staged => "Staged",
             ChangeSection::Changed => "Changed",
             ChangeSection::Untracked => "Untracked",
+        }
+    }
+
+    /// The heading this section wears on `source`: a change request's diff
+    /// is not "staged" anything (B1 §13), so its one section reads Changes.
+    /// A commit keeps Staged; §8 names only the Range.
+    fn label_in(self, source: &ChangesSource) -> &'static str {
+        match (self, source) {
+            (ChangeSection::Staged, ChangesSource::Range { .. }) => "Changes",
+            _ => self.label(),
         }
     }
 
@@ -370,6 +393,9 @@ enum ChangeRow {
         section: ChangeSection,
         path: PathBuf,
         line: DiffLine,
+        /// The stretch of the line that changed against its partner in the
+        /// run, washed darker (`segment_words`).
+        words: Option<Range<usize>>,
     },
     /// One row of the side-by-side rendering: old on the left, new on the
     /// right, either side possibly absent where a run was longer than its
@@ -382,6 +408,9 @@ enum ChangeRow {
         /// unique element id.
         key: usize,
         row: DiffSideBySideRow,
+        /// The changed stretch on the left and on the right of a zipped
+        /// replacement (`changed_span`).
+        words: (Option<Range<usize>>, Option<Range<usize>>),
     },
     /// A file whose diff could not be fetched. Rendered as an explicit
     /// "diff unavailable" row when expanded, so an empty expansion can
@@ -390,6 +419,8 @@ enum ChangeRow {
         section: ChangeSection,
         path: PathBuf,
         message: String,
+        /// Git failed, so Retry can help; a binary file did not fail.
+        failed: bool,
     },
 }
 
@@ -459,6 +490,7 @@ impl ListRow {
                     section,
                     path,
                     line,
+                    ..
                 } => {
                     4u8.hash(state);
                     section.hash(state);
@@ -512,6 +544,21 @@ enum ChangesSource {
 }
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
+
+/// Where a change request's files live on its forge, for a row's *Open on
+/// the forge*. Only a Range surface has one; the change request tab sets it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeFiles {
+    pub forge: sirio_forge::Forge,
+    pub web_url: String,
+}
+
+/// What an open Discard confirmation would throw away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DiscardAsk {
+    One(PathBuf),
+    All(Vec<PathBuf>),
+}
 
 /// The full-width git changes surface.
 pub struct ChangesTab {
@@ -604,6 +651,13 @@ pub struct ChangesTab {
     /// because one path can appear in two sections and Enter has to act on
     /// the one the user is actually on.
     selected_change: Option<(ChangeSection, PathBuf)>,
+    /// The Discard confirmation open over the surface: what it would throw
+    /// away. In the window, not the system's prompt (spec §8), so a test and
+    /// the control socket can see it and answer it.
+    discard_ask: Option<DiscardAsk>,
+    /// Where a Range surface's change request lives on its forge, for each
+    /// row's *Open on the forge*; `None` for every other source.
+    forge_files: Option<Rc<ForgeFiles>>,
     /// Focus for the list, so `on_key_down` reaches it. Built lazily at
     /// first render, the way the Files tree's is.
     list_focus: Option<FocusHandle>,
@@ -742,6 +796,8 @@ impl ChangesTab {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -828,7 +884,7 @@ impl ChangesTab {
                     })
                     .collect::<Vec<_>>();
                 ChangesSectionReport {
-                    name: section.label(),
+                    name: section.label_in(&self.source),
                     count: files.len(),
                     files,
                 }
@@ -839,6 +895,10 @@ impl ChangesTab {
             sections,
             loading: self.git_task.is_some(),
             error: self.git_error.clone(),
+            dialog: self.discard_ask.as_ref().map(|ask| match ask {
+                DiscardAsk::One(path) => format!("discard:{}", path.display()),
+                DiscardAsk::All(_) => "discard-all".to_string(),
+            }),
         }
     }
 
@@ -1098,33 +1158,24 @@ impl ChangesTab {
         );
     }
 
-    fn confirm_discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Gives a Range surface its change request's place on the forge, for
+    /// each row's *Open on the forge*.
+    pub fn set_forge_files(&mut self, files: ForgeFiles) {
+        self.forge_files = Some(Rc::new(files));
+    }
+
+    /// Asks, inside the window, before throwing away `path`'s worktree changes.
+    pub fn ask_discard(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.allows_staging() {
             return;
         }
-        let display_path = sirio_project::display_path(&path);
-        let detail = format!(
-            "This will throw away the worktree changes to {display_path}. This cannot be undone."
-        );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard changes?",
-            Some(&detail),
-            &["Discard", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await.unwrap_or(1) != 0 {
-                return;
-            }
-            let _ = this.update(cx, |tab, cx| {
-                tab.start_operation(move |repo| discard(repo, &path), cx)
-            });
-        })
-        .detach();
+        self.discard_ask = Some(DiscardAsk::One(path));
+        cx.notify();
     }
 
-    fn confirm_discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks before throwing away every worktree change; nothing to ask about
+    /// asks nothing.
+    pub fn ask_discard_all(&mut self, cx: &mut Context<Self>) {
         if !self.allows_staging() {
             return;
         }
@@ -1132,29 +1183,55 @@ impl ChangesTab {
             .entries
             .iter()
             .filter(|entry| entry.has_worktree_changes())
-            .map(|entry| entry.path.display().to_string())
+            .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
         if paths.is_empty() {
             return;
         }
-        let detail = format!(
-            "This will throw away the worktree changes to:\n{}\n\nThis cannot be undone.",
-            paths.join("\n")
-        );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard all changes?",
-            Some(&detail),
-            &["Discard All", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await.unwrap_or(1) != 0 {
-                return;
-            }
-            let _ = this.update(cx, |tab, cx| tab.start_operation(discard_all, cx));
-        })
-        .detach();
+        self.discard_ask = Some(DiscardAsk::All(paths));
+        cx.notify();
+    }
+
+    pub fn close_discard(&mut self, cx: &mut Context<Self>) {
+        if self.discard_ask.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The dialog's confirm: closes it and queues the discard behind whatever
+    /// git work is in flight, the way a click always did. `false` when no
+    /// dialog was open, so a second press does nothing.
+    ///
+    /// It throws away what the dialog listed and nothing more, and only what
+    /// the surface still lists: a file an agent changed while the dialog was
+    /// open was never shown, and a change that is gone (or a path the socket
+    /// named that never had one) has nothing left to discard.
+    pub fn confirm_discard(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(ask) = self.discard_ask.take() else {
+            return false;
+        };
+        let paths: Vec<PathBuf> = match ask {
+            DiscardAsk::One(path) => vec![path]
+                .into_iter()
+                .filter(|path| self.entries.iter().any(|entry| &entry.path == path))
+                .collect(),
+            DiscardAsk::All(paths) => paths
+                .into_iter()
+                .filter(|path| {
+                    self.entries
+                        .iter()
+                        .any(|entry| &entry.path == path && entry.has_worktree_changes())
+                })
+                .collect(),
+        };
+        if !paths.is_empty() {
+            self.start_operation(
+                move |repo| paths.iter().try_for_each(|path| discard(repo, path)),
+                cx,
+            );
+        }
+        cx.notify();
+        true
     }
 
     /// #325: every file row currently drawn, in draw order, as the pair the
@@ -1254,6 +1331,13 @@ impl ChangesTab {
     /// load fetches every entry eagerly, so this only does real work for a
     /// row a lazy refresh had dropped, or a fresh diff a mutation-triggered
     /// refresh raced ahead of.
+    /// The unavailable diff's Retry: forget the failure, then ask git again.
+    fn retry_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.diff_errors.remove(&path);
+        self.fetch_expanded_diff(path, cx);
+        cx.notify();
+    }
+
     fn fetch_expanded_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) {
             return;
@@ -1316,6 +1400,28 @@ impl ChangesTab {
         }
         self.unified_width_dirty = true;
         cx.notify();
+    }
+
+    /// The control socket's `surface.changes.view`: the diff's layout, a
+    /// file opened the way a click on its row opens it, and the toolbar's
+    /// Refresh. The poll only runs once the surface is drawn, so a headless
+    /// run asks for the refresh a person would get from it.
+    pub fn control_view(
+        &mut self,
+        mode: Option<DiffViewMode>,
+        expand: Option<&Path>,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mode) = mode {
+            self.set_view_mode(mode, cx);
+        }
+        if let Some(path) = expand {
+            self.focus_path(path, cx);
+        }
+        if refresh {
+            self.refresh(cx);
+        }
     }
 
     /// F-CHG-13: `RightPanelActionEvent::OpenDiff(path)` and
@@ -1514,6 +1620,7 @@ impl ChangesTab {
                     section,
                     path: entry.path.clone(),
                     message: format!("diff unavailable: {error}"),
+                    failed: true,
                 });
             }
             return;
@@ -1532,6 +1639,7 @@ impl ChangesTab {
                 section,
                 path: entry.path.clone(),
                 message: "Binary diff unavailable".to_string(),
+                failed: false,
             });
             return;
         }
@@ -1663,6 +1771,7 @@ impl ChangesTab {
         allows_staging: bool,
         draws_open_diff: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
+        forge: Option<Rc<ForgeFiles>>,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -1675,19 +1784,22 @@ impl ChangesTab {
                 expanded,
             } => {
                 let is_selected = selected == Some(&(section, entry.path.clone()));
-                Self::render_change_file(
-                    section,
-                    entry,
-                    stat,
-                    drag_payload,
-                    expanded,
-                    allows_staging,
-                    draws_open_diff,
-                    is_selected,
-                    entity,
-                    theme,
-                )
-                .into_any_element()
+                let menu = file_menu(&entry.path, forge.as_deref());
+                let id = format!("changes-menu-host-{}-{}", section.slug(), entry.path.display());
+                ContextMenu::new(id, menu)
+                    .child(Self::render_change_file(
+                        section,
+                        entry,
+                        stat,
+                        drag_payload,
+                        expanded,
+                        allows_staging,
+                        draws_open_diff,
+                        is_selected,
+                        entity,
+                        theme,
+                    ))
+                    .into_any_element()
             }
             ChangeRow::Hunk {
                 section,
@@ -1712,7 +1824,7 @@ impl ChangesTab {
                 .gap(px(DIFF_ROW_GAP))
                 .px(px(DIFF_ROW_PADDING))
                 .py(px(1.0))
-                .bg(ink(0.02))
+                .bg(theme.ely.fg.opacity(0.02))
                 .font_family(theme.typography.code_family)
                 .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
@@ -1745,17 +1857,21 @@ impl ChangesTab {
                 section,
                 path,
                 line,
-            } => Self::render_diff_line(section, path, line, unified_x, theme).into_any_element(),
+                words,
+            } => Self::render_diff_line(section, path, line, words, unified_x, theme)
+                .into_any_element(),
             ChangeRow::SplitLine {
                 section,
                 path,
                 key,
                 row,
+                words,
             } => Self::render_split_line(
                 section,
                 path,
                 key,
                 row,
+                words,
                 split_left_x,
                 split_right_x,
                 theme,
@@ -1765,34 +1881,35 @@ impl ChangesTab {
                 section,
                 path,
                 message,
-            } => div()
-                .id(format!(
-                    "diff-unavailable-{}-{}",
-                    section.slug(),
-                    path.display()
-                ))
-                .h(px(DIFF_LINE_HEIGHT))
-                .w_full()
-                .flex_none()
-                .flex()
-                .items_start()
-                .gap(px(DIFF_ROW_GAP))
-                .px(px(DIFF_ROW_PADDING))
-                .py(px(1.0))
-                // A message, not code: the row matches the sidebar face.
-                .font_family(theme.typography.ui_family)
-                .text_size(theme.typography.scaled(12.0))
-                .line_height(px(18.0))
-                .text_color(theme.ely.fg_subtle)
-                .child(div().w(px(DIFF_HUNK_GUTTER_WIDTH)).flex_none().child("⋯"))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(message),
-                )
-                .into_any_element(),
+                failed,
+            } => {
+                let retry_path = path.clone();
+                let retry_entity = entity.clone();
+                div()
+                    .id(format!("diff-unavailable-{}-{}", section.slug(), path.display()))
+                    .debug_selector(|| "changes-diff-unavailable".into())
+                    .w_full()
+                    .flex_none()
+                    .px(px(DIFF_ROW_PADDING))
+                    .py(px(6.0))
+                    .child(
+                        Callout::new(if failed { Severity::Danger } else { Severity::Info })
+                            .title(if failed { "Could not load the diff" } else { "Binary file" })
+                            .child(selectable_text(message))
+                            .when(failed, |callout| {
+                                callout.child(row_button(
+                                    format!("diff-retry-{}-{}", section.slug(), path.display()),
+                                    "changes-diff-retry",
+                                    "Retry",
+                                    move |_, cx| {
+                                        retry_entity
+                                            .update(cx, |tab, cx| tab.retry_diff(retry_path.clone(), cx));
+                                    },
+                                ))
+                            }),
+                    )
+                    .into_any_element()
+            }
         }
     }
 
@@ -1809,6 +1926,8 @@ impl ChangesTab {
     ) -> impl IntoElement {
         let band_entity = entity.clone();
         let band_path = path.clone();
+        let toggle_entity = entity.clone();
+        let toggle_path = path.clone();
         let label = if count == 1 {
             "1 hidden line".to_owned()
         } else {
@@ -1830,7 +1949,7 @@ impl ChangesTab {
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             .text_color(theme.ely.fg_subtle)
-            .bg(ink(0.02))
+            .bg(theme.ely.fg.opacity(0.02))
             .hover(|style| style.bg(theme.ely.hover))
             .on_click(move |_, _, cx| {
                 band_entity.update(cx, |tab, cx| {
@@ -1840,11 +1959,17 @@ impl ChangesTab {
             .child(div().h(px(1.0)).w(px(24.0)).bg(theme.ely.border))
             .child(div().text_color(theme.ely.fg_subtle).child(label))
             .child(div().h(px(1.0)).w(px(24.0)).bg(theme.ely.border))
-            .child(
-                div()
-                    .text_color(theme.ely.fg_subtle)
-                    .child(if expanded { "⌃" } else { "⌄" }),
-            )
+            .child(row_icon_button(
+                format!("band-toggle-{}-{path_for_id}-{key}", section.slug()),
+                "changes-context-band-toggle",
+                if expanded { IconName::ChevronUp } else { IconName::ChevronsUpDown },
+                if expanded { "Hide lines" } else { "Show lines" },
+                move |_, cx| {
+                    toggle_entity.update(cx, |tab, cx| {
+                        tab.toggle_band(section, toggle_path.clone(), key, cx);
+                    });
+                },
+            ))
     }
 
     /// The collapsible header of one section, stating its size the way the
@@ -1853,20 +1978,16 @@ impl ChangesTab {
     /// remembering the choice across refreshes.
     fn render_section_header(
         section: ChangeSection,
+        label: &'static str,
         count: usize,
         collapsed: bool,
         allows_staging: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        tooltip_builder: controls::TooltipBuilder,
     ) -> impl IntoElement {
         let entity_for_toggle = entity.clone();
         let entity_for_action = entity.clone();
         let action_label = section.batch_action_label();
-        let action_icon = match section {
-            ChangeSection::Staged => Icon::SquareMinus,
-            ChangeSection::Changed | ChangeSection::Untracked => Icon::SquarePlus,
-        };
         let action_id = format!("changes-section-{}-all", section.slug());
         div()
             .id(format!("changes-section-{}", section.slug()))
@@ -1878,51 +1999,46 @@ impl ChangesTab {
             .flex()
             .items_center()
             .gap(px(DIFF_ROW_GAP))
-            // Section chrome ("Staged (N)" + batch action), not code: the
+            // Section chrome ("Staged" + count + batch action), not code: the
             // sidebar face, like every other section heading in the app.
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
-            .bg(ink(0.02))
+            .bg(theme.ely.fg.opacity(0.02))
             .hover(|style| style.bg(theme.ely.hover))
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| tab.toggle_section(section, cx));
             })
             .child(
-                div()
-                    .w(px(10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if collapsed {
-                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    } else {
-                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    }),
+                div().w(px(10.0)).flex().items_center().justify_center().child(
+                    EIcon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
+                        .size(EIconSize::Xs)
+                        .color(theme.ely.fg_muted),
+                ),
             )
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.ely.fg_muted)
-                    .child(section.label()),
+                    .child(label),
             )
-            .child(
-                div()
-                    .text_color(theme.ely.fg_subtle)
-                    .child(format!("({count})")),
-            )
+            .child(CountBadge::new(format!("changes-section-count-{}", section.slug()), count))
             .child(div().flex_1())
             // A commit view renders no stage/unstage batch action either:
             // the header keeps its collapse toggle but not the mutation.
             .when(allows_staging, |this| {
-                this.child(section_action_button(
-                    action_icon,
-                    action_label,
+                this.child(row_icon_button(
                     action_id,
-                    theme,
-                    tooltip_builder,
-                    move |cx| {
+                    match section {
+                        ChangeSection::Staged => "changes-section-staged-all",
+                        ChangeSection::Changed => "changes-section-changed-all",
+                        ChangeSection::Untracked => "changes-section-untracked-all",
+                    },
+                    match section {
+                        ChangeSection::Staged => IconName::Minus,
+                        ChangeSection::Changed | ChangeSection::Untracked => IconName::Plus,
+                    },
+                    action_label,
+                    move |_, cx| {
                         entity_for_action.update(cx, |tab, cx| tab.section_action(section, cx));
                     },
                 ))
@@ -1951,16 +2067,7 @@ impl ChangesTab {
         let unstages = section == ChangeSection::Staged;
         let stage_label = section.action_label();
         let color = status_color(&entry, theme);
-        // Unknown counts render `·` (the same glyph as binary), never a
-        // confident +0 −0.
-        let (additions, deletions) = match stat {
-            Some(stat) if stat.is_binary => ("·".to_owned(), "·".to_owned()),
-            Some(stat) => (
-                format!("+{}", stat.additions),
-                format!("−{}", stat.deletions),
-            ),
-            None => ("·".to_owned(), "·".to_owned()),
-        };
+        let status = git_status(section, &entry);
         let entity_for_toggle = entity.clone();
         let entity_for_stage = entity.clone();
         let entity_for_discard = entity.clone();
@@ -1986,7 +2093,7 @@ impl ChangesTab {
             // they are chrome, and the path is a label, not content.
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
-            // The path is neutral text — the +/− counts carry the status.
+            // The path is neutral text — the badge and the stat carry the status.
             .text_color(theme.ely.fg)
             .hover(|style| style.bg(theme.ely.hover))
             // #325: the keyboard selection has to be visible, or up/down
@@ -2007,18 +2114,11 @@ impl ChangesTab {
                 });
             })
             .child(
-                div()
-                    .w(px(10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if expanded {
-                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    } else {
-                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    }),
+                div().w(px(10.0)).flex().items_center().justify_center().child(
+                    EIcon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                        .size(EIconSize::Xs)
+                        .color(theme.ely.fg_muted),
+                ),
             )
             .child(
                 div()
@@ -2026,12 +2126,12 @@ impl ChangesTab {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        bezel_icons::icon(bezel_icons::DOCUMENT)
-                            .size(px(14.0))
-                            .text_color(color),
-                    ),
+                    .child(EIcon::new(IconName::File).size(EIconSize::Sm).color(color)),
             )
+            .child(GitStatusBadge::new(
+                format!("changes-status-{}-{}", section.slug(), path.display()),
+                status,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -2039,18 +2139,14 @@ impl ChangesTab {
                     .text_ellipsis()
                     .child(path.to_string_lossy().to_string()),
             )
-            .child(
-                div()
-                    .text_size(theme.typography.scaled(11.5))
-                    .text_color(theme.sirio.diff_add)
-                    .child(additions),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.scaled(11.5))
-                    .text_color(theme.sirio.diff_del)
-                    .child(deletions),
-            )
+            // Known text counts are Ely's stat; unknown or binary counts stay
+            // `·`, never a confident +0 −0 (the honesty contract).
+            .child(match stat {
+                Some(stat) if !stat.is_binary => {
+                    EDiffStat::new(stat.additions, stat.deletions).into_any_element()
+                }
+                _ => div().text_color(theme.ely.fg_subtle).child("·").into_any_element(),
+            })
             .when(expanded, |this| {
                 this.child(
                     div()
@@ -2061,21 +2157,21 @@ impl ChangesTab {
                         // row keeps its diff navigation, but nothing to
                         // mutate.
                         .when(allows_staging, |this| {
-                            this.child(destructive_action_text_button(
-                                "Discard",
+                            this.child(row_button(
                                 format!("discard-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |window, cx| {
+                                "changes-discard",
+                                "Discard",
+                                move |_, cx| {
                                     entity_for_discard.update(cx, |tab, cx| {
-                                        tab.confirm_discard(path_for_discard.clone(), window, cx);
+                                        tab.ask_discard(path_for_discard.clone(), cx);
                                     });
                                 },
                             ))
-                            .child(action_text_button(
-                                stage_label,
+                            .child(row_button(
                                 format!("stage-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |cx| {
+                                if unstages { "changes-unstage" } else { "changes-stage" },
+                                stage_label,
+                                move |_, cx| {
                                     entity_for_stage.update(cx, |tab, cx| {
                                         if unstages {
                                             tab.unstage_path(path_for_stage.clone(), cx);
@@ -2090,11 +2186,11 @@ impl ChangesTab {
                         // it reveals the tab you are already in, and expands
                         // the row it is drawn inside (#217).
                         .when(draws_open_diff, |this| {
-                            this.child(action_text_button(
-                                "Open diff",
+                            this.child(row_button(
                                 format!("changes-open-diff-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |cx| {
+                                "changes-open-diff",
+                                "Open diff",
+                                move |_, cx| {
                                     entity_for_open_diff.update(cx, |_, cx| {
                                         cx.emit(ChangesTabActionEvent::OpenDiff(
                                             open_diff_path.clone(),
@@ -2104,11 +2200,11 @@ impl ChangesTab {
                             ))
                         })
                         .when(entry.is_conflicted(), |this| {
-                            this.child(action_text_button(
-                                "Resolve in terminal",
+                            this.child(row_button(
                                 format!("resolve-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |cx| {
+                                "changes-resolve",
+                                "Resolve in terminal",
+                                move |_, cx| {
                                     entity_for_resolve.update(cx, |_, cx| {
                                         cx.emit(ChangesTabActionEvent::ResolveInTerminal(
                                             conflict_path.clone(),
@@ -2117,31 +2213,26 @@ impl ChangesTab {
                                 },
                             ))
                         })
-                        .child(
-                            div()
-                                .id(format!("open-{}-{}", section.slug(), path.display()))
-                                .debug_selector(|| "changes-open-file".into())
-                                .text_color(theme.ely.fg_muted)
-                                .hover(|style| style.text_color(theme.ely.fg))
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    // `entry.path` is repo-relative, and the
-                                    // host opens an editor tab straight from
-                                    // whatever this event carries — a
-                                    // relative path made `FileView` resolve
-                                    // against the process CWD and render
-                                    // "This file does not exist: <name>" for
-                                    // a file that plainly does. Resolve
-                                    // against this surface's own root, the
-                                    // way the Files tree already emits
-                                    // absolute paths.
-                                    entity_for_open.update(cx, |tab, cx| {
-                                        let absolute = tab.repo_root.join(&path);
-                                        cx.emit(ChangesTabEvent::OpenFile(absolute));
-                                    });
-                                })
-                                .child("↗"),
-                        ),
+                        .child(row_icon_button(
+                            format!("open-{}-{}", section.slug(), path.display()),
+                            "changes-open-file",
+                            IconName::SquarePen,
+                            "Open file",
+                            move |_, cx| {
+                                // `entry.path` is repo-relative, and the host
+                                // opens an editor tab straight from whatever
+                                // this event carries — a relative path made
+                                // `FileView` resolve against the process CWD
+                                // and render "This file does not exist" for a
+                                // file that plainly does. Resolve against this
+                                // surface's own root, the way the Files tree
+                                // already emits absolute paths.
+                                entity_for_open.update(cx, |tab, cx| {
+                                    let absolute = tab.repo_root.join(&path);
+                                    cx.emit(ChangesTabEvent::OpenFile(absolute));
+                                });
+                            },
+                        )),
                 )
             })
     }
@@ -2162,6 +2253,7 @@ impl ChangesTab {
         path: PathBuf,
         key: usize,
         row: DiffSideBySideRow,
+        words: (Option<Range<usize>>, Option<Range<usize>>),
         left_x: Pixels,
         right_x: Pixels,
         theme: Theme,
@@ -2183,7 +2275,7 @@ impl ChangesTab {
             .font_family(theme.typography.code_family)
             .text_size(theme.typography.scaled(12.0))
             .child(
-                split_cell(row.left, true, left_x, theme)
+                split_cell(row.left, words.0, true, left_x, theme)
                     .debug_selector(|| "changes-split-left".into()),
             )
             .child(
@@ -2193,7 +2285,7 @@ impl ChangesTab {
                     .bg(theme.ely.border),
             )
             .child(
-                split_cell(row.right, false, right_x, theme)
+                split_cell(row.right, words.1, false, right_x, theme)
                     .debug_selector(|| "changes-split-right".into()),
             )
     }
@@ -2202,13 +2294,27 @@ impl ChangesTab {
         section: ChangeSection,
         path: PathBuf,
         line: DiffLine,
+        words: Option<Range<usize>>,
         unified_x: Pixels,
         theme: Theme,
     ) -> impl IntoElement {
-        let (background, marker_color, marker, text_color) = match line.origin {
-            DiffOrigin::Context => (theme.ely.bg, theme.ely.fg_subtle, " ", theme.ely.fg_muted),
-            DiffOrigin::Addition => (diff_wash(theme.sirio.diff_add), theme.sirio.diff_add, "+", theme.ely.fg),
-            DiffOrigin::Deletion => (diff_wash(theme.sirio.diff_del), theme.sirio.diff_del, "-", theme.ely.fg),
+        let colors = &theme.ely;
+        let (background, marker_color, marker, text_color, word_wash) = match line.origin {
+            DiffOrigin::Context => (colors.bg, colors.fg_subtle, " ", colors.fg_muted, None),
+            DiffOrigin::Addition => (
+                colors.success.opacity(LINE_WASH),
+                colors.success,
+                "+",
+                colors.fg,
+                Some(colors.success.opacity(WORD_WASH)),
+            ),
+            DiffOrigin::Deletion => (
+                colors.danger.opacity(LINE_WASH),
+                colors.danger,
+                "-",
+                colors.fg,
+                Some(colors.danger.opacity(WORD_WASH)),
+            ),
         };
         div()
             .id(format!(
@@ -2281,7 +2387,7 @@ impl ChangesTab {
                         // is the line as it reads in the file. Each row has
                         // an id of its own, which is what keeps two identical
                         // lines (a closing brace) from selecting together.
-                        .child(selectable_text(line.content)),
+                        .child(washed_text(line.content, words, word_wash)),
                 ),
             )
     }
@@ -2313,7 +2419,6 @@ impl ChangesTab {
         let collapse_entity = entity.clone();
         let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
-        let tooltip_builder = change_tooltip_builder(self.embedded_in_panel);
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -2344,102 +2449,74 @@ impl ChangesTab {
                     .text_color(theme.ely.fg)
                     .child(title),
             )
-            // The view-mode control sits at the head of the action cluster,
-            // with the other two *view* controls (Expand All / Collapse
-            // All) beside it and the git *mutations* (Stage all, Discard
-            // all) after them. It is the same segmented primitive Settings
-            // uses for System/Light/Dark, and it belongs in this header for
-            // the same reason Expand All does: it changes how the whole
-            // surface reads, not one file.
-            //
-            // The precedent taken from macOS is the *placement and
-            // primitive*, not the semantics: `SideBySideDiffView.scopeBar`
-            // (`DiffContentAdapter.swift:179`) is a segmented `Picker` in
-            // exactly this position at the top of the diff surface — but it
-            // picks the diff's *scope* (whole file vs hunks), because that
-            // build had only one renderer and so never needed a view-mode
-            // choice at all. Do not read this control as a port of that one.
-            .child(controls::segmented_icons_with_tooltip(
-                "changes-view-mode",
-                &[(Icon::DiffUnified, "Unified"), (Icon::DiffSplit, "Split")],
-                mode.index(),
-                theme,
-                tooltip_builder,
-                move |index, cx| {
-                    mode_entity.update(cx, |tab, cx| {
-                        tab.set_view_mode(DiffViewMode::from_index(index), cx);
-                    });
-                },
-            ))
+            // The view mode heads the action cluster: it changes how the
+            // whole surface reads, like Expand All beside it. One choice of
+            // two; pressing the chosen face again empties Ely's selection,
+            // which keeps the mode.
+            .child(
+                div()
+                    .id("changes-view-mode")
+                    .debug_selector(|| "changes-view-mode".into())
+                    .flex_none()
+                    .child(
+                        ToggleGroup::new("changes-view-mode-group")
+                            .size(ControlSize::Sm)
+                            .item(ToggleItem::new("unified").icon(IconName::Rows2).tooltip("Unified"))
+                            .item(ToggleItem::new("split").icon(IconName::Columns2).tooltip("Split"))
+                            .selected([mode.name()])
+                            .on_change(move |selected, _, cx| {
+                                let Some(mode) = selected.first().and_then(|value| DiffViewMode::parse(value))
+                                else {
+                                    return;
+                                };
+                                mode_entity.update(cx, |tab, cx| tab.set_view_mode(mode, cx));
+                            }),
+                    ),
+            )
             // Refresh is a button and nothing else: it never turns into a
-            // spinner while a snapshot loads. The toolbar used to swap it
-            // for `loading::compact` for as long as `git_task` was in
-            // flight, and `ensure_refresh` puts a task in flight every
-            // second, so the icon blinked once a second for the duration
-            // of every `git status`. A refresh over a settled surface is
-            // silent — the same rule `render_body` applies to the list —
+            // spinner while a snapshot loads (a refresh runs every second),
             // and a click during one is a no-op by `refresh`'s own
             // single-flight guard.
-            .child(action_icon_button(
-                Icon::RefreshCw,
-                "Refresh",
+            .child(crate::ely_ui::icon_button(
                 "changes-refresh",
-                "refresh-changes".to_owned(),
-                theme,
-                tooltip_builder,
-                move |cx| {
-                    refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
-                },
+                IconName::RefreshCw,
+                "Refresh",
+                true,
+                move |_, cx| refresh_entity.update(cx, |tab, cx| tab.refresh(cx)),
             ))
-            .child(action_icon_button(
-                Icon::ExpandVertical,
-                "Expand All",
+            .child(crate::ely_ui::icon_button(
                 "changes-expand-all",
-                "expand-all".to_owned(),
-                theme,
-                tooltip_builder,
-                move |cx| {
-                    expand_entity.update(cx, |tab, cx| tab.expand_all(cx));
-                },
+                IconName::Maximize2,
+                "Expand All",
+                true,
+                move |_, cx| expand_entity.update(cx, |tab, cx| tab.expand_all(cx)),
             ))
-            .child(action_icon_button(
-                Icon::FoldVertical,
-                "Collapse All",
+            .child(crate::ely_ui::icon_button(
                 "changes-collapse-all",
-                "collapse-all".to_owned(),
-                theme,
-                tooltip_builder,
-                move |cx| {
-                    collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx));
-                },
+                IconName::Minimize2,
+                "Collapse All",
+                true,
+                move |_, cx| collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx)),
             ))
             // The git mutations only exist for a mutable checkout: a commit
             // view renders no Stage/Discard controls at all.
             .when(self.allows_staging(), |this| {
-                this.child(action_icon_button(
-                    Icon::SquarePlus,
-                    "Stage all",
+                this.child(crate::ely_ui::icon_button(
                     "changes-stage-all",
-                    "stage-all".to_owned(),
-                    theme,
-                    tooltip_builder,
-                    move |cx| {
-                        stage_entity.update(cx, |tab, cx| {
-                            tab.start_operation(stage_all, cx);
-                        });
+                    IconName::Plus,
+                    "Stage all",
+                    true,
+                    move |_, cx| {
+                        stage_entity.update(cx, |tab, cx| tab.start_operation(stage_all, cx));
                     },
                 ))
-                .child(destructive_action_icon_button(
-                    Icon::Undo,
-                    "Discard all",
+                .child(crate::ely_ui::icon_button(
                     "changes-discard-all",
-                    "discard-all".to_owned(),
-                    theme,
-                    tooltip_builder,
-                    move |window, cx| {
-                        discard_entity.update(cx, |tab, cx| {
-                            tab.confirm_discard_all(window, cx);
-                        });
+                    IconName::Undo2,
+                    "Discard all",
+                    true,
+                    move |_, cx| {
+                        discard_entity.update(cx, |tab, cx| tab.ask_discard_all(cx));
                     },
                 ))
             })
@@ -2492,21 +2569,34 @@ fn push_segment(
 ) {
     match mode {
         DiffViewMode::Unified => {
-            for line in lines {
+            let words = segment_words(lines);
+            for (line, words) in lines.iter().zip(words) {
                 rows.push(ChangeRow::Line {
                     section,
                     path: path.to_path_buf(),
                     line: line.clone(),
+                    words,
                 });
             }
         }
         DiffViewMode::Split => {
             for row in GitDiffSideBySide::rows_from_lines(lines) {
+                let words = match (&row.left, &row.right) {
+                    (Some(left), Some(right))
+                        if left.origin == DiffOrigin::Deletion
+                            && right.origin == DiffOrigin::Addition =>
+                    {
+                        changed_span(&left.content, &right.content)
+                            .map_or((None, None), |(old, new)| (Some(old), Some(new)))
+                    }
+                    _ => (None, None),
+                };
                 rows.push(ChangeRow::SplitLine {
                     section,
                     path: path.to_path_buf(),
                     key: *split_key,
                     row,
+                    words,
                 });
                 *split_key += 1;
             }
@@ -2543,6 +2633,7 @@ fn split_row_shape(row: &DiffSideBySideRow) -> &'static str {
 /// a zipped deletion/addition pair shows one on each side.
 fn split_cell(
     line: Option<DiffSideBySideLine>,
+    words: Option<Range<usize>>,
     old: bool,
     side_x: Pixels,
     theme: Theme,
@@ -2587,10 +2678,21 @@ fn split_cell(
         // renderer to show — invisible in a photograph.
         return cell.bg(theme.ely.sunken);
     };
-    let (background, marker_color, marker) = match line.origin {
-        DiffOrigin::Context => (theme.ely.bg, theme.ely.fg_subtle, " "),
-        DiffOrigin::Addition => (diff_wash(theme.sirio.diff_add), theme.sirio.diff_add, "+"),
-        DiffOrigin::Deletion => (diff_wash(theme.sirio.diff_del), theme.sirio.diff_del, "-"),
+    let colors = &theme.ely;
+    let (background, marker_color, marker, word_wash) = match line.origin {
+        DiffOrigin::Context => (colors.bg, colors.fg_subtle, " ", None),
+        DiffOrigin::Addition => (
+            colors.success.opacity(LINE_WASH),
+            colors.success,
+            "+",
+            Some(colors.success.opacity(WORD_WASH)),
+        ),
+        DiffOrigin::Deletion => (
+            colors.danger.opacity(LINE_WASH),
+            colors.danger,
+            "-",
+            Some(colors.danger.opacity(WORD_WASH)),
+        ),
     };
     let number = if old {
         line.old_line_number
@@ -2646,7 +2748,7 @@ fn split_cell(
                             // text in the same row, so each needs its own
                             // identity or selecting one would select both.
                             .child(
-                                selectable_text(line.content)
+                                washed_text(line.content, words, word_wash)
                                     .id(if old { "split-old" } else { "split-new" }),
                             ),
                     ),
@@ -2717,26 +2819,24 @@ impl ChangesTab {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(theme.spacing.card_gap)
-                .text_size(theme.typography.headline)
-                .text_color(theme.ely.fg_muted)
-                .child(loading::indeterminate(
-                    "changes-loading-orb",
-                    loading::GENERIC_ORB,
-                    &theme,
-                    window,
-                    cx,
-                ))
-                .child("Loading changes…")
-                .child(loading::skeleton_rows(
-                    "changes-skeleton",
-                    loading::SKELETON_ROWS,
-                    &theme,
-                    window,
-                    cx,
-                ))
+                .children((0..6usize).map(|ix| {
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .px(px(DIFF_ROW_PADDING))
+                        .flex()
+                        .items_center()
+                        .gap(px(DIFF_ROW_GAP))
+                        .border_b_1()
+                        .border_color(theme.ely.border)
+                        .child(Skeleton::new(("changes-skeleton-icon", ix)).size(px(14.0)))
+                        .child(
+                            Skeleton::new(("changes-skeleton-path", ix))
+                                .h(px(10.0))
+                                .w(gpui::relative(0.5)),
+                        )
+                        .child(div().flex_1())
+                        .child(Skeleton::new(("changes-skeleton-stat", ix)).h(px(10.0)).w(px(48.0)))
+                }))
                 .into_any_element();
         }
         let sections = self.section_rows(mode);
@@ -2838,7 +2938,8 @@ impl ChangesTab {
         let row_entity = entity.clone();
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
-        let tooltip_builder = change_tooltip_builder(self.embedded_in_panel);
+        let source = self.source.clone();
+        let forge = self.forge_files.clone();
         let selected = self.selected_change.clone();
         let unified_x = self.unified_x;
         let split_left_x = self.split_left_x;
@@ -2883,12 +2984,12 @@ impl ChangesTab {
                             collapsed,
                         }) => Self::render_section_header(
                             *section,
+                            section.label_in(&source),
                             *count,
                             *collapsed,
                             allows_staging,
                             row_entity.clone(),
                             theme,
-                            tooltip_builder,
                         )
                         .into_any_element(),
                         Some(ListRow::Change(row)) => Self::render_change_row(
@@ -2903,6 +3004,7 @@ impl ChangesTab {
                             allows_staging,
                             draws_open_diff,
                             selected.as_ref(),
+                            forge.clone(),
                             row_entity.clone(),
                             theme,
                         ),
@@ -3107,9 +3209,9 @@ impl ChangesTab {
     fn render_error_state(
         error: &str,
         entity: gpui::Entity<Self>,
-        theme: Theme,
+        _theme: Theme,
     ) -> impl IntoElement {
-        let retry_entity = entity;
+        let retry = entity;
         div()
             .id("changes-error")
             .debug_selector(|| "changes-error".into())
@@ -3119,27 +3221,85 @@ impl ChangesTab {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.0))
             .p(px(24.0))
             .child(
-                div()
-                    .max_w(px(560.0))
-                    .text_size(theme.typography.headline)
-                    .text_color(theme.ely.danger)
-                    .child(format!("Git is unavailable: {error}")),
+                div().w_full().max_w(px(560.0)).child(
+                    Callout::new(Severity::Danger)
+                        .title("Git is unavailable")
+                        .child(selectable_text(error.to_string()))
+                        .child(crate::ely_ui::text_button(
+                            "changes-retry",
+                            "Retry",
+                            Some(IconName::RotateCw),
+                            crate::ely_ui::ButtonState::IDLE,
+                            move |_, cx| retry.update(cx, |tab, cx| tab.retry_refresh(cx)),
+                        )),
+                ),
             )
-            .child(action_text_button(
-                "Retry",
-                "changes-retry".to_owned(),
-                theme,
-                move |cx| retry_entity.update(cx, |tab, cx| tab.retry_refresh(cx)),
-            ))
+    }
+
+    /// The Discard confirmation, drawn over the surface while it is asked.
+    fn render_discard_dialog(&self, entity: &gpui::Entity<Self>) -> Option<AnyElement> {
+        let ask = self.discard_ask.as_ref()?;
+        let (title, body, label) = match ask {
+            DiscardAsk::One(path) => (
+                "Discard changes?",
+                format!(
+                    "This will throw away the worktree changes to {}. This cannot be undone.",
+                    sirio_project::display_path(path)
+                ),
+                "Discard",
+            ),
+            DiscardAsk::All(paths) => (
+                "Discard all changes?",
+                format!(
+                    "This will throw away the worktree changes to:\n{}\n\nThis cannot be undone.",
+                    paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+                "Discard All",
+            ),
+        };
+        let (close, confirm) = (entity.clone(), entity.clone());
+        let dialog = Dialog::new("changes-discard-dialog", title, move |_, cx| {
+            close.update(cx, |tab, cx| tab.close_discard(cx))
+        })
+        .child(selectable_text(body))
+        .action(|close| {
+            dialog_button("changes-discard-cancel", "Cancel", ButtonVariant::Ghost, move |window, cx| {
+                close(window, cx)
+            })
+        })
+        .action(move |close| {
+            dialog_button("changes-discard-confirm", label, ButtonVariant::Danger, move |window, cx| {
+                // Confirm first: closing runs `close_discard`, which would
+                // take the ask before the confirm could read it. Then close
+                // like Cancel does, which hands the keyboard back.
+                confirm.update(cx, |tab, cx| {
+                    tab.confirm_discard(cx);
+                });
+                close(window, cx);
+            })
+        });
+        Some(
+            div()
+                .debug_selector(|| "changes-discard-dialog".into())
+                .child(dialog)
+                .into_any_element(),
+        )
     }
 }
 
 impl Render for ChangesTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangesTab.render", cx.entity_id().as_u64());
+        // Ely draws from its own theme global, which only follows Sirio's
+        // appearance when something syncs it; a surface outside the chat
+        // must do so itself or stay dark in Light mode.
+        crate::ely::sync_theme_if_changed(cx);
         let theme = *Theme::get(cx);
         let theme = if self.embedded_in_panel {
             theme.with_sidebar_typography()
@@ -3162,6 +3322,7 @@ impl Render for ChangesTab {
         let toolbar = self
             .render_toolbar(entity.clone(), theme, mode)
             .into_any_element();
+        let dialog = self.render_discard_dialog(&entity);
         let body = self.render_body(entity, theme, mode, _window, cx);
         div()
             // The surface's own extent, so a drawn test can assert that
@@ -3174,6 +3335,7 @@ impl Render for ChangesTab {
             .bg(theme.ely.bg)
             .child(toolbar)
             .child(body)
+            .children(dialog)
     }
 }
 
@@ -3188,12 +3350,218 @@ fn status_color(entry: &StatusEntry, theme: Theme) -> Hsla {
     crate::git_status_style::entry_color(entry, theme)
 }
 
-/// The gallery derives row washes from the semantic ink rather than keeping
-/// a second palette entry for the same meaning.
-fn diff_wash(color: Hsla) -> Hsla {
-    Hsla {
-        a: DIFF_WASH_ALPHA,
-        ..color
+/// The letter a row's badge shows. The section decides which column of
+/// porcelain's two it reads — the index in Staged, the worktree in Changed —
+/// because that is the side of the split the row acts on. A commit's or a
+/// range's rows carry their status in the index column.
+fn git_status(section: ChangeSection, entry: &StatusEntry) -> GitStatus {
+    if section == ChangeSection::Untracked || entry.is_untracked() {
+        return GitStatus::Untracked;
+    }
+    if entry.is_conflicted() {
+        return GitStatus::Conflicted;
+    }
+    let kind = match section {
+        ChangeSection::Staged => entry.index_status,
+        ChangeSection::Changed | ChangeSection::Untracked => entry.worktree_status,
+    };
+    match kind {
+        Some(StatusKind::Added | StatusKind::Copied) => GitStatus::Added,
+        Some(StatusKind::Deleted) => GitStatus::Deleted,
+        Some(StatusKind::Renamed) => GitStatus::Renamed,
+        Some(StatusKind::Unmerged) => GitStatus::Conflicted,
+        Some(StatusKind::Untracked) => GitStatus::Untracked,
+        Some(StatusKind::Modified | StatusKind::TypeChanged) | None => GitStatus::Modified,
+    }
+}
+
+/// One file of a change request on its forge. GitHub anchors a file on the
+/// *Files changed* page by the SHA-256 of its path; GitLab's page opens at
+/// its top, because its per-file anchor is not one Sirio can check here.
+fn forge_file_url(files: &ForgeFiles, path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let base = files.web_url.trim_end_matches('/');
+    match files.forge {
+        sirio_forge::Forge::GitHub => {
+            // The forge's path, `/`-separated whatever the platform's is.
+            let path = path
+                .iter()
+                .map(|part| part.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let hex: String = Sha256::digest(path.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("{base}/files#diff-{hex}")
+        }
+        sirio_forge::Forge::GitLab => format!("{base}/diffs"),
+    }
+}
+
+/// A file row's right-click menu (B1 §7.1).
+fn file_menu(path: &Path, forge: Option<&ForgeFiles>) -> Menu {
+    let copy = path.to_string_lossy().into_owned();
+    let mut menu = Menu::new().item(
+        MenuItem::new("Copy path")
+            .icon(IconName::Copy)
+            .selectors("changes-menu-copy-path", None)
+            .on_click(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
+    );
+    if let Some(files) = forge {
+        let url = forge_file_url(files, path);
+        menu = menu.item(
+            MenuItem::new("Open on the forge")
+                .icon(IconName::ExternalLink)
+                .selectors("changes-menu-open-forge", None)
+                .on_click(move |_, cx| cx.open_url(&url)),
+        );
+    }
+    menu
+}
+
+/// A button of the Discard dialog, findable by its id.
+fn dialog_button(
+    id: &'static str,
+    label: &'static str,
+    variant: ButtonVariant,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex_none()
+        .child(
+            Button::new(id, label)
+                .variant(variant)
+                .on_click(move |_, window, cx| on_click(window, cx)),
+        )
+        .into_any_element()
+}
+
+/// A row's labelled action: a small ghost button. The click stops there, so
+/// the row it sits in does not also toggle.
+fn row_button(
+    id: String,
+    selector: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id.clone())
+        .debug_selector(move || selector.to_owned())
+        .flex_none()
+        .child(
+            Button::new(SharedString::from(format!("{id}-button")), label)
+                .size(ControlSize::Sm)
+                .variant(ButtonVariant::Ghost)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_click(window, cx);
+                }),
+        )
+        .into_any_element()
+}
+
+/// A row's icon action, with its tooltip. Stops the click like `row_button`.
+fn row_icon_button(
+    id: String,
+    selector: &'static str,
+    icon: IconName,
+    tooltip: &'static str,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id.clone())
+        .debug_selector(move || selector.to_owned())
+        .flex_none()
+        .child(
+            IconButton::new(SharedString::from(format!("{id}-button")), icon)
+                .size(ControlSize::Sm)
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_click(window, cx);
+                }),
+        )
+        .into_any_element()
+}
+
+/// The changed stretch of a replaced line on each side: what lies between
+/// the two lines' common prefix and common suffix, widened to whole words.
+/// `None` when the lines are equal or share nothing, where the line's own
+/// wash already says everything.
+fn changed_span(old: &str, new: &str) -> Option<(Range<usize>, Range<usize>)> {
+    if old == new {
+        return None;
+    }
+    let prefix: usize = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    let suffix: usize = old[prefix..]
+        .chars()
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    if prefix == 0 && suffix == 0 {
+        return None;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let widen = |text: &str, start: usize, end: usize| {
+        let start = start
+            - text[..start]
+                .chars()
+                .rev()
+                .take_while(|c| is_word(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        let end = end
+            + text[end..]
+                .chars()
+                .take_while(|c| is_word(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        start..end
+    };
+    Some((
+        widen(old, prefix, old.len() - suffix),
+        widen(new, prefix, new.len() - suffix),
+    ))
+}
+
+/// The changed words of every line of one deletion/addition run, paired the
+/// way `GitDiffSideBySide` zips the run: the n-th deletion with the n-th
+/// addition.
+fn segment_words(lines: &[DiffLine]) -> Vec<Option<Range<usize>>> {
+    let mut words = vec![None; lines.len()];
+    let of = |origin| (0..lines.len()).filter(move |&ix| lines[ix].origin == origin);
+    for (old, new) in of(DiffOrigin::Deletion).zip(of(DiffOrigin::Addition)) {
+        if let Some((old_words, new_words)) = changed_span(&lines[old].content, &lines[new].content) {
+            words[old] = Some(old_words);
+            words[new] = Some(new_words);
+        }
+    }
+    words
+}
+
+/// A line's code as selectable text, its changed words washed.
+#[track_caller]
+fn washed_text(text: String, words: Option<Range<usize>>, wash: Option<Hsla>) -> SelectableText {
+    let text = selectable_text(text);
+    match (words, wash) {
+        (Some(range), Some(wash)) if !range.is_empty() => text.highlights(vec![(
+            range,
+            HighlightStyle {
+                background_color: Some(wash),
+                ..Default::default()
+            },
+        )]),
+        _ => text,
     }
 }
 
@@ -3242,159 +3610,6 @@ impl Render for DiffDragPreview {
             .text_color(self.theme.ely.fg)
             .child("Diff")
     }
-}
-
-fn action_text_button(
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id.clone())
-        // The id drives click dispatch; the selector is what tests can
-        // find in the drawn frame's debug-bounds map.
-        .debug_selector(move || match label {
-            "Stage" => "changes-stage".to_owned(),
-            "Unstage" => "changes-unstage".to_owned(),
-            "Retry" => "changes-retry".to_owned(),
-            "Stage all" => "changes-stage-all".to_owned(),
-            "Expand All" => "changes-expand-all".to_owned(),
-            "Collapse All" => "changes-collapse-all".to_owned(),
-            "Open diff" => "changes-open-diff".to_owned(),
-            "Resolve in terminal" => "changes-resolve".to_owned(),
-            _ => format!("changes-action-{label}"),
-        })
-        .px(theme.spacing.titlebar_control_spacing)
-        .py(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.caption2)
-        .text_color(theme.ely.fg)
-        .hover(|style| style.bg(theme.ely.hover))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(label)
-}
-
-fn change_tooltip_builder(embedded_in_panel: bool) -> controls::TooltipBuilder {
-    if embedded_in_panel {
-        controls::sidebar_tooltip
-    } else {
-        Tooltip::text
-    }
-}
-
-fn action_icon_button(
-    icon: Icon,
-    tooltip: &'static str,
-    selector: &'static str,
-    id: String,
-    theme: Theme,
-    tooltip_builder: controls::TooltipBuilder,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_owned())
-        .px(theme.spacing.titlebar_control_spacing)
-        .py(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.caption2)
-        .text_color(theme.ely.fg)
-        .hover(|style| style.bg(theme.ely.hover))
-        .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(IconElement::new(icon, IconSize::Small))
-}
-
-fn section_action_button(
-    icon: Icon,
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    tooltip_builder: controls::TooltipBuilder,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id.clone())
-        .debug_selector(move || id.clone())
-        // The token layer has no compact-section-action padding yet; use its
-        // titlebar spacing as the nearest COSMIC control rhythm.
-        .px(theme.spacing.titlebar_control_spacing)
-        .py(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.caption2)
-        .text_color(theme.ely.fg_muted)
-        .hover(|style| style.bg(theme.ely.hover).text_color(theme.ely.fg))
-        .tooltip(move |window, cx| tooltip_builder(label, window, cx))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(IconElement::new(icon, IconSize::XSmall))
-}
-
-fn destructive_action_icon_button<F>(
-    icon: Icon,
-    tooltip: &'static str,
-    selector: &'static str,
-    id: String,
-    theme: Theme,
-    tooltip_builder: controls::TooltipBuilder,
-    on_click: F,
-) -> impl IntoElement
-where
-    F: Fn(&mut Window, &mut App) + 'static,
-{
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_owned())
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
-        .text_size(theme.typography.scaled(12.5))
-        .text_color(theme.ely.fg_muted)
-        .hover(|style| style.text_color(theme.ely.danger))
-        .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx);
-        })
-        .child(IconElement::new(icon, IconSize::Small))
-}
-
-fn destructive_action_text_button<F>(
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    on_click: F,
-) -> impl IntoElement
-where
-    F: Fn(&mut Window, &mut App) + 'static,
-{
-    div()
-        .id(id)
-        .debug_selector(move || match label {
-            "Discard" => "changes-discard".to_owned(),
-            "Discard all" => "changes-discard-all".to_owned(),
-            _ => format!("changes-destructive-{label}"),
-        })
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
-        .text_size(theme.typography.scaled(12.5))
-        .text_color(theme.ely.fg_muted)
-        .hover(|style| style.text_color(theme.ely.danger))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx);
-        })
-        .child(label)
 }
 
 /// Loads the status, per-file counts and per-file diffs for one checkout.
@@ -3786,6 +4001,7 @@ mod tests {
         repo_root: PathBuf,
     ) -> (VisualTestContext, gpui::Entity<ChangesTab>) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::in_right_panel(repo_root.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -3802,6 +4018,7 @@ mod tests {
         repo_root: PathBuf,
     ) -> (VisualTestContext, gpui::Entity<ChangesTab>) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::new(repo_root.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -3965,6 +4182,8 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -4018,6 +4237,8 @@ mod tests {
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::in_right_panel(dir.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -4715,6 +4936,7 @@ mod tests {
     async fn a_known_non_git_project_shows_the_empty_changes_state(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             ChangesTab::in_right_panel_with_git_capability(dir.0.clone(), false, cx)
         });
@@ -4745,6 +4967,8 @@ mod tests {
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::new(dir.0.clone(), cx));
         let tab = cx
             .update_window(window.into(), |_, window, _| {
@@ -5071,6 +5295,311 @@ mod tests {
         );
     }
 
+    /// A file staged and then modified again sits in two sections, and each
+    /// row names its own side of the split: what the index holds in Staged,
+    /// what the worktree holds in Changed.
+    #[test]
+    fn a_file_in_two_sections_shows_each_sections_own_letter() {
+        let entry = StatusEntry {
+            path: PathBuf::from("a.rs"),
+            original_path: None,
+            index_status: Some(StatusKind::Added),
+            worktree_status: Some(StatusKind::Modified),
+        };
+        assert_eq!(git_status(ChangeSection::Staged, &entry), GitStatus::Added);
+        assert_eq!(git_status(ChangeSection::Changed, &entry), GitStatus::Modified);
+    }
+
+    /// A commit's or a range's rows carry their status in the index column
+    /// (`commit_status_kind`), so a file the commit deletes reads D.
+    #[test]
+    fn a_commit_row_reads_its_status_from_the_index_column() {
+        let entry = StatusEntry {
+            path: PathBuf::from("gone.txt"),
+            original_path: None,
+            index_status: Some(commit_status_kind('D')),
+            worktree_status: None,
+        };
+        assert_eq!(git_status(ChangeSection::Staged, &entry), GitStatus::Deleted);
+    }
+
+    /// B1 §13: a change request's diff is not "staged" anything. Its one
+    /// section is headed, and reported, as Changes.
+    #[test]
+    fn a_range_reports_its_one_section_as_changes() {
+        let report = range_tab_with_one_diff(false).report();
+        let names: Vec<_> = report.sections.iter().map(|section| section.name).collect();
+        assert!(names.contains(&"Changes"), "{names:?}");
+        assert!(!names.contains(&"Staged"), "{names:?}");
+    }
+
+    #[test]
+    fn a_changed_word_is_the_only_stretch_washed() {
+        let (old, new) = changed_span("let x = 1;", "let x = 2;").expect("a stretch");
+        assert_eq!((&"let x = 1;"[old], &"let x = 2;"[new]), ("1", "2"));
+    }
+
+    #[test]
+    fn a_stretch_is_widened_to_whole_words() {
+        let (old, new) = changed_span("let count = 10;", "let count = 12;").expect("a stretch");
+        assert_eq!((&"let count = 10;"[old], &"let count = 12;"[new]), ("10", "12"));
+    }
+
+    /// Identical lines have nothing changed, and lines with nothing in common
+    /// are already said by the line wash; a word wash over all of it adds noise.
+    #[test]
+    fn identical_or_wholly_different_lines_wash_no_words() {
+        assert_eq!(changed_span("same", "same"), None);
+        assert_eq!(changed_span("abc", "xyz"), None);
+    }
+
+    /// Review Focus 3: slicing a `String` off a character boundary panics.
+    #[test]
+    fn a_changed_stretch_falls_on_character_boundaries() {
+        let (old_text, new_text) = ("città bella è", "città brutta è");
+        let (old, new) = changed_span(old_text, new_text).expect("a stretch");
+        assert_eq!((&old_text[old], &new_text[new]), ("bella", "brutta"));
+        let (old, new) = changed_span("🙂 a", "🙃 a").expect("a stretch");
+        assert_eq!((&"🙂 a"[old], &"🙃 a"[new]), ("🙂", "🙃"));
+    }
+
+    /// A run pairs its n-th deletion with its n-th addition — the side-by-side
+    /// model's zip — and an addition left over has nothing to compare with.
+    #[test]
+    fn a_run_pairs_its_nth_deletion_with_its_nth_addition() {
+        let line = |origin, content: &str| DiffLine {
+            origin,
+            old_line_number: None,
+            new_line_number: None,
+            content: content.to_string(),
+        };
+        let lines = [
+            line(DiffOrigin::Deletion, "a = 1"),
+            line(DiffOrigin::Deletion, "b = 1"),
+            line(DiffOrigin::Addition, "a = 2"),
+            line(DiffOrigin::Addition, "b = 2"),
+            line(DiffOrigin::Addition, "c = 3"),
+        ];
+        let words = segment_words(&lines);
+        let shown: Vec<Option<&str>> = words
+            .iter()
+            .zip(&lines)
+            .map(|(range, line)| range.clone().map(|range| &line.content[range]))
+            .collect();
+        assert_eq!(shown, vec![Some("1"), Some("1"), Some("2"), Some("2"), None]);
+    }
+
+    /// An unavailable diff offers Retry, and Retry asks git again instead of
+    /// keeping the old failure (`fetch_expanded_diff` skips a path that has one).
+    #[gpui::test]
+    async fn retry_on_an_unavailable_diff_asks_git_again(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let (base, head) = (rev_parse(&dir.0, "HEAD~1"), rev_parse(&dir.0, "HEAD"));
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_, cx| ChangesTab::for_range(dir.0.clone(), base, head, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, _| window.root::<ChangesTab>().flatten().expect("root"));
+        wait_for_tab(&cx, &tab, |tab| !tab.entries.is_empty());
+        let path = tab.read_with(&cx.cx, |tab, _| tab.entries[0].path.clone());
+        tab.update(&mut cx.cx, |tab, cx| {
+            tab.diffs.remove(&path);
+            tab.diff_errors.insert(path.clone(), "fatal: transient".to_string());
+            tab.expanded_changes.insert((ChangeSection::Staged, path.clone()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let retry = cx.debug_bounds("changes-diff-retry").expect("Retry on the unavailable diff");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        wait_for_tab(&cx, &tab, |tab| tab.diffs.contains_key(&path) && !tab.diff_errors.contains_key(&path));
+    }
+
+    /// A confirm closes the dialog at once and queues exactly one discard, even
+    /// pressed again before the refresh in flight finishes.
+    #[gpui::test]
+    async fn a_confirm_pressed_twice_discards_once(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        tab.update(&mut cx.cx, |tab, cx| {
+            tab.refresh(cx);
+            tab.ask_discard(PathBuf::from("tracked.txt"), cx);
+            assert!(tab.confirm_discard(cx), "the first confirm runs");
+            assert!(!tab.confirm_discard(cx), "the dialog is closed: a second confirm does nothing");
+            assert_eq!(tab.pending_operations.len(), 1, "one discard is queued behind the refresh");
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
+    }
+
+    /// GitHub anchors a file on the Files page by the SHA-256 of its path
+    /// (`#diff-<hex>`); the value below is `printf 'src/login.rs' | sha256sum`.
+    #[test]
+    fn a_github_file_opens_at_its_anchor_on_the_files_page() {
+        let files = ForgeFiles {
+            forge: sirio_forge::Forge::GitHub,
+            web_url: "https://ghe.test/acme/widgets/pull/101/".into(),
+        };
+        assert_eq!(
+            forge_file_url(&files, Path::new("src/login.rs")),
+            "https://ghe.test/acme/widgets/pull/101/files#diff-9aab51a5bbaf3c93f5972ab49fcaaca7a705b3258ba2dab5c387dfa8a85b7535"
+        );
+    }
+
+    #[test]
+    fn a_gitlab_file_opens_its_merge_requests_diffs() {
+        let files = ForgeFiles {
+            forge: sirio_forge::Forge::GitLab,
+            web_url: "https://git.corp/acme/widgets/-/merge_requests/201".into(),
+        };
+        assert_eq!(
+            forge_file_url(&files, Path::new("src/login.rs")),
+            "https://git.corp/acme/widgets/-/merge_requests/201/diffs"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_right_click_on_a_file_row_copies_its_path(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.run_until_parked();
+        let row = cx.debug_bounds("changes-file-row").expect("the row").center();
+        cx.simulate_mouse_down(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-menu-open-forge").is_none(), "a worktree row has no forge");
+        let copy = cx.debug_bounds("changes-menu-copy-path").expect("Copy path").center();
+        cx.simulate_click(copy, Modifiers::none());
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("tracked.txt".to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn a_change_requests_row_offers_its_file_on_the_forge(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_, _| {
+            let mut tab = range_tab_with_one_diff(false);
+            tab.set_forge_files(ForgeFiles {
+                forge: sirio_forge::Forge::GitHub,
+                web_url: "https://ghe.test/acme/widgets/pull/101".into(),
+            });
+            tab
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let row = cx.debug_bounds("changes-file-row").expect("the row").center();
+        cx.simulate_mouse_down(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-menu-open-forge").is_some());
+    }
+
+    /// Discard all throws away what its dialog listed, nothing more: a file an
+    /// agent changed while the dialog was open was never shown, so it survives.
+    #[gpui::test]
+    async fn discard_all_throws_away_only_what_it_listed(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("other.txt"), "other\n").expect("seed other file");
+        git(&dir.0, &["add", "other.txt"]);
+        git(&dir.0, &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "other"]);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        tab.update(&mut cx.cx, |tab, cx| tab.ask_discard_all(cx));
+        std::fs::write(dir.0.join("other.txt"), "an agent's edit\n").expect("edit while the dialog is open");
+        tab.update(&mut cx.cx, |tab, cx| {
+            assert!(tab.confirm_discard(cx));
+        });
+        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none() && tab.pending_operations.is_empty());
+        let paths: Vec<_> = status(&dir.0)
+            .expect("status after discard all")
+            .entries
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(paths, vec![PathBuf::from("other.txt")], "only the listed file was discarded");
+    }
+
+    /// A Discard whose path the surface no longer lists (the change is gone,
+    /// or the socket named a path that never had one) discards nothing and
+    /// raises no git error over the whole surface.
+    #[gpui::test]
+    async fn a_discard_of_a_path_the_surface_no_longer_lists_does_nothing(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        tab.update(&mut cx.cx, |tab, cx| {
+            tab.ask_discard(PathBuf::from("never-was.txt"), cx);
+            assert!(tab.confirm_discard(cx), "the dialog was open and is now closed");
+        });
+        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none() && tab.pending_operations.is_empty());
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.git_error.clone()), None);
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| section_count(tab, "Changed")), 1);
+    }
+
+    /// A confirm by mouse hands the keyboard back, as Cancel and Escape do:
+    /// row navigation keeps working after a Discard.
+    #[gpui::test]
+    async fn confirming_discard_gives_the_keyboard_back(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.run_until_parked();
+        let focus = tab.read_with(&cx.cx, |tab, _| tab.list_focus.clone().expect("list focus"));
+        cx.update(|window, cx| focus.focus(window, cx));
+        let row = cx.debug_bounds("changes-file-row").expect("the row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let discard = cx.debug_bounds("changes-discard").expect("Discard");
+        cx.simulate_click(discard.center(), Modifiers::none());
+        cx.run_until_parked();
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "the list has the keyboard again"
+        );
+    }
+
+    /// Ely's single-choice group empties its selection when the chosen face is
+    /// pressed again; the surface must keep its mode rather than read that as
+    /// "no mode".
+    #[gpui::test]
+    async fn pressing_the_chosen_view_again_keeps_it(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+        let split = cx.debug_bounds("toggle split").expect("the Split face");
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| DiffViewMode::get(cx)), DiffViewMode::Split);
+        let split = cx.debug_bounds("toggle split").expect("the Split face");
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| DiffViewMode::get(cx)),
+            DiffViewMode::Split,
+            "pressing the chosen face again keeps Split"
+        );
+    }
+
     /// F-CHG-14: the individual Discard control is laid out, opens the
     /// platform prompt, and only mutates the checkout after the real prompt
     /// answer says Discard.
@@ -5092,8 +5621,13 @@ mod tests {
             .debug_bounds("changes-discard")
             .expect("Discard is drawn after expanding the row");
         cx.simulate_click(discard.center(), Modifiers::none());
-        assert!(cx.cx.has_pending_prompt(), "Discard asks for confirmation");
-        cx.cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard asks inside the window");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let cancel = cx.debug_bounds("changes-discard-cancel").expect("the dialog's Cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_none(), "Cancel closes it");
         cx.run_until_parked();
         assert_eq!(
             tab.read_with(&cx.cx, |tab, _| section_count(tab, "Changed")),
@@ -5105,8 +5639,11 @@ mod tests {
             .debug_bounds("changes-discard")
             .expect("Discard remains available after cancellation");
         cx.simulate_click(discard.center(), Modifiers::none());
-        assert!(cx.cx.has_pending_prompt());
-        cx.cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard asks inside the window");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
         wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
         assert!(
             status(&dir.0)
@@ -5199,11 +5736,11 @@ mod tests {
             "the refresh must be in flight before Discard is clicked"
         );
         cx.simulate_click(discard.center(), Modifiers::none());
-        assert!(
-            cx.cx.has_pending_prompt(),
-            "Discard still asks for confirmation during a refresh"
-        );
-        cx.cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard still asks for confirmation during a refresh");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
 
         wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
         assert!(
@@ -5237,6 +5774,8 @@ mod tests {
         }
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         for (width, font_size) in [(320.0, 13), (220.0, 13), (320.0, 18)] {
             cx.update(|cx| Theme::set_interface_font_size(font_size, cx));
             let dir = TempDir::new();
@@ -5255,8 +5794,8 @@ mod tests {
                 .expect("sidebar diff drawn");
             let list = view.debug_bounds("changes-list").expect("diff list drawn");
             for selector in [
-                "changes-view-mode-0",
-                "changes-view-mode-1",
+                "toggle unified",
+                "toggle split",
                 "changes-refresh",
                 "changes-expand-all",
                 "changes-collapse-all",
@@ -5276,11 +5815,13 @@ mod tests {
                 .debug_bounds("changes-discard-all")
                 .expect("Discard all drawn");
             view.simulate_click(discard.center(), Modifiers::none());
-            assert!(
-                view.cx.has_pending_prompt(),
-                "the last toolbar action must take a click"
-            );
-            view.cx.simulate_prompt_answer("Cancel");
+            view.run_until_parked();
+            assert!(view.debug_bounds("changes-discard-dialog").is_some(), "the last toolbar action must take a click");
+            assert!(!view.cx.has_pending_prompt(), "and never through the system's own prompt");
+            let cancel = view.debug_bounds("changes-discard-cancel").expect("the dialog's Cancel");
+            view.simulate_click(cancel.center(), Modifiers::none());
+            view.run_until_parked();
+            assert!(view.debug_bounds("changes-discard-dialog").is_none(), "Cancel closes it");
             view.run_until_parked();
         }
     }
@@ -5334,11 +5875,13 @@ mod tests {
             .debug_bounds("changes-discard-all")
             .expect("Discard all is in the drawn toolbar");
         cx.simulate_click(discard_all.center(), Modifiers::none());
-        assert!(
-            cx.cx.has_pending_prompt(),
-            "Discard all asks for confirmation"
-        );
-        cx.cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard all asks for confirmation");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let cancel = cx.debug_bounds("changes-discard-cancel").expect("the dialog's Cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_none(), "Cancel closes it");
         cx.run_until_parked();
         assert_eq!(
             tab.read_with(&cx.cx, |tab, _| {
@@ -5352,8 +5895,11 @@ mod tests {
             .debug_bounds("changes-discard-all")
             .expect("Discard all remains available after cancellation");
         cx.simulate_click(discard_all.center(), Modifiers::none());
-        assert!(cx.cx.has_pending_prompt());
-        cx.cx.simulate_prompt_answer("Discard All");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard asks inside the window");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
         // `git restore --worktree` deliberately leaves untracked files alone
         // (`git clean` is the separate, more destructive action — see
         // `sirio_git::discard_all`). The confirmed click clears every
@@ -5575,6 +6121,8 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -5659,6 +6207,8 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -5786,6 +6336,8 @@ mod tests {
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         let received = std::rc::Rc::new(std::cell::RefCell::new(None));
         let fixture_received = received.clone();
         let window = cx.add_window(|_window, cx| {
@@ -5935,6 +6487,8 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -6047,7 +6601,7 @@ mod tests {
             .debug_bounds("changes-unified-horizontal-bar-track")
             .expect("expanded wide unified code draws its horizontal bar");
         let toolbar = cx
-            .debug_bounds("changes-view-mode-0")
+            .debug_bounds("toggle unified")
             .expect("toolbar remains drawn");
         assert!(track.left() >= surface.left() && track.right() <= surface.right());
         assert!(toolbar.left() >= surface.left() && toolbar.right() <= surface.right());
@@ -6091,10 +6645,10 @@ mod tests {
             "wide viewport should remove overflow: max/viewport={:?}",
             tab.read_with(&cx.cx, |tab, _| (tab.unified_max_width, tab.unified_viewport))
         );
-        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        let split = cx.debug_bounds("toggle split").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
-        let unified = cx.debug_bounds("changes-view-mode-0").unwrap();
+        let unified = cx.debug_bounds("toggle unified").unwrap();
         cx.simulate_click(unified.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
@@ -6136,7 +6690,7 @@ mod tests {
         let row = cx.debug_bounds("changes-file-row").expect("changed row draws");
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
-        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        let split = cx.debug_bounds("toggle split").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, app| {
@@ -6212,10 +6766,10 @@ mod tests {
         let split_positions = tab.read_with(&cx.cx, |tab, _| {
             (tab.split_left_x, tab.split_right_x)
         });
-        let unified = cx.debug_bounds("changes-view-mode-0").unwrap();
+        let unified = cx.debug_bounds("toggle unified").unwrap();
         cx.simulate_click(unified.center(), Modifiers::none());
         cx.run_until_parked();
-        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        let split = cx.debug_bounds("toggle split").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, app| {
@@ -6284,7 +6838,7 @@ mod tests {
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
         let split = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6315,7 +6869,7 @@ mod tests {
         );
         // …and the toolbar it shares the surface with is still reachable.
         assert!(
-            cx.debug_bounds("changes-view-mode-0").is_some(),
+            cx.debug_bounds("toggle unified").is_some(),
             "the Unified segment is still on screen to switch back with"
         );
     }
@@ -6357,6 +6911,7 @@ mod tests {
             is_submodule: false,
         };
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.open_window(gpui::size(px(330.0), px(600.0)), move |_window, _cx| {
             ChangesTab {
                 repo_root: PathBuf::from("/repo"),
@@ -6399,6 +6954,8 @@ mod tests {
                 last_focus: None,
                 reveal_line: None,
                 selected_change: None,
+                discard_ask: None,
+                forge_files: None,
                 list_focus: None,
                 list_state: new_list_state(),
                 list_fingerprint: 0,
@@ -6487,7 +7044,7 @@ mod tests {
         );
 
         let split = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6534,7 +7091,7 @@ mod tests {
         );
 
         let split_segment = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split_segment.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6620,7 +7177,7 @@ mod tests {
         );
 
         let split_segment = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split_segment.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6641,7 +7198,7 @@ mod tests {
         );
 
         let unified_segment = cx
-            .debug_bounds("changes-view-mode-0")
+            .debug_bounds("toggle unified")
             .expect("the view-mode control draws a Unified segment");
         cx.simulate_click(unified_segment.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6712,6 +7269,7 @@ mod tests {
     #[gpui::test]
     async fn a_commit_view_lists_that_commit_s_files_and_forbids_staging(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
         // The second commit added exactly one file; asking for it proves the
@@ -6857,6 +7415,8 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -6889,6 +7449,7 @@ mod tests {
         use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
         use std::time::Instant;
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| synthetic_big_diff_tab(lines));
         let handle: gpui::AnyWindowHandle = window.into();
         let mut cx = VisualTestContext::from_window(handle, cx);
@@ -7083,6 +7644,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         let (base, head) = seed_range(&dir.0);
         let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base.clone(), head.clone(), cx));
@@ -7124,6 +7686,7 @@ mod tests {
     #[gpui::test]
     async fn focusing_a_line_opens_the_context_band_that_hides_it(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         let (base, head) = seed_range(&dir.0);
         let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base, head, cx));
@@ -7148,6 +7711,7 @@ mod tests {
     #[gpui::test]
     async fn a_deleted_file_is_known_to_be_deleted(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         let (base, _) = seed_range(&dir.0);
         git(&dir.0, &["rm", "-q", "a.txt"]);

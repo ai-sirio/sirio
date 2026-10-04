@@ -1033,6 +1033,21 @@ enum ControlAction {
     ReadChanges {
         reply: ControlReply,
     },
+    ChangesView {
+        mode: Option<String>,
+        expand: Option<String>,
+        refresh: bool,
+        reply: ControlReply,
+    },
+    ChangesDialog {
+        discard: Option<String>,
+        all: bool,
+        close: bool,
+        reply: ControlReply,
+    },
+    ChangesConfirm {
+        reply: ControlReply,
+    },
     OpenSettings {
         section: Option<SettingsCategory>,
         reply: ControlReply,
@@ -2062,6 +2077,8 @@ impl ControlHandler for AppControlHandler {
                     "surface.changes.discard",
                     "surface.changes.stage_all",
                     "surface.changes.discard_all",
+                    "surface.changes.view",
+                    "surface.changes.dialog",
                     "git.branches",
                     "surface.settings.open",
                     "surface.settings.select",
@@ -2093,6 +2110,7 @@ impl ControlHandler for AppControlHandler {
                 methods.extend(BROWSER_CAPABILITIES);
                 if cfg!(debug_assertions) {
                     methods.push("surface.change_request.act");
+                    methods.push("surface.changes.confirm");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2231,6 +2249,21 @@ impl ControlHandler for AppControlHandler {
             "surface.changes.discard" => self.run_changes_path_action(request, discard),
             "surface.changes.stage_all" => self.run_changes_all_action(request, stage_all),
             "surface.changes.discard_all" => self.run_changes_all_action(request, discard_all),
+            "surface.changes.view" => {
+                let mode = request.params.get("mode").cloned();
+                let expand = request.params.get("expand").cloned();
+                let refresh = request.params.get("refresh").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::ChangesView { mode, expand, refresh, reply })
+            }
+            "surface.changes.dialog" => {
+                let discard = request.params.get("discard").cloned();
+                let all = request.params.get("all").is_some_and(|value| value == "true");
+                let close = request.params.get("close").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::ChangesDialog { discard, all, close, reply })
+            }
+            "surface.changes.confirm" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::ChangesConfirm { reply })
+            }
             // F-GIT-BRANCH-01: GitBranches::list has no UI caller (the New
             // Worktree prompt is free-text with no read-back), so this
             // socket door is the exercisable route the row's own VERIFY
@@ -3772,7 +3805,7 @@ fn changes_report_pairs(
             .find(|section| section.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| format!("Changes report is missing {name} section"))
     };
-    let staged = section("Staged")?;
+    let staged = section("Staged").or_else(|_| section("Changes"))?;
     let changed = section("Changed")?;
     let untracked = section("Untracked")?;
 
@@ -3789,6 +3822,7 @@ fn changes_report_pairs(
             "error".to_string(),
             report.error.clone().unwrap_or_default(),
         ),
+        ("dialog".to_string(), report.dialog.clone().unwrap_or_default()),
         ("stagedCount".to_string(), staged.count.to_string()),
         ("changedCount".to_string(), changed.count.to_string()),
         ("untrackedCount".to_string(), untracked.count.to_string()),
@@ -5200,6 +5234,15 @@ impl SirioWorkspace {
                                     let result = workspace.control_read_changes(cx);
                                     let _ = reply.send(result);
                                 }
+                                ControlAction::ChangesView { mode, expand, refresh, reply } => {
+                                    let _ = reply.send(workspace.control_changes_view(mode, expand, refresh, cx));
+                                }
+                                ControlAction::ChangesDialog { discard, all, close, reply } => {
+                                    let _ = reply.send(workspace.control_changes_dialog(discard, all, close, cx));
+                                }
+                                ControlAction::ChangesConfirm { reply } => {
+                                    let _ = reply.send(workspace.control_changes_confirm(cx));
+                                }
                                 ControlAction::OpenSettings { section, reply } => {
                                     let result = workspace.control_open_settings(section, cx);
                                     let _ = reply.send(result);
@@ -6165,6 +6208,7 @@ impl SirioWorkspace {
                                             change_request: origin.reference.clone(),
                                             sha: origin.sha.clone(),
                                             path: origin.relative_path.to_string_lossy().into_owned(),
+                                            deleted: origin.deleted,
                                         });
                                     }
                                     None => {
@@ -13550,7 +13594,7 @@ impl SirioWorkspace {
         // as a refused path rather than a refused revision.
         if !snapshot_path_is_repository_relative(&path) {
             let sha = if deleted { &revisions.base_sha } else { &revisions.head_sha };
-            let origin = refused_snapshot_origin(reference, sha);
+            let origin = refused_snapshot_origin(reference, sha, deleted);
             self.add_snapshot_tab(origin, Err(INVALID_CHANGE_REQUEST_FILE_PATH.to_string()), None, cx);
             return;
         }
@@ -13578,6 +13622,7 @@ impl SirioWorkspace {
                 sha,
                 relative_path: path,
                 local_copy: (!deleted && local.is_file()).then_some(local),
+                deleted,
             };
             let _ = this.update(cx, |workspace, cx| {
                 if workspace.still_in(&worktree) {
@@ -13626,16 +13671,7 @@ impl SirioWorkspace {
             }
             return;
         }
-        let name = origin.relative_path.file_name().map_or_else(
-            || origin.relative_path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        // A refused origin has no path to name the tab by.
-        let title = if name.is_empty() {
-            origin.label()
-        } else {
-            format!("{name} @ {}", origin.reference.label())
-        };
+        let title = snapshot_tab_title(&origin);
         let view = cx.new(|cx| match read {
             Ok(bytes) => FileView::snapshot(origin, bytes, cx),
             Err(reason) => {
@@ -14841,11 +14877,75 @@ impl SirioWorkspace {
         self.control_read_changes(cx)
     }
 
+    fn control_changes_view(
+        &mut self,
+        mode: Option<String>,
+        expand: Option<String>,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some((_, view)) = self.active_changes_view() else {
+            return Err("Changes surface is not open".to_string());
+        };
+        let mode = match mode.as_deref() {
+            None | Some("") => None,
+            Some(name) => Some(
+                sirio_ui::changes::DiffViewMode::parse(name)
+                    .ok_or_else(|| format!("unknown mode '{name}': unified or split"))?,
+            ),
+        };
+        view.update(cx, |tab, cx| tab.control_view(mode, expand.as_deref().map(Path::new), refresh, cx));
+        self.control_read_changes(cx)
+    }
+
+    fn control_changes_dialog(
+        &mut self,
+        discard: Option<String>,
+        all: bool,
+        close: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some((_, view)) = self.active_changes_view() else {
+            return Err("Changes surface is not open".to_string());
+        };
+        view.update(cx, |tab, cx| match (discard, all, close) {
+            (_, _, true) => {
+                tab.close_discard(cx);
+                Ok(())
+            }
+            (Some(path), false, false) => {
+                tab.ask_discard(PathBuf::from(path), cx);
+                Ok(())
+            }
+            (None, true, false) => {
+                tab.ask_discard_all(cx);
+                Ok(())
+            }
+            _ => Err("pass one of discard <path>, all or close".to_string()),
+        })?;
+        self.control_read_changes(cx)
+    }
+
+    fn control_changes_confirm(&mut self, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let Some((_, view)) = self.active_changes_view() else {
+            return Err("Changes surface is not open".to_string());
+        };
+        if !view.update(cx, |tab, cx| tab.confirm_discard(cx)) {
+            return Err("no Discard confirmation is open".to_string());
+        }
+        self.control_read_changes(cx)
+    }
+
     fn control_read_changes(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
         let Some((tab, view)) = self.active_changes_view() else {
             return Err("Changes surface is not open".to_string());
         };
-        changes_report_pairs(tab.id, &view.read(cx).report())
+        let mut pairs = changes_report_pairs(tab.id, &view.read(cx).report())?;
+        pairs.push((
+            "mode".to_string(),
+            sirio_ui::changes::DiffViewMode::get(cx).name().to_string(),
+        ));
+        Ok(pairs)
     }
 
     fn control_open_settings(
@@ -15081,6 +15181,13 @@ impl SirioWorkspace {
             ("path".to_string(), display_absolute_path(view.path())),
             ("read_only".to_string(), view.is_snapshot().to_string()),
             ("origin".to_string(), view.snapshot_origin().map(|origin| origin.label()).unwrap_or_default()),
+            (
+                "local_copy".to_string(),
+                view.snapshot_origin()
+                    .and_then(|origin| origin.local_copy.as_deref())
+                    .map(display_absolute_path)
+                    .unwrap_or_default(),
+            ),
             ("state".to_string(), state.to_string()),
             ("error".to_string(), view.snapshot_error().unwrap_or_default().to_string()),
             ("content".to_string(), text),
@@ -16313,6 +16420,17 @@ impl SirioWorkspace {
                 tint
             })
             .flatten();
+        // A snapshot is read-only, and its tab says so with a lock on its icon
+        // (B1 §7.2).
+        let read_only = tab.kind == TabKind::Editor && {
+            let mut snapshot = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content {
+                    snapshot |= view.read(cx).is_snapshot();
+                }
+            });
+            snapshot
+        };
         let width = Self::tab_render_width(tab);
         let close_entity = entity.clone();
         let menu_entity = entity.clone();
@@ -16423,8 +16541,24 @@ impl SirioWorkspace {
                 div()
                     .w(px(14.0))
                     .flex_none()
+                    .relative()
                     .text_color(change_request_tint.unwrap_or(glyph_color))
-                    .child(IconElement::new(icon, IconSize::Small)),
+                    .child(IconElement::new(icon, IconSize::Small))
+                    .when(read_only, |icon| {
+                        icon.child(
+                            // On the page's own ground, so the file glyph
+                            // under it does not show through the lock.
+                            div()
+                                .absolute()
+                                .right(px(-5.0))
+                                .bottom(px(-4.0))
+                                .p(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(theme.ely.bg)
+                                .debug_selector(move || format!("workspace-tab-lock-{id}"))
+                                .child(sirio_ui::ely::lock_mark(theme.ely.fg_muted)),
+                        )
+                    }),
             )
             .when(!renaming, |this| {
                 this.child(
@@ -20768,7 +20902,7 @@ fn restored_snapshot_view(
     cx: &mut App,
 ) -> Entity<FileView> {
     if let Some(refusal) = restored_snapshot_refusal(snapshot) {
-        let origin = refused_snapshot_origin(snapshot.change_request.clone(), &snapshot.sha);
+        let origin = refused_snapshot_origin(snapshot.change_request.clone(), &snapshot.sha, snapshot.deleted);
         return cx.new(|cx| {
             let mut view = FileView::snapshot_pending(origin, cx);
             view.finish_snapshot(Err(refusal.to_string()), cx);
@@ -20781,7 +20915,8 @@ fn restored_snapshot_view(
         reference: snapshot.change_request.clone(),
         sha: snapshot.sha.clone(),
         relative_path,
-        local_copy: local.is_file().then_some(local),
+        local_copy: (!snapshot.deleted && local.is_file()).then_some(local),
+        deleted: snapshot.deleted,
     };
     cx.new(|cx| FileView::snapshot_pending(origin, cx))
 }
@@ -20795,12 +20930,30 @@ const INVALID_CHANGE_REQUEST_FILE_PATH: &str = "This file's path is not one a re
 /// The origin of a snapshot tab that shows a refusal instead of a file: no
 /// path, and a sha only when it is a commit id, so nothing untrusted reaches
 /// a label or a join.
-fn refused_snapshot_origin(reference: sirio_forge::ChangeRef, sha: &str) -> SnapshotOrigin {
+fn refused_snapshot_origin(reference: sirio_forge::ChangeRef, sha: &str, deleted: bool) -> SnapshotOrigin {
     SnapshotOrigin {
         reference,
         sha: if sirio_git::is_commit_id(sha) { sha.to_owned() } else { String::new() },
         relative_path: PathBuf::new(),
         local_copy: None,
+        deleted,
+    }
+}
+
+/// A snapshot tab's title: `lib.rs @ #578`, or `gone.txt (deleted in #578)`
+/// for a file the change request deletes. A refused origin has no path to
+/// name it by.
+fn snapshot_tab_title(origin: &SnapshotOrigin) -> String {
+    let name = origin.relative_path.file_name().map_or_else(
+        || origin.relative_path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    if name.is_empty() {
+        origin.label()
+    } else if origin.deleted {
+        format!("{name} (deleted in {})", origin.reference.label())
+    } else {
+        format!("{name} @ {}", origin.reference.label())
     }
 }
 
@@ -26417,6 +26570,9 @@ done
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
+        // The tab strip draws a snapshot's lock with Ely, as the app does
+        // after `sirio_ui::ely::init`.
+        cx.update(sirio_ui::ely::init);
         let first = committed_test_repo("snapshot-switch-first");
         let second = committed_test_repo("snapshot-switch-second");
         std::fs::write(second.join("only.rs"), "fn only_in_second() {}\n")
@@ -26499,6 +26655,7 @@ done
                         },
                         sha: sha.clone(),
                         path: "only.rs".into(),
+                        deleted: false,
                     }),
                     ..SessionTabState::default()
                 }],
@@ -36790,6 +36947,9 @@ done
             | ControlAction::RestoreSession { reply }
             | ControlAction::OpenChanges { reply, .. }
             | ControlAction::ReadChanges { reply }
+            | ControlAction::ChangesView { reply, .. }
+            | ControlAction::ChangesDialog { reply, .. }
+            | ControlAction::ChangesConfirm { reply }
             | ControlAction::OpenSettings { reply, .. }
             | ControlAction::SelectSettings { reply, .. }
             | ControlAction::ReadSettings { reply }
@@ -36918,6 +37078,9 @@ done
             }
             "surface.changes.stage_all" => request::changes_stage_all(Some("workspace-1")),
             "surface.changes.discard_all" => request::changes_discard_all(Some("workspace-1")),
+            "surface.changes.view" => request::changes_view(Some("split"), None, false),
+            "surface.changes.dialog" => request::changes_dialog(None, false, true),
+            "surface.changes.confirm" => request::changes_confirm(),
             "git.branches" => request_with_params(method, &[]),
             "surface.settings.open" => request::settings_open(None),
             "surface.settings.select" => request_with_params(method, &[]),
@@ -36959,6 +37122,32 @@ done
         request
     }
 
+    /// The host reads a Range surface's *Changes* section as the staged one,
+    /// so the report keeps its keys when the heading changes (B1 §13).
+    #[test]
+    fn a_changes_section_is_read_as_staged() {
+        let file = sirio_ui::changes::ChangesFileReport {
+            path: PathBuf::from("a.rs"),
+            additions: 2,
+            deletions: 1,
+            is_binary: false,
+        };
+        let report = ChangesReport {
+            repo_root: PathBuf::from("/repo"),
+            sections: vec![
+                sirio_ui::changes::ChangesSectionReport { name: "Changes", count: 1, files: vec![file] },
+                sirio_ui::changes::ChangesSectionReport { name: "Changed", count: 0, files: vec![] },
+                sirio_ui::changes::ChangesSectionReport { name: "Untracked", count: 0, files: vec![] },
+            ],
+            loading: false,
+            error: None,
+            dialog: None,
+        };
+        let pairs = changes_report_pairs(1, &report).expect("a Changes section is accepted");
+        let staged = pairs.iter().find(|(key, _)| key == "stagedCount").map(|(_, value)| value.as_str());
+        assert_eq!(staged, Some("1"));
+    }
+
     #[cfg(windows)]
     fn verbatim_changes_response(id: &str) -> ControlResponse {
         let file = || sirio_ui::changes::ChangesFileReport {
@@ -36988,6 +37177,7 @@ done
             ],
             loading: false,
             error: None,
+            dialog: None,
         };
         ControlResponse::success(
             id,
@@ -39197,6 +39387,59 @@ browser  profile  "
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn deleted_origin(path: &str, deleted: bool) -> SnapshotOrigin {
+        SnapshotOrigin {
+            reference: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".into(),
+                project: "acme/widgets".into(),
+                number: 578,
+            },
+            sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into(),
+            relative_path: PathBuf::from(path),
+            local_copy: None,
+            deleted,
+        }
+    }
+
+    /// B1 §5.3: a deleted file's snapshot says what happened to the file.
+    #[test]
+    fn a_deleted_files_snapshot_is_titled_deleted_in_its_change_request() {
+        assert_eq!(snapshot_tab_title(&deleted_origin("src/lib.rs", false)), "lib.rs @ #578");
+        assert_eq!(
+            snapshot_tab_title(&deleted_origin("gone.txt", true)),
+            "gone.txt (deleted in #578)"
+        );
+    }
+
+    /// B1 §13: a restored snapshot of a deleted file never offers the
+    /// worktree's same-named file as its "local copy".
+    #[gpui::test]
+    fn a_restored_deleted_snapshot_offers_no_local_copy(cx: &mut TestAppContext) {
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-restored-deleted-snapshot-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        std::fs::write(working_directory.join("gone.txt"), "a different file\n").expect("same-named file");
+        let snapshot = session::PersistedSnapshot {
+            change_request: deleted_origin("gone.txt", true).reference,
+            sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into(),
+            path: "gone.txt".into(),
+            deleted: true,
+        };
+        let view = cx.update(|cx| {
+            sirio_theme::Theme::init(cx);
+            restored_snapshot_view(&snapshot, &working_directory, cx)
+        });
+        let origin = view
+            .read_with(cx, |view, _| view.snapshot_origin().cloned())
+            .expect("a snapshot");
+        let _ = std::fs::remove_dir_all(&working_directory);
+        assert!(origin.deleted);
+        assert_eq!(origin.local_copy, None);
+    }
+
     /// A persisted sha is shown in the bar and joined into the view's
     /// virtual path before any read validates it, so the restore refuses
     /// one Sirio would never have written — before either happens.
@@ -39211,6 +39454,7 @@ browser  profile  "
             },
             sha: sha.into(),
             path: path.into(),
+            deleted: false,
         };
         let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
         assert_eq!(restored_snapshot_refusal(&snapshot(good, "src/lib.rs")), None);
@@ -39244,12 +39488,12 @@ browser  profile  "
             number: 578,
         };
         let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-        let kept = refused_snapshot_origin(reference.clone(), good);
+        let kept = refused_snapshot_origin(reference.clone(), good, false);
         assert_eq!(kept.sha, good);
         assert!(kept.relative_path.as_os_str().is_empty());
         assert!(kept.local_copy.is_none());
         for bad in ["", "--upload-pack=x", "/etc/passwd", &good[..39]] {
-            assert_eq!(refused_snapshot_origin(reference.clone(), bad).sha, "", "{bad:?}");
+            assert_eq!(refused_snapshot_origin(reference.clone(), bad, false).sha, "", "{bad:?}");
         }
     }
 

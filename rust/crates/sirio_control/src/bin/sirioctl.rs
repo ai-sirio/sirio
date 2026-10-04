@@ -129,6 +129,9 @@ fn usage() {
          \x20 surface changes discard <path> [--worktree w]\n\
          \x20 surface changes stage-all [--worktree w]\n\
          \x20 surface changes discard-all [--worktree w]\n\
+         \x20 surface changes view [--mode unified|split] [--expand path] [--refresh]\n\
+         \x20 surface changes dialog --discard path|--discard-all|--close\n\
+         \x20 surface changes confirm           (debug builds) confirm the open Discard\n\
          \x20 surface settings open [--section s]\n\
          \x20 surface settings select <section>\n\
          \x20 surface settings read             read the mounted Settings section\n\
@@ -763,6 +766,25 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("changes", "discard-all") => require_ok(
             socket,
             &sirio_control::protocol::request::changes_discard_all(parsed.value("worktree")),
+        ),
+        ("changes", "dialog") => require_ok(
+            socket,
+            &sirio_control::protocol::request::changes_dialog(
+                parsed.value("discard"),
+                parsed.flag("discard-all"),
+                parsed.flag("close"),
+            ),
+        ),
+        ("changes", "confirm") => {
+            require_ok(socket, &sirio_control::protocol::request::changes_confirm())
+        }
+        ("changes", "view") => require_ok(
+            socket,
+            &sirio_control::protocol::request::changes_view(
+                parsed.value("mode"),
+                parsed.value("expand"),
+                parsed.flag("refresh"),
+            ),
         ),
         ("settings", "open") => require_ok(
             socket,
