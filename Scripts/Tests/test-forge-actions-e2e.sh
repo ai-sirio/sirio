@@ -29,6 +29,7 @@ set -euo pipefail
 # script reproduces it.
 #
 # Usage: Scripts/Tests/test-forge-actions-e2e.sh [--stage NAME] [--state-only] [--out-dir DIR] [--display :N]
+#          [--appearance light|dark]   seed the isolated app's appearance (default: the app's own)
 #        SIRIO_FORGE_E2E_VERBOSE=1 prints every probe answer. `--state-only`
 #        skips the ui stage's window captures (frames/), which need a display.
 
@@ -40,12 +41,14 @@ OUT_DIR=""
 ONLY=""
 STATE_ONLY=0
 DISPLAY_TARGET="${DISPLAY:-}"
+APPEARANCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --stage) ONLY="$2"; shift 2 ;;
     --state-only) STATE_ONLY=1; shift ;;
     --display) DISPLAY_TARGET="$2"; shift 2 ;;
+    --appearance) APPEARANCE="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -953,6 +956,9 @@ run_ci() { # flavour host project number origin-url job running-job
   git -C "$repo" remote add origin "$origin"
 
   export SIRIO_SOCKET="$run_dir/control.sock" SIRIO_DB="$run_dir/session.sqlite" SIRIO_CREDENTIALS="$run_dir/credentials.json"
+  if [ -n "$APPEARANCE" ]; then
+    (cd "$CARGO_DIR" && cargo run --quiet -p sirio_persistence --example appearance_seed -- --database "$SIRIO_DB" --appearance "$APPEARANCE") || fail "could not seed the appearance"
+  fi
   export GH_CONFIG_DIR="$run_dir/gh" GLAB_CONFIG_DIR="$run_dir/glab"
   mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
   chmod 700 "$GLAB_CONFIG_DIR"
@@ -1182,6 +1188,9 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   git -C "$repo" remote add origin "$origin"
 
   export SIRIO_SOCKET="$run_dir/control.sock" SIRIO_DB="$run_dir/session.sqlite" SIRIO_CREDENTIALS="$run_dir/credentials.json"
+  if [ -n "$APPEARANCE" ]; then
+    (cd "$CARGO_DIR" && cargo run --quiet -p sirio_persistence --example appearance_seed -- --database "$SIRIO_DB" --appearance "$APPEARANCE") || fail "could not seed the appearance"
+  fi
   export GH_CONFIG_DIR="$run_dir/gh" GLAB_CONFIG_DIR="$run_dir/glab"
   mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
   chmod 700 "$GLAB_CONFIG_DIR"

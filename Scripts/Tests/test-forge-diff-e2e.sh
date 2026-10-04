@@ -51,7 +51,7 @@ command -v git >/dev/null || fail "git is required"
 command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required (the fake forge's readiness probe)"
 
-RUN_DIR=$(mktemp -d /tmp/sirio-diff-e2e-XXXXXX)
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sirio-diff-e2e-XXXXXX")
 APP_PID=""
 FORGE_PID=""
 stop_app() { [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; APP_PID=""; }; }
@@ -382,6 +382,13 @@ connect_and_open() { # host forge number
   ctl project add "$WT"
   ctl select-workspace --workspace "$WT"
   ctl surface change-requests show
+  # Let the initial host probe settle before saving a token, as the sign-in UI does.
+  if [ "$2" = github ]; then
+    wait_for state not-connected surface change-requests read
+  else
+    wait_for state unknown-forge surface change-requests read
+  fi
+  wait_for host "$1" surface change-requests read
   local account
   account=$(read_field account surface change-requests token --host "$1" --forge "$2" --token good) || fail "the token was not accepted"
   [ "$account" = "fake-user" ] || fail "the token signed in as '$account'"

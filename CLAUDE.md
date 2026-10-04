@@ -56,8 +56,9 @@ Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME
-# runs one stage (wire-github, wire-gitlab, failures, cli, scopes, ui);
-# --state-only skips the ui stage's window captures.
+# runs one stage (wire-github, wire-gitlab, failures, merge, metadata, cli,
+# scopes, ci, ui); ci covers re-runs and job logs. --state-only skips captures;
+# --appearance light|dark seeds the isolated app's appearance.
 Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
 
 # Ely's Tabs and git badges with Sirio's theme, on a private Xvfb with
@@ -285,6 +286,22 @@ matching the forge's schema: they send every document with an id that names
 nothing.
 `docs/superpowers/specs/2026-09-29-change-request-actions-design.md` has the
 design; `Scripts/Tests/test-forge-actions-e2e.sh` proves it.
+
+**CI** (slice B2c, spec §15): a check that is a GitHub Actions or GitLab CI
+job carries a `CheckJob` (job and run ids, whether the forge would retry it).
+*Re-run* and *Re-run failed* are `Action::Rerun` through `act` — GitHub REST,
+GitLab `jobRetry`/`pipelineRetry`; GitLab retries per pipeline, so its *Re-run
+failed* sits on the pipeline row, not on a stage. `ForgeClient::job_log` reads
+the job's status, then its log: GitHub answers with a redirect to a signed
+URL on another host, which the token means fetches itself with **no
+credential** (`RestRequest.log` turns redirects off for it) and `gh` follows
+the same way; `gh api` prints terminal escapes only with
+`--allow-escape-sequences`. Only the last 4 MiB are kept, cut at a line, and
+the tab says so. `sirio_ui::ansi_log` turns the text into styled lines and
+folding groups without a terminal; `CiLogTab` (`TabKind::CiLog`, `"ci_log"`)
+draws it in a `uniform_list` and reloads a running job's log every 5 s only
+while it is drawn. The `ci` stage of `test-forge-actions-e2e.sh` proves the
+re-runs and log state; drawing and visible reload require its framed run.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and

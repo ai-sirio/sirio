@@ -317,3 +317,84 @@ The script asks for the toolbar's Refresh through `surface changes view
 - GitLab's per-file anchor: the diffs page opens at its top.
 - The Split view's word washes in a narrow pane, where long lines are
   clipped as before.
+
+## B2c: CI re-run and the log tab
+
+`docs/superpowers/specs/2026-09-29-change-request-actions-design.md` §15.
+The `ci` stage drives GitHub and GitLab against loopback fake forges. It
+checks re-run job/run requests, one write in flight, readonly permission
+gating, the refreshed group/row order, log bounds and signed-URL credentials,
+folds and copy, *Jump to first error*, expiry/retry, unknown-job refusal,
+deduplication and identity restoration across a quit.
+
+### Run and capture
+
+From the repository root, keeping the exported cache `TMPDIR`:
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Scripts/Tests/test-forge-actions-e2e.sh --stage ci --state-only --out-dir "$TMPDIR/b2c-state"
+```
+
+The controller runs both appearances with Xvfb and lavapipe. Choose a free
+X display; `:94` below needs a screen large enough for the complete window.
+The first run uses the app's default appearance; the second seeds Light in
+each isolated CI/UI database through `sirio_persistence`'s `appearance_seed`
+example. The same `--appearance` option accepts `dark` when an explicit dark
+seed is wanted.
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :94 -screen 0 1600x1500x24 -nolisten tcp -noreset > "$TMPDIR/b2c-xvfb.log" 2>&1 &
+b2c_xvfb_pid=$!
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+Scripts/Tests/test-forge-actions-e2e.sh --stage ci --display :94 --out-dir "$TMPDIR/b2c-dark"
+Scripts/Tests/test-forge-actions-e2e.sh --stage ci --display :94 --appearance light --out-dir "$TMPDIR/b2c-light"
+ls "$TMPDIR/b2c-dark/frames" "$TMPDIR/b2c-light/frames"
+kill "$b2c_xvfb_pid"
+wait "$b2c_xvfb_pid" 2>/dev/null || true
+```
+
+Each capture is matched to the app PID. Both artifact directories retain
+`transcript.log`, fake-forge request logs, `app-github-ci.log`,
+`app-gitlab-ci.log` and `frames/`. Read every generated frame in both modes:
+
+- `github-checks`, `github-checks-rerun`: grouped jobs and the result of
+  re-running them.
+- `github-log`, `github-log-error`, `github-log-gone`: the log, the jump to
+  its first error, and the expired-log Callout with the last good text.
+- `github-log-waiting`, `github-log-truncated`: an unpublished running job
+  and the retained-tail notice.
+- `gitlab-checks`, `gitlab-checks-rerun`: the pipeline-level *Re-run failed*
+  above its stages and the result of the write.
+- `gitlab-log`, `gitlab-log-error`, `gitlab-log-gone`: the log, its first
+  error and its expired-log state.
+
+The framed GitLab half also checks that a visible running log reloads at
+least twice over 12 seconds, that hiding it stops reads, and that a rate
+limit suppresses reads. State-only runs skip those draw-dependent checks.
+The socket's pending `top` index proves a logical jump in state-only mode;
+inspect `*-log-error` to establish the actual viewport placement.
+
+### What was seen
+
+(filled in by the controller after the framed run)
+
+### Not seen
+
+- B2c frames in either appearance, actual viewport placement, selection,
+  horizontal scrolling and scrollbar behavior: the implementation runs use
+  `--state-only`. The controller records the framed results above.
+- The visible, hidden and rate-limited branches of periodic log reload;
+  state-only never arms the drawing-dependent timer and prints `SKIP:`.
+- `glab` log and write paths: it is not installed on this machine. Token
+  means on both fake forges and the installed `gh` means are exercised.
+- A live GitHub running log or any live forge write. The fake proves the
+  unpublished state; nextest's live bodies skip with isolated credentials.
+- macOS, Windows and Wayland. The Windows-only test helpers were updated,
+  but the Linux build does not compile or execute them.
+- Saving a token through the socket while its initial host probe still
+  runs: the full diff regression exposed an unsigned-cache race twice.
+  Its harness now waits for the initial sign-in/unknown-forge state, like
+  the visible UI; production handling of overlapping socket calls is
+  outside this B2c proof.
