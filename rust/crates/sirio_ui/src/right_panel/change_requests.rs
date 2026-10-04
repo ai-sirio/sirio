@@ -6,17 +6,19 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bezel::motion::{Fade, Painter};
 use bezel::ui::input::TextField;
-use bezel::ui::popover;
 use ely_gpui_component::{
+    feedback::Callout,
     forms::{Choice, InputEvent, SearchInput, TextInput},
+    menus::{ContextMenu, Menu, MenuItem},
+    motion::Skeleton,
     navigation::Tabs,
-    primitives::IconName,
+    primitives::{Icon as EIcon, IconName, Severity},
+    theme::IconSize as EIconSize,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, FontWeight, Global,
-    IntoElement, KeyDownEvent, MouseButton, Pixels, Point, Render, Task, Window, div, prelude::*,
+    IntoElement, KeyDownEvent, Render, Task, Window, div, prelude::*,
     px,
 };
 use sirio_forge::{
@@ -25,7 +27,7 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 use crate::change_request_style as style;
-use crate::ely_ui;
+use crate::ely_ui::{self, ButtonState};
 use crate::forge_source::{self, Connection, ReadyConnection};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
@@ -97,12 +99,6 @@ pub(crate) enum TokenState {
     Failed(String),
 }
 
-struct RowMenu {
-    index: usize,
-    position: Point<Pixels>,
-    painter: Painter,
-}
-
 pub(crate) struct ChangeRequestList {
     worktree: PathBuf,
     pub(crate) link: Link,
@@ -127,7 +123,6 @@ pub(crate) struct ChangeRequestList {
     pub(crate) token_state: TokenState,
     visible: bool,
     generation: u64,
-    menu: Option<RowMenu>,
     connect_task: Option<Task<()>>,
     page_task: Option<Task<()>>,
     more_task: Option<Task<()>>,
@@ -163,7 +158,6 @@ impl ChangeRequestList {
             token_state: TokenState::Idle,
             visible: false,
             generation: 0,
-            menu: None,
             connect_task: None,
             page_task: None,
             more_task: None,
@@ -717,19 +711,6 @@ impl ChangeRequestList {
         ]
     }
 
-    fn open_menu(&mut self, index: usize, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.menu = Some(RowMenu {
-            index,
-            position,
-            painter: Painter::of(cx),
-        });
-        cx.notify();
-    }
-
-    fn close_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu = None;
-        cx.notify();
-    }
 }
 
 /// What a failure means to the reader, and what to do about it.
@@ -806,6 +787,43 @@ fn text_button(
         .hover(move |style| style.bg(hover))
         .on_click(move |_, _, cx| on_click(cx))
         .child(label)
+}
+
+fn render_loading(theme: &Theme) -> AnyElement {
+    div()
+        .debug_selector(|| "change-requests-loading".to_owned())
+        .flex()
+        .flex_col()
+        .children((0..4usize).map(|ix| {
+            div()
+                .px(px(12.0))
+                .py(px(9.0))
+                .flex()
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme.ely.border)
+                .child(Skeleton::new(("change-requests-skeleton-icon", ix)).circle().size(px(14.0)))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(Skeleton::new(("change-requests-skeleton-title", ix)).h(px(10.0)).w(gpui::relative(0.8)))
+                        .child(Skeleton::new(("change-requests-skeleton-meta", ix)).h(px(8.0)).w(gpui::relative(0.5))),
+                )
+        }))
+        .into_any_element()
+}
+
+fn callout(id: &'static str, severity: Severity, title: &'static str, body: String) -> gpui::Div {
+    div()
+        .debug_selector(move || id.to_owned())
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(Callout::new(severity).title(title).child(selectable_text(body)))
 }
 
 fn notice(id: &'static str, title: String, hint: Option<String>, theme: &Theme) -> gpui::Div {
@@ -1048,6 +1066,23 @@ impl ChangeRequestList {
             )
     }
 
+    fn row_menu(row: &ChangeSummary) -> Menu {
+        let (open, copy) = (row.web_url.clone(), row.web_url.clone());
+        Menu::new()
+            .item(
+                MenuItem::new("Open in browser")
+                    .icon(IconName::ExternalLink)
+                    .selectors("change-request-menu-open-browser", None)
+                    .on_click(move |_, cx| cx.open_url(&open)),
+            )
+            .item(
+                MenuItem::new("Copy link")
+                    .icon(IconName::Copy)
+                    .selectors("change-request-menu-copy-link", None)
+                    .on_click(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
+            )
+    }
+
     fn render_row(
         &self,
         index: usize,
@@ -1058,8 +1093,9 @@ impl ChangeRequestList {
     ) -> impl IntoElement {
         let hover = theme.ely.hover;
         let open = entity.clone();
-        let menu = entity.clone();
-        div()
+        let tone = style::state_color(row.state, theme);
+        let mark = |icon: IconName, tint| EIcon::new(icon).size(EIconSize::Sm).color(tint);
+        let line = div()
             .id(("change-request-row", index))
             .debug_selector(move || format!("change-request-row-{index}"))
             .px(px(12.0))
@@ -1072,16 +1108,7 @@ impl ChangeRequestList {
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .on_click(move |_, _, cx| open.update(cx, |list, cx| list.open_row(index, cx)))
-            .on_mouse_down(MouseButton::Right, move |event, _, cx| {
-                cx.stop_propagation();
-                menu.update(cx, |list, cx| list.open_menu(index, event.position, cx));
-            })
-            .child(
-                div().pt(px(2.0)).child(
-                    IconElement::new(Icon::PullRequest, IconSize::Small)
-                        .text_color(style::state_color(row.state, theme)),
-                ),
-            )
+            .child(div().pt(px(2.0)).child(mark(style::state_icon(row.state), tone)))
             .child(
                 div()
                     .flex_1()
@@ -1099,14 +1126,12 @@ impl ChangeRequestList {
                     )
                     .child(
                         div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
                             .text_size(theme.typography.footnote)
                             .text_color(theme.ely.fg_subtle)
-                            .child(format!(
-                                "{} · {} · {}",
-                                row.reference.label(),
-                                row.author,
-                                style::age(now, row.updated_at)
-                            )),
+                            .child(format!("{} · {} · {}", row.reference.label(), row.author, style::age(now, row.updated_at))),
                     ),
             )
             .child(
@@ -1117,49 +1142,46 @@ impl ChangeRequestList {
                     .gap(px(7.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.ely.fg_muted)
-                    .when_some(style::ci_mark(row.ci, theme), |this, (icon, tint)| {
-                        this.child(IconElement::new(icon, IconSize::Small).text_color(tint))
+                    .when_some(style::ci_icon(row.ci, theme), |this, (icon, tint)| this.child(mark(icon, tint)))
+                    .when_some(style::review_icon(row.review, row.review_requested_from_me, theme), |this, (icon, tint)| {
+                        this.child(mark(icon, tint))
                     })
-                    .when_some(
-                        style::review_mark(row.review, row.review_requested_from_me, theme),
-                        |this, (icon, tint)| {
-                            this.child(IconElement::new(icon, IconSize::Small).text_color(tint))
-                        },
-                    )
                     .when(row.comments > 0, |this| {
                         this.child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(2.0))
-                                .child(IconElement::new(Icon::MessageSquare, IconSize::XSmall))
+                                .child(mark(IconName::MessageSquare, theme.ely.fg_muted))
                                 .child(row.comments.to_string()),
                         )
                     }),
-            )
+            );
+        ContextMenu::new(("change-request-menu-host", index), Self::row_menu(row)).child(line)
     }
 
     fn render_rows(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
         if !self.settled {
-            return notice(
-                "change-requests-loading",
-                "Loading…".to_string(),
-                None,
-                theme,
-            )
-            .into_any_element();
+            return render_loading(theme);
         }
         let retry = entity.clone();
         if self.rows.is_empty() {
             return match &self.list_error {
-                Some(error) => notice("change-requests-error", error_text(error), None, theme)
-                    .child(text_button(
-                        "change-requests-retry",
-                        "Retry".to_string(),
-                        theme,
-                        move |cx| retry.update(cx, |list, cx| list.refresh(cx)),
-                    ))
-                    .into_any_element(),
+                Some(error) => {
+                    let (severity, title) = match error {
+                        ForgeError::RateLimited { .. } => (Severity::Warning, "Rate limited"),
+                        _ => (Severity::Danger, "Could not load"),
+                    };
+                    callout("change-requests-error", severity, title, error_text(error))
+                        .child(ely_ui::text_button(
+                            "change-requests-retry",
+                            "Retry",
+                            Some(IconName::RotateCw),
+                            ButtonState::IDLE,
+                            move |_, cx| retry.update(cx, |list, cx| list.refresh(cx)),
+                        ))
+                        .into_any_element()
+                }
                 None => notice(
                     "change-requests-empty",
                     "Nothing here.".to_string(),
@@ -1185,24 +1207,22 @@ impl ChangeRequestList {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.ely.danger)
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(selectable_text(format!(
-                                    "Refresh failed · {}",
-                                    error_text(error)
-                                ))),
+                                .child(ely_ui::message(
+                                    Severity::Danger,
+                                    format!("Refresh failed · {}", error_text(error)),
+                                    theme,
+                                )),
                         )
-                        .child(text_button(
+                        .child(ely_ui::text_button(
                             "change-requests-refresh-retry",
-                            "Retry".to_string(),
-                            theme,
-                            move |cx| retry.update(cx, |list, cx| list.refresh(cx)),
+                            "Retry",
+                            None,
+                            ButtonState::IDLE,
+                            move |_, cx| retry.update(cx, |list, cx| list.refresh(cx)),
                         )),
                 )
             })
@@ -1213,15 +1233,12 @@ impl ChangeRequestList {
                     .map(|(index, row)| self.render_row(index, row, now, theme, entity)),
             )
             .when(self.next.is_some(), |this| {
-                this.child(div().p(px(10.0)).flex().justify_center().child(text_button(
+                this.child(div().p(px(10.0)).flex().justify_center().child(ely_ui::text_button(
                     "change-requests-more",
-                    if self.more_task.is_some() {
-                        "Loading…".to_string()
-                    } else {
-                        "Load more".to_string()
-                    },
-                    theme,
-                    move |cx| more.update(cx, |list, cx| list.load_more(cx)),
+                    "Load more",
+                    None,
+                    ButtonState::IDLE.loading(self.more_task.is_some()),
+                    move |_, cx| more.update(cx, |list, cx| list.load_more(cx)),
                 )))
             })
             .into_any_element()
@@ -1352,58 +1369,7 @@ impl ChangeRequestList {
         .into_any_element()
     }
 
-    fn render_menu(
-        &self,
-        menu: &RowMenu,
-        theme: &Theme,
-        entity: &Entity<Self>,
-    ) -> Option<AnyElement> {
-        let row = self.rows.get(menu.index)?;
-        let bezel_theme = theme.to_bezel_theme();
-        let mut view = popover::popover_card(&bezel_theme)
-            .id("change-request-menu")
-            .debug_selector(|| "change-request-menu".to_owned())
-            .text_size(theme.typography.ui_size)
-            .w(theme.spacing.menu_width);
-        for (selector, label) in [
-            ("change-request-menu-open-browser", "Open in browser"),
-            ("change-request-menu-copy-link", "Copy link"),
-        ] {
-            let url = row.web_url.clone();
-            let close = entity.clone();
-            let item = popover::menu_row(
-                &bezel_theme,
-                false,
-                Fade::new(menu.painter.clone(), selector),
-            )
-            .id(selector)
-            .debug_selector(move || selector.to_owned())
-            .w_full()
-            .min_h(theme.spacing.titlebar_control_frame.height)
-            .text_size(theme.typography.ui_size)
-            .text_color(bezel_theme.text)
-            .on_click(move |_, _, cx| {
-                if selector == "change-request-menu-copy-link" {
-                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-                } else {
-                    cx.open_url(&url);
-                }
-                close.update(cx, |list, cx| list.close_menu(cx));
-            })
-            .child(label);
-            view = view.child(item);
-        }
-        let close = entity.clone();
-        Some(popover::menu_at(
-            "change-request-menu-layer",
-            menu.position,
-            view.on_mouse_down_out(move |_, _, cx| {
-                close.update(cx, |list, cx| list.close_menu(cx))
-            })
-            .into_any_element(),
-            None,
-        ))
-    }
+
 }
 
 impl Render for ChangeRequestList {
@@ -1469,10 +1435,6 @@ impl Render for ChangeRequestList {
                     .into_any_element()
             }
         };
-        let menu = self
-            .menu
-            .as_ref()
-            .and_then(|menu| self.render_menu(menu, &theme, &entity));
         div()
             .id("change-requests")
             .debug_selector(|| "change-requests".to_owned())
@@ -1480,7 +1442,6 @@ impl Render for ChangeRequestList {
             .flex()
             .flex_col()
             .child(content)
-            .when_some(menu, |this, menu| this.child(menu))
     }
 }
 
@@ -1851,6 +1812,25 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(1));
         pump_until(cx, || past_forge.count("ChangeRequestList") > asked);
         assert_eq!(past_forge.count("ChangeRequestList"), asked + 1, "a past reset spun instead of waiting");
+    }
+
+    #[gpui::test]
+    fn a_right_click_on_a_row_offers_its_link_to_copy(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| forge_source::set_source(FakeSource::ready(testing::github_client(forge()), None), cx));
+        let (list, view) = cx.add_window_view(|_, cx| ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx));
+        list.update(view, |list, cx| list.set_visible(true, cx));
+        pump_until(view, || list.read_with(view, |list, _| list.settled));
+        view.run_until_parked();
+        let row = view.debug_bounds("change-request-row-1").expect("the second row").center();
+        view.simulate_mouse_down(row, gpui::MouseButton::Right, gpui::Modifiers::none());
+        view.simulate_mouse_up(row, gpui::MouseButton::Right, gpui::Modifiers::none());
+        view.run_until_parked();
+        let copy = view.debug_bounds("change-request-menu-copy-link").expect("the menu's Copy link").center();
+        view.simulate_click(copy, gpui::Modifiers::none());
+        let url = list.read_with(view, |list, _| list.rows[1].web_url.clone());
+        assert_eq!(view.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())), Some(url));
     }
 
     #[gpui::test]
