@@ -60,6 +60,17 @@ pub struct RestRequest {
     pub method: RestMethod,
     pub path: String,
     pub body: Option<Vec<u8>>,
+    /// A CI log rather than a JSON answer. The token means then does not
+    /// follow a redirect — the caller fetches the `Location` itself with no
+    /// credential (spec §4) — and reads up to `LOG_DOWNLOAD_LIMIT`; `gh` is
+    /// told to print terminal escapes.
+    pub log: bool,
+}
+
+impl RestRequest {
+    pub(crate) fn get(path: String) -> Self {
+        Self { method: RestMethod::Get, path, body: None, log: false }
+    }
 }
 
 /// Sends requests to one forge host: a GraphQL body — `{"operationName",
@@ -79,6 +90,7 @@ pub struct TokenTransport {
     host: String,
     token: String,
     agent: ureq::Agent,
+    log_agent: ureq::Agent,
 }
 
 impl TokenTransport {
@@ -89,6 +101,7 @@ impl TokenTransport {
             host: host.to_string(),
             token,
             agent: http_agent(HTTP_TIMEOUT),
+            log_agent: log_agent(),
         }
     }
 }
@@ -106,7 +119,7 @@ impl std::fmt::Debug for TokenTransport {
 impl TokenTransport {
     /// Reads whatever the forge answered, whatever its status: a status is
     /// an answer here, and `interpret` decides what it means.
-    fn read(&self, response: ureq::http::Response<ureq::Body>) -> Result<ApiResponse, ForgeError> {
+    fn read(&self, response: ureq::http::Response<ureq::Body>, limit: u64) -> Result<ApiResponse, ForgeError> {
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -118,10 +131,18 @@ impl TokenTransport {
                 )
             })
             .collect();
-        let body = response
-            .into_body()
+        let mut body = response.into_body();
+        let body = body
+            .with_config()
+            .limit(limit)
             .read_to_vec()
-            .map_err(|error| classify(&self.host, error))?;
+            .map_err(|error| match error {
+                ureq::Error::BodyExceedsLimit(_) => ForgeError::UnexpectedResponse {
+                    host: self.host.clone(),
+                    detail: "the answer is larger than Sirio reads; open it in the browser".to_string(),
+                },
+                other => classify(&self.host, other),
+            })?;
         Ok(ApiResponse {
             status,
             headers,
@@ -141,7 +162,7 @@ impl Transport for TokenTransport {
             .header("User-Agent", "Sirio")
             .send(body)
             .map_err(|error| classify(&self.host, error))?;
-        self.read(response)
+        self.read(response, 10 * 1024 * 1024)
     }
 
     fn request(&self, request: &RestRequest) -> Result<ApiResponse, ForgeError> {
@@ -162,11 +183,11 @@ impl Transport for TokenTransport {
             host: self.host.clone(),
             detail: format!("an unusable request: {error}"),
         })?;
-        let response = self
-            .agent
+        let agent = if request.log { &self.log_agent } else { &self.agent };
+        let response = agent
             .run(http_request)
             .map_err(|error| classify(&self.host, error))?;
-        self.read(response)
+        self.read(response, if request.log { crate::LOG_DOWNLOAD_LIMIT } else { 10 * 1024 * 1024 })
     }
 }
 
@@ -184,7 +205,27 @@ pub(crate) fn http_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
-fn classify(host: &str, error: ureq::Error) -> ForgeError {
+/// How long a log download may take: a large log is tens of megabytes.
+pub(crate) const LOG_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Like `http_agent`, but a redirect is handed back instead of followed:
+/// GitHub's log answers with a signed URL on another host, which the caller
+/// fetches with no credential (spec §4).
+fn log_agent() -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+    let config = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .timeout_global(Some(LOG_TIMEOUT))
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+pub(crate) fn classify(host: &str, error: ureq::Error) -> ForgeError {
     let host = host.to_string();
     match error {
         ureq::Error::Tls(detail) => ForgeError::Tls {
@@ -322,6 +363,10 @@ impl CliTransport {
                     CLI_TIMEOUT.as_secs()
                 ),
             },
+            RunError::OutputTooLarge => ForgeError::UnexpectedResponse {
+                host: self.host.clone(),
+                detail: "the log is larger than 64 MiB; open it in the browser".to_string(),
+            },
             RunError::Io(detail) => ForgeError::Network {
                 host: self.host.clone(),
                 detail,
@@ -341,10 +386,24 @@ impl Transport for CliTransport {
 
     fn request(&self, request: &RestRequest) -> Result<ApiResponse, ForgeError> {
         let _perf = sirio_perf::span("forge.cli_rest", 0);
-        let args = rest_args(self.program, &self.host, request);
-        let output = run(self.program, &args, request.body.as_deref(), CLI_TIMEOUT)
+        let timeout = if request.log { LOG_TIMEOUT } else { CLI_TIMEOUT };
+        let mut args = rest_args(self.program, &self.host, request);
+        // Leave room for --include's HTTP headers; the parsed body still
+        // has the exact download cap. Stop a chatty CLI before it fills memory.
+        let limit = request.log.then_some(crate::LOG_DOWNLOAD_LIMIT + 64 * 1024);
+        let mut output = run_bounded(self.program, &args, request.body.as_deref(), timeout, limit)
             .map_err(|error| self.run_error(error))?;
-        interpret_cli(self.program, &self.host, &output)
+        // A gh older than the flag refuses it; a log read is safe to repeat.
+        if request.log && String::from_utf8_lossy(&output.stderr).contains("unknown flag: --allow-escape-sequences") {
+            args.retain(|arg| *arg != "--allow-escape-sequences");
+            output = run_bounded(self.program, &args, request.body.as_deref(), timeout, limit)
+                .map_err(|error| self.run_error(error))?;
+        }
+        let response = interpret_cli(self.program, &self.host, &output)?;
+        if request.log && response.body.len() as u64 > crate::LOG_DOWNLOAD_LIMIT {
+            return Err(self.run_error(RunError::OutputTooLarge));
+        }
+        Ok(response)
     }
 }
 
@@ -358,6 +417,9 @@ fn rest_args<'a>(program: CliProgram, host: &'a str, request: &'a RestRequest) -
         request.method.as_str(),
         request.path.as_str(),
     ];
+    if request.log && program == CliProgram::Gh {
+        args.push("--allow-escape-sequences");
+    }
     if request.body.is_some() {
         args.extend(["--input", "-"]);
         if program == CliProgram::Glab {
@@ -395,6 +457,7 @@ pub(crate) enum RunError {
     NotInstalled,
     TimedOut,
     Io(String),
+    OutputTooLarge,
 }
 
 /// Runs a CLI with a deadline, feeding it `stdin`. Output drains on two
@@ -406,6 +469,17 @@ pub(crate) fn run(
     stdin: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<CliOutput, RunError> {
+    run_bounded(program, args, stdin, timeout, None)
+}
+
+fn run_bounded(
+    program: CliProgram,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+    limit: Option<u64>,
+) -> Result<CliOutput, RunError> {
+    let exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut child = Command::new(program.command())
         .args(args)
         .stdin(if stdin.is_some() {
@@ -425,14 +499,30 @@ pub(crate) fn run(
         })?;
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
+    let out_exceeded = exceeded.clone();
     let out_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
+        if let Some(limit) = limit {
+            let _ = stdout.take(limit + 1).read_to_end(&mut bytes);
+            if bytes.len() as u64 > limit {
+                out_exceeded.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else {
+            let _ = stdout.read_to_end(&mut bytes);
+        }
         bytes
     });
+    let err_exceeded = exceeded.clone();
     let err_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
+        if let Some(limit) = limit {
+            let _ = stderr.take(limit + 1).read_to_end(&mut bytes);
+            if bytes.len() as u64 > limit {
+                err_exceeded.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else {
+            let _ = stderr.read_to_end(&mut bytes);
+        }
         bytes
     });
     if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
@@ -441,6 +531,11 @@ pub(crate) fn run(
     }
     let deadline = Instant::now() + timeout;
     let status = loop {
+        if exceeded.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
@@ -454,6 +549,9 @@ pub(crate) fn run(
     };
     let stdout = out_reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
+    if exceeded.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(RunError::OutputTooLarge);
+    }
     match status {
         Some(status) => Ok(CliOutput {
             code: status.code(),

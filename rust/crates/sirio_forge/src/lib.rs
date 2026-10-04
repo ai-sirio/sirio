@@ -12,6 +12,7 @@ mod error;
 mod github;
 mod gitlab;
 mod graphql;
+mod log;
 mod mapping;
 mod model;
 mod resolve;
@@ -38,3 +39,11 @@ pub use target::{ForgeTarget, parse_remote_url};
 pub use transport::{
     ApiResponse, CliProgram, CliTransport, RestMethod, RestRequest, TokenTransport, Transport,
 };
+
+pub use model::Log;
+
+/// How much of a log's end Sirio keeps (spec §15.2).
+pub const LOG_TAIL_BYTES: usize = 4 * 1024 * 1024;
+/// The most a log download may be; past it the log is refused with a pointer
+/// to the browser rather than held whole in memory.
+pub const LOG_DOWNLOAD_LIMIT: u64 = 64 * 1024 * 1024;

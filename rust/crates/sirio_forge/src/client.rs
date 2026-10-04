@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use crate::action::{Action, ActionOutcome};
 use crate::error::ForgeError;
 use crate::model::{
-    Candidate, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CommitSummary,
+    Candidate, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob, Log, CommitSummary,
     FileChange, Forge, ListQuery, Listing, PageCursor,
 };
 use crate::scopes::TokenScopes;
@@ -140,6 +140,16 @@ impl ForgeClient {
         match self.forge {
             Forge::GitHub => github::checks(self, number),
             Forge::GitLab => gitlab::checks(self, number),
+        }
+    }
+
+    /// The tail of a CI job's log (spec §7.4). Two requests: the job's
+    /// status, then its log.
+    pub fn job_log(&self, job: &CheckJob) -> Result<Log, ForgeError> {
+        let _perf = sirio_perf::span("forge.job_log", 0);
+        match self.forge {
+            Forge::GitHub => github::job_log(self, job),
+            Forge::GitLab => gitlab::job_log(self, job),
         }
     }
 

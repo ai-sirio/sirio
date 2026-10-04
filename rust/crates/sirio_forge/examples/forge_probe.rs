@@ -284,6 +284,21 @@ fn run(args: &Args) -> Result<(), Failure> {
             }
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }
+        "log" => {
+            let job_id = args
+                .flag("job")
+                .and_then(|id| id.parse().ok())
+                .ok_or_else(|| usage("log needs --job <number>"))?;
+            let log = client.job_log(&sirio_forge::CheckJob { job_id, run_id: None, retryable: false })?;
+            println!("PUBLISHED {}", yes_no(log.published));
+            println!("COMPLETE {}", yes_no(log.complete));
+            println!("DROPPED {}", log.dropped);
+            println!("BYTES {}", log.bytes.len());
+            let text = String::from_utf8_lossy(&log.bytes);
+            let first = text.trim_start_matches('\u{feff}').lines().next().unwrap_or("");
+            // Escapes are printed as `\e` so the transcript stays readable.
+            println!("FIRST {}", first.replace('\x1b', "\\e"));
+        }
         "files" => {
             let listing = client.files(number(args)?)?;
             for file in &listing.items {

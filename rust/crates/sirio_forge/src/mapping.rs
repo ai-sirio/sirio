@@ -150,6 +150,12 @@ pub(crate) fn gitlab_job(status: &str) -> CheckStatus {
     }
 }
 
+/// A GitLab job (REST status, lower case) whose log will not grow. Unknown
+/// is not settled: the tab keeps reloading rather than freeze a live log.
+pub(crate) fn gitlab_job_settled(status: &str) -> bool {
+    matches!(status, "success" | "failed" | "canceled" | "skipped")
+}
+
 /// The number at the end of a GitLab global id — `gid://gitlab/Ci::Build/42`
 /// is 42 — or `None` for anything else.
 pub(crate) fn gitlab_gid_number(gid: &str) -> Option<u64> {
@@ -823,6 +829,16 @@ mod tests {
         assert_eq!(file_change_kind("RENAMED"), Some(FileChangeKind::Renamed));
         assert_eq!(file_change_kind("CHANGED"), Some(FileChangeKind::Modified));
         assert_eq!(file_change_kind("SOMETHING_NEW"), None);
+    }
+
+    #[test]
+    fn a_gitlab_job_is_settled_only_in_a_final_state() {
+        for status in ["success", "failed", "canceled", "skipped"] {
+            assert!(gitlab_job_settled(status), "{status}");
+        }
+        for status in ["created", "pending", "running", "manual", "scheduled", "waiting_for_resource", "preparing", "canceling", "something_new"] {
+            assert!(!gitlab_job_settled(status), "{status}");
+        }
     }
 
     #[test]

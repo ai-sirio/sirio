@@ -22,12 +22,12 @@ use crate::action::{
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor,
+    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, interpret_rest, next_cursor,
     no_unknown_field, opt_bool, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
-    Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, CommentKind, CommentRef,
+    Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, Log, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
     ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -587,6 +587,38 @@ pub(crate) fn checks(client: &ForgeClient, number: u64) -> Result<Listing<Check>
     })
 }
 
+pub(crate) fn job_log(client: &ForgeClient, job: &CheckJob) -> Result<Log, ForgeError> {
+    let project = percent_encode(&client.project, false);
+    let status = execute_rest(client, &RestRequest::get(format!("projects/{project}/jobs/{}", job.job_id)))?;
+    let complete = serde_json::from_slice::<Value>(&status.body)
+        .ok()
+        .and_then(|answer| answer.get("status").and_then(Value::as_str).map(mapping::gitlab_job_settled))
+        .unwrap_or(false);
+    let mut request = RestRequest::get(format!("projects/{project}/jobs/{}/trace", job.job_id));
+    request.log = true;
+    let response = client.transport.request(&request)?;
+    let bytes = match response.status {
+        200..=299 => response.body,
+        // An archived trace may live in object storage.
+        301 | 302 | 303 | 307 | 308 => {
+            let location = response.header("location").ok_or_else(|| ForgeError::UnexpectedResponse {
+                host: client.host.clone(),
+                detail: "a redirect with no location".to_string(),
+            })?;
+            crate::log::fetch_signed(&client.host, location)?
+        }
+        404 if !complete => return Ok(crate::log::finish(Vec::new(), false, false)),
+        _ => return Err(interpret_rest(&client.host, response).err().unwrap_or(ForgeError::UnexpectedResponse {
+            host: client.host.clone(),
+            detail: "an unreadable log answer".to_string(),
+        })),
+    };
+    // GitLab serves a running job's trace as it grows; a job that never
+    // started answers an empty one.
+    let published = !bytes.is_empty();
+    Ok(crate::log::finish(bytes, complete, published))
+}
+
 /// `diffStats` is a plain list, not a connection: one request, never cut.
 pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileChange>, ForgeError> {
     let data = plain(
@@ -671,6 +703,7 @@ fn create_note(client: &ForgeClient, noteable: &str, body: &str) -> Result<(), F
 fn approve(client: &ForgeClient, number: u64) -> Result<(), ForgeError> {
     let request = RestRequest {
         method: RestMethod::Post,
+        log: false,
         path: format!(
             "projects/{}/merge_requests/{number}/approve",
             percent_encode(&client.project, false)
@@ -819,6 +852,7 @@ pub(crate) fn act(
             client,
             &RestRequest {
                 method: RestMethod::Post,
+                log: false,
                 path: format!(
                     "projects/{}/merge_requests/{number}/cancel_merge_when_pipeline_succeeds",
                     percent_encode(&client.project, false)
@@ -951,6 +985,7 @@ pub(crate) fn label_candidates(client: &ForgeClient, text: &str) -> Result<Vec<C
 pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
     let request = RestRequest {
         method: RestMethod::Get,
+        log: false,
         path: "personal_access_tokens/self".to_string(),
         body: None,
     };

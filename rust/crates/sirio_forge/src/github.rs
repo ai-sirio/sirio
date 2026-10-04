@@ -14,14 +14,14 @@ use crate::action::{
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
 use crate::graphql::{
-    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, next_cursor,
+    array_at, bool_at, execute, execute_mutation, execute_rest, has_previous_page, interpret_rest, next_cursor,
     no_unknown_field, opt_str, opt_u32, revisions, str_at, time_at, u32_at,
 };
 use crate::mapping;
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
-    Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, CiState, CommentKind,
+    Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, Log, CiState, CommentKind,
     CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
     PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -642,6 +642,38 @@ fn duration(started: Option<i64>, finished: Option<i64>) -> Option<u64> {
     u64::try_from(finished? - started?).ok()
 }
 
+pub(crate) fn job_log(client: &ForgeClient, job: &CheckJob) -> Result<Log, ForgeError> {
+    let (owner, name) = owner_and_name(client)?;
+    let status = execute_rest(
+        client,
+        &RestRequest::get(format!("repos/{owner}/{name}/actions/jobs/{}", job.job_id)),
+    )?;
+    let complete = serde_json::from_slice::<Value>(&status.body)
+        .ok()
+        .and_then(|answer| answer.get("status").and_then(Value::as_str).map(|status| status == "completed"))
+        .unwrap_or(false);
+    let mut request = RestRequest::get(format!("repos/{owner}/{name}/actions/jobs/{}/logs", job.job_id));
+    request.log = true;
+    let response = client.transport.request(&request)?;
+    let bytes = match response.status {
+        200..=299 => response.body,
+        301 | 302 | 303 | 307 | 308 => {
+            let location = response.header("location").ok_or_else(|| ForgeError::UnexpectedResponse {
+                host: client.host.clone(),
+                detail: "a redirect with no location".to_string(),
+            })?;
+            crate::log::fetch_signed(&client.host, location)?
+        }
+        // A running job's log is not served until it ends (spec §13).
+        404 if !complete => return Ok(crate::log::finish(Vec::new(), false, false)),
+        _ => return Err(interpret_rest(&client.host, response).err().unwrap_or(ForgeError::UnexpectedResponse {
+            host: client.host.clone(),
+            detail: "an unreadable log answer".to_string(),
+        })),
+    };
+    Ok(crate::log::finish(bytes, complete, true))
+}
+
 pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileChange>, ForgeError> {
     let (owner, name) = owner_and_name(client)?;
     paged(|after| {
@@ -913,6 +945,7 @@ pub(crate) fn act(
                 client,
                 &RestRequest {
                     method: RestMethod::Post,
+                    log: false,
                     path,
                     body: None,
                 },
@@ -942,6 +975,7 @@ fn delete_head(client: &ForgeClient, branch: &str) -> ActionOutcome {
     let result = owner_and_name(client).and_then(|(owner, name)| {
         let request = RestRequest {
             method: RestMethod::Delete,
+            log: false,
             path: format!("repos/{owner}/{name}/git/refs/heads/{}", percent_encode(branch, true)),
             body: None,
         };
@@ -1011,6 +1045,7 @@ pub(crate) fn label_candidates(client: &ForgeClient, text: &str) -> Result<Vec<C
 pub(crate) fn token_scopes(client: &ForgeClient) -> Option<TokenScopes> {
     let request = RestRequest {
         method: RestMethod::Get,
+        log: false,
         path: "user".to_string(),
         body: None,
     };

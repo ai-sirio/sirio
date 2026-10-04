@@ -261,6 +261,11 @@ GH_RO=("$PROBE" --forge github --host ghe.test --project acme/widgets --token re
 GL=("$PROBE" --forge gitlab --host gitlab.test --project team/app --token good)
 GH_ID='"pullRequestId":"PR_kwDOfake101"'
 
+write_gh_hosts() { # dir credential
+  mkdir -p "$1"
+  printf 'github.localhost:\n    users:\n        fake-user:\n            oauth_token: %s\n    git_protocol: https\n    user: fake-user\n    oauth_token: %s\n' "$2" "$2" >"$1/hosts.yml"
+}
+
 if wanted wire-github; then
 echo "stage wire-github: every action of B2a reaches GitHub as the mutation it means"
 reset_forge github "$GH_PORT"
@@ -696,10 +701,7 @@ fi
 
 if wanted cli; then
 echo "stage cli: the real gh and glab carry the same writes"
-write_gh_hosts() { # dir credential
-  mkdir -p "$1"
-  printf 'github.localhost:\n    users:\n        fake-user:\n            oauth_token: %s\n    git_protocol: https\n    user: fake-user\n    oauth_token: %s\n' "$2" "$2" >"$1/hosts.yml"
-}
+
 write_glab_config() { # dir credential
   mkdir -p "$1"
   chmod 700 "$1"
@@ -790,6 +792,57 @@ expect_input gitlab JobRetry '{"id":"gid://gitlab/Ci::Build/2"}'
 probe "${GL[@]}" act 201 rerun-failed --id 45
 expect_line "ACT ok"
 expect_input gitlab PipelineRetry '{"id":"gid://gitlab/Ci::Pipeline/45"}'
+# A log behind GitHub's redirect: fetched from the other host with no credential.
+reset_forge github
+probe "${GH[@]}" log --job 2
+expect_code 0
+expect_line "PUBLISHED yes"
+expect_line "COMPLETE yes"
+expect_line "DROPPED 0"
+grep -qF 'GET /__blob/github-job-2.log - interaction=no vars={"authorization": "none"}' "$WORK/github-requests.log" \
+  || { cat "$WORK/github-requests.log" >&2; fail "the redirected log request was not seen without a credential"; }
+probe "${GH[@]}" log --job 3
+expect_line "PUBLISHED no"
+expect_line "COMPLETE no"
+GH_BIG=("$PROBE" --forge github --host ghe.test --project acme/widgets --token biglog)
+probe "${GH_BIG[@]}" log --job 2
+expect_line "PUBLISHED yes"
+no_line "DROPPED 0"
+expect_prefix "FIRST line 0"
+reset_forge gitlab
+probe "${GL[@]}" log --job 2
+expect_line "PUBLISHED yes"
+expect_line "COMPLETE yes"
+probe "${GL[@]}" log --job 3
+expect_line "PUBLISHED yes"
+expect_line "COMPLETE no"
+probe "${GL[@]}" log --job 4
+expect_line "PUBLISHED no"
+if command -v gh >/dev/null; then
+  # The same log through gh: its own redirect, its own credential handling.
+  reset_forge github
+  write_gh_hosts "$WORK/gh-good" good
+  GH_CLI=("$PROBE" --forge github --host github.localhost --project acme/widgets --cli)
+  probe GH_CONFIG_DIR="$WORK/gh-good" HTTP_PROXY="http://127.0.0.1:$GH_PORT" "${GH_CLI[@]}" log --job 2
+  expect_line "PUBLISHED yes"
+  grep -qF 'GET /__blob/github-job-2.log - interaction=no vars={"authorization": "none"}' "$WORK/github-requests.log" \
+    || { cat "$WORK/github-requests.log" >&2; fail "gh carried a credential to the log's host, or never fetched it"; }
+else
+  echo "SKIP: gh is not on PATH -- the log through gh was not exercised"
+fi
+echo "SKIP: glab is not exercised for logs on this machine unless installed" ; command -v glab >/dev/null && echo "(glab present: extend this step)"
+# Every means refuses a download above 64 MiB.
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token oversizelog log --job 2
+expect_code 20 "an oversized log through the token means"
+expect_line "ERR UnexpectedResponse"
+if command -v gh >/dev/null; then
+  for credential in hugelog oversizelog; do
+    write_gh_hosts "$WORK/gh-$credential" "$credential"
+    probe GH_CONFIG_DIR="$WORK/gh-$credential" HTTP_PROXY="http://127.0.0.1:$GH_PORT" "${GH_CLI[@]}" log --job 2
+    expect_code 20 "an oversized log through gh ($credential)"
+    expect_line "ERR UnexpectedResponse"
+  done
+fi
 # Later parts of stage ci are added above this line.
 fi
 

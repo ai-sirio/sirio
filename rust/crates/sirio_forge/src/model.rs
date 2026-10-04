@@ -480,6 +480,20 @@ pub struct CheckJob {
     pub retryable: bool,
 }
 
+/// The tail of a CI job's log, as the forge served it (spec §7.4, §15.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Log {
+    /// Escape sequences and all; at most `LOG_TAIL_BYTES`, starting at a line.
+    pub bytes: Vec<u8>,
+    /// Bytes dropped from the start to keep the tail; 0 when it is whole.
+    pub dropped: u64,
+    /// The job has finished: its log will not grow.
+    pub complete: bool,
+    /// The forge serves a log for it yet. A GitHub job's log appears when
+    /// the job ends; a manual GitLab job that never ran has none.
+    pub published: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
     pub name: String,
