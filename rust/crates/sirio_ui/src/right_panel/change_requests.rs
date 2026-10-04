@@ -9,6 +9,11 @@ use std::time::Duration;
 use bezel::motion::{Fade, Painter};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
+use ely_gpui_component::{
+    forms::{Choice, InputEvent, SearchInput, TextInput},
+    navigation::Tabs,
+    primitives::IconName,
+};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, FontWeight, Global,
     IntoElement, KeyDownEvent, MouseButton, Pixels, Point, Render, Task, Window, div, prelude::*,
@@ -20,6 +25,7 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 use crate::change_request_style as style;
+use crate::ely_ui;
 use crate::forge_source::{self, Connection, ReadyConnection};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
@@ -114,7 +120,7 @@ pub(crate) struct ChangeRequestList {
     to_review: Option<u32>,
     /// A rate limit's reset: no request before it (spec §9).
     paused_until: Option<i64>,
-    search: Entity<TextField>,
+    search: Option<Entity<TextInput>>,
     search_open: bool,
     applied_search: String,
     pub(crate) token: Entity<TextField>,
@@ -137,14 +143,6 @@ impl EventEmitter<ChangeRequestListEvent> for ChangeRequestList {}
 
 impl ChangeRequestList {
     pub(crate) fn new(worktree: PathBuf, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| TextField::new(cx).with_placeholder("Search"));
-        cx.observe(&search, |list, field, cx| {
-            let text = field.read(cx).content().trim().to_string();
-            if text != list.applied_search {
-                list.schedule_search(text, cx);
-            }
-        })
-        .detach();
         let token =
             cx.new(|cx| TextField::new(cx).with_placeholder("Paste a personal access token"));
         Self {
@@ -158,7 +156,7 @@ impl ChangeRequestList {
             card_branch: None,
             to_review: None,
             paused_until: None,
-            search,
+            search: None,
             search_open: false,
             applied_search: String::new(),
             token,
@@ -519,20 +517,42 @@ impl ChangeRequestList {
         }));
     }
 
+    /// The search field, built the first time it is opened (Ely's input
+    /// needs the window the constructor does not have).
+    fn search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextInput> {
+        if let Some(input) = &self.search {
+            return input.clone();
+        }
+        let input = ely_ui::new_input(window, cx, "", None, "Search");
+        cx.subscribe(&input, |list, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Changed) {
+                let text = input.read(cx).text().trim().to_string();
+                if text != list.applied_search {
+                    list.schedule_search(text, cx);
+                }
+            }
+        })
+        .detach();
+        self.search = Some(input.clone());
+        input
+    }
+
     /// The socket's search: opens the field and types `text` into it, so the
     /// debounce and the read run as they do for a person.
-    pub(crate) fn control_search(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn control_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = true;
-        self.search.update(cx, |field, cx| field.set_content(text, cx));
+        let input = self.search_input(window, cx);
+        input.update(cx, |input, cx| input.set_text(text, cx));
         cx.notify();
     }
 
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = !self.search_open;
+        let input = self.search_input(window, cx);
         if self.search_open {
-            self.search.read(cx).focus_handle(cx).focus(window, cx);
+            input.read(cx).focus_handle(cx).focus(window, cx);
         } else if !self.applied_search.is_empty() {
-            self.search.update(cx, |field, cx| field.clear(cx));
+            input.update(cx, |input, cx| input.set_text("", cx));
         }
         cx.notify();
     }
@@ -825,6 +845,7 @@ impl ChangeRequestList {
             host => format!("{host}/{}", client.project()),
         };
         let refresh = entity.clone();
+        let search = entity.clone();
         div()
             .flex()
             .items_center()
@@ -847,11 +868,18 @@ impl ChangeRequestList {
                     .whitespace_nowrap()
                     .child(project),
             )
-            .child(icon_button(
+            .child(ely_ui::icon_button(
+                "change-requests-search",
+                IconName::Search,
+                "Search",
+                true,
+                move |window, cx| search.update(cx, |list, cx| list.toggle_search(window, cx)),
+            ))
+            .child(ely_ui::icon_button(
                 "change-requests-refresh",
-                Icon::RefreshCw,
+                IconName::RefreshCw,
                 "Refresh",
-                theme,
+                true,
                 move |_, cx| refresh.update(cx, |list, cx| list.refresh(cx)),
             ))
     }
@@ -987,107 +1015,37 @@ impl ChangeRequestList {
         )
     }
 
-    fn render_filters(
-        &self,
-        filter: Filter,
-        theme: &Theme,
-        entity: &Entity<Self>,
-    ) -> impl IntoElement {
-        const FILTERS: [(Filter, Icon, &str, &str); 4] = [
-            (
-                Filter::Mine,
-                Icon::Person,
-                "Mine",
-                "change-requests-filter-mine",
-            ),
-            (
-                Filter::ToReview,
-                Icon::Eye,
-                "To review",
-                "change-requests-filter-to-review",
-            ),
-            (
-                Filter::AllOpen,
-                Icon::PullRequest,
-                "All open",
-                "change-requests-filter-all-open",
-            ),
-            (
-                Filter::ClosedAndMerged,
-                Icon::Archive,
-                "Closed & merged",
-                "change-requests-filter-closed",
-            ),
+    fn render_filters(&self, filter: Filter, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
+        const FILTERS: [(Filter, IconName, &str); 4] = [
+            (Filter::Mine, IconName::User, "Mine"),
+            (Filter::ToReview, IconName::Eye, "To review"),
+            (Filter::AllOpen, IconName::GitPullRequest, "Open"),
+            (Filter::ClosedAndMerged, IconName::Archive, "Closed"),
         ];
-        let hover = theme.ely.hover;
         let to_review = self.to_review.filter(|count| *count > 0);
-        let search = entity.clone();
+        let choices = FILTERS.map(|(candidate, icon, label)| {
+            let choice = Choice::new(filter_word(candidate), label).icon(icon);
+            match (candidate, to_review) {
+                (Filter::ToReview, Some(count)) => choice.note(count.to_string()),
+                _ => choice,
+            }
+        });
+        let choose = entity.clone();
         div()
-            .h(px(30.0))
+            .id("change-requests-filters")
+            .debug_selector(|| "change-requests-filters".to_owned())
             .px(px(6.0))
-            .flex()
-            .items_center()
             .border_b_1()
             .border_color(theme.ely.border)
-            .children(FILTERS.map(|(candidate, icon, label, id)| {
-                let active = candidate == filter;
-                let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
-                let choose = entity.clone();
-                div()
-                    .id(id)
-                    .debug_selector(move || id.to_owned())
-                    .relative()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(7.0))
-                    .text_size(theme.typography.footnote)
-                    .font_weight(if active {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(tone)
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .tooltip(move |window, cx| crate::controls::sidebar_tooltip(label, window, cx))
-                    .on_click(move |_, _, cx| {
-                        choose.update(cx, |list, cx| list.set_filter(candidate, cx))
-                    })
-                    .child(IconElement::new(icon, IconSize::Small).text_color(tone))
-                    .when(active, |this| this.child(label))
-                    .when(candidate == Filter::ToReview, |this| {
-                        this.when_some(to_review, |this, count| {
-                            this.child(
-                                div()
-                                    .text_size(theme.typography.caption2)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.sirio.quantity)
-                                    .child(count.to_string()),
-                            )
-                        })
-                    })
-                    .when(active, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .bottom(px(-1.0))
-                                .left_0()
-                                .right_0()
-                                .h(px(2.0))
-                                .bg(theme.ely.fg),
-                        )
-                    })
-            }))
-            .child(div().flex_1())
-            .child(icon_button(
-                "change-requests-search",
-                Icon::MagnifyingGlass,
-                "Search",
-                theme,
-                move |window, cx| search.update(cx, |list, cx| list.toggle_search(window, cx)),
-            ))
+            // A narrow panel scrolls the strip instead of clipping its last tab.
+            .overflow_x_scroll()
+            .child(
+                Tabs::new("change-requests-filter", choices, filter_word(filter)).on_change(move |value, _, cx| {
+                    if let Some(filter) = parse_filter(value) {
+                        choose.update(cx, |list, cx| list.set_filter(filter, cx));
+                    }
+                }),
+            )
     }
 
     fn render_row(
@@ -1450,6 +1408,7 @@ impl ChangeRequestList {
 
 impl Render for ChangeRequestList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("ChangeRequestList.render", cx.entity_id().as_u64());
         let theme = Theme::get(cx).with_sidebar_typography();
         let entity = cx.entity();
@@ -1495,14 +1454,15 @@ impl Render for ChangeRequestList {
                         this.child(card)
                     })
                     .child(self.render_filters(filter, &theme, &entity))
-                    .when(self.search_open, |this| {
+                    .when_some(self.search.clone().filter(|_| self.search_open), |this, input| {
                         this.child(
                             div()
+                                .debug_selector(|| "change-requests-search-field".to_owned())
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .border_b_1()
                                 .border_color(theme.ely.border)
-                                .child(crate::controls::sidebar_text_field(self.search.clone())),
+                                .child(SearchInput::new("change-requests-search-field", &input)),
                         )
                     })
                     .child(self.render_rows(&theme, &entity))
@@ -1678,6 +1638,22 @@ mod tests {
         list.read_with(cx, |list, _| {
             assert_eq!(list.card_branch.as_deref(), Some("feat/103"));
         });
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_filter_strip_chooses_that_filter(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| forge_source::set_source(FakeSource::ready(testing::github_client(forge()), None), cx));
+        let (list, view) = cx.add_window_view(|_, cx| ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx));
+        list.update(view, |list, cx| list.set_visible(true, cx));
+        pump_until(view, || list.read_with(view, |list, _| list.settled));
+        view.run_until_parked();
+        let strip = view.debug_bounds("change-requests-filters").expect("the filter strip");
+        view.simulate_click(gpui::point(strip.left() + px(24.0), strip.center().y), gpui::Modifiers::none());
+        pump_until(view, || list.read_with(view, |list, _| list.settled));
+        assert_eq!(view.update(|_, cx| filter_word(current_filter(cx))), "mine");
+        list.update(view, |list, cx| list.set_filter(Filter::AllOpen, cx));
     }
 
     #[gpui::test]
