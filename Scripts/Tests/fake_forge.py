@@ -76,6 +76,11 @@ reads then serve `<Operation>.after.push.json`; `POST /__checking` stands for
 the forge still working out whether it can merge (`.after.checking.json`)
 until the next `/__reset`.
 
+`POST /__ratelimit?seconds=N` rate limits every read with a reset N seconds
+ahead; `POST /__throttle` answers 429 with Retry-After and no reset until
+`/__reset`. That reset also clears both limits. `ChangeRequestSearch` keeps
+only rows containing every free word of `q` (words without `:`).
+
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
 2.100 and glab 1.119), so chunked bodies are decoded here.
 
@@ -92,6 +97,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forge-fixtures")
 
@@ -171,6 +177,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     fixture_files = {}
     applied = []
     applied_lock = threading.Lock()
+    limit_until = 0.0
+    throttled = False
 
     def credential(self):
         auth = self.headers.get("Authorization") or ""
@@ -217,6 +225,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def scenario_error(self):
+        if Handler.throttled:
+            return 429, {"message": "Retry later"}, [("Retry-After", "30")]
+        if time.time() < Handler.limit_until:
+            return 403, {"message": "API rate limit exceeded"}, [
+                ("X-RateLimit-Remaining", "0"),
+                ("X-RateLimit-Reset", str(int(Handler.limit_until))),
+            ]
         credential = self.credential()
         if credential in ("", "expired"):
             return 401, {"message": "Bad credentials"}, []
@@ -367,9 +382,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # The forge has not yet worked out whether it can merge.
             self.remember("checking")
             return self.answer(200, {"checking": True})
+        if path == "/__ratelimit":
+            # Every request is rate limited until N seconds from now.
+            seconds = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "5"))
+            Handler.limit_until = time.time() + seconds
+            return self.answer(200, {"limited_until": int(Handler.limit_until)})
+        if path == "/__throttle":
+            # Every request answers 429 with no reset time, until /__reset.
+            Handler.throttled = True
+            return self.answer(200, {"throttled": True})
         if path == "/__reset":
             with self.applied_lock:
                 del self.applied[:]
+            Handler.limit_until = 0.0
+            Handler.throttled = False
             return self.answer(200, {"reset": True})
         if self.flavor != "none" and path.startswith("/api/v4/"):
             return self.rest_write(path)
@@ -402,6 +428,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload = json.load(fixture)
         if operation in ("ReviewerCandidates", "LabelCandidates"):
             payload = only_matching(payload, (variables.get("q") or "").lower())
+        if operation == "ChangeRequestSearch":
+            # GitHub's search: the qualifiers are the fake's to ignore; every
+            # free word the user typed must appear in a row.
+            for word in [w for w in (variables.get("q") or "").lower().split() if ":" not in w]:
+                payload = only_matching(payload, word)
         if self.flavor == "gitlab" and operation == "LabelCandidates" and not re.search(r"includeAncestorGroups:\s*true", query):
             payload = without_group_labels(payload)
         if old and operation in BASELINE_OPERATIONS:

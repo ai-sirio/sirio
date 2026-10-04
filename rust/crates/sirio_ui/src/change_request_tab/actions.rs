@@ -137,11 +137,11 @@ pub(crate) fn action_button(
     enabled: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    super::ely_ui::text_button(
+    crate::ely_ui::text_button(
         id,
         label,
         None,
-        super::ely_ui::ButtonState::enabled(enabled),
+        crate::ely_ui::ButtonState::enabled(enabled),
         on_click,
     )
 }
@@ -325,7 +325,7 @@ impl ChangeRequestTab {
                 .gap(px(4.0))
                 .children(items.into_iter().map(|(id, icon, tooltip, what)| {
                     let entity = entity.clone();
-                    super::ely_ui::icon_button(id, icon, tooltip, enabled, move |window, cx| {
+                    crate::ely_ui::icon_button(id, icon, tooltip, enabled, move |window, cx| {
                         entity.update(cx, |tab, cx| match &what {
                             HeaderAction::Edit => tab.start_edit(window, cx),
                             HeaderAction::Do(action) => {
@@ -361,7 +361,7 @@ impl ChangeRequestTab {
             div()
                 .id("change-request-action-status")
                 .debug_selector(|| "change-request-action-status".into())
-                .child(super::ely_ui::message(severity, text, theme))
+                .child(crate::ely_ui::message(severity, text, theme))
                 .into_any_element(),
         )
     }

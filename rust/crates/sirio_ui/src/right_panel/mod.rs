@@ -764,6 +764,14 @@ impl RightPanel {
         true
     }
 
+    pub fn set_change_request_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(list) = self.change_requests.clone() else {
+            return false;
+        };
+        list.update(cx, |list, cx| list.control_search(text, window, cx));
+        true
+    }
+
     pub fn change_request_for(&self, number: u64, cx: &App) -> Option<(sirio_forge::ChangeRef, String)> {
         self.change_requests.as_ref().and_then(|list| list.read(cx).reference_for(number))
     }

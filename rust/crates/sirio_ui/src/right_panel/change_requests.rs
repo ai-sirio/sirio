@@ -6,12 +6,18 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bezel::motion::{Fade, Painter};
-use bezel::ui::input::TextField;
-use bezel::ui::popover;
+use ely_gpui_component::{
+    feedback::Callout,
+    forms::{Choice, InputEvent, PasswordInput, SearchInput, TextInput},
+    menus::{ContextMenu, Menu, MenuItem},
+    motion::Skeleton,
+    navigation::Tabs,
+    primitives::{Icon as EIcon, IconName, Severity},
+    theme::IconSize as EIconSize,
+};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Focusable, FontWeight, Global,
-    IntoElement, KeyDownEvent, MouseButton, Pixels, Point, Render, Task, Window, div, prelude::*,
+    IntoElement, Render, Task, Window, div, prelude::*,
     px,
 };
 use sirio_forge::{
@@ -20,12 +26,15 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 use crate::change_request_style as style;
+use crate::ely_ui::{self, ButtonState};
 use crate::forge_source::{self, Connection, ReadyConnection};
-use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::sidebar::icons::{IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// How long a rate limit that names no reset pauses the list: one refresh.
+const DEFAULT_PAUSE_SECS: i64 = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeRequestListEvent {
@@ -89,12 +98,6 @@ pub(crate) enum TokenState {
     Failed(String),
 }
 
-struct RowMenu {
-    index: usize,
-    position: Point<Pixels>,
-    painter: Painter,
-}
-
 pub(crate) struct ChangeRequestList {
     worktree: PathBuf,
     pub(crate) link: Link,
@@ -112,20 +115,20 @@ pub(crate) struct ChangeRequestList {
     to_review: Option<u32>,
     /// A rate limit's reset: no request before it (spec §9).
     paused_until: Option<i64>,
-    search: Entity<TextField>,
+    search: Option<Entity<TextInput>>,
     search_open: bool,
     applied_search: String,
-    pub(crate) token: Entity<TextField>,
+    pub(crate) token: Option<Entity<TextInput>>,
     pub(crate) token_state: TokenState,
     visible: bool,
     generation: u64,
-    menu: Option<RowMenu>,
     connect_task: Option<Task<()>>,
     page_task: Option<Task<()>>,
     more_task: Option<Task<()>>,
     card_task: Option<Task<()>>,
     count_task: Option<Task<()>>,
     timer_task: Option<Task<()>>,
+    resume_task: Option<Task<()>>,
     search_task: Option<Task<()>>,
     token_task: Option<Task<()>>,
 }
@@ -133,17 +136,7 @@ pub(crate) struct ChangeRequestList {
 impl EventEmitter<ChangeRequestListEvent> for ChangeRequestList {}
 
 impl ChangeRequestList {
-    pub(crate) fn new(worktree: PathBuf, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| TextField::new(cx).with_placeholder("Search"));
-        cx.observe(&search, |list, field, cx| {
-            let text = field.read(cx).content().trim().to_string();
-            if text != list.applied_search {
-                list.schedule_search(text, cx);
-            }
-        })
-        .detach();
-        let token =
-            cx.new(|cx| TextField::new(cx).with_placeholder("Paste a personal access token"));
+    pub(crate) fn new(worktree: PathBuf, _cx: &mut Context<Self>) -> Self {
         Self {
             worktree,
             link: Link::Idle,
@@ -155,20 +148,20 @@ impl ChangeRequestList {
             card_branch: None,
             to_review: None,
             paused_until: None,
-            search,
+            search: None,
             search_open: false,
             applied_search: String::new(),
-            token,
+            token: None,
             token_state: TokenState::Idle,
             visible: false,
             generation: 0,
-            menu: None,
             connect_task: None,
             page_task: None,
             more_task: None,
             card_task: None,
             count_task: None,
             timer_task: None,
+            resume_task: None,
             search_task: None,
             token_task: None,
         }
@@ -255,14 +248,36 @@ impl ChangeRequestList {
         false
     }
 
-    fn note_rate_limited(&mut self, error: &ForgeError) {
-        if let ForgeError::RateLimited {
-            reset_at: Some(reset),
-            ..
-        } = error
-        {
-            self.paused_until = Some(*reset);
+    /// Pauses every read until the forge's reset, capped at an hour (a
+    /// minute for an absent or expired reset), then looks again by itself:
+    /// "retrying at HH:MM" is a promise.
+    fn note_rate_limited(&mut self, error: &mut ForgeError, cx: &mut Context<Self>) {
+        let ForgeError::RateLimited { reset_at, .. } = error else {
+            return;
+        };
+        let now = style::now();
+        let until = reset_at.filter(|at| *at > now)
+            .unwrap_or(now + DEFAULT_PAUSE_SECS).min(now + 3600);
+        if reset_at.is_some() {
+            *reset_at = Some(until);
         }
+        self.paused_until = Some(until);
+        self.arm_resume(until, cx);
+    }
+
+    fn arm_resume(&mut self, until: i64, cx: &mut Context<Self>) {
+        let wait = Duration::from_secs((until - style::now()).clamp(1, 3600) as u64);
+        self.resume_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |list, cx| {
+                list.resume_task = None;
+                match list.paused_until {
+                    Some(until) if style::now() < until => list.arm_resume(until, cx),
+                    _ if list.visible => list.refresh(cx),
+                    _ => {}
+                }
+            });
+        }));
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -365,7 +380,7 @@ impl ChangeRequestList {
     /// A refused sign-in turns the view back into the "not connected" card
     /// and makes the host ask again; a rate limit pauses refreshing until
     /// its reset; anything else shows where the rows are, and they stay.
-    fn handle_error(&mut self, error: ForgeError, cx: &mut Context<Self>) {
+    fn handle_error(&mut self, mut error: ForgeError, cx: &mut Context<Self>) {
         match &error {
             ForgeError::NotAuthenticated { host } => {
                 let forge = self.ready().map(|ready| ready.client.forge());
@@ -377,7 +392,7 @@ impl ChangeRequestList {
                     });
                 }
             }
-            ForgeError::RateLimited { .. } => self.note_rate_limited(&error),
+            ForgeError::RateLimited { .. } => self.note_rate_limited(&mut error, cx),
             _ => {}
         }
         self.list_error = Some(error);
@@ -400,7 +415,7 @@ impl ChangeRequestList {
         self.card_task = Some(cx.spawn(async move |this, cx| {
             // The branch is read here, not taken from `ready`: `connect`
             // read it once, and the worktree may have switched since.
-            let result = cx
+            let mut result = cx
                 .background_spawn(async move {
                     let Some(branch) = source.current_branch(&worktree) else {
                         return Ok(None);
@@ -414,8 +429,8 @@ impl ChangeRequestList {
                 if list.generation != generation {
                     return;
                 }
-                if let Err(error) = &result {
-                    list.note_rate_limited(error);
+                if let Err(error) = &mut result {
+                    list.note_rate_limited(error, cx);
                 }
                 list.card = match result {
                     Ok(None) => {
@@ -443,15 +458,15 @@ impl ChangeRequestList {
         let client = ready.client;
         let generation = self.generation;
         self.count_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
+            let mut result = cx
                 .background_spawn(async move { client.to_review_count() })
                 .await;
             let _ = this.update(cx, |list, cx| {
                 if list.generation != generation {
                     return;
                 }
-                if let Err(error) = &result {
-                    list.note_rate_limited(error);
+                if let Err(error) = &mut result {
+                    list.note_rate_limited(error, cx);
                 }
                 list.to_review = result.ok();
                 cx.notify();
@@ -465,6 +480,22 @@ impl ChangeRequestList {
         self.next = None;
         self.settled = false;
         self.list_error = None;
+        self.reload(cx);
+    }
+
+    /// The first page again; while the host is paused, the pause itself is
+    /// what the view shows, not a load that was never sent.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            self.generation += 1;
+            self.settled = true;
+            self.list_error = Some(ForgeError::RateLimited {
+                host: self.ready().map(|ready| ready.client.host().to_string()).unwrap_or_default(),
+                reset_at: self.paused_until,
+            });
+            cx.notify();
+            return;
+        }
         if let Some(ready) = self.ready().cloned() {
             self.load_page(ready, cx);
         }
@@ -478,19 +509,47 @@ impl ChangeRequestList {
                 list.applied_search = text;
                 list.rows.clear();
                 list.settled = false;
-                if let Some(ready) = list.ready().cloned() {
-                    list.load_page(ready, cx);
-                }
+                list.reload(cx);
             });
         }));
     }
 
+    /// The search field, built the first time it is opened (Ely's input
+    /// needs the window the constructor does not have).
+    fn search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextInput> {
+        if let Some(input) = &self.search {
+            return input.clone();
+        }
+        let input = ely_ui::new_input(window, cx, "", None, "Search");
+        cx.subscribe(&input, |list, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Changed) {
+                let text = input.read(cx).text().trim().to_string();
+                if text != list.applied_search {
+                    list.schedule_search(text, cx);
+                }
+            }
+        })
+        .detach();
+        self.search = Some(input.clone());
+        input
+    }
+
+    /// The socket's search: opens the field and types `text` into it, so the
+    /// debounce and the read run as they do for a person.
+    pub(crate) fn control_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = true;
+        let input = self.search_input(window, cx);
+        input.update(cx, |input, cx| input.set_text(text, cx));
+        cx.notify();
+    }
+
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = !self.search_open;
+        let input = self.search_input(window, cx);
         if self.search_open {
-            self.search.read(cx).focus_handle(cx).focus(window, cx);
+            input.read(cx).focus_handle(cx).focus(window, cx);
         } else if !self.applied_search.is_empty() {
-            self.search.update(cx, |field, cx| field.clear(cx));
+            input.update(cx, |input, cx| input.set_text("", cx));
         }
         cx.notify();
     }
@@ -536,8 +595,28 @@ impl ChangeRequestList {
         cx.notify();
     }
 
+    fn token_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextInput> {
+        if let Some(input) = &self.token {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            TextInput::new(window, cx).masked().placeholder("Paste a personal access token")
+        });
+        cx.subscribe(&input, |list, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Submit) {
+                list.save_token(cx);
+            }
+        })
+        .detach();
+        self.token = Some(input.clone());
+        input
+    }
+
     /// Verifies and stores the pasted token through the host, then connects.
     pub(crate) fn save_token(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.token_state, TokenState::Saving) {
+            return;
+        }
         let Link::Settled(Connection::NotConnected { forge, host }) = &self.link else {
             return;
         };
@@ -545,8 +624,9 @@ impl ChangeRequestList {
             return;
         };
         let (forge, host) = (*forge, host.clone());
-        let token = self.token.read(cx).content().to_string();
-        if token.trim().is_empty() {
+        let Some(input) = self.token.clone() else { return };
+        let token = input.read(cx).text().trim().to_string();
+        if token.is_empty() {
             return;
         }
         let worktree = self.worktree.clone();
@@ -563,7 +643,7 @@ impl ChangeRequestList {
                 match result {
                     Ok(connection) => {
                         list.token_state = TokenState::Idle;
-                        list.token.update(cx, |field, cx| field.clear(cx));
+                        input.update(cx, |input, cx| input.set_text("", cx));
                         list.settle(connection, cx);
                     }
                     Err(error) => list.token_state = TokenState::Failed(error.to_string()),
@@ -572,12 +652,6 @@ impl ChangeRequestList {
             });
         }));
         cx.notify();
-    }
-
-    fn on_token_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(event.keystroke.key.as_str(), "enter" | "return") {
-            self.save_token(cx);
-        }
     }
 
     /// The reference and title of change request `number` on the project
@@ -655,19 +729,6 @@ impl ChangeRequestList {
         ]
     }
 
-    fn open_menu(&mut self, index: usize, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.menu = Some(RowMenu {
-            index,
-            position,
-            painter: Painter::of(cx),
-        });
-        cx.notify();
-    }
-
-    fn close_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu = None;
-        cx.notify();
-    }
 }
 
 /// What a failure means to the reader, and what to do about it.
@@ -697,53 +758,41 @@ fn error_text(error: &ForgeError) -> String {
     }
 }
 
-fn icon_button(
-    id: &'static str,
-    icon: Icon,
-    tooltip: &'static str,
-    theme: &Theme,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.ely.hover;
+fn render_loading(theme: &Theme) -> AnyElement {
     div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .w(px(24.0))
-        .h(px(24.0))
+        .debug_selector(|| "change-requests-loading".to_owned())
         .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .rounded(theme.radii.chip)
-        .text_color(theme.ely.fg_muted)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
-        .on_click(move |_, window, cx| on_click(window, cx))
-        .child(IconElement::new(icon, IconSize::Small))
+        .flex_col()
+        .children((0..4usize).map(|ix| {
+            div()
+                .px(px(12.0))
+                .py(px(9.0))
+                .flex()
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme.ely.border)
+                .child(Skeleton::new(("change-requests-skeleton-icon", ix)).circle().size(px(14.0)))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(Skeleton::new(("change-requests-skeleton-title", ix)).h(px(10.0)).w(gpui::relative(0.8)))
+                        .child(Skeleton::new(("change-requests-skeleton-meta", ix)).h(px(8.0)).w(gpui::relative(0.5))),
+                )
+        }))
+        .into_any_element()
 }
 
-fn text_button(
-    id: &'static str,
-    label: String,
-    theme: &Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = theme.ely.hover;
+fn callout(id: &'static str, severity: Severity, title: &'static str, body: String) -> gpui::Div {
     div()
-        .id(id)
         .debug_selector(move || id.to_owned())
-        .flex_none()
-        .px(px(10.0))
-        .py(px(5.0))
-        .rounded(theme.radii.control)
-        .bg(theme.ely.hover)
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.fg)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .on_click(move |_, _, cx| on_click(cx))
-        .child(label)
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(Callout::new(severity).title(title).child(selectable_text(body)))
 }
 
 fn notice(id: &'static str, title: String, hint: Option<String>, theme: &Theme) -> gpui::Div {
@@ -783,6 +832,7 @@ impl ChangeRequestList {
             host => format!("{host}/{}", client.project()),
         };
         let refresh = entity.clone();
+        let search = entity.clone();
         div()
             .flex()
             .items_center()
@@ -805,11 +855,18 @@ impl ChangeRequestList {
                     .whitespace_nowrap()
                     .child(project),
             )
-            .child(icon_button(
+            .child(ely_ui::icon_button(
+                "change-requests-search",
+                IconName::Search,
+                "Search",
+                true,
+                move |window, cx| search.update(cx, |list, cx| list.toggle_search(window, cx)),
+            ))
+            .child(ely_ui::icon_button(
                 "change-requests-refresh",
-                Icon::RefreshCw,
+                IconName::RefreshCw,
                 "Refresh",
-                theme,
+                true,
                 move |_, cx| refresh.update(cx, |list, cx| list.refresh(cx)),
             ))
     }
@@ -828,24 +885,25 @@ impl ChangeRequestList {
                     .items_center()
                     .gap(px(3.0))
                     .text_color(style::state_color(item.state, theme))
-                    .child(IconElement::new(Icon::PullRequest, IconSize::XSmall))
+                    .child(EIcon::new(style::state_icon(item.state)).size(EIconSize::Xs)
+                        .color(style::state_color(item.state, theme)))
                     .child(style::state_label(item.state)),
             )
-            .when_some(style::ci_mark(item.ci, theme), |this, (icon, tint)| {
+            .when_some(style::ci_icon(item.ci, theme), |this, (icon, tint)| {
                 this.child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(3.0))
                         .text_color(tint)
-                        .child(IconElement::new(icon, IconSize::XSmall))
+                        .child(EIcon::new(icon).size(EIconSize::Xs).color(tint))
                         .child(style::ci_text(item.ci)),
                 )
             })
             .when_some(
-                style::review_mark(item.review, item.review_requested_from_me, theme),
+                style::review_icon(item.review, item.review_requested_from_me, theme),
                 |this, (icon, tint)| {
-                    this.child(IconElement::new(icon, IconSize::XSmall).text_color(tint))
+                    this.child(EIcon::new(icon).size(EIconSize::Xs).color(tint))
                 },
             )
             .child(
@@ -853,7 +911,7 @@ impl ChangeRequestList {
                     .flex()
                     .items_center()
                     .gap(px(3.0))
-                    .child(IconElement::new(Icon::MessageSquare, IconSize::XSmall))
+                    .child(EIcon::new(IconName::MessageSquare).size(EIconSize::Xs).color(theme.ely.fg_muted))
                     .child(item.comments.to_string()),
             )
     }
@@ -891,22 +949,20 @@ impl ChangeRequestList {
                     .gap(px(8.0))
                     .text_color(theme.ely.fg_muted)
                     .child(selectable_text(format!("No {noun} for {branch}")))
-                    .child(icon_button(
+                    .child(ely_ui::text_button(
                         "change-requests-create",
-                        Icon::Plus,
                         "Create on the forge",
-                        theme,
+                        Some(IconName::Plus),
+                        ButtonState::IDLE,
                         move |_, cx| cx.open_url(&url),
                     ))
                     .into_any_element()
             }
-            Card::Loading | Card::Hidden => div()
-                .text_color(theme.ely.fg_subtle)
-                .child(format!("Looking for this branch's {noun}…"))
+            Card::Loading | Card::Hidden => Skeleton::new("change-requests-card-skeleton")
+                .h(px(10.0))
+                .w(gpui::relative(0.7))
                 .into_any_element(),
-            Card::Failed(error) => div()
-                .text_color(theme.ely.danger)
-                .child(selectable_text(error_text(error)))
+            Card::Failed(error) => ely_ui::message(Severity::Danger, error_text(error), theme)
                 .into_any_element(),
         };
         let found = matches!(self.card, Card::Found(_));
@@ -937,7 +993,7 @@ impl ChangeRequestList {
                         .gap(px(6.0))
                         .text_size(theme.typography.caption2)
                         .text_color(theme.ely.fg_subtle)
-                        .child(IconElement::new(Icon::GitBranch, IconSize::XSmall))
+                        .child(EIcon::new(IconName::GitBranch).size(EIconSize::Xs).color(theme.ely.fg_subtle))
                         .child(format!("THIS WORKTREE · {branch}")),
                 )
                 .child(body)
@@ -945,107 +1001,53 @@ impl ChangeRequestList {
         )
     }
 
-    fn render_filters(
-        &self,
-        filter: Filter,
-        theme: &Theme,
-        entity: &Entity<Self>,
-    ) -> impl IntoElement {
-        const FILTERS: [(Filter, Icon, &str, &str); 4] = [
-            (
-                Filter::Mine,
-                Icon::Person,
-                "Mine",
-                "change-requests-filter-mine",
-            ),
-            (
-                Filter::ToReview,
-                Icon::Eye,
-                "To review",
-                "change-requests-filter-to-review",
-            ),
-            (
-                Filter::AllOpen,
-                Icon::PullRequest,
-                "All open",
-                "change-requests-filter-all-open",
-            ),
-            (
-                Filter::ClosedAndMerged,
-                Icon::Archive,
-                "Closed & merged",
-                "change-requests-filter-closed",
-            ),
+    fn render_filters(&self, filter: Filter, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
+        const FILTERS: [(Filter, IconName); 4] = [
+            (Filter::Mine, IconName::User),
+            (Filter::ToReview, IconName::Eye),
+            (Filter::AllOpen, IconName::GitPullRequest),
+            (Filter::ClosedAndMerged, IconName::Archive),
         ];
-        let hover = theme.ely.hover;
         let to_review = self.to_review.filter(|count| *count > 0);
-        let search = entity.clone();
+        let choices = FILTERS.map(|(candidate, icon)| {
+            // All four filters stay present even at the panel's 220 px floor.
+            let choice = Choice::new(filter_word(candidate), "").icon(icon);
+            match (candidate, to_review) {
+                (Filter::ToReview, Some(count)) => choice.note(count.to_string()),
+                _ => choice,
+            }
+        });
+        let choose = entity.clone();
         div()
-            .h(px(30.0))
+            .id("change-requests-filters")
+            .debug_selector(|| "change-requests-filters".to_owned())
             .px(px(6.0))
-            .flex()
-            .items_center()
             .border_b_1()
             .border_color(theme.ely.border)
-            .children(FILTERS.map(|(candidate, icon, label, id)| {
-                let active = candidate == filter;
-                let tone = if active { theme.ely.fg } else { theme.ely.fg_muted };
-                let choose = entity.clone();
-                div()
-                    .id(id)
-                    .debug_selector(move || id.to_owned())
-                    .relative()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .px(px(7.0))
-                    .text_size(theme.typography.footnote)
-                    .font_weight(if active {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(tone)
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .tooltip(move |window, cx| crate::controls::sidebar_tooltip(label, window, cx))
-                    .on_click(move |_, _, cx| {
-                        choose.update(cx, |list, cx| list.set_filter(candidate, cx))
-                    })
-                    .child(IconElement::new(icon, IconSize::Small).text_color(tone))
-                    .when(active, |this| this.child(label))
-                    .when(candidate == Filter::ToReview, |this| {
-                        this.when_some(to_review, |this, count| {
-                            this.child(
-                                div()
-                                    .text_size(theme.typography.caption2)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.sirio.quantity)
-                                    .child(count.to_string()),
-                            )
-                        })
-                    })
-                    .when(active, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .bottom(px(-1.0))
-                                .left_0()
-                                .right_0()
-                                .h(px(2.0))
-                                .bg(theme.ely.fg),
-                        )
-                    })
-            }))
-            .child(div().flex_1())
-            .child(icon_button(
-                "change-requests-search",
-                Icon::MagnifyingGlass,
-                "Search",
-                theme,
-                move |window, cx| search.update(cx, |list, cx| list.toggle_search(window, cx)),
-            ))
+            .child(
+                Tabs::new("change-requests-filter", choices, filter_word(filter)).on_change(move |value, _, cx| {
+                    if let Some(filter) = parse_filter(value) {
+                        choose.update(cx, |list, cx| list.set_filter(filter, cx));
+                    }
+                }),
+            )
+    }
+
+    fn row_menu(row: &ChangeSummary) -> Menu {
+        let (open, copy) = (row.web_url.clone(), row.web_url.clone());
+        Menu::new()
+            .item(
+                MenuItem::new("Open in browser")
+                    .icon(IconName::ExternalLink)
+                    .selectors("change-request-menu-open-browser", None)
+                    .on_click(move |_, cx| cx.open_url(&open)),
+            )
+            .item(
+                MenuItem::new("Copy link")
+                    .icon(IconName::Copy)
+                    .selectors("change-request-menu-copy-link", None)
+                    .on_click(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
+            )
     }
 
     fn render_row(
@@ -1058,8 +1060,9 @@ impl ChangeRequestList {
     ) -> impl IntoElement {
         let hover = theme.ely.hover;
         let open = entity.clone();
-        let menu = entity.clone();
-        div()
+        let tone = style::state_color(row.state, theme);
+        let mark = |icon: IconName, tint| EIcon::new(icon).size(EIconSize::Sm).color(tint);
+        let line = div()
             .id(("change-request-row", index))
             .debug_selector(move || format!("change-request-row-{index}"))
             .px(px(12.0))
@@ -1072,16 +1075,7 @@ impl ChangeRequestList {
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .on_click(move |_, _, cx| open.update(cx, |list, cx| list.open_row(index, cx)))
-            .on_mouse_down(MouseButton::Right, move |event, _, cx| {
-                cx.stop_propagation();
-                menu.update(cx, |list, cx| list.open_menu(index, event.position, cx));
-            })
-            .child(
-                div().pt(px(2.0)).child(
-                    IconElement::new(Icon::PullRequest, IconSize::Small)
-                        .text_color(style::state_color(row.state, theme)),
-                ),
-            )
+            .child(div().pt(px(2.0)).child(mark(style::state_icon(row.state), tone)))
             .child(
                 div()
                     .flex_1()
@@ -1099,14 +1093,12 @@ impl ChangeRequestList {
                     )
                     .child(
                         div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
                             .text_size(theme.typography.footnote)
                             .text_color(theme.ely.fg_subtle)
-                            .child(format!(
-                                "{} · {} · {}",
-                                row.reference.label(),
-                                row.author,
-                                style::age(now, row.updated_at)
-                            )),
+                            .child(format!("{} · {} · {}", row.reference.label(), row.author, style::age(now, row.updated_at))),
                     ),
             )
             .child(
@@ -1117,49 +1109,46 @@ impl ChangeRequestList {
                     .gap(px(7.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.ely.fg_muted)
-                    .when_some(style::ci_mark(row.ci, theme), |this, (icon, tint)| {
-                        this.child(IconElement::new(icon, IconSize::Small).text_color(tint))
+                    .when_some(style::ci_icon(row.ci, theme), |this, (icon, tint)| this.child(mark(icon, tint)))
+                    .when_some(style::review_icon(row.review, row.review_requested_from_me, theme), |this, (icon, tint)| {
+                        this.child(mark(icon, tint))
                     })
-                    .when_some(
-                        style::review_mark(row.review, row.review_requested_from_me, theme),
-                        |this, (icon, tint)| {
-                            this.child(IconElement::new(icon, IconSize::Small).text_color(tint))
-                        },
-                    )
                     .when(row.comments > 0, |this| {
                         this.child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(2.0))
-                                .child(IconElement::new(Icon::MessageSquare, IconSize::XSmall))
+                                .child(mark(IconName::MessageSquare, theme.ely.fg_muted))
                                 .child(row.comments.to_string()),
                         )
                     }),
-            )
+            );
+        ContextMenu::new(("change-request-menu-host", index), Self::row_menu(row)).child(line)
     }
 
     fn render_rows(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
         if !self.settled {
-            return notice(
-                "change-requests-loading",
-                "Loading…".to_string(),
-                None,
-                theme,
-            )
-            .into_any_element();
+            return render_loading(theme);
         }
         let retry = entity.clone();
         if self.rows.is_empty() {
             return match &self.list_error {
-                Some(error) => notice("change-requests-error", error_text(error), None, theme)
-                    .child(text_button(
-                        "change-requests-retry",
-                        "Retry".to_string(),
-                        theme,
-                        move |cx| retry.update(cx, |list, cx| list.refresh(cx)),
-                    ))
-                    .into_any_element(),
+                Some(error) => {
+                    let (severity, title) = match error {
+                        ForgeError::RateLimited { .. } => (Severity::Warning, "Rate limited"),
+                        _ => (Severity::Danger, "Could not load"),
+                    };
+                    callout("change-requests-error", severity, title, error_text(error))
+                        .child(ely_ui::text_button(
+                            "change-requests-retry",
+                            "Retry",
+                            Some(IconName::RotateCw),
+                            ButtonState::IDLE,
+                            move |_, cx| retry.update(cx, |list, cx| list.refresh(cx)),
+                        ))
+                        .into_any_element()
+                }
                 None => notice(
                     "change-requests-empty",
                     "Nothing here.".to_string(),
@@ -1185,24 +1174,22 @@ impl ChangeRequestList {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.ely.danger)
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(selectable_text(format!(
-                                    "Refresh failed · {}",
-                                    error_text(error)
-                                ))),
+                                .child(ely_ui::message(
+                                    Severity::Danger,
+                                    format!("Refresh failed · {}", error_text(error)),
+                                    theme,
+                                )),
                         )
-                        .child(text_button(
+                        .child(ely_ui::text_button(
                             "change-requests-refresh-retry",
-                            "Retry".to_string(),
-                            theme,
-                            move |cx| retry.update(cx, |list, cx| list.refresh(cx)),
+                            "Retry",
+                            None,
+                            ButtonState::IDLE,
+                            move |_, cx| retry.update(cx, |list, cx| list.refresh(cx)),
                         )),
                 )
             })
@@ -1213,75 +1200,68 @@ impl ChangeRequestList {
                     .map(|(index, row)| self.render_row(index, row, now, theme, entity)),
             )
             .when(self.next.is_some(), |this| {
-                this.child(div().p(px(10.0)).flex().justify_center().child(text_button(
+                this.child(div().p(px(10.0)).flex().justify_center().child(ely_ui::text_button(
                     "change-requests-more",
-                    if self.more_task.is_some() {
-                        "Loading…".to_string()
-                    } else {
-                        "Load more".to_string()
-                    },
-                    theme,
-                    move |cx| more.update(cx, |list, cx| list.load_more(cx)),
+                    "Load more",
+                    None,
+                    ButtonState::IDLE.loading(self.more_task.is_some()),
+                    move |_, cx| more.update(cx, |list, cx| list.load_more(cx)),
                 )))
             })
             .into_any_element()
     }
 
-    fn render_unknown(&self, host: &str, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
+    fn render_unknown(&self, host: &str, _theme: &Theme, entity: &Entity<Self>) -> AnyElement {
         let github = entity.clone();
         let gitlab = entity.clone();
-        notice(
+        callout(
             "change-requests-unknown-forge",
-            format!("Which forge is {host}?"),
-            Some("Sirio cannot tell from the host alone. Your answer is kept.".to_string()),
-            theme,
+            Severity::Info,
+            "Unknown forge",
+            format!("Which forge is {host}? Sirio cannot tell from the host alone. Your answer is kept."),
         )
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .gap(px(8.0))
-                .child(text_button(
+                .child(ely_ui::text_button(
                     "change-requests-forge-github",
-                    "GitHub Enterprise".to_string(),
-                    theme,
-                    move |cx| github.update(cx, |list, cx| list.answer_forge(Forge::GitHub, cx)),
+                    "GitHub Enterprise",
+                    None,
+                    ButtonState::IDLE,
+                    move |_, cx| github.update(cx, |list, cx| list.answer_forge(Forge::GitHub, cx)),
                 ))
-                .child(text_button(
+                .child(ely_ui::text_button(
                     "change-requests-forge-gitlab",
-                    "GitLab".to_string(),
-                    theme,
-                    move |cx| gitlab.update(cx, |list, cx| list.answer_forge(Forge::GitLab, cx)),
+                    "GitLab",
+                    None,
+                    ButtonState::IDLE,
+                    move |_, cx| gitlab.update(cx, |list, cx| list.answer_forge(Forge::GitLab, cx)),
                 )),
         )
         .into_any_element()
     }
 
     fn render_not_connected(
-        &self,
+        &mut self,
         forge: Forge,
         host: &str,
         theme: &Theme,
         entity: &Entity<Self>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let command = format!("{} auth login --hostname {host}", style::cli_name(forge));
         let scopes = style::token_scopes(forge);
         let copied = command.clone();
         let save = entity.clone();
-        notice(
+        let token = self.token_input(window, cx);
+        callout(
             "change-requests-not-connected",
-            format!("Not signed in to {host}"),
-            None,
-            theme,
-        )
-        .child(
-            div()
-                .text_size(theme.typography.footnote)
-                .text_color(theme.ely.fg_muted)
-                .child(selectable_text(format!(
-                    "Sign in with the {} CLI:",
-                    forge.name()
-                ))),
+            Severity::Info,
+            "Not signed in",
+            format!("Sirio is not signed in to {host}. Sign in with the {} CLI:", forge.name()),
         )
         .child(
             div()
@@ -1293,13 +1273,14 @@ impl ChangeRequestList {
                 .py(px(4.0))
                 .rounded(theme.radii.control)
                 .bg(theme.sirio.code_wash)
+                .text_color(theme.ely.fg)
                 .text_size(theme.typography.footnote)
                 .child(div().flex_1().min_w_0().child(selectable_text(command)))
-                .child(icon_button(
+                .child(ely_ui::icon_button(
                     "change-requests-copy-login",
-                    Icon::Copy,
+                    IconName::Copy,
                     "Copy",
-                    theme,
+                    true,
                     move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone())),
                 )),
         )
@@ -1324,90 +1305,33 @@ impl ChangeRequestList {
                         .debug_selector(|| "change-requests-token-field".to_owned())
                         .flex_1()
                         .min_w_0()
-                        .on_key_down(cx.listener(Self::on_token_key))
-                        .child(crate::controls::sidebar_text_field(self.token.clone())),
+                        .child(PasswordInput::new(&token)),
                 )
-                .child(text_button(
+                .child(ely_ui::text_button(
                     "change-requests-token-save",
-                    "Save".to_string(),
-                    theme,
-                    move |cx| save.update(cx, |list, cx| list.save_token(cx)),
+                    "Save",
+                    None,
+                    ButtonState::IDLE.primary().loading(matches!(self.token_state, TokenState::Saving)),
+                    move |_, cx| save.update(cx, |list, cx| list.save_token(cx)),
                 )),
         )
         .when_some(
             match &self.token_state {
                 TokenState::Idle => None,
-                TokenState::Saving => Some(("Checking the token…".to_string(), theme.ely.fg_subtle)),
-                TokenState::Failed(why) => Some((why.clone(), theme.ely.danger)),
+                TokenState::Saving => Some(ely_ui::message(Severity::Info, "Checking the token…".to_string(), theme)),
+                TokenState::Failed(why) => Some(ely_ui::message(Severity::Danger, why.clone(), theme)),
             },
-            |this, (text, tone)| {
-                this.child(
-                    div()
-                        .text_size(theme.typography.footnote)
-                        .text_color(tone)
-                        .child(selectable_text(text)),
-                )
-            },
+            |this, line| this.child(line),
         )
         .into_any_element()
     }
 
-    fn render_menu(
-        &self,
-        menu: &RowMenu,
-        theme: &Theme,
-        entity: &Entity<Self>,
-    ) -> Option<AnyElement> {
-        let row = self.rows.get(menu.index)?;
-        let bezel_theme = theme.to_bezel_theme();
-        let mut view = popover::popover_card(&bezel_theme)
-            .id("change-request-menu")
-            .debug_selector(|| "change-request-menu".to_owned())
-            .text_size(theme.typography.ui_size)
-            .w(theme.spacing.menu_width);
-        for (selector, label) in [
-            ("change-request-menu-open-browser", "Open in browser"),
-            ("change-request-menu-copy-link", "Copy link"),
-        ] {
-            let url = row.web_url.clone();
-            let close = entity.clone();
-            let item = popover::menu_row(
-                &bezel_theme,
-                false,
-                Fade::new(menu.painter.clone(), selector),
-            )
-            .id(selector)
-            .debug_selector(move || selector.to_owned())
-            .w_full()
-            .min_h(theme.spacing.titlebar_control_frame.height)
-            .text_size(theme.typography.ui_size)
-            .text_color(bezel_theme.text)
-            .on_click(move |_, _, cx| {
-                if selector == "change-request-menu-copy-link" {
-                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-                } else {
-                    cx.open_url(&url);
-                }
-                close.update(cx, |list, cx| list.close_menu(cx));
-            })
-            .child(label);
-            view = view.child(item);
-        }
-        let close = entity.clone();
-        Some(popover::menu_at(
-            "change-request-menu-layer",
-            menu.position,
-            view.on_mouse_down_out(move |_, _, cx| {
-                close.update(cx, |list, cx| list.close_menu(cx))
-            })
-            .into_any_element(),
-            None,
-        ))
-    }
+
 }
 
 impl Render for ChangeRequestList {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("ChangeRequestList.render", cx.entity_id().as_u64());
         let theme = Theme::get(cx).with_sidebar_typography();
         let entity = cx.entity();
@@ -1439,7 +1363,7 @@ impl Render for ChangeRequestList {
             }
             Link::Settled(Connection::NotConnected { forge, host }) => {
                 let (forge, host) = (*forge, host.clone());
-                self.render_not_connected(forge, &host, &theme, &entity, cx)
+                self.render_not_connected(forge, &host, &theme, &entity, window, cx)
             }
             Link::Settled(Connection::Ready(ready)) => {
                 let ready = ready.clone();
@@ -1453,24 +1377,21 @@ impl Render for ChangeRequestList {
                         this.child(card)
                     })
                     .child(self.render_filters(filter, &theme, &entity))
-                    .when(self.search_open, |this| {
+                    .when_some(self.search.clone().filter(|_| self.search_open), |this, input| {
                         this.child(
                             div()
+                                .debug_selector(|| "change-requests-search-field".to_owned())
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .border_b_1()
                                 .border_color(theme.ely.border)
-                                .child(crate::controls::sidebar_text_field(self.search.clone())),
+                                .child(SearchInput::new("change-requests-search-field", &input)),
                         )
                     })
                     .child(self.render_rows(&theme, &entity))
                     .into_any_element()
             }
         };
-        let menu = self
-            .menu
-            .as_ref()
-            .and_then(|menu| self.render_menu(menu, &theme, &entity));
         div()
             .id("change-requests")
             .debug_selector(|| "change-requests".to_owned())
@@ -1478,7 +1399,6 @@ impl Render for ChangeRequestList {
             .flex()
             .flex_col()
             .child(content)
-            .when_some(menu, |this, menu| this.child(menu))
     }
 }
 
@@ -1639,6 +1559,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_click_on_the_filter_strip_chooses_that_filter(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| forge_source::set_source(FakeSource::ready(testing::github_client(forge()), None), cx));
+        let (list, view) = cx.add_window_view(|_, cx| ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx));
+        list.update(view, |list, cx| list.set_visible(true, cx));
+        pump_until(view, || list.read_with(view, |list, _| list.settled));
+        view.run_until_parked();
+        let strip = view.debug_bounds("change-requests-filters").expect("the filter strip");
+        view.simulate_click(gpui::point(strip.left() + px(24.0), strip.center().y), gpui::Modifiers::none());
+        pump_until(view, || list.read_with(view, |list, _| list.settled));
+        assert_eq!(view.update(|_, cx| filter_word(current_filter(cx))), "mine");
+        list.update(view, |list, cx| list.set_filter(Filter::AllOpen, cx));
+    }
+
+    #[gpui::test]
     fn choosing_a_filter_lists_its_change_requests(cx: &mut TestAppContext) {
         let list = shown(cx, FakeSource::ready(testing::github_client(forge()), None));
         pump_until(cx, || list.read_with(cx, |list, _| list.settled));
@@ -1764,6 +1700,114 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_filter_chosen_while_paused_says_so_instead_of_loading(cx: &mut TestAppContext) {
+        let forge = forge();
+        let list = shown(cx, FakeSource::ready(testing::github_client(forge.clone()), None));
+        pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+        forge.rate_limited("ChangeRequestList", crate::change_request_style::now() + 3600);
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || list.read_with(cx, |list, _| list.list_error.is_some()));
+        list.update(cx, |list, cx| list.set_filter(Filter::ClosedAndMerged, cx));
+        list.read_with(cx, |list, cx| {
+            assert!(list.settled, "a paused list waits on a load it never sent");
+            assert!(matches!(list.list_error, Some(ForgeError::RateLimited { reset_at: Some(_), .. })));
+            assert_eq!(list.report(cx)[0], ("state".to_string(), "error".to_string()));
+        });
+        list.update(cx, |list, cx| list.set_filter(Filter::AllOpen, cx));
+    }
+
+    #[gpui::test]
+    fn a_rate_limit_without_a_reset_pauses_too(cx: &mut TestAppContext) {
+        let forge = forge();
+        let list = shown(cx, FakeSource::ready(testing::github_client(forge.clone()), None));
+        pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+        forge.fail("ChangeRequestList", 429);
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || {
+            list.read_with(cx, |list, _| matches!(list.list_error, Some(ForgeError::RateLimited { reset_at: None, .. })))
+        });
+        let asked = forge.count("ChangeRequestList");
+        list.update(cx, |list, cx| list.set_filter(Filter::AllOpen, cx));
+        cx.run_until_parked();
+        assert_eq!(forge.count("ChangeRequestList"), asked, "a 429 with no reset still pauses");
+    }
+
+    #[gpui::test]
+    fn a_reset_in_the_past_or_far_future_never_spins(cx: &mut TestAppContext) {
+        let mut failures = Vec::new();
+        for (reset_at, seconds) in [(style::now() - 3600, 60), (4_102_444_800, 3600)] {
+            let forge = forge();
+            let list = shown(cx, FakeSource::ready(testing::github_client(forge.clone()), None));
+            pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+            let now = style::now();
+            list.update(cx, |list, cx| {
+                // Isolate the resume from the ordinary minute refresh.
+                list.timer_task = None;
+                list.handle_error(ForgeError::RateLimited {
+                    host: "github.com".to_string(),
+                    reset_at: Some(reset_at),
+                }, cx);
+            });
+            cx.run_until_parked();
+            let asked = forge.count("ChangeRequestList");
+            let until = list.read_with(cx, |list, _| {
+                let until = list.paused_until.unwrap();
+                assert!(matches!(list.list_error, Some(ForgeError::RateLimited { reset_at: Some(at), .. }) if at == until),
+                    "the displayed retry must use the actual deadline");
+                until
+            });
+            cx.executor().advance_clock(Duration::from_millis(seconds * 1000 - 1));
+            cx.run_until_parked();
+            if forge.count("ChangeRequestList") != asked {
+                failures.push(format!("reset {reset_at}: requested before {seconds} seconds"));
+            }
+            if until < now + seconds as i64 || until > style::now() + seconds as i64 {
+                failures.push(format!("reset {reset_at}: pause deadline {until} is not {seconds} seconds ahead"));
+            }
+            // GPUI's simulated clock does not advance chrono's wall clock.
+            // Move the stored deadline by the elapsed interval to let the
+            // real resume callback observe expiry at the simulated deadline.
+            list.update(cx, |list, _| {
+                list.paused_until = list.paused_until.map(|until| until - seconds as i64);
+            });
+            cx.executor().advance_clock(Duration::from_millis(1));
+            cx.run_until_parked();
+            for _ in 0..100 {
+                if forge.count("ChangeRequestList") > asked { break; }
+                std::thread::sleep(Duration::from_millis(5));
+                cx.run_until_parked();
+            }
+            if forge.count("ChangeRequestList") != asked + 1 {
+                failures.push(format!("reset {reset_at}: did not ask once at {seconds} seconds"));
+            }
+            list.update(cx, |list, _| {
+                list.visible = false;
+                list.resume_task = None;
+            });
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+    }
+
+    #[gpui::test]
+    fn a_right_click_on_a_row_offers_its_link_to_copy(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| forge_source::set_source(FakeSource::ready(testing::github_client(forge()), None), cx));
+        let (list, view) = cx.add_window_view(|_, cx| ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx));
+        list.update(view, |list, cx| list.set_visible(true, cx));
+        pump_until(view, || list.read_with(view, |list, _| list.settled));
+        view.run_until_parked();
+        let row = view.debug_bounds("change-request-row-1").expect("the second row").center();
+        view.simulate_mouse_down(row, gpui::MouseButton::Right, gpui::Modifiers::none());
+        view.simulate_mouse_up(row, gpui::MouseButton::Right, gpui::Modifiers::none());
+        view.run_until_parked();
+        let copy = view.debug_bounds("change-request-menu-copy-link").expect("the menu's Copy link").center();
+        view.simulate_click(copy, gpui::Modifiers::none());
+        let url = list.read_with(view, |list, _| list.rows[1].web_url.clone());
+        assert_eq!(view.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())), Some(url));
+    }
+
+    #[gpui::test]
     fn opening_a_row_asks_the_host_for_its_tab(cx: &mut TestAppContext) {
         let list = shown(cx, FakeSource::ready(testing::github_client(forge()), None));
         pump_until(cx, || list.read_with(cx, |list, _| list.settled));
@@ -1783,6 +1827,45 @@ mod tests {
                 title: "Fix the login".into()
             }]
         );
+    }
+
+    #[gpui::test]
+    fn both_unknown_forge_choices_fit_and_gitlab_can_be_chosen_at_240_px(cx: &mut TestAppContext) {
+        struct ForgePanel(Entity<ChangeRequestList>, f32);
+
+        impl Render for ForgePanel {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(self.1)).h_full().overflow_hidden().child(self.0.clone())
+            }
+        }
+
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        for width in [240.0, 220.0] {
+            let source = FakeSource::with(Connection::NotConnected {
+                forge: Forge::GitLab,
+                host: "git.corp".into(),
+            });
+            cx.update(|cx| forge_source::set_source(source.clone(), cx));
+            let list = cx.new(|cx| {
+                let mut list = ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx);
+                list.link = Link::Settled(Connection::UnknownForge { host: "git.corp".into() });
+                list
+            });
+            let window = cx.add_window(|_, _| ForgePanel(list, width));
+            let mut view = gpui::VisualTestContext::from_window(window.into(), cx);
+            view.run_until_parked();
+            let panel = view.debug_bounds("change-requests").expect("panel drawn");
+            let github = view.debug_bounds("change-requests-forge-github").expect("GitHub choice drawn");
+            let gitlab = view.debug_bounds("change-requests-forge-gitlab").expect("GitLab choice drawn");
+            for choice in [github, gitlab] {
+                assert!(choice.left() >= panel.left() && choice.right() <= panel.right(),
+                    "both choices must fit at {width}px: choice={choice:?}, panel={panel:?}");
+            }
+            assert!(gitlab.top() >= github.bottom(), "the narrow row must wrap");
+            view.simulate_click(gitlab.center(), gpui::Modifiers::none());
+            assert_eq!(*source.forges.lock().unwrap(), vec![("git.corp".to_string(), Forge::GitLab)]);
+        }
     }
 
     #[gpui::test]
@@ -1811,6 +1894,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn enter_in_the_token_field_saves_it_once(cx: &mut TestAppContext) {
+        let source = FakeSource::with(Connection::NotConnected {
+            forge: Forge::GitHub,
+            host: "ghe.test".into(),
+        });
+        *source.token_answer.lock().unwrap() = Err(ForgeError::NotAuthenticated {
+            host: "ghe.test".into(),
+        });
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| forge_source::set_source(source.clone(), cx));
+        let (list, view) = cx.add_window_view(|_, cx| {
+            ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx)
+        });
+        list.update(view, |list, cx| list.set_visible(true, cx));
+        pump_until(view, || {
+            list.read_with(view, |list, _| matches!(list.link, Link::Settled(_)))
+        });
+        view.run_until_parked();
+        let field = view.debug_bounds("change-requests-token-field").expect("the token field").center();
+        view.simulate_click(field, gpui::Modifiers::none());
+        view.simulate_input("bad-token");
+        view.simulate_keystrokes("enter");
+        pump_until(view, || {
+            list.read_with(view, |list, _| matches!(list.token_state, TokenState::Failed(_)))
+        });
+        assert_eq!(source.tokens.lock().unwrap().len(), 1, "one Enter, one save");
+        assert_eq!(source.tokens.lock().unwrap()[0].2, "bad-token");
+        list.read_with(view, |list, cx| {
+            let input = list.token.as_ref().expect("the token input");
+            assert!(input.read(cx).is_masked(), "a pasted token is never shown in clear");
+        });
+    }
+
+    #[gpui::test]
     fn a_rejected_token_says_why_and_stays_disconnected(cx: &mut TestAppContext) {
         let source = FakeSource::with(Connection::NotConnected {
             forge: Forge::GitHub,
@@ -1819,21 +1937,28 @@ mod tests {
         *source.token_answer.lock().unwrap() = Err(ForgeError::NotAuthenticated {
             host: "ghe.test".into(),
         });
-        let list = shown(cx, source.clone());
-        pump_until(cx, || {
-            list.read_with(cx, |list, _| matches!(list.link, Link::Settled(_)))
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| forge_source::set_source(source.clone(), cx));
+        let (list, view) = cx.add_window_view(|_, cx| {
+            ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx)
         });
-        list.update(cx, |list, cx| {
-            list.token
-                .update(cx, |field, cx| field.set_content("bad-token", cx));
+        list.update(view, |list, cx| list.set_visible(true, cx));
+        pump_until(view, || {
+            list.read_with(view, |list, _| matches!(list.link, Link::Settled(_)))
+        });
+        view.run_until_parked();
+        list.update(view, |list, cx| {
+            list.token.as_ref().unwrap()
+                .update(cx, |input, cx| input.set_text("bad-token", cx));
             list.save_token(cx);
         });
-        pump_until(cx, || {
-            list.read_with(cx, |list, _| {
+        pump_until(view, || {
+            list.read_with(view, |list, _| {
                 matches!(list.token_state, TokenState::Failed(_))
             })
         });
-        list.read_with(cx, |list, _| {
+        list.read_with(view, |list, _| {
             let TokenState::Failed(why) = &list.token_state else {
                 unreachable!()
             };

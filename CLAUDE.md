@@ -236,7 +236,10 @@ right panel's fifth view and the `ChangeRequest` tab in the Secondary half
 never see a token or a setting. `ForgeHub` owns the `forge.hosts` setting —
 a Settings-screen save re-applies the stored value — and keeps tokens in the
 credential store under `forge:<host>`. The list asks nothing before it is
-shown and refreshes only while visible; a restored tab loads when shown.
+shown and refreshes only while visible. A rate limit pauses every read until
+its reset (a minute when the forge names none), and the list looks again by
+itself when it ends. `surface.change_requests.search` sets the list's real
+search field, including its debounce. A restored tab loads when shown.
 
 The detail tab's *Files* is the diff, read by `sirio_git::range_*` between
 the commits `sirio_forge::Revisions` names. When either is not local,

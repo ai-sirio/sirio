@@ -133,3 +133,111 @@ Not seen, or seen with a remark:
   REST cancel of an auto-merge through `glab`, printed `SKIP:` (no `glab`).
 - The framed `ui` run's GitLab start-up flake (above) did not recur in the run
   these frames come from; it did in an earlier one.
+
+## Delivery 4: the list
+
+`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` §7.
+The right panel's Change requests view uses Ely tabs, search, row icons,
+context menu, callouts, skeletons and a masked token input. The forge's
+brand mark stays in the existing icon set, which has the brand glyphs.
+
+### Run and capture
+
+From the repository root, with Xvfb and software Vulkan:
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :94 -screen 0 1600x1500x24 -nolisten tcp -noreset > "$TMPDIR/d4f-xvfb.log" 2>&1 &
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-ui-e2e.sh --display :94 --out-dir "$TMPDIR/d4f-dark"
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-ui-e2e.sh --display :94 --appearance light --out-dir "$TMPDIR/d4f-light"
+ls "$TMPDIR/d4f-dark/frames" "$TMPDIR/d4f-light/frames"
+```
+
+Use a free X display. Sirio starts a centered 1470×833 window: the display
+must fit it. The plan's existing `:93` was only 1400 pixels wide, so those
+first captures cut both outer edges. The complete runs used a private
+`:94` at 1600×1500; no application layout change was needed for that crop.
+Each capture is matched to the app's PID. The two artifact directories
+retain the transcript, app and fake-forge logs as well as `frames/`.
+
+Steps 1–4 still prove sign-in, the saved and trimmed token, filter results,
+and the detail tab's conversation and checks. The added steps prove:
+
+- **Search (5):** `surface.change_requests.search` sets the real input;
+  its 300 ms debounce reaches the fake forge, a query matching nothing
+  empties the list, and clearing it brings the rows back.
+- **Known reset (6):** choosing a filter after a rate limit shows its
+  callout; another filter sends no read while paused. Rows return by
+  themselves when the reset arrives.
+- **No reset (7):** a 429 with no reset also pauses reads, including a
+  filter change. Native tests confirm that another filter request stays
+  paused; the exact one-minute duration is not tested with an elapsed clock.
+- **Unknown host (8):** a forge that cannot be identified asks which forge
+  it is instead of trying a guessed one.
+
+The loopback fake's hooks are `POST /__ratelimit?seconds=N` (403 with a
+reset N seconds ahead), `POST /__throttle` (429 with `Retry-After`, without
+a reset), and `POST /__reset` (clear both). A second fake with
+`--flavor none` serves the unknown host. Free words in the fake's search
+must all occur in the returned row.
+
+The list bounds the actual pause deadline: an absent or expired reset uses
+60 seconds, and a reset more than an hour away uses now + 3600 seconds.
+Known-reset retry copy uses that same bounded deadline. The native
+`a_reset_in_the_past_or_far_future_never_spins` guard reproduced an early
+request for a past reset and no retry within an hour for a year-2100 reset.
+It now proves no request before the respective 60-second or one-hour pause,
+then one resume request. GPUI advances its simulated timer clock; the guard
+checks the real wall-clock deadline and moves it by the elapsed interval
+before letting the resume callback observe expiry.
+
+### What was seen (2026-10-04, Xvfb, lavapipe)
+
+Both modes have `not-connected.png`, `list.png`, `mine.png`, `empty.png`,
+`rate-limited.png`, `unknown-host.png`, `detail-conversation.png` and
+`detail-checks.png`; all sixteen complete frames were read.
+
+- The four-choice strip shows the Mine (person), To review (eye), Open
+  (pull request) and Closed (archive) icons, with the review count of 2
+  kept as a note. There are no tab labels or horizontal scrolling; Mine
+  and Open have the expected active underline in their respective frames.
+  An active label still exceeded the 220 px floor, so the strip uses icons
+  for every choice. A whole-window glyph check failed on the old 320 and
+  240 px frames, then passed with all four choices selected in turn at
+  320, 240 and 220 px (12 frames). The scratch harness and check are
+  `$TMPDIR/ely4-filter-frames.sh` and `$TMPDIR/ely4-filter-frame-check.py`;
+  their frames are in `$TMPDIR/ely4-filters-{red,green}-{320,240}/frames`
+  and `$TMPDIR/ely4-filters-green-220/frames`.
+- The branch card and rows carry green open glyphs; the draft glyph is
+  muted, with CI, review and comment icons alongside the rows.
+- Sign-in and unknown-host callouts have a blue severity rule and icon;
+  the rate-limit callout has an amber rule and a retry time, with Retry.
+- Search is visible in the empty frame, with its clear button and
+  “Nothing here.” The skeletons are absent once rows exist.
+- The login copy button, token field, Save, header controls and row
+  metadata fit inside the panel's right edge. The token field has its
+  lock and eye controls; it is empty in these frames. The native Enter
+  test proves masking with text entered and one submission per Enter.
+- Light has a pale ground throughout, including the Ely controls.
+
+The complete dark sign-in frame exposed black login-command text on a
+dark wash: the Callout migration had lost the old notice's inherited
+foreground. An explicit theme foreground fixed it. A command-only pixel
+check failed with 0 visible light ink pixels before the fix and passed
+with 349 afterward; the copy glyph was excluded from that check.
+
+### Not seen
+
+- The right-click menu on screen. The native pointer guard opens it and
+  proves Copy link copies the clicked row's URL. Outside-click dismissal
+  is implemented by Ely, but that guard does not exercise it.
+- A pasted token in a frame; masking and Enter were tested natively.
+- macOS, Windows or Wayland; these captures use Linux X11 under Xvfb.
+- `glab` transport and CLI detection: `test-forge-e2e.sh` printed SKIP
+  because `glab` is not installed. Token transport and the available
+  `gh` path ran. Forge, diff, actions UI and both framed UI runs passed.
+
+Final review also noted a baseline debounce gap: typing and then clearing
+back to the applied query before 300 ms can leave the pending query active.
+That comparison and scheduling behavior already existed before this
+delivery and was retained under its unchanged-behavior constraint.

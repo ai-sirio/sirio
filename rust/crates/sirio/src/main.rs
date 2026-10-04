@@ -1054,6 +1054,10 @@ enum ControlAction {
         filter: sirio_forge::Filter,
         reply: ControlReply,
     },
+    SearchChangeRequests {
+        text: String,
+        reply: ControlReply,
+    },
     SaveForgeToken {
         host: String,
         forge: sirio_forge::Forge,
@@ -2065,6 +2069,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.change_requests.show",
                     "surface.change_requests.read",
                     "surface.change_requests.filter",
+                    "surface.change_requests.search",
                     "surface.change_requests.token",
                     "surface.change_request.open",
                     "surface.change_request.tab",
@@ -2302,6 +2307,10 @@ impl ControlHandler for AppControlHandler {
                     );
                 };
                 self.queue_action(request, move |reply| ControlAction::FilterChangeRequests { filter, reply })
+            }
+            "surface.change_requests.search" => {
+                let text = request.params.get("text").cloned().unwrap_or_default();
+                self.queue_action(request, move |reply| ControlAction::SearchChangeRequests { text, reply })
             }
             "surface.change_requests.token" => {
                 let host = request.params.get("host").cloned().unwrap_or_default();
@@ -5211,6 +5220,9 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::FilterChangeRequests { filter, reply } => {
                                     let _ = reply.send(workspace.control_filter_change_requests(filter, cx));
+                                }
+                                ControlAction::SearchChangeRequests { text, reply } => {
+                                    let _ = reply.send(workspace.control_search_change_requests(text, window, cx));
                                 }
                                 ControlAction::SaveForgeToken { host, forge, token, reply } => {
                                     workspace.control_save_forge_token(host, forge, token, reply, cx);
@@ -14883,6 +14895,18 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         if !self.right_panel.update(cx, |panel, cx| panel.set_change_request_filter(filter, cx)) {
+            return Err("the change request view has not been shown".to_string());
+        }
+        self.control_read_change_requests(cx)
+    }
+
+    fn control_search_change_requests(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        if !self.right_panel.update(cx, |panel, cx| panel.set_change_request_search(&text, window, cx)) {
             return Err("the change request view has not been shown".to_string());
         }
         self.control_read_change_requests(cx)
@@ -36772,6 +36796,7 @@ done
             | ControlAction::ShowChangeRequests { reply }
             | ControlAction::ReadChangeRequests { reply }
             | ControlAction::FilterChangeRequests { reply, .. }
+            | ControlAction::SearchChangeRequests { reply, .. }
             | ControlAction::SaveForgeToken { reply, .. }
             | ControlAction::OpenChangeRequest { reply, .. }
             | ControlAction::SelectChangeRequestTab { reply, .. }
@@ -36900,6 +36925,7 @@ done
             "surface.change_requests.show" => request::change_requests_show(),
             "surface.change_requests.read" => request::change_requests_read(),
             "surface.change_requests.filter" => request::change_requests_filter("all-open"),
+            "surface.change_requests.search" => request::change_requests_search("x"),
             "surface.change_requests.token" => request::change_requests_token("git.corp", "gitlab", "t"),
             "surface.change_request.open" => request::change_request_open("1"),
             "surface.change_request.tab" => request::change_request_tab("checks"),

@@ -480,6 +480,14 @@ pub mod request {
         )
     }
 
+    /// Types `text` into the view's search field, as a person would.
+    pub fn change_requests_search(text: &str) -> ControlRequest {
+        request(
+            "surface.change_requests.search",
+            BTreeMap::from([("text".to_string(), text.to_string())]),
+        )
+    }
+
     /// Saves a forge token through the same verification as the UI. The
     /// reply names the account; it never carries the token.
     pub fn change_requests_token(host: &str, forge: &str, token: &str) -> ControlRequest {

@@ -9,7 +9,7 @@ use ely_gpui_component::primitives::Severity;
 use sirio_forge::{Action, ChangeState, MergeCapability, MergeMethod, MergeVerdict};
 
 use super::actions::ActionState;
-use super::ely_ui::{ButtonState, message, new_input, normalize, text_button};
+use crate::ely_ui::{ButtonState, message, new_input, normalize, text_button};
 use super::*;
 
 /// What the strip offers, from the change request's state and the forge's

@@ -1,4 +1,5 @@
-//! The tab's Ely adapters (spec §5). Each turns an Ely widget into the shape
+//! Sirio's Ely adapters, shared by the change-request surfaces (spec §5, §7).
+//! Each turns an Ely widget into the shape
 //! the tab already calls: a `debug_selector` wrapper so tests and scripts find
 //! it, a busy flag, and `selectable_text` for any message a person may copy.
 //! No tab state lives here.
@@ -14,7 +15,6 @@ use gpui::{AnyElement, App, Context, Entity, IntoElement, Window, div, prelude::
 use sirio_forge::ChangeState;
 use sirio_theme::Theme;
 
-use super::ChangeRequestTab;
 use crate::change_request_style as style;
 use crate::text_selection::selectable_text;
 
@@ -141,9 +141,9 @@ pub(crate) fn normalize(text: &str, multi_line: bool) -> String {
 
 /// A text input filled with `text`. Needs the window the tab's constructors
 /// lack, so it is called from a click, from `control_act`, or from `render`.
-pub(crate) fn new_input(
+pub(crate) fn new_input<T: 'static>(
     window: &mut Window,
-    cx: &mut Context<ChangeRequestTab>,
+    cx: &mut Context<T>,
     text: &str,
     rows: Option<(usize, usize)>,
     placeholder: &'static str,

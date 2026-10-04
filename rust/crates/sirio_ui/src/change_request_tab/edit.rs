@@ -6,7 +6,7 @@ use ely_gpui_component::forms::Input;
 use sirio_forge::{Action, CommentRef};
 
 use super::actions::{ActionState, CommentEdit, EditFields, action_button, indexed_button};
-use super::ely_ui::{ButtonState, new_input, normalize, text_button};
+use crate::ely_ui::{ButtonState, new_input, normalize, text_button};
 use super::*;
 
 /// A description or a comment: wraps, grows, then scrolls.

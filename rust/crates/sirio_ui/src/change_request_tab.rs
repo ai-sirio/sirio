@@ -22,7 +22,6 @@ use sirio_theme::Theme;
 mod actions;
 mod composer;
 mod edit;
-mod ely_ui;
 mod merge;
 mod people;
 
@@ -34,7 +33,7 @@ use ely_gpui_component::{
     primitives::{Icon as EIcon, IconName, Severity},
     theme::IconSize as EIconSize,
 };
-use ely_ui::ButtonState;
+use crate::ely_ui::{self, ButtonState};
 use crate::changes::{ChangesTab, ChangesTabEvent};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
