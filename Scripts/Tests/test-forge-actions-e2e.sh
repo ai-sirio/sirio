@@ -633,6 +633,9 @@ expect_var gitlab ReviewerCandidates q ann
 expect_line "CANDIDATE ann ann Ann Lee"
 probe "${GL[@]}" candidates labels 201 --text fe
 expect_line "CANDIDATE gid://gitlab/ProjectLabel/2 feature -"
+echo "  an organisation's labels, kept on a group above the project's own, are offered"
+probe "${GL[@]}" candidates labels 201 --text plat
+expect_line "CANDIDATE gid://gitlab/GroupLabel/9 platform -"
 echo "  a GitLab without the reviewers mutation says so, rather than failing to read"
 probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token old act 201 set-reviewers --add ann
 expect_code 20 "reviewers on an old gitlab"

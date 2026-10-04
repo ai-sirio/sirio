@@ -145,6 +145,20 @@ def only_matching(value, text):
     return value
 
 
+def without_group_labels(value):
+    """GitLab lists a project's labels and its own group's; the `GroupLabel`
+    rows of the fixture stand for an organisation's labels above that, which
+    come only with `includeAncestorGroups: true`."""
+    if isinstance(value, dict):
+        return {
+            key: [row for row in item if "GroupLabel" not in str(row.get("id"))]
+            if key == "nodes" and isinstance(item, list)
+            else without_group_labels(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     flavor = "github"
@@ -377,6 +391,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload = json.load(fixture)
         if operation in ("ReviewerCandidates", "LabelCandidates"):
             payload = only_matching(payload, (variables.get("q") or "").lower())
+        if self.flavor == "gitlab" and operation == "LabelCandidates" and not re.search(r"includeAncestorGroups:\s*true", query):
+            payload = without_group_labels(payload)
         if old and operation in BASELINE_OPERATIONS:
             payload = strip_newer(payload)
         return self.answer(200, payload, [("X-RateLimit-Remaining", "4999")])

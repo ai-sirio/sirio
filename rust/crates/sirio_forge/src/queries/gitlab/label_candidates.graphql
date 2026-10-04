@@ -1,5 +1,5 @@
 query LabelCandidates($fullPath: ID!, $q: String) {
   project(fullPath: $fullPath) {
-    labels(searchTerm: $q, first: 20) { nodes { id title color } }
+    labels(searchTerm: $q, first: 20, includeAncestorGroups: true) { nodes { id title color } }
   }
 }
