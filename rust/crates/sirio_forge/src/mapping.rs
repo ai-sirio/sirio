@@ -446,9 +446,12 @@ pub(crate) fn gitlab_merge(facts: GitLabMergeFacts<'_>) -> MergeCapability {
         verdict,
         methods,
         default_method,
-        can_auto_merge: facts
-            .auto_merge_strategies
-            .is_some_and(|strategies| strategies.contains(&"MERGE_WHEN_CHECKS_PASS")),
+        // GitLab lists its strategies as its own lower-case constants
+        // (`merge_when_checks_pass`); the mutation's enum spells them in
+        // capitals. Either spelling is read.
+        can_auto_merge: facts.auto_merge_strategies.is_some_and(|strategies| {
+            strategies.iter().any(|strategy| strategy.eq_ignore_ascii_case("merge_when_checks_pass"))
+        }),
         auto_merge_enabled: (facts.auto_merge_enabled == Some(true)).then(|| {
             if squash_on { MergeMethod::Squash } else { MergeMethod::Merge }
         }),
@@ -1061,7 +1064,7 @@ mod tests {
             squash_read_only: Some(false),
             squash_on_merge: Some(false),
             auto_merge_enabled: Some(false),
-            auto_merge_strategies: Some(&["MERGE_WHEN_CHECKS_PASS"]),
+            auto_merge_strategies: Some(&["merge_when_checks_pass"]),
             remove_source_branch: Some(false),
         }
     }
