@@ -591,3 +591,67 @@ built and run; §14.2 lists what was not.
 - The two `ActChangeRequest` enforcement arms in `sirio`'s `#[cfg(windows)]`
   test helpers were added by hand; they neither compile nor run on Linux, so
   they are checked only by the macOS/Windows CI.
+
+## §15 Slice B2c on Ely (2026-10-04)
+
+`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` moved
+every change-request surface to Ely and left B2c to its own brainstorm (its
+§11). Settled with the user on 2026-10-04; each item supersedes the sentence
+of this spec it names, and everything else in §4–§13 about B2c stands — the
+forge side (`CheckJob`, `Rerun`, `job_log`, the redirect carrying no
+credential, the tail), `TabKind::CiLog` and its persistence, and the proof.
+
+### §15.1 Checks (supersedes §7.2, §7.3)
+
+- **Checks are grouped by run**: a header per workflow (GitHub) or stage
+  (GitLab) — a disclosure chevron, the group's name, its count — with its jobs
+  under it, failed first, then running, queued and settled. A group with
+  nothing failed or running starts folded. Checks with no group (a GitHub
+  `StatusContext`, a third-party check run) sit together under *Other checks*.
+- ***Re-run failed*** is an `IconButton` on the header of a GitHub workflow
+  whose run has a failed or canceled job (`Rerun::FailedInRun`). GitLab retries
+  failed jobs per **pipeline**, not per stage, so there it sits once, on a row
+  above the stages naming the pipeline; its stages have none.
+- **Each job row**: a click opens its log in Sirio (§15.2) — the same job again
+  focuses its tab; a check with no `job` keeps opening its URL in the browser.
+  On the right, an `IconButton` *Re-run* on a failed or canceled job
+  (`Rerun::Job`) and an *Open in browser* when the check has a URL.
+- **Who may re-run**: `Capabilities.can_rerun_checks`, from the repository's
+  `viewerPermission` (write or above) on GitHub and the pipeline's
+  `userPermissions.updatePipeline` on GitLab; a job the forge says is not
+  retryable (`retryable` on GitLab, a run still in progress on GitHub) has no
+  button. A re-run is an action like the others (§5): no confirmation, one
+  write in flight per tab (§14.1 item 4), then the checks and the header are
+  re-read.
+
+### §15.2 The log tab (supersedes §7.4's drawing)
+
+- **Ely chrome**: a toolbar of `IconButton`s — *Refresh*, *Jump to first
+  error* (disabled when the log marks none), *Copy log*, *Open in browser* —
+  over the job's name and status; loading is a `Skeleton`; every failure is a
+  `Callout` with *Retry* (and *Close*, §8).
+- **The body is a gpui `uniform_list` of lines, never wrapped**: every row the
+  same height, a horizontal scroll for long lines, a line-number gutter. Ely's
+  only virtual list (`lists/long.rs`, upstream only) measures each row and is
+  not used for a log of a hundred thousand lines.
+- **Groups fold** with Ely's disclosure chevron on the group's first line; a
+  group's header carries a *Copy* `IconButton` for the group's text. An
+  unclosed group runs to the end of the log.
+- **Selection is per line** through `selectable_text`, each line with its own
+  `.id(..)`; copying more than a line goes through *Copy log* and a group's
+  *Copy*, which copy the text without escape sequences.
+- **Colours**: the sixteen SGR colours are the theme's `ely.ansi` palette, the
+  terminal's own; 256-colour and true-colour codes are drawn as given.
+- **The tail cap is 4 MiB**, cut at a line boundary; a cut log says how much it
+  kept and offers *Open in browser*.
+- **A running job's log reloads every 5 s**, only while the tab is visible,
+  and stops once the job is settled.
+
+### §15.3 Socket
+
+- Every build: `surface.ci_log.open` (by the check's index or job id in an open
+  change request tab) and `surface.ci_log.read` — the title, the job's status,
+  the line count, the folds, the first error's line, `truncated`, `complete`,
+  and whether the tab is reloading.
+- Debug builds only, through the existing `surface.change_request.act` door:
+  `rerun-job --job ID` and `rerun-failed --run ID`.
