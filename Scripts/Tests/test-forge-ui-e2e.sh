@@ -14,6 +14,8 @@ set -euo pipefail
 # script reproduces it.
 #
 # Usage: Scripts/Tests/test-forge-ui-e2e.sh [--state-only] [--out-dir DIR] [--display :N]
+#          [--appearance light|dark]   draw in that mode (default: the app's own)
+#          [--window-size WxH]         resize the app's window before each capture (needs xdotool)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
@@ -21,11 +23,15 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET="${DISPLAY:-}"
+APPEARANCE=""
+WINDOW_SIZE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --state-only) STATE_ONLY=1; shift ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --display) DISPLAY_TARGET="$2"; shift 2 ;;
+    --appearance) APPEARANCE="$2"; shift 2 ;;
+    --window-size) WINDOW_SIZE="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -74,6 +80,9 @@ git -C "$FIXTURE" remote add origin https://ghe.test/acme/widgets.git
 
 export SIRIO_SOCKET="$RUN_DIR/control.sock"
 export SIRIO_DB="$RUN_DIR/session.sqlite"
+if [ -n "$APPEARANCE" ]; then
+  (cd "$ROOT/rust" && cargo run --quiet -p sirio_persistence --example appearance_seed -- --database "$SIRIO_DB" --appearance "$APPEARANCE") || fail "could not seed the appearance"
+fi
 export SIRIO_CREDENTIALS="$RUN_DIR/credentials.json"
 export SIRIO_FORGE_TEST_ENDPOINTS="ghe.test=http://127.0.0.1:$PORT"
 export GH_CONFIG_DIR="$RUN_DIR/gh" GLAB_CONFIG_DIR="$RUN_DIR/glab"
@@ -135,6 +144,10 @@ capture() { # name
   local window
   window=$(find_window)
   [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID for $1"
+  if [ -n "$WINDOW_SIZE" ]; then
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" "${WINDOW_SIZE%x*}" "${WINDOW_SIZE#*x}" || fail "could not resize the window"
+    sleep 2
+  fi
   import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png"
   local colours
   colours=$(identify -format '%k' "$OUT_DIR/frames/$1.png")
