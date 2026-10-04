@@ -36,6 +36,8 @@ impl PickerKind {
     }
 }
 
+const BUSY: &str = "Wait for the change being sent to finish.";
+
 /// What to add and what to take away to turn `original` into `chosen`.
 pub(crate) fn difference(
     original: &BTreeSet<String>,
@@ -116,6 +118,9 @@ impl ChangeRequestTab {
     ) -> Result<(), String> {
         if !self.picker_offered(kind) {
             return Err(format!("the {} cannot be changed here", kind.word()));
+        }
+        if self.action_busy() {
+            return Err(BUSY.to_string());
         }
         let header = self.header.value().ok_or("the change request is not loaded")?;
         let current: BTreeMap<String, String> = match kind {
@@ -258,13 +263,22 @@ impl ChangeRequestTab {
     }
 
     /// Closing is the send: one write with the difference, or none.
+    /// While another write is in flight a picker with picks stays open,
+    /// picks and all: one write at a time per tab.
     pub(crate) fn close_picker(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some(picker) = self.actions.picker.as_ref() else {
+            return Ok(());
+        };
+        let (add, remove) = difference(&picker.original, &picker.chosen);
+        let changed = !(add.is_empty() && remove.is_empty());
+        if changed && self.action_busy() {
+            return Err(BUSY.to_string());
+        }
         let Some(picker) = self.actions.picker.take() else {
             return Ok(());
         };
         cx.notify();
-        let (add, remove) = difference(&picker.original, &picker.chosen);
-        if add.is_empty() && remove.is_empty() {
+        if !changed {
             return Ok(());
         }
         let action = match picker.kind {
@@ -612,6 +626,23 @@ mod tests {
         click_row(&tab, "U_bob", cx);
         let chosen = tab.read_with(cx, |tab, _| tab.actions.picker.as_ref().expect("open").chosen.clone());
         assert_eq!(chosen, ids(&["U_ann", "U_bob"]), "picks across two searches");
+    }
+
+    #[gpui::test]
+    fn a_picker_neither_opens_nor_sends_while_another_write_is_in_flight(cx: &mut TestAppContext) {
+        let forge = forge();
+        let (tab, cx) = opened(cx, forge.clone());
+        click_row(&tab, "U_ann", cx);
+        tab.update(cx, |tab, _| tab.actions.state = ActionState::Working("comment"));
+        let closed = tab.update(cx, |tab, cx| tab.close_picker(cx));
+        assert!(closed.is_err(), "a pick was sent beside a write in flight");
+        tab.read_with(cx, |tab, _| {
+            assert!(matches!(tab.actions.state, ActionState::Working("comment")), "the write in flight lost its state");
+            assert!(tab.picker_is(PickerKind::Reviewers), "the picks were thrown away");
+        });
+        let opened = tab.update_in(cx, |tab, window, cx| tab.open_picker(PickerKind::Labels, window, cx));
+        assert!(opened.is_err(), "a picker opened beside a write in flight");
+        assert!(tab.read_with(cx, |tab, _| tab.picker_is(PickerKind::Reviewers)), "the open picker was closed");
     }
 
     #[gpui::test]
