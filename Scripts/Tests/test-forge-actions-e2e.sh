@@ -974,6 +974,15 @@ run_ci() { # flavour host project number origin-url job running-job
   ctl project add "$repo" >/dev/null
   ctl select-workspace --workspace "$repo" >/dev/null
   ctl surface change-requests show >/dev/null
+  # Let the first host probe settle before a token is saved, as the sign-in
+  # UI does: a save racing it can leave the list unsigned (testing doc,
+  # "Not seen").
+  if [ "$flavour" = github ]; then
+    wait_for state not-connected surface change-requests read >/dev/null
+  else
+    wait_for state unknown-forge surface change-requests read >/dev/null
+  fi
+  wait_for host "$host" surface change-requests read >/dev/null
   saved_token "$host" "$flavour" good
 
   ctl surface change-request open "$number" >/dev/null
@@ -1065,7 +1074,12 @@ run_ci() { # flavour host project number origin-url job running-job
   ctl surface ci-log view --copy 0 >/dev/null
   [ "$(key copied surface ci-log read)" -gt 0 ] || fail "$flavour: Copy group copied nothing"
   ctl surface ci-log view --jump-error >/dev/null
-  if [ "$(key top surface ci-log read)" != "$(key first_error surface ci-log read)" ]; then
+  [ "$(key error_shown surface ci-log read)" = yes ] || fail "$flavour: the jump left the first error folded away"
+  # A log whose visible lines all fit cannot scroll: row 0 stays on top, and
+  # the unfolded error is on screen anyway.
+  top=$(key top surface ci-log read)
+  [ "$(key scrollable surface ci-log read)" = no ] && top=$(key first_error surface ci-log read)
+  if [ "$top" != "$(key first_error surface ci-log read)" ]; then
     reply surface ci-log read
     fail "$flavour: the jump did not bring the first error to the top"
   fi
@@ -1140,18 +1154,32 @@ run_ci() { # flavour host project number origin-url job running-job
       sleep 12
       [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" -ge "$((traces + 2))" ] || fail "GitLab: a drawn running log did not reload"
       ctl surface change-request open "$number" >/dev/null
+      # The tick already due saw the tab drawn before it was hidden and may
+      # read once more; after it, a hidden tab reads nothing.
+      sleep 7
       traces=$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)
       sleep 12
       [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" = "$traces" ] || fail "GitLab: a hidden log kept reloading"
       ctl surface change-request tab checks >/dev/null
       wait_for state loaded surface change-request read
       ctl surface ci-log open --job "$running" >/dev/null
+      # A trace slower than the 5 s tick: the next read waits for this one.
+      curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__slowlog?seconds=7"
+      sleep 16
+      curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__slowlog?seconds=0"
+      [ "$(curl -s "http://127.0.0.1:$port/__stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["traces_at_once_max"])')" = 1 ] \
+        || fail "GitLab: a slow log was downloaded twice at once"
+      sleep 8
       curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__ratelimit?seconds=20"
       ctl surface ci-log view --refresh >/dev/null
       wait_for state error surface ci-log read
       traces=$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)
       sleep 12
       [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" = "$traces" ] || fail "GitLab: a rate-limited log kept reloading"
+      # Once the reset passes, a visible running log reads again by itself.
+      sleep 14
+      [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" -gt "$traces" ] || fail "GitLab: a rate-limited log did not resume after its reset"
+      wait_for state loaded surface ci-log read
     else
       echo "SKIP: reloading while visible needs window draws (--state-only)"
     fi

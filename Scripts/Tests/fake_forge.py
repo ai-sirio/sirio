@@ -76,6 +76,8 @@ reads then serve `<Operation>.after.push.json`; `POST /__checking` stands for
 the forge still working out whether it can merge (`.after.checking.json`)
 until the next `/__reset`.
 
+`POST /__slowlog?seconds=N` answers every GitLab trace N seconds late, and
+`GET /__stats` says how many traces were ever answered at once.
 `POST /__ratelimit?seconds=N` rate limits every read with a reset N seconds
 ahead; `POST /__throttle` answers 429 with Retry-After and no reset until
 `/__reset`. That reset also clears both limits. `ChangeRequestSearch` keeps
@@ -245,6 +247,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     limit_until = 0.0
     throttled = False
     expired = False
+    # A GitLab trace answered this many seconds late, and how many traces
+    # were ever being answered at once.
+    slow_log = 0.0
+    traces_at_once = 0
+    traces_at_once_max = 0
+    traces_lock = threading.Lock()
 
     def credential(self):
         auth = self.headers.get("Authorization") or ""
@@ -411,6 +419,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.plain_path()
         self.body()
+        if path == "/__stats":
+            return self.answer(200, {"traces_at_once_max": Handler.traces_at_once_max})
         if path.startswith("/__blob/"):
             # The signed-URL host: what reaches it must carry no credential.
             carried = "present" if (self.headers.get("Authorization") or self.headers.get("PRIVATE-TOKEN")) else "none"
@@ -464,7 +474,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not job.group(2):
                 status = {1: "success", 2: "failed", 3: "running", 4: "manual"}.get(number, "failed")
                 return self.answer(200, {"id": number, "status": status})
-            return self.answer_text(200, gitlab_log(number))
+            with Handler.traces_lock:
+                Handler.traces_at_once += 1
+                Handler.traces_at_once_max = max(Handler.traces_at_once_max, Handler.traces_at_once)
+            try:
+                time.sleep(Handler.slow_log)
+                return self.answer_text(200, gitlab_log(number))
+            finally:
+                with Handler.traces_lock:
+                    Handler.traces_at_once -= 1
         signed_in = (self.flavor == "github" and path in ("/", "/user", "/api/v3/user")) or (
             self.flavor == "gitlab" and path == "/api/v4/user"
         )
@@ -524,6 +542,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             seconds = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "5"))
             Handler.limit_until = time.time() + seconds
             return self.answer(200, {"limited_until": int(Handler.limit_until)})
+        if path == "/__slowlog":
+            # Every GitLab trace is answered N seconds late.
+            Handler.slow_log = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "0"))
+            return self.answer(200, {"slow_log": Handler.slow_log})
         if path == "/__throttle":
             # Every request answers 429 with no reset time, until /__reset.
             Handler.throttled = True
@@ -534,6 +556,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Handler.limit_until = 0.0
             Handler.throttled = False
             Handler.expired = False
+            Handler.slow_log = 0.0
+            Handler.traces_at_once_max = 0
             return self.answer(200, {"reset": True})
         if self.flavor != "none" and path.startswith("/api/v4/"):
             return self.rest_write(path)

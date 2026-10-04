@@ -57,6 +57,9 @@ pub struct CiLogTab {
     vertical_bar: Option<bezel::ui::scroll::ScrollbarState>,
     horizontal_bar: HorizontalBarState,
     load_task: Option<Task<()>>,
+    /// A read is on its way: a tick waits for it rather than starting a
+    /// second download of the same log beside it.
+    loading: bool,
     connect_task: Option<Task<()>>,
     generation: u64,
     paused_until: Option<i64>,
@@ -85,6 +88,7 @@ impl CiLogTab {
             vertical_bar: None,
             horizontal_bar: Default::default(),
             load_task: None,
+            loading: false,
             connect_task: None,
             generation: 0,
             paused_until: None,
@@ -166,6 +170,7 @@ impl CiLogTab {
             Forge::GitLab => LogFlavor::GitLab,
         };
         self.log.begin();
+        self.loading = true;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -181,6 +186,7 @@ impl CiLogTab {
                 if tab.generation != generation {
                     return;
                 }
+                tab.loading = false;
                 if let Err(ForgeError::RateLimited { reset_at, .. }) = &result {
                     tab.paused_until = Some(reset_at.unwrap_or_else(|| now_unix() + 60));
                 }
@@ -221,7 +227,10 @@ impl CiLogTab {
                         tab.ticking = false;
                         return false;
                     }
-                    if tab.renders != tab.renders_at_tick {
+                    // The drawn mark is spent only by a read that starts: a
+                    // tick during a rate limit leaves it for the first tick
+                    // after the reset.
+                    if tab.renders != tab.renders_at_tick && !tab.loading && !tab.rate_paused() {
                         tab.renders_at_tick = tab.renders;
                         tab.load(cx);
                     }
@@ -330,6 +339,9 @@ impl CiLogTab {
             || scroll.base_handle.logical_scroll_top().0,
             |pending| pending.item_index,
         );
+        // Lines that all fit leave nothing to scroll: a jump keeps row 0 on
+        // top, and the error is on screen anyway.
+        let scrollable = scroll.base_handle.max_offset().y > px(0.0);
         let top = visible
             .as_ref()
             .and_then(|rows| rows.get(top_index).copied())
@@ -367,6 +379,14 @@ impl CiLogTab {
                     .map_or("-".into(), |line| line.to_string()),
             ),
             ("top".into(), top),
+            ("scrollable".into(), if scrollable { "yes" } else { "no" }.into()),
+            (
+                "error_shown".into(),
+                match (doc.and_then(|doc| doc.first_error), visible.as_ref()) {
+                    (Some(line), Some(rows)) if rows.contains(&line) => "yes",
+                    _ => "no",
+                }.into(),
+            ),
             ("dropped".into(), loaded.map_or(0, |loaded| loaded.dropped).to_string()),
             (
                 "truncated".into(),
