@@ -1002,15 +1002,16 @@ impl ChangeRequestList {
     }
 
     fn render_filters(&self, filter: Filter, theme: &Theme, entity: &Entity<Self>) -> impl IntoElement {
-        const FILTERS: [(Filter, IconName, &str); 4] = [
-            (Filter::Mine, IconName::User, "Mine"),
-            (Filter::ToReview, IconName::Eye, "To review"),
-            (Filter::AllOpen, IconName::GitPullRequest, "Open"),
-            (Filter::ClosedAndMerged, IconName::Archive, "Closed"),
+        const FILTERS: [(Filter, IconName); 4] = [
+            (Filter::Mine, IconName::User),
+            (Filter::ToReview, IconName::Eye),
+            (Filter::AllOpen, IconName::GitPullRequest),
+            (Filter::ClosedAndMerged, IconName::Archive),
         ];
         let to_review = self.to_review.filter(|count| *count > 0);
-        let choices = FILTERS.map(|(candidate, icon, label)| {
-            let choice = Choice::new(filter_word(candidate), label).icon(icon);
+        let choices = FILTERS.map(|(candidate, icon)| {
+            // All four filters stay present even at the panel's 220 px floor.
+            let choice = Choice::new(filter_word(candidate), "").icon(icon);
             match (candidate, to_review) {
                 (Filter::ToReview, Some(count)) => choice.note(count.to_string()),
                 _ => choice,
@@ -1023,8 +1024,6 @@ impl ChangeRequestList {
             .px(px(6.0))
             .border_b_1()
             .border_color(theme.ely.border)
-            // A narrow panel scrolls the strip instead of clipping its last tab.
-            .overflow_x_scroll()
             .child(
                 Tabs::new("change-requests-filter", choices, filter_word(filter)).on_change(move |value, _, cx| {
                     if let Some(filter) = parse_filter(value) {
