@@ -241,3 +241,79 @@ Final review also noted a baseline debounce gap: typing and then clearing
 back to the applied query before 300 ms can leave the pending query active.
 That comparison and scheduling behavior already existed before this
 delivery and was retained under its unchanged-behavior constraint.
+
+## Delivery 5: the Changes surface
+
+`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` §8 and §9.
+The Changes surface (local changes, a commit, a change request's *Files*)
+draws with Ely:
+- the toolbar's `ToggleGroup` and `IconButton`s;
+- sections with a `CountBadge`;
+- rows with `GitStatusBadge` and `DiffStat`;
+- bands with an `IconButton`;
+- line and changed-word washes from Ely's palette;
+- `Callout`s for git errors and unavailable diffs, and `Skeleton` loading.
+
+Its engine is unchanged. Discard asks inside the window, through an Ely
+`Dialog`. A file row's right-click offers *Copy path* and, on a change
+request, *Open on the forge*. A change request's one section is headed
+*Changes*. A deleted file's snapshot is titled `gone.txt (deleted in #101)`,
+and once restored it never offers a same-named local file. A snapshot tab
+wears a lock.
+
+### Run and capture
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :94 -screen 0 1600x1500x24 > "$TMPDIR/xvfb94.log" 2>&1 &
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+Scripts/Tests/test-changes-e2e.sh --display :94 --out-dir "$TMPDIR/d5-dark"
+Scripts/Tests/test-changes-e2e.sh --display :94 --appearance light --out-dir "$TMPDIR/d5-light"
+Scripts/Tests/test-forge-diff-e2e.sh --display :94 --out-dir "$TMPDIR/d5-diff"
+```
+
+`test-changes-e2e.sh` drives a real repository with one staged, one changed
+and one untracked file. Its frames:
+
+- **`local-unified`:** the `A`/`M`/`U` badges and `+N −M` with the five
+  dots. The replaced line washes only `20` → `2000`, and the `città` line
+  draws its accents.
+- **`local-split`:** the same diff in two columns, zipped as before.
+- **`error`:** with `.git` moved away, the `Callout` carries git's own
+  message and Retry. Moving `.git` back clears it.
+- **`discard-dialog`:** the in-window confirmation over a scrim. The
+  debug-only `surface changes confirm` then discards, and the script checks
+  `git diff` is empty. *Discard all*, closed with `surface changes dialog
+  --close`, discards nothing.
+
+`test-forge-diff-e2e.sh`'s frames add:
+
+- **`*-commit`:** a commit, still headed *Staged*.
+- **`*-files-diff`:** the change request's *Changes (N)*, with the `R`/`D`/`M`
+  badges.
+- **`*-snapshot`:** the snapshot tab's lock.
+
+Its step 3 checks the deleted file's title. Step 3b restores both snapshots
+beside same-named worktree files: `login.rs` offers its local copy, and the
+deleted `gone.txt` does not.
+
+A headless (`--state-only`) run never draws, so the Changes poll never arms.
+The script asks for the toolbar's Refresh through `surface changes view
+--refresh` wherever it waits for git.
+
+### Found while building it
+
+- The snapshot lock first sat transparent over the file glyph and read as
+  noise. It now sits on the page's ground.
+- The `.git`-moved error needs a refresh. In a framed run the 1 s poll gives
+  one; headless, `view --refresh` does.
+
+### Not established
+
+- macOS: the system sheet is gone, but the dialog is not seen there.
+- Windows and Wayland.
+- Keyboard use of the view-mode toggle.
+- *Open on the forge* opened in a browser: its URL is unit-tested.
+- GitLab's per-file anchor: the diffs page opens at its top.
+- The Split view's word washes in a narrow pane, where long lines are
+  clipped as before.
