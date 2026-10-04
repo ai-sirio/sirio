@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, ReviewVerdict, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -84,6 +84,8 @@ const CREATE_NOTE: &str = include_str!("queries/gitlab/create_note.graphql");
 const UPDATE_NOTE: &str = include_str!("queries/gitlab/update_note.graphql");
 const UPDATE: &str = include_str!("queries/gitlab/update.graphql");
 const SET_DRAFT: &str = include_str!("queries/gitlab/set_draft.graphql");
+const PIPELINE_RETRY: &str = include_str!("queries/gitlab/pipeline_retry.graphql");
+const JOB_RETRY: &str = include_str!("queries/gitlab/job_retry.graphql");
 const REQUEST_CHANGES: &str = include_str!("queries/gitlab/request_changes.graphql");
 const COUNT: &str = include_str!("queries/gitlab/count.graphql");
 const COMMITS: &str = include_str!("queries/gitlab/commits.graphql");
@@ -831,6 +833,17 @@ pub(crate) fn act(
         Action::SetLabels { add, remove } => {
             return set_each(client, "MergeRequestSetLabels", SET_LABELS, "labelIds", &iid, add, remove);
         }
+        Action::Rerun(target) => {
+            let (operation, document, id) = match target {
+                RerunTarget::FailedInRun(pipeline) => (
+                    "PipelineRetry",
+                    PIPELINE_RETRY,
+                    format!("gid://gitlab/Ci::Pipeline/{pipeline}"),
+                ),
+                RerunTarget::Job(job) => ("JobRetry", JOB_RETRY, format!("gid://gitlab/Ci::Build/{job}")),
+            };
+            mutate(client, operation, document, json!({ "id": id }))?;
+        }
         Action::EditComment { comment, body } => mutate(
             client,
             "UpdateNote",
@@ -1024,6 +1037,16 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
             operation: "LabelCandidates",
             document: LABEL_CANDIDATES,
             variables: json!({ "fullPath": project, "q": "bug" }),
+        },
+        LiveProbe {
+            operation: "PipelineRetry",
+            document: PIPELINE_RETRY,
+            variables: json!({ "input": { "id": "gid://gitlab/Ci::Pipeline/0" } }),
+        },
+        LiveProbe {
+            operation: "JobRetry",
+            document: JOB_RETRY,
+            variables: json!({ "input": { "id": "gid://gitlab/Ci::Build/0" } }),
         },
     ]
 }

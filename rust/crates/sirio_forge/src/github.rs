@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, ReviewVerdict, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -900,6 +900,23 @@ pub(crate) fn act(
                     Err(error) => return Err(error),
                 }
             }
+        }
+        Action::Rerun(target) => {
+            let (owner, name) = owner_and_name(client)?;
+            let path = match target {
+                RerunTarget::FailedInRun(run) => {
+                    format!("repos/{owner}/{name}/actions/runs/{run}/rerun-failed-jobs")
+                }
+                RerunTarget::Job(job) => format!("repos/{owner}/{name}/actions/jobs/{job}/rerun"),
+            };
+            execute_rest(
+                client,
+                &RestRequest {
+                    method: RestMethod::Post,
+                    path,
+                    body: None,
+                },
+            )?;
         }
         Action::EditComment { comment, body } => match comment.kind {
             CommentKind::Comment => mutate(

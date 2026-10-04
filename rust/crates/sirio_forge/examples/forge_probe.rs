@@ -16,7 +16,9 @@
 //! ```
 //!
 //! `act`'s actions: `comment`, `approve`, `request-changes`, `review-comment`,
-//! `close`, `reopen`, `ready`, `draft`, `edit`, `edit-comment`. It prints
+//! `close`, `reopen`, `ready`, `draft`, `edit`, `edit-comment`, `merge`,
+//! `cancel-auto-merge`, `set-reviewers`, `set-labels`, `rerun-job`,
+//! `rerun-failed`. Re-runs take `--id <number>`. It prints
 //! `ACT ok`, then `WARNING <text>` when a second step failed.
 
 use std::process::ExitCode;
@@ -25,7 +27,7 @@ use sirio_forge::{
     Action, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
     CommentKind, CommentRef, EventKind, FileChangeKind, Filter, Forge, ForgeClient, ForgeError,
     ForgeTarget, HostSetting, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
-    Resolution, ReviewOutcome, ReviewState,
+    Resolution, RerunTarget, ReviewOutcome, ReviewState,
     ReviewVerdict, SystemProbes, TimelineItem, TokenTransport, Transport, resolve,
 };
 
@@ -395,6 +397,12 @@ fn resolve_command(args: &Args) -> Result<(), Failure> {
     Ok(())
 }
 
+fn id_number(args: &Args) -> Result<u64, Failure> {
+    args.flag("id")
+        .and_then(|id| id.parse().ok())
+        .ok_or_else(|| usage("rerun-job and rerun-failed need --id <number>"))
+}
+
 fn number(args: &Args) -> Result<u64, Failure> {
     args.words
         .get(1)
@@ -617,6 +625,8 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
         "approve" => Action::Review { verdict: ReviewVerdict::Approve, body: body_of(args)? },
         "request-changes" => Action::Review { verdict: ReviewVerdict::RequestChanges, body: body_of(args)? },
         "review-comment" => Action::Review { verdict: ReviewVerdict::Comment, body: body_of(args)? },
+        "rerun-job" => Action::Rerun(RerunTarget::Job(id_number(args)?)),
+        "rerun-failed" => Action::Rerun(RerunTarget::FailedInRun(id_number(args)?)),
         "close" => Action::Close,
         "reopen" => Action::Reopen,
         "ready" => Action::MarkReady,

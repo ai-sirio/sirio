@@ -319,6 +319,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.remember("approve")
         return self.answer(201, {"id": 201, "iid": 201, "approved_by": [{"user": {"username": "fake-user"}}]})
 
+    def github_rerun(self, path):
+        """GitHub's re-runs are REST: a job, or a run's failed jobs."""
+        self.record("POST", path, None, None, None)
+        error = self.scenario_error()
+        if error:
+            return self.answer(error[0], error[1], error[2])
+        credential = self.credential()
+        if credential == "readonly":
+            return self.answer(403, {"message": "Must have admin rights to Repository."})
+        if credential == "slow":
+            time.sleep(1.5)
+        self.remember("rerun")
+        return self.answer(201, {})
+
     def do_GET(self):
         path = self.plain_path()
         self.body()
@@ -399,6 +413,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(200, {"reset": True})
         if self.flavor != "none" and path.startswith("/api/v4/"):
             return self.rest_write(path)
+        if self.flavor == "github" and re.fullmatch(
+            r"(/api/v3)?/repos/[^/]+/[^/]+/actions/(runs/\d+/rerun-failed-jobs|jobs/\d+/rerun)", path
+        ):
+            return self.github_rerun(path)
         if self.flavor == "none" or path not in ("/graphql", "/api/graphql"):
             self.record("POST", path, None, None, None)
             return self.answer(404, {"message": "Not Found"})

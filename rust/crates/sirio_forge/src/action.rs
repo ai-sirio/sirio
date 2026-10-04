@@ -14,6 +14,16 @@ pub enum ReviewVerdict {
     Comment,
 }
 
+/// Which CI jobs to run again (spec §5, §15.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RerunTarget {
+    /// The failed and canceled jobs of a GitHub workflow run, or of a GitLab
+    /// pipeline: `CheckJob::run_id`.
+    FailedInRun(u64),
+    /// One job: `CheckJob::job_id`.
+    Job(u64),
+}
+
 /// One write a user asks of a forge about one change request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -59,6 +69,8 @@ pub enum Action {
         add: Vec<String>,
         remove: Vec<String>,
     },
+    /// Runs CI jobs again. No confirmation, like every action but merge.
+    Rerun(RerunTarget),
 }
 
 impl Action {
@@ -92,6 +104,8 @@ impl Action {
             Self::CancelAutoMerge => "cancel-auto-merge",
             Self::SetReviewers { .. } => "set-reviewers",
             Self::SetLabels { .. } => "set-labels",
+            Self::Rerun(RerunTarget::FailedInRun(_)) => "rerun-failed",
+            Self::Rerun(RerunTarget::Job(_)) => "rerun-job",
         }
     }
 }
@@ -295,6 +309,11 @@ pub(crate) fn check_action(
                 return refuse("There is nothing to change.");
             }
         }
+        Action::Rerun(_) => {
+            if !caps.can_rerun_checks {
+                return refuse("You cannot re-run checks here.");
+            }
+        }
     }
     Ok(())
 }
@@ -337,7 +356,7 @@ mod tests {
             can_toggle_draft: true,
             can_edit_reviewers: true,
             can_edit_labels: true,
-            can_rerun_checks: false,
+            can_rerun_checks: true,
             merge: ready_merge(),
         }
     }
@@ -482,6 +501,22 @@ mod tests {
     }
 
     #[test]
+    fn a_rerun_needs_the_permission_to_rerun_checks() {
+        let mut caps = everything();
+        caps.can_rerun_checks = false;
+        for target in [RerunTarget::Job(2), RerunTarget::FailedInRun(1)] {
+            let refused = check_action("h", &Action::Rerun(target), &context(ChangeState::Open, caps.clone()));
+            assert!(matches!(refused, Err(ForgeError::Rejected { .. })), "{target:?}: {refused:?}");
+        }
+        caps.can_rerun_checks = true;
+        for state in [ChangeState::Open, ChangeState::Draft, ChangeState::Merged, ChangeState::Closed] {
+            // CI runs whatever the change request's state: a merged one's
+            // failed deploy is still worth running again.
+            assert_eq!(check_action("h", &Action::Rerun(RerunTarget::Job(2)), &context(state, caps.clone())), Ok(()));
+        }
+    }
+
+    #[test]
     fn every_action_has_its_own_content_free_kind() {
         let kinds: Vec<&str> = [
             comment("x"),
@@ -499,6 +534,8 @@ mod tests {
             Action::CancelAutoMerge,
             Action::SetReviewers { add: vec!["u".into()], remove: vec![] },
             Action::SetLabels { add: vec!["l".into()], remove: vec![] },
+            Action::Rerun(RerunTarget::FailedInRun(1)),
+            Action::Rerun(RerunTarget::Job(2)),
         ]
         .iter()
         .map(Action::kind)

@@ -771,6 +771,25 @@ expect_line "JOB rspec 2 45 yes"
 expect_line "JOB lint 3 45 no"
 probe "${GL[@]}" header 201
 expect_line "RERUN yes"
+reset_forge github
+probe "${GH[@]}" act 101 rerun-job --id 2
+expect_code 0
+expect_line "ACT ok"
+expect_rest github "POST /api/v3/repos/acme/widgets/actions/jobs/2/rerun"
+probe "${GH[@]}" act 101 rerun-failed --id 1
+expect_line "ACT ok"
+expect_rest github "POST /api/v3/repos/acme/widgets/actions/runs/1/rerun-failed-jobs"
+reset_forge github
+probe "${GH_RO[@]}" act 101 rerun-job --id 2
+expect_line "ERR Rejected"
+no_rest github "POST /api/v3/repos/acme/widgets/actions"
+reset_forge gitlab
+probe "${GL[@]}" act 201 rerun-job --id 2
+expect_line "ACT ok"
+expect_input gitlab JobRetry '{"id":"gid://gitlab/Ci::Build/2"}'
+probe "${GL[@]}" act 201 rerun-failed --id 45
+expect_line "ACT ok"
+expect_input gitlab PipelineRetry '{"id":"gid://gitlab/Ci::Pipeline/45"}'
 # Later parts of stage ci are added above this line.
 fi
 

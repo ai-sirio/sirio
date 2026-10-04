@@ -1,0 +1,3 @@
+mutation JobRetry($input: JobRetryInput!) {
+  jobRetry(input: $input) { errors }
+}

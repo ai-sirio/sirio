@@ -1,0 +1,3 @@
+mutation PipelineRetry($input: PipelineRetryInput!) {
+  pipelineRetry(input: $input) { errors }
+}
