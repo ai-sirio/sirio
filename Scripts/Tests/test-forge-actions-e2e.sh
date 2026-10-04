@@ -974,6 +974,65 @@ run_ci() { # flavour host project number origin-url job running-job
   wait_for state loaded surface change-request read
   ctl surface change-request tab checks >/dev/null
   wait_for state loaded surface change-request read
+  wait_for caps "comment,approve,request-changes,edit,state,draft,rerun" surface change-request read
+  local groups rows
+  groups=$(key check_groups surface change-request read)
+  rows=$(key check_rows surface change-request read)
+  echo "check_groups=$groups"
+  echo "check_rows=$rows"
+  capture "$flavour-checks"
+  reset_forge "$flavour"
+  if [ "$flavour" = github ]; then
+    case "$groups" in "CI:open:rerun-failed=1|Lint:open|Other checks:open") ;; *) fail "github groups: $groups" ;; esac
+    case "$rows" in *"test:failed:job=2:rerun"*) ;; *) fail "github rows: $rows" ;; esac
+    ctl surface change-request act rerun-job --job 2 >/dev/null
+    wait_for action idle surface change-request read
+    expect_rest github "POST /api/v3/repos/acme/widgets/actions/jobs/2/rerun"
+    # Running Lint now sorts before CI's queued job; the refreshed job has no Re-run.
+    wait_for check_rows "lint:running:job=3|test:queued:job=2|build:passed:job=1|deploy/preview:running" surface change-request read
+    ctl surface change-request act rerun-failed --run 1 >/dev/null
+    wait_for action idle surface change-request read
+    expect_rest github "POST /api/v3/repos/acme/widgets/actions/runs/1/rerun-failed-jobs"
+  else
+    case "$groups" in "Pipeline #45:open:rerun-failed=45|test:open|build:folded|deploy:folded") ;; *) fail "gitlab groups: $groups" ;; esac
+    ctl surface change-request act rerun-job --job 2 >/dev/null
+    wait_for action idle surface change-request read
+    expect_input gitlab JobRetry '{"id":"gid://gitlab/Ci::Build/2"}'
+    ctl surface change-request act rerun-failed --run 45 >/dev/null
+    wait_for action idle surface change-request read
+    expect_input gitlab PipelineRetry '{"id":"gid://gitlab/Ci::Pipeline/45"}'
+  fi
+  capture "$flavour-checks-rerun"
+  if [ "$flavour" = github ]; then
+    # Two presses while the first is in flight: one request.
+    saved_token "$host" github slow
+    reopen_tab "$number"
+    ctl surface change-request tab checks >/dev/null
+    wait_for state loaded surface change-request read
+    reset_forge github
+    ctl surface change-request act rerun-job --job 2 >/dev/null
+    if ctl surface change-request act rerun-job --job 2 >/dev/null 2>&1; then fail "a second re-run was accepted while the first was in flight"; fi
+    wait_for action idle surface change-request read
+    [ "$(grep -c 'POST /api/v3/repos/acme/widgets/actions/jobs/2/rerun ' "$WORK/github-requests.log")" = 1 ] || fail "the forge saw the re-run twice"
+    # A viewer who may not re-run sees no button and sends nothing.
+    reset_forge github
+    saved_token "$host" github readonly
+    reopen_tab "$number"
+    ctl surface change-request tab checks >/dev/null
+    wait_for state loaded surface change-request read
+    case "$(key caps surface change-request read)" in *rerun*) fail "readonly can re-run" ;; esac
+    case "$(key check_rows surface change-request read)" in *"test:failed:job=2"*) ;; *) fail "readonly was not tested against a failed job" ;; esac
+    case "$(key check_rows surface change-request read)" in *":rerun"*) fail "readonly shows Re-run" ;; esac
+    reset_forge github
+    ctl surface change-request act rerun-job --job 2 >/dev/null 2>&1 || true
+    wait_for action failed surface change-request read
+    wait_for action_message "You cannot re-run checks here." surface change-request read
+    no_rest github "POST /api/v3/repos/acme/widgets/actions"
+    saved_token "$host" github good
+    reopen_tab "$number"
+    ctl surface change-request tab checks >/dev/null
+    wait_for state loaded surface change-request read
+  fi
   ctl surface ci-log open --job "$job" >/dev/null
   wait_for state loaded surface ci-log read
   [ "$(key first_error surface ci-log read)" != "-" ] || fail "$flavour: the log's first error was not found"
@@ -1141,7 +1200,7 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   saved_token "$host" "$flavour" good
   ctl surface change-request open "$number" >/dev/null
   wait_for state loaded surface change-request read
-  wait_for caps "comment,approve,request-changes,edit,state,draft" surface change-request read
+  wait_for caps "comment,approve,request-changes,edit,state,draft,rerun" surface change-request read
   wait_for cr_state open surface change-request read
   wait_for action idle surface change-request read
   capture "$flavour-tab"
@@ -1181,7 +1240,7 @@ PY
   reset_forge "$flavour" "$port"
   ctl surface change-request act close >/dev/null
   wait_for cr_state closed surface change-request read
-  wait_for caps "comment,edit,state" surface change-request read
+  wait_for caps "comment,edit,state,rerun" surface change-request read
   capture "$flavour-closed"
   # No reset from here to the end of the sequence: the fake remembers each write,
   # so a reopen finds a closed change request and a ready finds a draft.

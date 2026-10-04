@@ -3,6 +3,7 @@
 //! and Files. Its identity is a `ChangeRef`, which is what the host keys the
 //! tab by and what the session store keeps.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,9 +14,9 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use sirio_forge::{
-    ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
+    Action, ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
     FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
-    TimelineItem,
+    RerunTarget, TimelineItem,
 };
 use sirio_theme::Theme;
 
@@ -215,7 +216,7 @@ pub struct ChangeRequestTab {
     pub(crate) commits: Slot<Listing<CommitSummary>>,
     pub(crate) checks: Slot<Listing<Check>>,
     pub(crate) files: Slot<Listing<FileChange>>,
-    show_settled_checks: bool,
+    check_folds: HashMap<String, bool>,
     generation: u64,
     /// A rate limit's reset: no request before it (spec §9).
     paused_until: Option<i64>,
@@ -277,7 +278,7 @@ impl ChangeRequestTab {
             commits: Slot::Idle,
             checks: Slot::Idle,
             files: Slot::Idle,
-            show_settled_checks: false,
+            check_folds: HashMap::new(),
             generation: 0,
             paused_until: None,
             last_refresh: None,
@@ -922,12 +923,48 @@ impl ChangeRequestTab {
             RangeState::Failed { error, .. } => error.to_string(),
             _ => String::new(),
         };
+        let mut group_words = Vec::new();
+        let mut row_words = Vec::new();
+        if let Some(listing) = self.checks.value() {
+            let can_rerun = self.header.value().is_some_and(|header| header.capabilities.can_rerun_checks);
+            let (pipeline, groups) = check_groups(&listing.items, self.reference.forge, can_rerun);
+            for group in pipeline.iter().chain(groups.iter()) {
+                let open = self.check_folds.get(&group.key).copied().unwrap_or(group.open_by_default);
+                let mut word = format!("{}:{}", group.title, if open { "open" } else { "folded" });
+                if let Some(run) = group.rerun_failed {
+                    word.push_str(&format!(":rerun-failed={run}"));
+                }
+                group_words.push(word);
+            }
+            for index in groups.iter().flat_map(|group| group.members.iter()) {
+                let check = &listing.items[*index];
+                let status = match check.status {
+                    CheckStatus::Failed => "failed",
+                    CheckStatus::Running => "running",
+                    CheckStatus::Queued => "queued",
+                    CheckStatus::Passed => "passed",
+                    CheckStatus::Canceled => "canceled",
+                    CheckStatus::Skipped => "skipped",
+                    CheckStatus::Neutral => "neutral",
+                };
+                let mut word = format!("{}:{status}", check.name);
+                if let Some(job) = &check.job {
+                    word.push_str(&format!(":job={}", job.job_id));
+                }
+                if can_rerun && rerunnable(check) {
+                    word.push_str(":rerun");
+                }
+                row_words.push(word);
+            }
+        }
         vec![
             ("label".to_string(), self.reference.label()),
             ("title".to_string(), self.title.clone()),
             ("inner".to_string(), self.inner.as_str().to_string()),
             ("state".to_string(), state.to_string()),
             ("rows".to_string(), rows.to_string()),
+            ("check_groups".to_string(), if group_words.is_empty() { "-".to_string() } else { group_words.join("|") }),
+            ("check_rows".to_string(), if row_words.is_empty() { "-".to_string() } else { row_words.join("|") }),
             ("files_mode".to_string(), files_mode.to_string()),
             ("head".to_string(), head),
             ("diff_files".to_string(), diff_files),
@@ -1701,105 +1738,180 @@ impl ChangeRequestTab {
         theme: &Theme,
         entity: &Entity<Self>,
     ) -> AnyElement {
-        let rank = |status: CheckStatus| match status {
-            CheckStatus::Failed => 0,
-            CheckStatus::Running => 1,
-            CheckStatus::Queued => 2,
-            _ => 3,
-        };
-        let mut ordered: Vec<(usize, &Check)> = listing.items.iter().enumerate().collect();
-        ordered.sort_by_key(|(index, check)| (rank(check.status), *index));
-        let (open, settled): (Vec<_>, Vec<_>) = ordered
-            .into_iter()
-            .partition(|(_, check)| rank(check.status) < 3);
-        let passed = settled
-            .iter()
-            .filter(|(_, check)| check.status == CheckStatus::Passed)
-            .count();
-        let toggle = entity.clone();
-        let hover = theme.ely.hover;
-        let row = |index: usize, check: &Check| {
-            let (icon, tint) = style::check_icon(check.status, theme);
-            let url = check.url.clone();
-            div()
-                .id(("change-request-check", index))
+        let can_rerun = self.header.value()
+            .is_some_and(|header| header.capabilities.can_rerun_checks);
+        let busy = self.action_busy();
+        let (pipeline, groups) = check_groups(&listing.items, self.reference.forge, can_rerun);
+        let mut content = div().flex().flex_col();
+        if let Some(pipeline) = pipeline {
+            let mut row = div()
+                .id("change-request-pipeline")
                 .flex()
                 .items_center()
                 .gap(px(8.0))
                 .px(px(6.0))
                 .py(px(5.0))
-                .rounded(theme.radii.control)
-                .when(url.is_some(), |this| {
-                    this.cursor_pointer().hover(move |style| style.bg(hover))
-                })
-                .on_click(move |_, _, cx| {
-                    if let Some(url) = &url {
-                        cx.open_url(url)
-                    }
-                })
-                .child(EIcon::new(icon).size(EIconSize::Sm).color(tint))
-                .when_some(check.group.clone(), |this, group| {
-                    this.child(div().flex_none().text_color(theme.ely.fg_subtle).child(group))
-                })
+                .child(
+                    EIcon::new(IconName::Workflow)
+                        .size(EIconSize::Sm)
+                        .color(theme.ely.fg_subtle),
+                )
+                .child(pipeline.title)
+                .child(div().flex_1());
+            if let Some(run) = pipeline.rerun_failed {
+                let entity = entity.clone();
+                row = row.child(ely_ui::icon_button(
+                    "change-request-rerun-pipeline",
+                    IconName::RotateCcw,
+                    "Re-run failed",
+                    !busy,
+                    move |_, cx| entity.update(cx, |tab, cx| {
+                        let _ = tab.perform(Action::Rerun(RerunTarget::FailedInRun(run)), cx);
+                    }),
+                ));
+            }
+            content = content.child(row);
+        }
+        for (group_index, group) in groups.into_iter().enumerate() {
+            let open = self.check_folds.get(&group.key).copied()
+                .unwrap_or(group.open_by_default);
+            let failed = group.members.iter()
+                .filter(|index| listing.items[**index].status == CheckStatus::Failed)
+                .count();
+            let count = if failed > 0 {
+                format!("{failed} failed · {}", group.members.len())
+            } else {
+                group.members.len().to_string()
+            };
+            let selector_key = group.key.clone();
+            let toggle_key = group.key.clone();
+            let toggle = entity.clone();
+            let mut header = div()
+                .id(("change-request-check-group", group_index))
+                .debug_selector(move || format!("change-request-check-group-{selector_key}"))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(check.name.clone()),
-                )
-                .when_some(check.duration_secs, |this, secs| {
-                    this.child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.ely.fg_subtle)
-                            .child(style::duration_text(secs)),
-                    )
-                })
-        };
-        div()
-            .flex()
-            .flex_col()
-            .children(open.iter().map(|(index, check)| row(*index, check)))
-            .when(!settled.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id("change-request-settled-checks")
+                        .id(("change-request-check-disclosure", group_index))
                         .flex()
+                        .flex_1()
                         .items_center()
                         .gap(px(8.0))
                         .px(px(6.0))
                         .py(px(5.0))
                         .cursor_pointer()
-                        .text_color(theme.ely.fg_muted)
                         .on_click(move |_, _, cx| {
                             toggle.update(cx, |tab, cx| {
-                                tab.show_settled_checks = !tab.show_settled_checks;
+                                let open = tab.check_folds.get(&toggle_key).copied().unwrap_or(open);
+                                tab.check_folds.insert(toggle_key.clone(), !open);
                                 cx.notify();
                             })
                         })
                         .child(
-                            EIcon::new(if self.show_settled_checks {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size(EIconSize::Sm),
+                            EIcon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                                .size(EIconSize::Sm),
                         )
-                        .child(format!("{passed} passed, {} other", settled.len() - passed)),
-                )
-            })
-            .when(self.show_settled_checks, |this| {
-                this.children(settled.iter().map(|(index, check)| row(*index, check)))
-            })
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(group.title))
+                        .child(div().text_color(theme.ely.fg_subtle).child(count)),
+                );
+            if let Some(run) = group.rerun_failed {
+                let entity = entity.clone();
+                header = header.child(
+                    div().id(("change-request-rerun-group", group_index)).child(ely_ui::icon_button(
+                        "change-request-rerun-group",
+                        IconName::RotateCcw,
+                        "Re-run failed",
+                        !busy,
+                        move |_, cx| entity.update(cx, |tab, cx| {
+                            let _ = tab.perform(Action::Rerun(RerunTarget::FailedInRun(run)), cx);
+                        }),
+                    )),
+                );
+            }
+            content = content.child(header);
+            if !open {
+                continue;
+            }
+            for index in group.members {
+                let check = &listing.items[index];
+                let (icon, tint) = style::check_icon(check.status, theme);
+                let job_id = check.job.as_ref().map(|job| job.job_id);
+                let url = check.url.clone();
+                let log = entity.clone();
+                let hover = theme.ely.hover;
+                let mut row = div()
+                    .id(("change-request-check", index))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id(("change-request-check-open", index))
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(6.0))
+                            .py(px(5.0))
+                            .rounded(theme.radii.control)
+                            .when(job_id.is_some() || url.is_some(), |this| {
+                                this.cursor_pointer().hover(move |style| style.bg(hover))
+                            })
+                            .on_click(move |_, _, cx| {
+                                if let Some(job_id) = job_id {
+                                    log.update(cx, |tab, cx| {
+                                        let _ = tab.open_log_by_job(job_id, cx);
+                                    });
+                                } else if let Some(url) = &url {
+                                    cx.open_url(url);
+                                }
+                            })
+                            .child(EIcon::new(icon).size(EIconSize::Sm).color(tint))
+                            .child(
+                                div().flex_1().min_w_0().overflow_hidden()
+                                    .text_ellipsis().whitespace_nowrap().child(check.name.clone()),
+                            )
+                            .when_some(check.duration_secs, |this, secs| {
+                                this.child(div().flex_none().text_color(theme.ely.fg_subtle)
+                                    .child(style::duration_text(secs)))
+                            }),
+                    );
+                if let Some(job_id) = job_id {
+                    if can_rerun && rerunnable(check) {
+                        let entity = entity.clone();
+                        row = row.child(
+                            div().id(("change-request-rerun-job", index)).child(ely_ui::icon_button(
+                                "change-request-rerun-job",
+                                IconName::RotateCcw,
+                                "Re-run",
+                                !busy,
+                                move |_, cx| entity.update(cx, |tab, cx| {
+                                    let _ = tab.perform(Action::Rerun(RerunTarget::Job(job_id)), cx);
+                                }),
+                            )),
+                        );
+                    }
+                    if let Some(url) = check.url.clone() {
+                        row = row.child(
+                            div().id(("change-request-check-browser", index)).child(ely_ui::icon_button(
+                                "change-request-check-browser",
+                                IconName::ExternalLink,
+                                "Open in browser",
+                                !busy,
+                                move |_, cx| cx.open_url(&url),
+                            )),
+                        );
+                    }
+                }
+                content = content.child(row);
+            }
+        }
+        content
             .when(listing.truncated, |this| {
-                this.child(
-                    div()
-                        .text_color(theme.ely.fg_subtle)
-                        .child("More checks are on the forge."),
-                )
+                this.child(div().text_color(theme.ely.fg_subtle).child("More checks are on the forge."))
             })
             .into_any_element()
     }
@@ -2105,6 +2217,85 @@ impl Render for ChangeRequestTab {
             .child(body)
             .children(self.render_merge_dialog(&theme, &entity))
     }
+}
+
+/// One header of *Checks*: a workflow run (GitHub) or a stage (GitLab), and
+/// the checks under it (spec §15.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CheckGroup {
+    pub key: String,
+    pub title: String,
+    /// Indexes into the listing, failed first, then running, queued, the rest.
+    pub members: Vec<usize>,
+    pub open_by_default: bool,
+    /// The run whose failed jobs *Re-run failed* would send, when it may.
+    pub rerun_failed: Option<u64>,
+}
+
+fn rank(status: CheckStatus) -> u8 {
+    match status {
+        CheckStatus::Failed => 0,
+        CheckStatus::Running => 1,
+        CheckStatus::Queued => 2,
+        CheckStatus::Canceled => 3,
+        _ => 4,
+    }
+}
+
+fn rerunnable(check: &Check) -> bool {
+    matches!(check.status, CheckStatus::Failed | CheckStatus::Canceled)
+        && check.job.as_ref().is_some_and(|job| job.retryable)
+}
+
+/// Groups the checks by run; on GitLab, also the pipeline row that carries
+/// *Re-run failed*, because GitLab retries a pipeline, not a stage.
+pub(crate) fn check_groups(items: &[Check], forge: Forge, can_rerun: bool) -> (Option<CheckGroup>, Vec<CheckGroup>) {
+    let mut groups: Vec<CheckGroup> = Vec::new();
+    let mut other: Vec<usize> = Vec::new();
+    for (index, check) in items.iter().enumerate() {
+        let Some(group) = &check.group else {
+            other.push(index);
+            continue;
+        };
+        let run = check.job.as_ref().and_then(|job| job.run_id);
+        let key = match (forge, run) {
+            (Forge::GitHub, Some(run)) => format!("run:{run}:{group}"),
+            _ => format!("group:{group}"),
+        };
+        match groups.iter_mut().find(|existing| existing.key == key) {
+            Some(existing) => existing.members.push(index),
+            None => groups.push(CheckGroup { key, title: group.clone(), members: vec![index], open_by_default: false, rerun_failed: None }),
+        }
+    }
+    if !other.is_empty() {
+        groups.push(CheckGroup { key: "other".into(), title: "Other checks".into(), members: other, open_by_default: false, rerun_failed: None });
+    }
+    for group in &mut groups {
+        group.members.sort_by_key(|index| (rank(items[*index].status), *index));
+        group.open_by_default = group.members.iter().any(|index| rank(items[*index].status) <= 1);
+        if forge == Forge::GitHub && can_rerun && group.key != "other" {
+            group.rerun_failed = group
+                .members
+                .iter()
+                .find(|index| rerunnable(&items[**index]))
+                .and_then(|index| items[*index].job.as_ref().and_then(|job| job.run_id));
+        }
+    }
+    // Worst group first; "Other checks" always last.
+    let worst = |group: &CheckGroup| group.members.iter().map(|index| rank(items[*index].status)).min().unwrap_or(4);
+    let other_last = |group: &CheckGroup| group.key == "other";
+    groups.sort_by_key(|group| (other_last(group), worst(group)));
+    let pipeline = (forge == Forge::GitLab)
+        .then(|| items.iter().find_map(|check| check.job.as_ref().and_then(|job| job.run_id)))
+        .flatten()
+        .map(|run| CheckGroup {
+            key: "pipeline".into(),
+            title: format!("Pipeline #{run}"),
+            members: Vec::new(),
+            open_by_default: true,
+            rerun_failed: (can_rerun && items.iter().any(rerunnable)).then_some(run),
+        });
+    (pipeline, groups)
 }
 
 #[cfg(test)]
@@ -2889,4 +3080,119 @@ mod tests {
         });
         assert!(events.borrow().is_empty(), "a commit that could not be fetched is not opened");
     }
+    fn job(name: &str, status: CheckStatus, group: Option<&str>, job: Option<(u64, u64, bool)>) -> Check {
+        Check {
+            name: name.to_string(),
+            status,
+            group: group.map(str::to_string),
+            duration_secs: None,
+            url: Some(format!("https://forge.test/{name}")),
+            job: job.map(|(job_id, run_id, retryable)| CheckJob { job_id, run_id: Some(run_id), retryable }),
+        }
+    }
+
+    #[test]
+    fn checks_group_by_run_failed_first_and_the_rest_together() {
+        let items = vec![
+            job("build", CheckStatus::Passed, Some("CI"), Some((1, 1, true))),
+            job("test", CheckStatus::Failed, Some("CI"), Some((2, 1, true))),
+            job("lint", CheckStatus::Running, Some("Lint"), Some((3, 4, false))),
+            job("deploy/preview", CheckStatus::Running, None, None),
+            job("docs", CheckStatus::Passed, Some("Docs"), Some((5, 6, true))),
+        ];
+        let (pipeline, groups) = check_groups(&items, Forge::GitHub, true);
+        assert!(pipeline.is_none());
+        let titles: Vec<&str> = groups.iter().map(|group| group.title.as_str()).collect();
+        // Worst first; the checks with no group last.
+        assert_eq!(titles, ["CI", "Lint", "Docs", "Other checks"]);
+        assert_eq!(groups[0].members, [1, 0]);
+        assert!(groups[0].open_by_default && groups[1].open_by_default && !groups[2].open_by_default);
+        assert_eq!(groups[0].rerun_failed, Some(1));
+        assert_eq!(groups[1].rerun_failed, None);
+        assert_eq!(groups[3].members, [3]);
+    }
+
+    #[test]
+    fn the_same_workflow_in_two_runs_is_two_groups() {
+        let items = vec![
+            job("a", CheckStatus::Failed, Some("CI"), Some((1, 1, true))),
+            job("b", CheckStatus::Failed, Some("CI"), Some((2, 9, true))),
+        ];
+        let (_, groups) = check_groups(&items, Forge::GitHub, true);
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn rerunning_failed_needs_the_permission_and_a_retryable_failure() {
+        let items = vec![job("test", CheckStatus::Failed, Some("CI"), Some((2, 1, false)))];
+        assert_eq!(check_groups(&items, Forge::GitHub, true).1[0].rerun_failed, None);
+        let items = vec![job("test", CheckStatus::Canceled, Some("CI"), Some((2, 1, true)))];
+        assert_eq!(check_groups(&items, Forge::GitHub, true).1[0].rerun_failed, Some(1));
+        assert_eq!(check_groups(&items, Forge::GitHub, false).1[0].rerun_failed, None);
+    }
+
+    #[test]
+    fn gitlab_reruns_failed_jobs_per_pipeline_not_per_stage() {
+        let items = vec![
+            job("build", CheckStatus::Passed, Some("build"), Some((1, 45, true))),
+            job("rspec", CheckStatus::Failed, Some("test"), Some((2, 45, true))),
+            job("lint", CheckStatus::Running, Some("test"), Some((3, 45, false))),
+        ];
+        let (pipeline, groups) = check_groups(&items, Forge::GitLab, true);
+        let pipeline = pipeline.expect("a pipeline row");
+        assert_eq!((pipeline.title.as_str(), pipeline.rerun_failed), ("Pipeline #45", Some(45)));
+        assert!(groups.iter().all(|group| group.rerun_failed.is_none()));
+        assert_eq!(groups.iter().map(|group| group.title.as_str()).collect::<Vec<_>>(), ["test", "build"]);
+        // Nothing failed: still the row, with no button.
+        let calm = vec![job("build", CheckStatus::Passed, Some("build"), Some((1, 45, true)))];
+        assert_eq!(check_groups(&calm, Forge::GitLab, true).0.map(|row| row.rerun_failed), Some(None));
+        // No job carries a pipeline (a baseline answer): no row.
+        let bare = vec![job("x", CheckStatus::Failed, Some("test"), None)];
+        assert!(check_groups(&bare, Forge::GitLab, true).0.is_none());
+    }
+
+    #[test]
+    fn queued_only_check_groups_start_folded() {
+        let items = vec![job("test", CheckStatus::Queued, Some("CI"), Some((2, 1, false)))];
+        assert!(!check_groups(&items, Forge::GitHub, true).1[0].open_by_default);
+    }
+
+    #[test]
+    fn rerun_refusals_name_the_workflow_write_permission() {
+        let error = ForgeError::Forbidden {
+            host: "forge.test".to_string(),
+            detail: "permission denied".to_string(),
+            sso_url: None,
+        };
+        for forge in [Forge::GitHub, Forge::GitLab] {
+            for kind in ["rerun-job", "rerun-failed"] {
+                assert_eq!(
+                    actions::action_error_text(&error, forge, kind),
+                    "This token cannot re-run workflows: it needs Actions: write (fine-grained) or repo (classic) on GitHub, api on GitLab."
+                );
+            }
+            assert!(actions::action_error_text(&error, forge, "close").contains("Settings → Git Hosting"));
+        }
+    }
+
+    #[test]
+    fn check_group_keys_do_not_collide_with_names_or_other_checks() {
+        let items = vec![
+            job("a", CheckStatus::Failed, Some("CI"), Some((1, 1, true))),
+            job("b", CheckStatus::Failed, Some("CI#1"), None),
+        ];
+        let (_, groups) = check_groups(&items, Forge::GitHub, true);
+        assert_eq!(groups.len(), 2, "a name must not alias another workflow's run key");
+        assert_ne!(groups[0].key, groups[1].key);
+
+        let items = vec![
+            job("a", CheckStatus::Failed, Some("other"), Some((1, 45, true))),
+            job("b", CheckStatus::Running, Some("test"), Some((2, 45, false))),
+            job("c", CheckStatus::Passed, None, None),
+        ];
+        let (_, groups) = check_groups(&items, Forge::GitLab, true);
+        assert_eq!(groups.iter().map(|group| group.title.as_str()).collect::<Vec<_>>(), ["other", "test", "Other checks"]);
+        assert_ne!(groups[0].key, groups[2].key, "disclosures must have separate overrides");
+    }
+
 }

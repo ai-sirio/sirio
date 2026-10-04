@@ -106,8 +106,11 @@ enum HeaderAction {
 
 /// What the user reads when a write fails: the forge's own reason where it
 /// gave one, the remedy where there is one (spec §9).
-pub(crate) fn action_error_text(error: &ForgeError, forge: Forge) -> String {
+pub(crate) fn action_error_text(error: &ForgeError, forge: Forge, kind: &str) -> String {
     match error {
+        ForgeError::Forbidden { .. } if kind.starts_with("rerun-") => {
+            "This token cannot re-run workflows: it needs Actions: write (fine-grained) or repo (classic) on GitHub, api on GitLab.".to_string()
+        }
         ForgeError::Forbidden {
             sso_url: Some(url), ..
         } => format!("This organisation requires its SSO: authorise the token at {url}"),
@@ -229,7 +232,7 @@ impl ChangeRequestTab {
                 }
                 self.actions.state = ActionState::Failed {
                     kind,
-                    message: action_error_text(&error, self.reference.forge),
+                    message: action_error_text(&error, self.reference.forge, kind),
                 };
             }
         }
@@ -380,6 +383,7 @@ impl ChangeRequestTab {
             (caps.can_edit, "edit"),
             (caps.can_change_state, "state"),
             (caps.can_toggle_draft, "draft"),
+            (caps.can_rerun_checks, "rerun"),
         ]
         .into_iter()
         .filter_map(|(on, word)| on.then_some(word))
@@ -416,6 +420,18 @@ impl ChangeRequestTab {
             "reopen" => self.perform(Action::Reopen, cx),
             "ready" => self.perform(Action::MarkReady, cx),
             "draft" => self.perform(Action::ConvertToDraft, cx),
+            "rerun-job" => {
+                let job = text("job")
+                    .and_then(|job| job.parse().ok())
+                    .ok_or_else(|| "rerun-job needs --job <number>".to_string())?;
+                self.perform(Action::Rerun(RerunTarget::Job(job)), cx)
+            }
+            "rerun-failed" => {
+                let run = text("run")
+                    .and_then(|run| run.parse().ok())
+                    .ok_or_else(|| "rerun-failed needs --run <number>".to_string())?;
+                self.perform(Action::Rerun(RerunTarget::FailedInRun(run)), cx)
+            }
             "compose" => {
                 let words = text("text").ok_or("compose needs text")?;
                 self.ensure_composer(window, cx);

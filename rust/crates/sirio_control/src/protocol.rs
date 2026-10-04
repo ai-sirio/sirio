@@ -617,7 +617,8 @@ pub mod request {
 
     /// Runs one write on the active change request's tab: the buttons' own
     /// handlers, by name (`close`, `reopen`, `ready`, `draft`, `compose`,
-    /// `send`, `edit`, `edit-comment`), with their text in `params`. A debug
+    /// `send`, `edit`, `edit-comment`, `rerun-job`, `rerun-failed`), with their
+    /// text in `params`. A debug
     /// build of Sirio answers it; a release build answers "unknown method", so
     /// nothing that can write to a forge is reachable over the socket
     /// (spec §10).
