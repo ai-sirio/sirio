@@ -236,8 +236,8 @@ fn section_name(head: &str) -> (&str, bool) {
     }
 }
 
-/// Control strings can contain newlines and forge markers. Remove them before
-/// splitting lines so their payload cannot become visible text or a group.
+/// A control string ends at its terminator or its line's end. A stray
+/// introducer must never hide later lines, especially the job's errors.
 fn strip_control_strings(text: &str) -> Cow<'_, str> {
     let mut clean = String::new();
     let mut start = 0;
@@ -253,6 +253,10 @@ fn strip_control_strings(text: &str) -> Cow<'_, str> {
         chars.next();
         let mut end = text.len();
         while let Some((at, next)) = chars.next() {
+            if next == '\n' {
+                end = at;
+                break;
+            }
             if next == '\x07' && kind == ']' {
                 end = at + 1;
                 break;
@@ -756,7 +760,7 @@ mod tests {
 
     #[test]
     fn control_strings_and_intermediate_escapes_are_dropped_whole() {
-        for introducer in ['P', 'X', '^', '_'] {
+        for introducer in ['P', 'X', '^', '_', ']'] {
             let doc = gh(&format!("left{E}{introducer}hidden{E}[31m{E}\\right\n"));
             assert_eq!(texts(&doc), ["leftright"], "{introducer}");
             assert_eq!(styled(&doc, 0, "right"), LogStyle::default());
@@ -765,9 +769,9 @@ mod tests {
             let multiline = gh(&format!(
                 "left{E}{introducer}hidden\n##[group]hidden group\n{E}[31mhidden{E}\\right\n"
             ));
-            assert_eq!(texts(&multiline), ["leftright"], "{introducer}");
-            assert!(multiline.groups.is_empty());
-            assert_eq!(styled(&multiline, 0, "right"), LogStyle::default());
+            assert_eq!(texts(&multiline), ["left", "hidden group", "hiddenright"], "{introducer}");
+            assert_eq!(multiline.groups.len(), 1);
+            assert_eq!(styled(&multiline, 2, "right").fg, Some(LogColor::Ansi(1)));
         }
         assert_eq!(texts(&gh(&format!("left{E}((Bright\n"))), ["leftright"]);
     }
@@ -795,5 +799,15 @@ mod tests {
         assert_eq!((doc.groups[0].header, doc.groups[0].end), (0, 2));
         assert_eq!(default_folds(&doc), BTreeSet::from([0]));
         assert_eq!(visible_lines(&doc, &default_folds(&doc)), [0, 2]);
+    }
+
+    #[test]
+    fn an_unterminated_control_string_does_not_hide_later_errors() {
+        for introducer in ['P', 'X', '^', '_', ']'] {
+            let doc = gl(&format!("left{E}{introducer}hidden\nERROR: job failed\nafter\n"));
+            assert_eq!(doc.first_error, Some(1), "{introducer}");
+            assert_eq!(texts(&doc), ["left", "ERROR: job failed", "after"]);
+            assert_eq!(doc.lines[1].mark, Some(Mark::Error));
+        }
     }
 }
