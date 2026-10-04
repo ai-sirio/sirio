@@ -53,7 +53,10 @@ normal -- so one server covers every error path of an action:
                  in a fork, a review request Sirio cannot send back) -- the
                  same rule as `readonly`
     deletefails  GitHub's REST `DELETE .../git/refs/heads/<branch>` answers
-                 422, so a merge whose branch deletion fails can be told apart
+                 422 for a protected branch, so a merge whose branch deletion
+                 fails can be told apart
+    autodeleted  the same DELETE answers 422 "Reference does not exist", as
+                 GitHub does once its own delete-on-merge setting got there first
 
 Merge (B2b): GitHub's branch deletion is REST `DELETE /api/v3/repos/<o>/<r>/
 git/refs/heads/<branch>` (204); GitLab's cancel of an auto-merge is REST
@@ -344,6 +347,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if error:
             return self.answer(error[0], error[1], error[2])
         if self.credential() == "deletefails":
+            return self.answer(422, {"message": "Cannot delete this protected branch"})
+        if self.credential() == "autodeleted":
             return self.answer(422, {"message": "Reference does not exist"})
         self.send_response(204)
         self.send_header("Content-Length", "0")

@@ -918,6 +918,11 @@ fn delete_head(client: &ForgeClient, branch: &str) -> ActionOutcome {
     });
     match result {
         Ok(()) => ActionOutcome::default(),
+        // The repository deletes merged heads itself and got there first:
+        // the branch is gone, which is what was asked.
+        Err(ForgeError::Rejected { message, .. }) if message.contains("Reference does not exist") => {
+            ActionOutcome::default()
+        }
         Err(error) => ActionOutcome {
             warning: Some(format!("merged; deleting the branch failed: {error}")),
         },

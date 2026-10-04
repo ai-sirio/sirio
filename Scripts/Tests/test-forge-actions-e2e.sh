@@ -468,6 +468,7 @@ expect_nth_input() { # flavour Operation n(1-based) json
   [ "$got" = "$want" ] || { cat "$WORK/$1-requests.log" >&2; fail "$1 $2 #$3 was sent as $got, expected $want"; }
 }
 expect_prefix() { echo "$PROBE_OUT" | grep -q -- "^$1" || { dump; fail "no line starting: $1"; }; }
+no_prefix() { ! echo "$PROBE_OUT" | grep -q -- "^$1" || { dump; fail "a line starts: $1"; }; }
 no_rest() { # flavour "METHOD /path-prefix"
   ! grep -q -- "^$2" "$WORK/$1-requests.log" || { cat "$WORK/$1-requests.log" >&2; fail "the $1 forge saw: $2"; }
 }
@@ -513,6 +514,12 @@ probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token del
 expect_code 0 "a merge whose branch deletion fails"
 expect_line "ACT ok"
 expect_prefix "WARNING merged; deleting the branch failed:"
+echo "  a branch the forge already deleted on merge is not a failure"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token autodeleted act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
+expect_code 0 "a merge whose branch the forge deleted itself"
+expect_line "ACT ok"
+no_prefix "WARNING"
 echo "  a head in a fork is never deleted"
 reset_forge github "$GH_PORT"
 probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token fork act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
