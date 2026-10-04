@@ -26,6 +26,8 @@ use crate::text_selection::selectable_text;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// How long a rate limit that names no reset pauses the list: one refresh.
+const DEFAULT_PAUSE_SECS: i64 = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeRequestListEvent {
@@ -126,6 +128,7 @@ pub(crate) struct ChangeRequestList {
     card_task: Option<Task<()>>,
     count_task: Option<Task<()>>,
     timer_task: Option<Task<()>>,
+    resume_task: Option<Task<()>>,
     search_task: Option<Task<()>>,
     token_task: Option<Task<()>>,
 }
@@ -169,6 +172,7 @@ impl ChangeRequestList {
             card_task: None,
             count_task: None,
             timer_task: None,
+            resume_task: None,
             search_task: None,
             token_task: None,
         }
@@ -255,14 +259,30 @@ impl ChangeRequestList {
         false
     }
 
-    fn note_rate_limited(&mut self, error: &ForgeError) {
-        if let ForgeError::RateLimited {
-            reset_at: Some(reset),
-            ..
-        } = error
-        {
-            self.paused_until = Some(*reset);
-        }
+    /// Pauses every read until the forge's reset (a minute when it names
+    /// none), then looks again by itself: "retrying at HH:MM" is a promise.
+    fn note_rate_limited(&mut self, error: &ForgeError, cx: &mut Context<Self>) {
+        let ForgeError::RateLimited { reset_at, .. } = error else {
+            return;
+        };
+        let until = reset_at.unwrap_or_else(|| style::now() + DEFAULT_PAUSE_SECS);
+        self.paused_until = Some(until);
+        self.arm_resume(until, cx);
+    }
+
+    fn arm_resume(&mut self, until: i64, cx: &mut Context<Self>) {
+        let wait = Duration::from_secs((until - style::now()).clamp(1, 3600) as u64);
+        self.resume_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |list, cx| {
+                list.resume_task = None;
+                match list.paused_until {
+                    Some(until) if style::now() < until => list.arm_resume(until, cx),
+                    _ if list.visible => list.refresh(cx),
+                    _ => {}
+                }
+            });
+        }));
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -377,7 +397,7 @@ impl ChangeRequestList {
                     });
                 }
             }
-            ForgeError::RateLimited { .. } => self.note_rate_limited(&error),
+            ForgeError::RateLimited { .. } => self.note_rate_limited(&error, cx),
             _ => {}
         }
         self.list_error = Some(error);
@@ -415,7 +435,7 @@ impl ChangeRequestList {
                     return;
                 }
                 if let Err(error) = &result {
-                    list.note_rate_limited(error);
+                    list.note_rate_limited(error, cx);
                 }
                 list.card = match result {
                     Ok(None) => {
@@ -451,7 +471,7 @@ impl ChangeRequestList {
                     return;
                 }
                 if let Err(error) = &result {
-                    list.note_rate_limited(error);
+                    list.note_rate_limited(error, cx);
                 }
                 list.to_review = result.ok();
                 cx.notify();
@@ -465,6 +485,22 @@ impl ChangeRequestList {
         self.next = None;
         self.settled = false;
         self.list_error = None;
+        self.reload(cx);
+    }
+
+    /// The first page again; while the host is paused, the pause itself is
+    /// what the view shows, not a load that was never sent.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.rate_paused() {
+            self.generation += 1;
+            self.settled = true;
+            self.list_error = Some(ForgeError::RateLimited {
+                host: self.ready().map(|ready| ready.client.host().to_string()).unwrap_or_default(),
+                reset_at: self.paused_until,
+            });
+            cx.notify();
+            return;
+        }
         if let Some(ready) = self.ready().cloned() {
             self.load_page(ready, cx);
         }
@@ -478,9 +514,7 @@ impl ChangeRequestList {
                 list.applied_search = text;
                 list.rows.clear();
                 list.settled = false;
-                if let Some(ready) = list.ready().cloned() {
-                    list.load_page(ready, cx);
-                }
+                list.reload(cx);
             });
         }));
     }
@@ -1769,6 +1803,78 @@ mod tests {
             searched,
             "no search is asked while paused"
         );
+    }
+
+    #[gpui::test]
+    fn a_filter_chosen_while_paused_says_so_instead_of_loading(cx: &mut TestAppContext) {
+        let forge = forge();
+        let list = shown(cx, FakeSource::ready(testing::github_client(forge.clone()), None));
+        pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+        forge.rate_limited("ChangeRequestList", crate::change_request_style::now() + 3600);
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || list.read_with(cx, |list, _| list.list_error.is_some()));
+        list.update(cx, |list, cx| list.set_filter(Filter::ClosedAndMerged, cx));
+        list.read_with(cx, |list, cx| {
+            assert!(list.settled, "a paused list waits on a load it never sent");
+            assert!(matches!(list.list_error, Some(ForgeError::RateLimited { reset_at: Some(_), .. })));
+            assert_eq!(list.report(cx)[0], ("state".to_string(), "error".to_string()));
+        });
+        list.update(cx, |list, cx| list.set_filter(Filter::AllOpen, cx));
+    }
+
+    #[gpui::test]
+    fn a_rate_limit_without_a_reset_pauses_too(cx: &mut TestAppContext) {
+        let forge = forge();
+        let list = shown(cx, FakeSource::ready(testing::github_client(forge.clone()), None));
+        pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+        forge.fail("ChangeRequestList", 429);
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || {
+            list.read_with(cx, |list, _| matches!(list.list_error, Some(ForgeError::RateLimited { reset_at: None, .. })))
+        });
+        let asked = forge.count("ChangeRequestList");
+        list.update(cx, |list, cx| list.set_filter(Filter::AllOpen, cx));
+        cx.run_until_parked();
+        assert_eq!(forge.count("ChangeRequestList"), asked, "a 429 with no reset still pauses");
+    }
+
+    #[gpui::test]
+    fn a_reset_in_the_past_or_far_future_never_spins(cx: &mut TestAppContext) {
+        let forge = forge();
+        let list = shown(cx, FakeSource::ready(testing::github_client(forge.clone()), None));
+        pump_until(cx, || list.read_with(cx, |list, _| list.settled));
+        forge.rate_limited("ChangeRequestList", 4_102_444_800);
+        list.update(cx, |list, cx| list.refresh(cx));
+        pump_until(cx, || list.read_with(cx, |list, _| list.list_error.is_some()));
+        let asked = forge.count("ChangeRequestList");
+        // A resume for a reset in 2100 is clamped to an hour and, still
+        // paused when it fires, asks nothing and arms again.
+        cx.executor().advance_clock(Duration::from_secs(3601));
+        cx.run_until_parked();
+        assert_eq!(forge.count("ChangeRequestList"), asked, "asked while still paused");
+        assert!(list.read_with(cx, |list, _| list.resume_task.is_some()), "the resume did not arm again");
+
+        let past_forge = self::forge();
+        let past_list = shown(cx, FakeSource::ready(testing::github_client(past_forge.clone()), None));
+        pump_until(cx, || past_list.read_with(cx, |list, _| list.settled));
+        let reset_at = crate::change_request_style::now() - 3600;
+        past_forge.rate_limited("ChangeRequestList", reset_at);
+        // Arm at the current simulated time: pump_until advances that clock
+        // by 100 ms even when the answer settles at the start of its step.
+        past_list.update(cx, |list, cx| {
+            list.note_rate_limited(&ForgeError::RateLimited {
+                host: "github.com".to_string(),
+                reset_at: Some(reset_at),
+            }, cx);
+        });
+        cx.run_until_parked();
+        let asked = past_forge.count("ChangeRequestList");
+        cx.executor().advance_clock(Duration::from_millis(999));
+        cx.run_until_parked();
+        assert_eq!(past_forge.count("ChangeRequestList"), asked, "a past reset retried immediately");
+        cx.executor().advance_clock(Duration::from_millis(1));
+        pump_until(cx, || past_forge.count("ChangeRequestList") > asked);
+        assert_eq!(past_forge.count("ChangeRequestList"), asked + 1, "a past reset spun instead of waiting");
     }
 
     #[gpui::test]
