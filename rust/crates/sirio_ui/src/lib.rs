@@ -3,6 +3,7 @@
 //! OWNERSHIP: this file declares modules only. Do not add rendering code here
 //! and do not edit it from a piece worktree — the integrator owns it.
 
+pub mod ansi_log;
 pub mod browser;
 // `src/browser.rs` is compiled twice: once as this crate's `browser` module,
 // and once as a bare `mod browser;` inside the `browser_*` examples, whose
