@@ -47,7 +47,7 @@ use gpui::{
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
     GitDiffSideBySide, GitError, StatusEntry, StatusKind, StatusSnapshot, commit_diff_entry,
-    commit_files, diff_entry, discard, discard_all, range_file_diff, range_files, range_stats,
+    commit_files, diff_entry, discard, range_file_diff, range_files, range_stats,
     stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
@@ -557,7 +557,7 @@ pub struct ForgeFiles {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DiscardAsk {
     One(PathBuf),
-    All(Vec<String>),
+    All(Vec<PathBuf>),
 }
 
 /// The full-width git changes surface.
@@ -1183,7 +1183,7 @@ impl ChangesTab {
             .entries
             .iter()
             .filter(|entry| entry.has_worktree_changes())
-            .map(|entry| entry.path.display().to_string())
+            .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
         if paths.is_empty() {
             return;
@@ -1201,13 +1201,34 @@ impl ChangesTab {
     /// The dialog's confirm: closes it and queues the discard behind whatever
     /// git work is in flight, the way a click always did. `false` when no
     /// dialog was open, so a second press does nothing.
+    ///
+    /// It throws away what the dialog listed and nothing more, and only what
+    /// the surface still lists: a file an agent changed while the dialog was
+    /// open was never shown, and a change that is gone (or a path the socket
+    /// named that never had one) has nothing left to discard.
     pub fn confirm_discard(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(ask) = self.discard_ask.take() else {
             return false;
         };
-        match ask {
-            DiscardAsk::One(path) => self.start_operation(move |repo| discard(repo, &path), cx),
-            DiscardAsk::All(_) => self.start_operation(discard_all, cx),
+        let paths: Vec<PathBuf> = match ask {
+            DiscardAsk::One(path) => vec![path]
+                .into_iter()
+                .filter(|path| self.entries.iter().any(|entry| &entry.path == path))
+                .collect(),
+            DiscardAsk::All(paths) => paths
+                .into_iter()
+                .filter(|path| {
+                    self.entries
+                        .iter()
+                        .any(|entry| &entry.path == path && entry.has_worktree_changes())
+                })
+                .collect(),
+        };
+        if !paths.is_empty() {
+            self.start_operation(
+                move |repo| paths.iter().try_for_each(|path| discard(repo, path)),
+                cx,
+            );
         }
         cx.notify();
         true
@@ -3233,7 +3254,11 @@ impl ChangesTab {
                 "Discard all changes?",
                 format!(
                     "This will throw away the worktree changes to:\n{}\n\nThis cannot be undone.",
-                    paths.join("\n")
+                    paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 ),
                 "Discard All",
             ),
@@ -3248,11 +3273,15 @@ impl ChangesTab {
                 close(window, cx)
             })
         })
-        .action(move |_| {
-            dialog_button("changes-discard-confirm", label, ButtonVariant::Danger, move |_, cx| {
+        .action(move |close| {
+            dialog_button("changes-discard-confirm", label, ButtonVariant::Danger, move |window, cx| {
+                // Confirm first: closing runs `close_discard`, which would
+                // take the ask before the confirm could read it. Then close
+                // like Cancel does, which hands the keyboard back.
                 confirm.update(cx, |tab, cx| {
                     tab.confirm_discard(cx);
                 });
+                close(window, cx);
             })
         });
         Some(
@@ -5471,6 +5500,79 @@ mod tests {
         cx.simulate_mouse_up(row, gpui::MouseButton::Right, Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("changes-menu-open-forge").is_some());
+    }
+
+    /// Discard all throws away what its dialog listed, nothing more: a file an
+    /// agent changed while the dialog was open was never shown, so it survives.
+    #[gpui::test]
+    async fn discard_all_throws_away_only_what_it_listed(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("other.txt"), "other\n").expect("seed other file");
+        git(&dir.0, &["add", "other.txt"]);
+        git(&dir.0, &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "other"]);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        tab.update(&mut cx.cx, |tab, cx| tab.ask_discard_all(cx));
+        std::fs::write(dir.0.join("other.txt"), "an agent's edit\n").expect("edit while the dialog is open");
+        tab.update(&mut cx.cx, |tab, cx| {
+            assert!(tab.confirm_discard(cx));
+        });
+        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none() && tab.pending_operations.is_empty());
+        let paths: Vec<_> = status(&dir.0)
+            .expect("status after discard all")
+            .entries
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(paths, vec![PathBuf::from("other.txt")], "only the listed file was discarded");
+    }
+
+    /// A Discard whose path the surface no longer lists (the change is gone,
+    /// or the socket named a path that never had one) discards nothing and
+    /// raises no git error over the whole surface.
+    #[gpui::test]
+    async fn a_discard_of_a_path_the_surface_no_longer_lists_does_nothing(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        tab.update(&mut cx.cx, |tab, cx| {
+            tab.ask_discard(PathBuf::from("never-was.txt"), cx);
+            assert!(tab.confirm_discard(cx), "the dialog was open and is now closed");
+        });
+        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none() && tab.pending_operations.is_empty());
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.git_error.clone()), None);
+        assert_eq!(tab.read_with(&cx.cx, |tab, _| section_count(tab, "Changed")), 1);
+    }
+
+    /// A confirm by mouse hands the keyboard back, as Cancel and Escape do:
+    /// row navigation keeps working after a Discard.
+    #[gpui::test]
+    async fn confirming_discard_gives_the_keyboard_back(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.run_until_parked();
+        let focus = tab.read_with(&cx.cx, |tab, _| tab.list_focus.clone().expect("list focus"));
+        cx.update(|window, cx| focus.focus(window, cx));
+        let row = cx.debug_bounds("changes-file-row").expect("the row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let discard = cx.debug_bounds("changes-discard").expect("Discard");
+        cx.simulate_click(discard.center(), Modifiers::none());
+        cx.run_until_parked();
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "the list has the keyboard again"
+        );
     }
 
     /// Ely's single-choice group empties its selection when the chosen face is
