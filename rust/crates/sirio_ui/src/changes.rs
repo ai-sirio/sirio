@@ -216,6 +216,22 @@ impl DiffViewMode {
     pub fn set(mode: Self, cx: &mut App) {
         cx.set_global(DiffViewModeSetting(mode));
     }
+
+    /// The mode as the control socket names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            DiffViewMode::Unified => "unified",
+            DiffViewMode::Split => "split",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "unified" => Some(DiffViewMode::Unified),
+            "split" => Some(DiffViewMode::Split),
+            _ => None,
+        }
+    }
 }
 
 /// Events emitted to the shell.
@@ -1316,6 +1332,28 @@ impl ChangesTab {
         }
         self.unified_width_dirty = true;
         cx.notify();
+    }
+
+    /// The control socket's `surface.changes.view`: the diff's layout, a
+    /// file opened the way a click on its row opens it, and the toolbar's
+    /// Refresh. The poll only runs once the surface is drawn, so a headless
+    /// run asks for the refresh a person would get from it.
+    pub fn control_view(
+        &mut self,
+        mode: Option<DiffViewMode>,
+        expand: Option<&Path>,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mode) = mode {
+            self.set_view_mode(mode, cx);
+        }
+        if let Some(path) = expand {
+            self.focus_path(path, cx);
+        }
+        if refresh {
+            self.refresh(cx);
+        }
     }
 
     /// F-CHG-13: `RightPanelActionEvent::OpenDiff(path)` and

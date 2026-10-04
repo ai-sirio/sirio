@@ -446,6 +446,22 @@ pub mod request {
         changes_all_action("surface.changes.discard_all", worktree)
     }
 
+    /// The Changes surface's layout (`unified`/`split`), a file to open and
+    /// the toolbar's Refresh. Writes nothing.
+    pub fn changes_view(mode: Option<&str>, expand: Option<&str>, refresh: bool) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if refresh {
+            params.insert("refresh".to_string(), "true".to_string());
+        }
+        if let Some(mode) = mode {
+            params.insert("mode".to_string(), mode.to_string());
+        }
+        if let Some(expand) = expand {
+            params.insert("expand".to_string(), expand.to_string());
+        }
+        request("surface.changes.view", params)
+    }
+
     pub fn settings_open(section: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();
         if let Some(section) = section {

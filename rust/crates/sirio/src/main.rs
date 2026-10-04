@@ -1033,6 +1033,12 @@ enum ControlAction {
     ReadChanges {
         reply: ControlReply,
     },
+    ChangesView {
+        mode: Option<String>,
+        expand: Option<String>,
+        refresh: bool,
+        reply: ControlReply,
+    },
     OpenSettings {
         section: Option<SettingsCategory>,
         reply: ControlReply,
@@ -2062,6 +2068,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.changes.discard",
                     "surface.changes.stage_all",
                     "surface.changes.discard_all",
+                    "surface.changes.view",
                     "git.branches",
                     "surface.settings.open",
                     "surface.settings.select",
@@ -2231,6 +2238,12 @@ impl ControlHandler for AppControlHandler {
             "surface.changes.discard" => self.run_changes_path_action(request, discard),
             "surface.changes.stage_all" => self.run_changes_all_action(request, stage_all),
             "surface.changes.discard_all" => self.run_changes_all_action(request, discard_all),
+            "surface.changes.view" => {
+                let mode = request.params.get("mode").cloned();
+                let expand = request.params.get("expand").cloned();
+                let refresh = request.params.get("refresh").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::ChangesView { mode, expand, refresh, reply })
+            }
             // F-GIT-BRANCH-01: GitBranches::list has no UI caller (the New
             // Worktree prompt is free-text with no read-back), so this
             // socket door is the exercisable route the row's own VERIFY
@@ -5199,6 +5212,9 @@ impl SirioWorkspace {
                                 ControlAction::ReadChanges { reply } => {
                                     let result = workspace.control_read_changes(cx);
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::ChangesView { mode, expand, refresh, reply } => {
+                                    let _ = reply.send(workspace.control_changes_view(mode, expand, refresh, cx));
                                 }
                                 ControlAction::OpenSettings { section, reply } => {
                                     let result = workspace.control_open_settings(section, cx);
@@ -14841,11 +14857,37 @@ impl SirioWorkspace {
         self.control_read_changes(cx)
     }
 
+    fn control_changes_view(
+        &mut self,
+        mode: Option<String>,
+        expand: Option<String>,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some((_, view)) = self.active_changes_view() else {
+            return Err("Changes surface is not open".to_string());
+        };
+        let mode = match mode.as_deref() {
+            None | Some("") => None,
+            Some(name) => Some(
+                sirio_ui::changes::DiffViewMode::parse(name)
+                    .ok_or_else(|| format!("unknown mode '{name}': unified or split"))?,
+            ),
+        };
+        view.update(cx, |tab, cx| tab.control_view(mode, expand.as_deref().map(Path::new), refresh, cx));
+        self.control_read_changes(cx)
+    }
+
     fn control_read_changes(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
         let Some((tab, view)) = self.active_changes_view() else {
             return Err("Changes surface is not open".to_string());
         };
-        changes_report_pairs(tab.id, &view.read(cx).report())
+        let mut pairs = changes_report_pairs(tab.id, &view.read(cx).report())?;
+        pairs.push((
+            "mode".to_string(),
+            sirio_ui::changes::DiffViewMode::get(cx).name().to_string(),
+        ));
+        Ok(pairs)
     }
 
     fn control_open_settings(
@@ -36790,6 +36832,7 @@ done
             | ControlAction::RestoreSession { reply }
             | ControlAction::OpenChanges { reply, .. }
             | ControlAction::ReadChanges { reply }
+            | ControlAction::ChangesView { reply, .. }
             | ControlAction::OpenSettings { reply, .. }
             | ControlAction::SelectSettings { reply, .. }
             | ControlAction::ReadSettings { reply }
@@ -36918,6 +36961,7 @@ done
             }
             "surface.changes.stage_all" => request::changes_stage_all(Some("workspace-1")),
             "surface.changes.discard_all" => request::changes_discard_all(Some("workspace-1")),
+            "surface.changes.view" => request::changes_view(Some("split"), None, false),
             "git.branches" => request_with_params(method, &[]),
             "surface.settings.open" => request::settings_open(None),
             "surface.settings.select" => request_with_params(method, &[]),
