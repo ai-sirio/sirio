@@ -42,7 +42,7 @@
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
-    Hsla, PromptLevel, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
+    HighlightStyle, Hsla, PromptLevel, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -54,6 +54,7 @@ use sirio_theme::Theme;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -61,13 +62,14 @@ use std::time::Duration;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, ToggleGroup, ToggleItem},
     data_display::CountBadge,
+    feedback::Callout,
     git::{DiffStat as EDiffStat, GitStatus, GitStatusBadge},
-    primitives::{Icon as EIcon, IconName},
+    primitives::{Icon as EIcon, IconName, Severity},
     theme::{ControlSize, IconSize as EIconSize},
 };
 use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
-use crate::text_selection::selectable_text;
+use crate::text_selection::{SelectableText, selectable_text};
 
 #[cfg(test)]
 mod perf_baseline;
@@ -100,7 +102,10 @@ const DIFF_NUMBER_WIDTH: f32 = 40.0;
 const DIFF_SIGN_WIDTH: f32 = 12.0;
 const DIFF_ROW_GAP: f32 = 8.0;
 const DIFF_ROW_PADDING: f32 = 10.0;
-const DIFF_WASH_ALPHA: f32 = 0.10;
+/// A line's wash and its changed words' wash, as Ely's `DiffViewer` draws
+/// them from the palette.
+const LINE_WASH: f32 = 0.08;
+const WORD_WASH: f32 = 0.25;
 
 fn clamped_x(x: Pixels, content: Pixels, viewport: Pixels) -> Pixels {
     x.clamp(-(content - viewport).max(px(0.0)), px(0.0))
@@ -383,6 +388,9 @@ enum ChangeRow {
         section: ChangeSection,
         path: PathBuf,
         line: DiffLine,
+        /// The stretch of the line that changed against its partner in the
+        /// run, washed darker (`segment_words`).
+        words: Option<Range<usize>>,
     },
     /// One row of the side-by-side rendering: old on the left, new on the
     /// right, either side possibly absent where a run was longer than its
@@ -395,6 +403,9 @@ enum ChangeRow {
         /// unique element id.
         key: usize,
         row: DiffSideBySideRow,
+        /// The changed stretch on the left and on the right of a zipped
+        /// replacement (`changed_span`).
+        words: (Option<Range<usize>>, Option<Range<usize>>),
     },
     /// A file whose diff could not be fetched. Rendered as an explicit
     /// "diff unavailable" row when expanded, so an empty expansion can
@@ -403,6 +414,8 @@ enum ChangeRow {
         section: ChangeSection,
         path: PathBuf,
         message: String,
+        /// Git failed, so Retry can help; a binary file did not fail.
+        failed: bool,
     },
 }
 
@@ -472,6 +485,7 @@ impl ListRow {
                     section,
                     path,
                     line,
+                    ..
                 } => {
                     4u8.hash(state);
                     section.hash(state);
@@ -1267,6 +1281,13 @@ impl ChangesTab {
     /// load fetches every entry eagerly, so this only does real work for a
     /// row a lazy refresh had dropped, or a fresh diff a mutation-triggered
     /// refresh raced ahead of.
+    /// The unavailable diff's Retry: forget the failure, then ask git again.
+    fn retry_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.diff_errors.remove(&path);
+        self.fetch_expanded_diff(path, cx);
+        cx.notify();
+    }
+
     fn fetch_expanded_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) {
             return;
@@ -1549,6 +1570,7 @@ impl ChangesTab {
                     section,
                     path: entry.path.clone(),
                     message: format!("diff unavailable: {error}"),
+                    failed: true,
                 });
             }
             return;
@@ -1567,6 +1589,7 @@ impl ChangesTab {
                 section,
                 path: entry.path.clone(),
                 message: "Binary diff unavailable".to_string(),
+                failed: false,
             });
             return;
         }
@@ -1780,17 +1803,21 @@ impl ChangesTab {
                 section,
                 path,
                 line,
-            } => Self::render_diff_line(section, path, line, unified_x, theme).into_any_element(),
+                words,
+            } => Self::render_diff_line(section, path, line, words, unified_x, theme)
+                .into_any_element(),
             ChangeRow::SplitLine {
                 section,
                 path,
                 key,
                 row,
+                words,
             } => Self::render_split_line(
                 section,
                 path,
                 key,
                 row,
+                words,
                 split_left_x,
                 split_right_x,
                 theme,
@@ -1800,34 +1827,35 @@ impl ChangesTab {
                 section,
                 path,
                 message,
-            } => div()
-                .id(format!(
-                    "diff-unavailable-{}-{}",
-                    section.slug(),
-                    path.display()
-                ))
-                .h(px(DIFF_LINE_HEIGHT))
-                .w_full()
-                .flex_none()
-                .flex()
-                .items_start()
-                .gap(px(DIFF_ROW_GAP))
-                .px(px(DIFF_ROW_PADDING))
-                .py(px(1.0))
-                // A message, not code: the row matches the sidebar face.
-                .font_family(theme.typography.ui_family)
-                .text_size(theme.typography.scaled(12.0))
-                .line_height(px(18.0))
-                .text_color(theme.ely.fg_subtle)
-                .child(div().w(px(DIFF_HUNK_GUTTER_WIDTH)).flex_none().child("⋯"))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(message),
-                )
-                .into_any_element(),
+                failed,
+            } => {
+                let retry_path = path.clone();
+                let retry_entity = entity.clone();
+                div()
+                    .id(format!("diff-unavailable-{}-{}", section.slug(), path.display()))
+                    .debug_selector(|| "changes-diff-unavailable".into())
+                    .w_full()
+                    .flex_none()
+                    .px(px(DIFF_ROW_PADDING))
+                    .py(px(6.0))
+                    .child(
+                        Callout::new(if failed { Severity::Danger } else { Severity::Info })
+                            .title(if failed { "Could not load the diff" } else { "Binary file" })
+                            .child(selectable_text(message))
+                            .when(failed, |callout| {
+                                callout.child(row_button(
+                                    format!("diff-retry-{}-{}", section.slug(), path.display()),
+                                    "changes-diff-retry",
+                                    "Retry",
+                                    move |_, cx| {
+                                        retry_entity
+                                            .update(cx, |tab, cx| tab.retry_diff(retry_path.clone(), cx));
+                                    },
+                                ))
+                            }),
+                    )
+                    .into_any_element()
+            }
         }
     }
 
@@ -2171,6 +2199,7 @@ impl ChangesTab {
         path: PathBuf,
         key: usize,
         row: DiffSideBySideRow,
+        words: (Option<Range<usize>>, Option<Range<usize>>),
         left_x: Pixels,
         right_x: Pixels,
         theme: Theme,
@@ -2192,7 +2221,7 @@ impl ChangesTab {
             .font_family(theme.typography.code_family)
             .text_size(theme.typography.scaled(12.0))
             .child(
-                split_cell(row.left, true, left_x, theme)
+                split_cell(row.left, words.0, true, left_x, theme)
                     .debug_selector(|| "changes-split-left".into()),
             )
             .child(
@@ -2202,7 +2231,7 @@ impl ChangesTab {
                     .bg(theme.ely.border),
             )
             .child(
-                split_cell(row.right, false, right_x, theme)
+                split_cell(row.right, words.1, false, right_x, theme)
                     .debug_selector(|| "changes-split-right".into()),
             )
     }
@@ -2211,13 +2240,27 @@ impl ChangesTab {
         section: ChangeSection,
         path: PathBuf,
         line: DiffLine,
+        words: Option<Range<usize>>,
         unified_x: Pixels,
         theme: Theme,
     ) -> impl IntoElement {
-        let (background, marker_color, marker, text_color) = match line.origin {
-            DiffOrigin::Context => (theme.ely.bg, theme.ely.fg_subtle, " ", theme.ely.fg_muted),
-            DiffOrigin::Addition => (diff_wash(theme.sirio.diff_add), theme.sirio.diff_add, "+", theme.ely.fg),
-            DiffOrigin::Deletion => (diff_wash(theme.sirio.diff_del), theme.sirio.diff_del, "-", theme.ely.fg),
+        let colors = &theme.ely;
+        let (background, marker_color, marker, text_color, word_wash) = match line.origin {
+            DiffOrigin::Context => (colors.bg, colors.fg_subtle, " ", colors.fg_muted, None),
+            DiffOrigin::Addition => (
+                colors.success.opacity(LINE_WASH),
+                colors.success,
+                "+",
+                colors.fg,
+                Some(colors.success.opacity(WORD_WASH)),
+            ),
+            DiffOrigin::Deletion => (
+                colors.danger.opacity(LINE_WASH),
+                colors.danger,
+                "-",
+                colors.fg,
+                Some(colors.danger.opacity(WORD_WASH)),
+            ),
         };
         div()
             .id(format!(
@@ -2290,7 +2333,7 @@ impl ChangesTab {
                         // is the line as it reads in the file. Each row has
                         // an id of its own, which is what keeps two identical
                         // lines (a closing brace) from selecting together.
-                        .child(selectable_text(line.content)),
+                        .child(washed_text(line.content, words, word_wash)),
                 ),
             )
     }
@@ -2472,21 +2515,34 @@ fn push_segment(
 ) {
     match mode {
         DiffViewMode::Unified => {
-            for line in lines {
+            let words = segment_words(lines);
+            for (line, words) in lines.iter().zip(words) {
                 rows.push(ChangeRow::Line {
                     section,
                     path: path.to_path_buf(),
                     line: line.clone(),
+                    words,
                 });
             }
         }
         DiffViewMode::Split => {
             for row in GitDiffSideBySide::rows_from_lines(lines) {
+                let words = match (&row.left, &row.right) {
+                    (Some(left), Some(right))
+                        if left.origin == DiffOrigin::Deletion
+                            && right.origin == DiffOrigin::Addition =>
+                    {
+                        changed_span(&left.content, &right.content)
+                            .map_or((None, None), |(old, new)| (Some(old), Some(new)))
+                    }
+                    _ => (None, None),
+                };
                 rows.push(ChangeRow::SplitLine {
                     section,
                     path: path.to_path_buf(),
                     key: *split_key,
                     row,
+                    words,
                 });
                 *split_key += 1;
             }
@@ -2523,6 +2579,7 @@ fn split_row_shape(row: &DiffSideBySideRow) -> &'static str {
 /// a zipped deletion/addition pair shows one on each side.
 fn split_cell(
     line: Option<DiffSideBySideLine>,
+    words: Option<Range<usize>>,
     old: bool,
     side_x: Pixels,
     theme: Theme,
@@ -2567,10 +2624,21 @@ fn split_cell(
         // renderer to show — invisible in a photograph.
         return cell.bg(theme.ely.sunken);
     };
-    let (background, marker_color, marker) = match line.origin {
-        DiffOrigin::Context => (theme.ely.bg, theme.ely.fg_subtle, " "),
-        DiffOrigin::Addition => (diff_wash(theme.sirio.diff_add), theme.sirio.diff_add, "+"),
-        DiffOrigin::Deletion => (diff_wash(theme.sirio.diff_del), theme.sirio.diff_del, "-"),
+    let colors = &theme.ely;
+    let (background, marker_color, marker, word_wash) = match line.origin {
+        DiffOrigin::Context => (colors.bg, colors.fg_subtle, " ", None),
+        DiffOrigin::Addition => (
+            colors.success.opacity(LINE_WASH),
+            colors.success,
+            "+",
+            Some(colors.success.opacity(WORD_WASH)),
+        ),
+        DiffOrigin::Deletion => (
+            colors.danger.opacity(LINE_WASH),
+            colors.danger,
+            "-",
+            Some(colors.danger.opacity(WORD_WASH)),
+        ),
     };
     let number = if old {
         line.old_line_number
@@ -2626,7 +2694,7 @@ fn split_cell(
                             // text in the same row, so each needs its own
                             // identity or selecting one would select both.
                             .child(
-                                selectable_text(line.content)
+                                washed_text(line.content, words, word_wash)
                                     .id(if old { "split-old" } else { "split-new" }),
                             ),
                     ),
@@ -3245,12 +3313,81 @@ fn row_icon_button(
         .into_any_element()
 }
 
-/// The gallery derives row washes from the semantic ink rather than keeping
-/// a second palette entry for the same meaning.
-fn diff_wash(color: Hsla) -> Hsla {
-    Hsla {
-        a: DIFF_WASH_ALPHA,
-        ..color
+/// The changed stretch of a replaced line on each side: what lies between
+/// the two lines' common prefix and common suffix, widened to whole words.
+/// `None` when the lines are equal or share nothing, where the line's own
+/// wash already says everything.
+fn changed_span(old: &str, new: &str) -> Option<(Range<usize>, Range<usize>)> {
+    if old == new {
+        return None;
+    }
+    let prefix: usize = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    let suffix: usize = old[prefix..]
+        .chars()
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    if prefix == 0 && suffix == 0 {
+        return None;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let widen = |text: &str, start: usize, end: usize| {
+        let start = start
+            - text[..start]
+                .chars()
+                .rev()
+                .take_while(|c| is_word(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        let end = end
+            + text[end..]
+                .chars()
+                .take_while(|c| is_word(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        start..end
+    };
+    Some((
+        widen(old, prefix, old.len() - suffix),
+        widen(new, prefix, new.len() - suffix),
+    ))
+}
+
+/// The changed words of every line of one deletion/addition run, paired the
+/// way `GitDiffSideBySide` zips the run: the n-th deletion with the n-th
+/// addition.
+fn segment_words(lines: &[DiffLine]) -> Vec<Option<Range<usize>>> {
+    let mut words = vec![None; lines.len()];
+    let of = |origin| (0..lines.len()).filter(move |&ix| lines[ix].origin == origin);
+    for (old, new) in of(DiffOrigin::Deletion).zip(of(DiffOrigin::Addition)) {
+        if let Some((old_words, new_words)) = changed_span(&lines[old].content, &lines[new].content) {
+            words[old] = Some(old_words);
+            words[new] = Some(new_words);
+        }
+    }
+    words
+}
+
+/// A line's code as selectable text, its changed words washed.
+#[track_caller]
+fn washed_text(text: String, words: Option<Range<usize>>, wash: Option<Hsla>) -> SelectableText {
+    let text = selectable_text(text);
+    match (words, wash) {
+        (Some(range), Some(wash)) if !range.is_empty() => text.highlights(vec![(
+            range,
+            HighlightStyle {
+                background_color: Some(wash),
+                ..Default::default()
+            },
+        )]),
+        _ => text,
     }
 }
 
@@ -5052,6 +5189,88 @@ mod tests {
         let names: Vec<_> = report.sections.iter().map(|section| section.name).collect();
         assert!(names.contains(&"Changes"), "{names:?}");
         assert!(!names.contains(&"Staged"), "{names:?}");
+    }
+
+    #[test]
+    fn a_changed_word_is_the_only_stretch_washed() {
+        let (old, new) = changed_span("let x = 1;", "let x = 2;").expect("a stretch");
+        assert_eq!((&"let x = 1;"[old], &"let x = 2;"[new]), ("1", "2"));
+    }
+
+    #[test]
+    fn a_stretch_is_widened_to_whole_words() {
+        let (old, new) = changed_span("let count = 10;", "let count = 12;").expect("a stretch");
+        assert_eq!((&"let count = 10;"[old], &"let count = 12;"[new]), ("10", "12"));
+    }
+
+    /// Identical lines have nothing changed, and lines with nothing in common
+    /// are already said by the line wash; a word wash over all of it adds noise.
+    #[test]
+    fn identical_or_wholly_different_lines_wash_no_words() {
+        assert_eq!(changed_span("same", "same"), None);
+        assert_eq!(changed_span("abc", "xyz"), None);
+    }
+
+    /// Review Focus 3: slicing a `String` off a character boundary panics.
+    #[test]
+    fn a_changed_stretch_falls_on_character_boundaries() {
+        let (old_text, new_text) = ("città bella è", "città brutta è");
+        let (old, new) = changed_span(old_text, new_text).expect("a stretch");
+        assert_eq!((&old_text[old], &new_text[new]), ("bella", "brutta"));
+        let (old, new) = changed_span("🙂 a", "🙃 a").expect("a stretch");
+        assert_eq!((&"🙂 a"[old], &"🙃 a"[new]), ("🙂", "🙃"));
+    }
+
+    /// A run pairs its n-th deletion with its n-th addition — the side-by-side
+    /// model's zip — and an addition left over has nothing to compare with.
+    #[test]
+    fn a_run_pairs_its_nth_deletion_with_its_nth_addition() {
+        let line = |origin, content: &str| DiffLine {
+            origin,
+            old_line_number: None,
+            new_line_number: None,
+            content: content.to_string(),
+        };
+        let lines = [
+            line(DiffOrigin::Deletion, "a = 1"),
+            line(DiffOrigin::Deletion, "b = 1"),
+            line(DiffOrigin::Addition, "a = 2"),
+            line(DiffOrigin::Addition, "b = 2"),
+            line(DiffOrigin::Addition, "c = 3"),
+        ];
+        let words = segment_words(&lines);
+        let shown: Vec<Option<&str>> = words
+            .iter()
+            .zip(&lines)
+            .map(|(range, line)| range.clone().map(|range| &line.content[range]))
+            .collect();
+        assert_eq!(shown, vec![Some("1"), Some("1"), Some("2"), Some("2"), None]);
+    }
+
+    /// An unavailable diff offers Retry, and Retry asks git again instead of
+    /// keeping the old failure (`fetch_expanded_diff` skips a path that has one).
+    #[gpui::test]
+    async fn retry_on_an_unavailable_diff_asks_git_again(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let (base, head) = (rev_parse(&dir.0, "HEAD~1"), rev_parse(&dir.0, "HEAD"));
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_, cx| ChangesTab::for_range(dir.0.clone(), base, head, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, _| window.root::<ChangesTab>().flatten().expect("root"));
+        wait_for_tab(&cx, &tab, |tab| !tab.entries.is_empty());
+        let path = tab.read_with(&cx.cx, |tab, _| tab.entries[0].path.clone());
+        tab.update(&mut cx.cx, |tab, cx| {
+            tab.diffs.remove(&path);
+            tab.diff_errors.insert(path.clone(), "fatal: transient".to_string());
+            tab.expanded_changes.insert((ChangeSection::Staged, path.clone()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let retry = cx.debug_bounds("changes-diff-retry").expect("Retry on the unavailable diff");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        wait_for_tab(&cx, &tab, |tab| tab.diffs.contains_key(&path) && !tab.diff_errors.contains_key(&path));
     }
 
     /// Ely's single-choice group empties its selection when the chosen face is

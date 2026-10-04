@@ -33,7 +33,7 @@
 use crate::chat::paint_wrapped_span;
 use gpui::{
     App, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId, EntityId,
-    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    FocusHandle, Global, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, SharedString, StyledText, TextLayout, Window, accesskit, actions,
 };
@@ -403,6 +403,12 @@ pub fn selectable_text(text: impl Into<SharedString>) -> SelectableText {
 impl SelectableText {
     pub fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = id.into();
+        self
+    }
+
+    /// Washes or colours stretches of the text without changing its layout.
+    pub fn highlights(mut self, highlights: Vec<(Range<usize>, HighlightStyle)>) -> Self {
+        self.styled = StyledText::new(self.text.clone()).with_highlights(highlights);
         self
     }
 }
