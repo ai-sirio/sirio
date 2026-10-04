@@ -772,19 +772,22 @@ strategy; §15.1–§15.3 remain the drawing contract.
 - The actions harness accepts `--appearance light|dark` and seeds each
   isolated CI/UI database through `appearance_seed`. State-only proof
   establishes re-runs, bounded log reads, parser output, folds, copy and
-  restoration. Drawing and the running-log timer's visible, hidden and
-  rate-limited branches remain controller proof from window draws.
+  restoration. Drawing and the running-log timer's visible, hidden, slow
+  and rate-limited branches are proven by the framed run.
+- After the final review: a tick never starts a second read of a log while
+  one is in flight, and spends its drawn mark only on a read that starts,
+  so a rate-limited log resumes after the reset by itself. The signed URL
+  is fetched https-only at every hop in a release build. A restored tab
+  keeps its link only as `https://` on its change request's host, and its
+  name without control characters, capped at 120.
 
 ### §15.5 Not verified
 
-- The B2c dark/light frames, their Ely chrome, selection, horizontal scroll,
-  scrollbar behavior and the painted *Jump to first error* position. The
-  testing document's *What was seen* is reserved for the controller after
-  the framed run.
-- Periodic reload of a visible running log, stopping reload when hidden,
-  and suppression during a rate limit. These assertions exist in the
-  framed `ci` stage; `--state-only` prints `SKIP:` and never arms the
-  draw-dependent timer.
+- Selection inside a log line, dragging the scrollbars, and *Jump to first
+  error* in a log long enough to scroll. The dark and light frames, the
+  drawn jump in a log that fits, and the reload timer (visible, hidden,
+  slow, rate-limited and resuming after the reset) were seen on 2026-10-05
+  (testing document, *What was seen*).
 - The `glab` paths, including log reads and GitLab CLI writes: `glab` is
   not installed on the implementation machine. Token means on both fake
   forges and the installed `gh` means are exercised.

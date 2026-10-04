@@ -371,22 +371,56 @@ Each capture is matched to the app PID. Both artifact directories retain
   error and its expired-log state.
 
 The framed GitLab half also checks that a visible running log reloads at
-least twice over 12 seconds, that hiding it stops reads, and that a rate
-limit suppresses reads. State-only runs skip those draw-dependent checks.
+least twice over 12 seconds, that hiding it stops reads once the tick
+already due has gone out, that a trace slower than the tick is never read
+twice at once, and that a rate limit suppresses reads until its reset and
+no longer. State-only runs skip those draw-dependent checks.
 The socket's pending `top` index proves a logical jump in state-only mode;
 inspect `*-log-error` to establish the actual viewport placement.
 
-### What was seen
+### What was seen (2026-10-05, Xvfb, lavapipe)
 
-(filled in by the controller after the framed run)
+Both appearances ran to `FORGE ACTIONS E2E OK` on `:96` (1600x1500), with
+12 PID-matched frames each; every frame was read.
+
+- **Checks.** GitHub groups by workflow run (*CI 1 failed · 2*, *Lint*,
+  *Other checks*), with *Re-run failed* on the CI header and Re-run plus
+  *Open in browser* on the failed `test` row only; `deploy/preview` (a status
+  context) has neither. After the re-run CI folds, since nothing in it is
+  failed or running, and running *Lint* sorts first. GitLab draws a
+  *Pipeline #45* row carrying *Re-run failed* above the `test`, `build` and
+  `deploy` stages; after the write `rspec` shows as created and has no
+  Re-run.
+- **Log.** The toolbar reads `test  complete` (`lint  running` in amber),
+  with Refresh, *Jump to first error*, Copy log and Open in browser. Line
+  numbers sit in a dim gutter; folded GitHub groups show a chevron and a
+  Copy button. `##[error]` / `ERROR:` lines are red and `$ bundle exec
+  rspec` green. GitLab's open section keeps its members, and the
+  carriage-return progress line shows only its last state.
+- **Jump.** In both fixtures the visible lines fit the viewport, so the jump
+  leaves row 0 on top and the error on screen (`scrollable=no`,
+  `error_shown=yes`); the first framed run's strict `top` check was wrong
+  for that case, not the jump.
+- **Gone.** A red *Log unavailable* Callout (`not found on ghe.test`,
+  `not found on gitlab.test`) with *Retry* and *Close*, the last good log
+  still below it.
+- **Waiting.** A running GitHub job shows the blue notice *The log is not
+  available until the job finishes.* with *Retry*.
+- **Truncated.** *Showing the last 4 MiB of the log; 1 MiB before it are on
+  the forge.* with *Open in browser*; the tail's gutter starts at 1, and the
+  horizontal scrollbar is drawn along the bottom.
+- **Reload (GitLab, drawn).** A visible running log read its trace 3 times
+  in 12 s. Once hidden, one read already due went out and then none in the
+  next 12 s. With a 7 s trace, no two reads of it were ever in flight at
+  once (`/__stats`). Under a 20 s rate limit nothing was read for 12 s, and
+  reads resumed on their own after the reset.
 
 ### Not seen
 
-- B2c frames in either appearance, actual viewport placement, selection,
-  horizontal scrolling and scrollbar behavior: the implementation runs use
-  `--state-only`. The controller records the framed results above.
-- The visible, hidden and rate-limited branches of periodic log reload;
-  state-only never arms the drawing-dependent timer and prints `SKIP:`.
+- Selection inside a log line, dragging either scrollbar, and a jump in a
+  log long enough to scroll: no step drives them.
+- The minor flaws the frames show: the horizontal scrollbar overlaps the
+  last visible row, and the truncation notice says "1 MiB … are".
 - `glab` log and write paths: it is not installed on this machine. Token
   means on both fake forges and the installed `gh` means are exercised.
 - A live GitHub running log or any live forge write. The fake proves the
