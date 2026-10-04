@@ -63,6 +63,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::controls;
+use ely_gpui_component::{
+    buttons::{ToggleGroup, ToggleItem},
+    primitives::IconName,
+    theme::ControlSize,
+};
 use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -188,20 +193,6 @@ struct DiffViewModeSetting(DiffViewMode);
 impl gpui::Global for DiffViewModeSetting {}
 
 impl DiffViewMode {
-    /// Display order; index into this is the segmented control's index.
-    const ORDER: [DiffViewMode; 2] = [DiffViewMode::Unified, DiffViewMode::Split];
-
-    fn index(self) -> usize {
-        match self {
-            DiffViewMode::Unified => 0,
-            DiffViewMode::Split => 1,
-        }
-    }
-
-    fn from_index(index: usize) -> Self {
-        Self::ORDER.get(index).copied().unwrap_or_default()
-    }
-
     /// The current choice. Defaults to `Unified` when nothing has set it,
     /// so a test (or a first launch) never has to install the global.
     pub fn get(cx: &App) -> Self {
@@ -2351,7 +2342,6 @@ impl ChangesTab {
         let collapse_entity = entity.clone();
         let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
-        let tooltip_builder = change_tooltip_builder(self.embedded_in_panel);
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -2382,102 +2372,74 @@ impl ChangesTab {
                     .text_color(theme.ely.fg)
                     .child(title),
             )
-            // The view-mode control sits at the head of the action cluster,
-            // with the other two *view* controls (Expand All / Collapse
-            // All) beside it and the git *mutations* (Stage all, Discard
-            // all) after them. It is the same segmented primitive Settings
-            // uses for System/Light/Dark, and it belongs in this header for
-            // the same reason Expand All does: it changes how the whole
-            // surface reads, not one file.
-            //
-            // The precedent taken from macOS is the *placement and
-            // primitive*, not the semantics: `SideBySideDiffView.scopeBar`
-            // (`DiffContentAdapter.swift:179`) is a segmented `Picker` in
-            // exactly this position at the top of the diff surface — but it
-            // picks the diff's *scope* (whole file vs hunks), because that
-            // build had only one renderer and so never needed a view-mode
-            // choice at all. Do not read this control as a port of that one.
-            .child(controls::segmented_icons_with_tooltip(
-                "changes-view-mode",
-                &[(Icon::DiffUnified, "Unified"), (Icon::DiffSplit, "Split")],
-                mode.index(),
-                theme,
-                tooltip_builder,
-                move |index, cx| {
-                    mode_entity.update(cx, |tab, cx| {
-                        tab.set_view_mode(DiffViewMode::from_index(index), cx);
-                    });
-                },
-            ))
+            // The view mode heads the action cluster: it changes how the
+            // whole surface reads, like Expand All beside it. One choice of
+            // two; pressing the chosen face again empties Ely's selection,
+            // which keeps the mode.
+            .child(
+                div()
+                    .id("changes-view-mode")
+                    .debug_selector(|| "changes-view-mode".into())
+                    .flex_none()
+                    .child(
+                        ToggleGroup::new("changes-view-mode-group")
+                            .size(ControlSize::Sm)
+                            .item(ToggleItem::new("unified").icon(IconName::Rows2).tooltip("Unified"))
+                            .item(ToggleItem::new("split").icon(IconName::Columns2).tooltip("Split"))
+                            .selected([mode.name()])
+                            .on_change(move |selected, _, cx| {
+                                let Some(mode) = selected.first().and_then(|value| DiffViewMode::parse(value))
+                                else {
+                                    return;
+                                };
+                                mode_entity.update(cx, |tab, cx| tab.set_view_mode(mode, cx));
+                            }),
+                    ),
+            )
             // Refresh is a button and nothing else: it never turns into a
-            // spinner while a snapshot loads. The toolbar used to swap it
-            // for `loading::compact` for as long as `git_task` was in
-            // flight, and `ensure_refresh` puts a task in flight every
-            // second, so the icon blinked once a second for the duration
-            // of every `git status`. A refresh over a settled surface is
-            // silent — the same rule `render_body` applies to the list —
+            // spinner while a snapshot loads (a refresh runs every second),
             // and a click during one is a no-op by `refresh`'s own
             // single-flight guard.
-            .child(action_icon_button(
-                Icon::RefreshCw,
-                "Refresh",
+            .child(crate::ely_ui::icon_button(
                 "changes-refresh",
-                "refresh-changes".to_owned(),
-                theme,
-                tooltip_builder,
-                move |cx| {
-                    refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
-                },
+                IconName::RefreshCw,
+                "Refresh",
+                true,
+                move |_, cx| refresh_entity.update(cx, |tab, cx| tab.refresh(cx)),
             ))
-            .child(action_icon_button(
-                Icon::ExpandVertical,
-                "Expand All",
+            .child(crate::ely_ui::icon_button(
                 "changes-expand-all",
-                "expand-all".to_owned(),
-                theme,
-                tooltip_builder,
-                move |cx| {
-                    expand_entity.update(cx, |tab, cx| tab.expand_all(cx));
-                },
+                IconName::Maximize2,
+                "Expand All",
+                true,
+                move |_, cx| expand_entity.update(cx, |tab, cx| tab.expand_all(cx)),
             ))
-            .child(action_icon_button(
-                Icon::FoldVertical,
-                "Collapse All",
+            .child(crate::ely_ui::icon_button(
                 "changes-collapse-all",
-                "collapse-all".to_owned(),
-                theme,
-                tooltip_builder,
-                move |cx| {
-                    collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx));
-                },
+                IconName::Minimize2,
+                "Collapse All",
+                true,
+                move |_, cx| collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx)),
             ))
             // The git mutations only exist for a mutable checkout: a commit
             // view renders no Stage/Discard controls at all.
             .when(self.allows_staging(), |this| {
-                this.child(action_icon_button(
-                    Icon::SquarePlus,
-                    "Stage all",
+                this.child(crate::ely_ui::icon_button(
                     "changes-stage-all",
-                    "stage-all".to_owned(),
-                    theme,
-                    tooltip_builder,
-                    move |cx| {
-                        stage_entity.update(cx, |tab, cx| {
-                            tab.start_operation(stage_all, cx);
-                        });
+                    IconName::Plus,
+                    "Stage all",
+                    true,
+                    move |_, cx| {
+                        stage_entity.update(cx, |tab, cx| tab.start_operation(stage_all, cx));
                     },
                 ))
-                .child(destructive_action_icon_button(
-                    Icon::Undo,
-                    "Discard all",
+                .child(crate::ely_ui::icon_button(
                     "changes-discard-all",
-                    "discard-all".to_owned(),
-                    theme,
-                    tooltip_builder,
+                    IconName::Undo2,
+                    "Discard all",
+                    true,
                     move |window, cx| {
-                        discard_entity.update(cx, |tab, cx| {
-                            tab.confirm_discard_all(window, cx);
-                        });
+                        discard_entity.update(cx, |tab, cx| tab.confirm_discard_all(window, cx));
                     },
                 ))
             })
@@ -3178,6 +3140,10 @@ impl ChangesTab {
 impl Render for ChangesTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("ChangesTab.render", cx.entity_id().as_u64());
+        // Ely draws from its own theme global, which only follows Sirio's
+        // appearance when something syncs it; a surface outside the chat
+        // must do so itself or stay dark in Light mode.
+        crate::ely::sync_theme_if_changed(cx);
         let theme = *Theme::get(cx);
         let theme = if self.embedded_in_panel {
             theme.with_sidebar_typography()
@@ -3324,32 +3290,6 @@ fn change_tooltip_builder(embedded_in_panel: bool) -> controls::TooltipBuilder {
     }
 }
 
-fn action_icon_button(
-    icon: Icon,
-    tooltip: &'static str,
-    selector: &'static str,
-    id: String,
-    theme: Theme,
-    tooltip_builder: controls::TooltipBuilder,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_owned())
-        .px(theme.spacing.titlebar_control_spacing)
-        .py(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.caption2)
-        .text_color(theme.ely.fg)
-        .hover(|style| style.bg(theme.ely.hover))
-        .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(IconElement::new(icon, IconSize::Small))
-}
-
 fn section_action_button(
     icon: Icon,
     label: &'static str,
@@ -3375,35 +3315,6 @@ fn section_action_button(
             on_click(cx);
         })
         .child(IconElement::new(icon, IconSize::XSmall))
-}
-
-fn destructive_action_icon_button<F>(
-    icon: Icon,
-    tooltip: &'static str,
-    selector: &'static str,
-    id: String,
-    theme: Theme,
-    tooltip_builder: controls::TooltipBuilder,
-    on_click: F,
-) -> impl IntoElement
-where
-    F: Fn(&mut Window, &mut App) + 'static,
-{
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_owned())
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
-        .text_size(theme.typography.scaled(12.5))
-        .text_color(theme.ely.fg_muted)
-        .hover(|style| style.text_color(theme.ely.danger))
-        .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx);
-        })
-        .child(IconElement::new(icon, IconSize::Small))
 }
 
 fn destructive_action_text_button<F>(
@@ -3824,6 +3735,7 @@ mod tests {
         repo_root: PathBuf,
     ) -> (VisualTestContext, gpui::Entity<ChangesTab>) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::in_right_panel(repo_root.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -3840,6 +3752,7 @@ mod tests {
         repo_root: PathBuf,
     ) -> (VisualTestContext, gpui::Entity<ChangesTab>) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::new(repo_root.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -4056,6 +3969,8 @@ mod tests {
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::in_right_panel(dir.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -4753,6 +4668,7 @@ mod tests {
     async fn a_known_non_git_project_shows_the_empty_changes_state(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             ChangesTab::in_right_panel_with_git_capability(dir.0.clone(), false, cx)
         });
@@ -4783,6 +4699,8 @@ mod tests {
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| ChangesTab::new(dir.0.clone(), cx));
         let tab = cx
             .update_window(window.into(), |_, window, _| {
@@ -5109,6 +5027,31 @@ mod tests {
         );
     }
 
+    /// Ely's single-choice group empties its selection when the chosen face is
+    /// pressed again; the surface must keep its mode rather than read that as
+    /// "no mode".
+    #[gpui::test]
+    async fn pressing_the_chosen_view_again_keeps_it(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+        let split = cx.debug_bounds("toggle split").expect("the Split face");
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| DiffViewMode::get(cx)), DiffViewMode::Split);
+        let split = cx.debug_bounds("toggle split").expect("the Split face");
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| DiffViewMode::get(cx)),
+            DiffViewMode::Split,
+            "pressing the chosen face again keeps Split"
+        );
+    }
+
     /// F-CHG-14: the individual Discard control is laid out, opens the
     /// platform prompt, and only mutates the checkout after the real prompt
     /// answer says Discard.
@@ -5275,6 +5218,8 @@ mod tests {
         }
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         for (width, font_size) in [(320.0, 13), (220.0, 13), (320.0, 18)] {
             cx.update(|cx| Theme::set_interface_font_size(font_size, cx));
             let dir = TempDir::new();
@@ -5293,8 +5238,8 @@ mod tests {
                 .expect("sidebar diff drawn");
             let list = view.debug_bounds("changes-list").expect("diff list drawn");
             for selector in [
-                "changes-view-mode-0",
-                "changes-view-mode-1",
+                "toggle unified",
+                "toggle split",
                 "changes-refresh",
                 "changes-expand-all",
                 "changes-collapse-all",
@@ -5824,6 +5769,8 @@ mod tests {
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
 
         cx.update(Theme::init);
+
+        cx.update(crate::ely::init);
         let received = std::rc::Rc::new(std::cell::RefCell::new(None));
         let fixture_received = received.clone();
         let window = cx.add_window(|_window, cx| {
@@ -6085,7 +6032,7 @@ mod tests {
             .debug_bounds("changes-unified-horizontal-bar-track")
             .expect("expanded wide unified code draws its horizontal bar");
         let toolbar = cx
-            .debug_bounds("changes-view-mode-0")
+            .debug_bounds("toggle unified")
             .expect("toolbar remains drawn");
         assert!(track.left() >= surface.left() && track.right() <= surface.right());
         assert!(toolbar.left() >= surface.left() && toolbar.right() <= surface.right());
@@ -6129,10 +6076,10 @@ mod tests {
             "wide viewport should remove overflow: max/viewport={:?}",
             tab.read_with(&cx.cx, |tab, _| (tab.unified_max_width, tab.unified_viewport))
         );
-        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        let split = cx.debug_bounds("toggle split").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
-        let unified = cx.debug_bounds("changes-view-mode-0").unwrap();
+        let unified = cx.debug_bounds("toggle unified").unwrap();
         cx.simulate_click(unified.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(tab.read_with(&cx.cx, |tab, _| tab.unified_x), px(0.0));
@@ -6174,7 +6121,7 @@ mod tests {
         let row = cx.debug_bounds("changes-file-row").expect("changed row draws");
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
-        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        let split = cx.debug_bounds("toggle split").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, app| {
@@ -6250,10 +6197,10 @@ mod tests {
         let split_positions = tab.read_with(&cx.cx, |tab, _| {
             (tab.split_left_x, tab.split_right_x)
         });
-        let unified = cx.debug_bounds("changes-view-mode-0").unwrap();
+        let unified = cx.debug_bounds("toggle unified").unwrap();
         cx.simulate_click(unified.center(), Modifiers::none());
         cx.run_until_parked();
-        let split = cx.debug_bounds("changes-view-mode-1").unwrap();
+        let split = cx.debug_bounds("toggle split").unwrap();
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, app| {
@@ -6322,7 +6269,7 @@ mod tests {
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
         let split = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6353,7 +6300,7 @@ mod tests {
         );
         // …and the toolbar it shares the surface with is still reachable.
         assert!(
-            cx.debug_bounds("changes-view-mode-0").is_some(),
+            cx.debug_bounds("toggle unified").is_some(),
             "the Unified segment is still on screen to switch back with"
         );
     }
@@ -6395,6 +6342,7 @@ mod tests {
             is_submodule: false,
         };
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.open_window(gpui::size(px(330.0), px(600.0)), move |_window, _cx| {
             ChangesTab {
                 repo_root: PathBuf::from("/repo"),
@@ -6525,7 +6473,7 @@ mod tests {
         );
 
         let split = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6572,7 +6520,7 @@ mod tests {
         );
 
         let split_segment = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split_segment.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6658,7 +6606,7 @@ mod tests {
         );
 
         let split_segment = cx
-            .debug_bounds("changes-view-mode-1")
+            .debug_bounds("toggle split")
             .expect("the view-mode control draws a Split segment");
         cx.simulate_click(split_segment.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6679,7 +6627,7 @@ mod tests {
         );
 
         let unified_segment = cx
-            .debug_bounds("changes-view-mode-0")
+            .debug_bounds("toggle unified")
             .expect("the view-mode control draws a Unified segment");
         cx.simulate_click(unified_segment.center(), Modifiers::none());
         cx.run_until_parked();
@@ -6750,6 +6698,7 @@ mod tests {
     #[gpui::test]
     async fn a_commit_view_lists_that_commit_s_files_and_forbids_staging(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
         // The second commit added exactly one file; asking for it proves the
@@ -6927,6 +6876,7 @@ mod tests {
         use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
         use std::time::Instant;
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| synthetic_big_diff_tab(lines));
         let handle: gpui::AnyWindowHandle = window.into();
         let mut cx = VisualTestContext::from_window(handle, cx);
@@ -7121,6 +7071,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         let (base, head) = seed_range(&dir.0);
         let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base.clone(), head.clone(), cx));
@@ -7162,6 +7113,7 @@ mod tests {
     #[gpui::test]
     async fn focusing_a_line_opens_the_context_band_that_hides_it(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         let (base, head) = seed_range(&dir.0);
         let tab = cx.new(|cx| ChangesTab::for_range(dir.0.clone(), base, head, cx));
@@ -7186,6 +7138,7 @@ mod tests {
     #[gpui::test]
     async fn a_deleted_file_is_known_to_be_deleted(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let dir = TempDir::new();
         let (base, _) = seed_range(&dir.0);
         git(&dir.0, &["rm", "-q", "a.txt"]);

@@ -127,6 +127,7 @@ fn synthetic_files_tab(files: usize, lines: usize, expanded: usize) -> ChangesTa
 #[gpui::test]
 async fn drawn_frames_count_rebuilds_and_payload_copies_separately(cx: &mut TestAppContext) {
     cx.update(Theme::init);
+    cx.update(crate::ely::init);
     let window = cx.add_window(|_, _| synthetic_files_tab(1, 300, 1));
     let mut cx = VisualTestContext::from_window(window.into(), cx);
     cx.simulate_resize(size(px(1200.0), px(800.0)));
