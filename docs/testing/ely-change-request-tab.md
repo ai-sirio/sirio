@@ -147,10 +147,10 @@ From the repository root, with Xvfb and software Vulkan:
 
 ```bash
 export TMPDIR=/home/epalmisano/.cache/st
-Xvfb :94 -screen 0 1600x1500x24 > "$TMPDIR/d4-xvfb.log" 2>&1 &
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-ui-e2e.sh --display :94 --out-dir "$TMPDIR/d4-dark"
-VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-ui-e2e.sh --display :94 --appearance light --out-dir "$TMPDIR/d4-light"
-ls "$TMPDIR/d4-dark/frames" "$TMPDIR/d4-light/frames"
+Xvfb :94 -screen 0 1600x1500x24 -nolisten tcp -noreset > "$TMPDIR/d4f-xvfb.log" 2>&1 &
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-ui-e2e.sh --display :94 --out-dir "$TMPDIR/d4f-dark"
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-ui-e2e.sh --display :94 --appearance light --out-dir "$TMPDIR/d4f-light"
+ls "$TMPDIR/d4f-dark/frames" "$TMPDIR/d4f-light/frames"
 ```
 
 Use a free X display. Sirio starts a centered 1470×833 window: the display
@@ -181,16 +181,33 @@ a reset), and `POST /__reset` (clear both). A second fake with
 `--flavor none` serves the unknown host. Free words in the fake's search
 must all occur in the returned row.
 
+The list bounds the actual pause deadline: an absent or expired reset uses
+60 seconds, and a reset more than an hour away uses now + 3600 seconds.
+Known-reset retry copy uses that same bounded deadline. The native
+`a_reset_in_the_past_or_far_future_never_spins` guard reproduced an early
+request for a past reset and no retry within an hour for a year-2100 reset.
+It now proves no request before the respective 60-second or one-hour pause,
+then one resume request. GPUI advances its simulated timer clock; the guard
+checks the real wall-clock deadline and moves it by the elapsed interval
+before letting the resume callback observe expiry.
+
 ### What was seen (2026-10-04, Xvfb, lavapipe)
 
 Both modes have `not-connected.png`, `list.png`, `mine.png`, `empty.png`,
 `rate-limited.png`, `unknown-host.png`, `detail-conversation.png` and
 `detail-checks.png`; all sixteen complete frames were read.
 
-- The four-choice strip shows Mine, To review with its count of 2, Open
-  and the Closed icon at the viewport edge; the remaining label belongs
-  to the horizontally scrolling strip. Mine and Open have the expected
-  active underline in their respective frames.
+- The four-choice strip shows the Mine (person), To review (eye), Open
+  (pull request) and Closed (archive) icons, with the review count of 2
+  kept as a note. There are no tab labels or horizontal scrolling; Mine
+  and Open have the expected active underline in their respective frames.
+  An active label still exceeded the 220 px floor, so the strip uses icons
+  for every choice. A whole-window glyph check failed on the old 320 and
+  240 px frames, then passed with all four choices selected in turn at
+  320, 240 and 220 px (12 frames). The scratch harness and check are
+  `$TMPDIR/ely4-filter-frames.sh` and `$TMPDIR/ely4-filter-frame-check.py`;
+  their frames are in `$TMPDIR/ely4-filters-{red,green}-{320,240}/frames`
+  and `$TMPDIR/ely4-filters-green-220/frames`.
 - The branch card and rows carry green open glyphs; the draft glyph is
   muted, with CI, review and comment icons alongside the rows.
 - Sign-in and unknown-host callouts have a blue severity rule and icon;
@@ -214,9 +231,6 @@ with 349 afterward; the copy glyph was excluded from that check.
 - The right-click menu on screen. The native pointer guard opens it and
   proves Copy link copies the clicked row's URL. Outside-click dismissal
   is implemented by Ely, but that guard does not exercise it.
-- The 240–280 px panel range named in the plan's review focus. These
-  frames and the compact-sidebar guard cover 320 px; no defect at smaller
-  widths was established.
 - A pasted token in a frame; masking and Enter were tested natively.
 - macOS, Windows or Wayland; these captures use Linux X11 under Xvfb.
 - `glab` transport and CLI detection: `test-forge-e2e.sh` printed SKIP
