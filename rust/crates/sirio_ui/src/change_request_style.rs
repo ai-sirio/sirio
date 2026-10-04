@@ -39,17 +39,6 @@ pub(crate) fn state_icon(state: ChangeState) -> IconName {
     }
 }
 
-/// `None` draws nothing: a change request with no checks.
-pub(crate) fn ci_mark(ci: CiState, theme: &Theme) -> Option<(Icon, Hsla)> {
-    match ci {
-        CiState::NoChecks => None,
-        CiState::Running(_) => Some((Icon::Clock, theme.ely.warning)),
-        CiState::Passed => Some((Icon::Check, theme.ely.success)),
-        CiState::Failed => Some((Icon::XCircle, theme.ely.danger)),
-        CiState::Canceled => Some((Icon::Dash, theme.ely.fg_subtle)),
-    }
-}
-
 pub(crate) fn ci_text(ci: CiState) -> String {
     match ci {
         CiState::NoChecks => "No checks".to_string(),
@@ -63,23 +52,7 @@ pub(crate) fn ci_text(ci: CiState) -> String {
 
 /// A review waiting on the signed-in user outranks the change request's
 /// own review state: it is the one thing on the row asking for an action.
-pub(crate) fn review_mark(
-    review: ReviewState,
-    requested_from_me: bool,
-    theme: &Theme,
-) -> Option<(Icon, Hsla)> {
-    if requested_from_me {
-        return Some((Icon::Eye, theme.sirio.quantity));
-    }
-    match review {
-        ReviewState::Approved { .. } => Some((Icon::UserCheck, theme.ely.success)),
-        ReviewState::ChangesRequested => Some((Icon::Warning, theme.ely.danger)),
-        ReviewState::ReviewRequired => Some((Icon::Eye, theme.ely.fg_subtle)),
-        ReviewState::None => None,
-    }
-}
-
-/// Twin of [`review_mark`] in Ely's icons; `None` draws nothing.
+/// `None` draws nothing.
 pub(crate) fn review_icon(
     review: ReviewState,
     requested_from_me: bool,
@@ -96,7 +69,7 @@ pub(crate) fn review_icon(
     }
 }
 
-/// Twin of [`ci_mark`] in Ely's icons; `None` draws nothing.
+/// A change request with no checks draws nothing; otherwise its CI glyph and colour.
 pub(crate) fn ci_icon(ci: CiState, theme: &Theme) -> Option<(IconName, Hsla)> {
     match ci {
         CiState::NoChecks => None,

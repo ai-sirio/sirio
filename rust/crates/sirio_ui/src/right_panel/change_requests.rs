@@ -1267,6 +1267,7 @@ impl ChangeRequestList {
                 .py(px(4.0))
                 .rounded(theme.radii.control)
                 .bg(theme.sirio.code_wash)
+                .text_color(theme.ely.fg)
                 .text_size(theme.typography.footnote)
                 .child(div().flex_1().min_w_0().child(selectable_text(command)))
                 .child(ely_ui::icon_button(
