@@ -85,10 +85,11 @@ pub(crate) fn merge_choices(merge: &MergeCapability) -> Vec<Choice> {
         .collect()
 }
 
-/// The commit title the dialog opens with.
-pub(crate) fn preset_title(method: MergeMethod, title: &str, number: u64) -> String {
+/// The commit title the dialog opens with; a squash names the change
+/// request as its forge writes it (`#101`, `!201`).
+pub(crate) fn preset_title(method: MergeMethod, title: &str, reference: &str) -> String {
     match method {
-        MergeMethod::Squash => format!("{title} (#{number})"),
+        MergeMethod::Squash => format!("{title} ({reference})"),
         MergeMethod::Merge | MergeMethod::Rebase => title.to_string(),
     }
 }
@@ -174,7 +175,7 @@ impl ChangeRequestTab {
             .as_ref()
             .map(|revisions| revisions.head_sha.clone())
             .ok_or("the forge did not say which commit is the head")?;
-        let title = preset_title(method, &header.summary.title, self.reference.number);
+        let title = preset_title(method, &header.summary.title, &self.reference.label());
         let target = header.summary.target_branch.clone();
         let delete_branch = merge.delete_branch_default;
         // GitHub's auto-merge has no delete flag: the repository's own
@@ -477,7 +478,9 @@ mod tests {
 
     #[test]
     fn a_squash_title_names_the_change_request() {
-        assert_eq!(preset_title(MergeMethod::Squash, "Fix login", 101), "Fix login (#101)");
-        assert_eq!(preset_title(MergeMethod::Merge, "Fix login", 101), "Fix login");
+        assert_eq!(preset_title(MergeMethod::Squash, "Fix login", "#101"), "Fix login (#101)");
+        assert_eq!(preset_title(MergeMethod::Merge, "Fix login", "#101"), "Fix login");
+        // On GitLab `#201` would name issue 201, and mention it for good.
+        assert_eq!(preset_title(MergeMethod::Squash, "Fix login", "!201"), "Fix login (!201)");
     }
 }
