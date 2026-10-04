@@ -68,6 +68,7 @@ use sirio_ui::{
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
 use sirio_ui::change_request_tab::{ChangeRequestTab, ChangeRequestTabEvent, InnerTab};
+use sirio_ui::ci_log_tab::{CiLogTab, CiLogTabEvent};
 use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1111,6 +1112,15 @@ enum ControlAction {
         params: BTreeMap<String, String>,
         reply: ControlReply,
     },
+    CiLogOpen { job: u64, reply: ControlReply },
+    CiLogRead { reply: ControlReply },
+    CiLogView {
+        toggle: Option<usize>,
+        jump_error: bool,
+        refresh: bool,
+        copy: Option<String>,
+        reply: ControlReply,
+    },
     ReadTabs {
         reply: ControlReply,
     },
@@ -2091,6 +2101,9 @@ impl ControlHandler for AppControlHandler {
                     "surface.change_request.open",
                     "surface.change_request.tab",
                     "surface.change_request.read",
+                    "surface.ci_log.open",
+                    "surface.ci_log.read",
+                    "surface.ci_log.view",
                     "surface.change_request.reveal",
                     "surface.change_request.open_file",
                     "surface.change_request.open_commit",
@@ -2380,6 +2393,26 @@ impl ControlHandler for AppControlHandler {
                     }
                 };
                 self.queue_action(request, move |reply| ControlAction::SelectChangeRequestTab { inner, reply })
+            }
+            "surface.ci_log.open" => {
+                let Some(job) = request.params.get("job").and_then(|job| job.parse().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.ci_log.open requires a numeric job");
+                };
+                self.queue_action(request, move |reply| ControlAction::CiLogOpen { job, reply })
+            }
+            "surface.ci_log.read" => self.queue_action(request, |reply| ControlAction::CiLogRead { reply }),
+            "surface.ci_log.view" => {
+                let toggle = match request.params.get("toggle") {
+                    Some(value) => match value.parse() {
+                        Ok(group) => Some(group),
+                        Err(_) => return ControlResponse::failure(&request.id, "toggle takes a group number"),
+                    },
+                    None => None,
+                };
+                let jump_error = request.params.get("jump_error").is_some_and(|value| value == "true");
+                let refresh = request.params.get("refresh").is_some_and(|value| value == "true");
+                let copy = request.params.get("copy").cloned();
+                self.queue_action(request, move |reply| ControlAction::CiLogView { toggle, jump_error, refresh, copy, reply })
             }
             "surface.change_request.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadChangeRequest { reply })
@@ -4146,7 +4179,7 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
     }
     match kind {
         TabKind::AgentChat => Icon::MessageSquare,
-        TabKind::Terminal => Icon::SquareTerminal,
+        TabKind::Terminal | TabKind::CiLog => Icon::SquareTerminal,
         TabKind::Editor => Icon::File,
         TabKind::Browser => Icon::Browser,
         TabKind::Diff => Icon::File,
@@ -5276,6 +5309,15 @@ impl SirioWorkspace {
                                 ControlAction::SelectChangeRequestTab { inner, reply } => {
                                     let _ = reply.send(workspace.control_select_change_request_tab(inner, cx));
                                 }
+                                ControlAction::CiLogOpen { job, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| tab.open_log_by_job(job, cx)));
+                                }
+                                ControlAction::CiLogRead { reply } => {
+                                    let _ = reply.send(workspace.control_read_ci_log(cx));
+                                }
+                                ControlAction::CiLogView { toggle, jump_error, refresh, copy, reply } => {
+                                    let _ = reply.send(workspace.control_ci_log_view(toggle, jump_error, refresh, copy, cx));
+                                }
                                 ControlAction::ReadChangeRequest { reply } => {
                                     let _ = reply.send(workspace.control_read_change_request(cx));
                                 }
@@ -6233,6 +6275,16 @@ impl SirioWorkspace {
                                 let view = view.read(cx);
                                 state.change_request = Some(view.reference().clone());
                                 state.change_request_tab = view.inner_tab().as_str().to_string();
+                            }
+                            TabContent::CiLog(view) => {
+                                let view = view.read(cx);
+                                state.ci_log = Some(session::PersistedCiLog {
+                                    change_request: view.reference().clone(),
+                                    job_id: view.job().job_id,
+                                    run_id: view.job().run_id,
+                                    name: view.name().to_string(),
+                                    web_url: view.web_url().map(str::to_string),
+                                });
                             }
                         }
                     });
@@ -8933,7 +8985,8 @@ impl SirioWorkspace {
             | TabContent::Changes(_)
             | TabContent::Browser(_)
             | TabContent::ProjectSettings(_)
-            | TabContent::ChangeRequest(_) => None,
+            | TabContent::ChangeRequest(_)
+            | TabContent::CiLog(_) => None,
         }
     }
 
@@ -9004,7 +9057,8 @@ impl SirioWorkspace {
                 | TabContent::Changes(_)
                 | TabContent::Browser(_)
                 | TabContent::ProjectSettings(_)
-                | TabContent::ChangeRequest(_) => return,
+                | TabContent::ChangeRequest(_)
+                | TabContent::CiLog(_) => return,
                 _ => self.pane_status(tab, pane_id),
             };
             if status.is_none_or(|current| activity_rank(candidate) < activity_rank(current)) {
@@ -9076,7 +9130,8 @@ impl SirioWorkspace {
                 | TabContent::Changes(_)
                 | TabContent::Browser(_)
                 | TabContent::ProjectSettings(_)
-                | TabContent::ChangeRequest(_) => ActivityStatus::Idle,
+                | TabContent::ChangeRequest(_)
+                | TabContent::CiLog(_) => ActivityStatus::Idle,
                 _ => self.pane_status(tab, pane_id),
             };
         });
@@ -9572,7 +9627,8 @@ impl SirioWorkspace {
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
-                    | TabContent::ChangeRequest(_) => (
+                    | TabContent::ChangeRequest(_)
+                    | TabContent::CiLog(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
@@ -10983,7 +11039,7 @@ impl SirioWorkspace {
 
     fn tab_width(kind: TabKind) -> f32 {
         match kind {
-            TabKind::AgentChat | TabKind::Editor | TabKind::Diff | TabKind::ProjectSettings | TabKind::ChangeRequest => {
+            TabKind::AgentChat | TabKind::Editor | TabKind::Diff | TabKind::ProjectSettings | TabKind::ChangeRequest | TabKind::CiLog => {
                 CHAT_TAB_MIN_WIDTH
             }
             TabKind::Terminal => TERMINAL_TAB_MIN_WIDTH,
@@ -11056,6 +11112,9 @@ impl SirioWorkspace {
             // A change request refreshes when its tab is chosen (spec §9).
             self.tabs[index].panes.for_each(&mut |_, content| {
                 if let TabContent::ChangeRequest(view) = content {
+                    view.update(cx, |tab, cx| tab.on_selected(cx));
+                }
+                if let TabContent::CiLog(view) = content {
                     view.update(cx, |tab, cx| tab.on_selected(cx));
                 }
             });
@@ -13482,6 +13541,77 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// Opens a job log, or focuses the tab already showing that job.
+    fn add_ci_log_tab(&mut self, reference: sirio_forge::ChangeRef, job: sirio_forge::CheckJob, name: String, web_url: Option<String>, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            let mut shows_it = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::CiLog(view) = content {
+                    shows_it |= *view.read(cx).reference() == reference
+                        && view.read(cx).job().job_id == job.job_id;
+                }
+            });
+            shows_it
+        }) {
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
+            return;
+        }
+        let view = cx.new(|_| CiLogTab::new(reference, job, name, web_url));
+        let tab_title = view.read(cx).tab_title();
+        Self::subscribe_ci_log_tab(&view, cx);
+        view.update(cx, |tab, cx| tab.on_selected(cx));
+        let tab_id = self.next_tab_id;
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            title: tab_title.clone(),
+            kind: TabKind::CiLog,
+            pane: TabKind::CiLog.default_pane(),
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(self.next_pane_id),
+            panes: PaneNode::leaf(self.next_pane_id, TabContent::CiLog(view)),
+            focused_pane: self.next_pane_id,
+            // The forge names it; the summarizer must not.
+            title_is_auto_named: false,
+        });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.open_secondary_pane();
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &tab_title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    fn subscribe_ci_log_tab(view: &Entity<CiLogTab>, cx: &mut Context<Self>) {
+        cx.subscribe(view, |workspace, emitter, event: &CiLogTabEvent, cx| match event {
+            CiLogTabEvent::Close => {
+                let hosted: Vec<usize> = workspace.tabs.iter().filter_map(|tab| {
+                    let mut found = false;
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::CiLog(view) = content
+                            && view.entity_id() == emitter.entity_id()
+                        {
+                            found = true;
+                        }
+                    });
+                    found.then_some(tab.id)
+                }).collect();
+                for tab_id in hosted {
+                    workspace.close_tab_by_id(tab_id, None, cx);
+                }
+            }
+        }).detach();
+    }
+
     fn subscribe_change_request_tab(view: &Entity<ChangeRequestTab>, cx: &mut Context<Self>) {
         cx.subscribe(
             view,
@@ -13523,6 +13653,9 @@ impl SirioWorkspace {
                             *deleted,
                             cx,
                         ),
+                    ChangeRequestTabEvent::OpenLog { job, name, web_url } => workspace.add_ci_log_tab(
+                        emitter.read(cx).reference().clone(), job.clone(), name.clone(), web_url.clone(), cx,
+                    ),
                     ChangeRequestTabEvent::Close => {
                         for tab_id in hosted {
                             workspace.close_tab_by_id(tab_id, None, cx);
@@ -13546,6 +13679,9 @@ impl SirioWorkspace {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::ChangeRequest(view) = content {
                     Self::subscribe_change_request_tab(view, cx);
+                }
+                if let TabContent::CiLog(view) = content {
+                    Self::subscribe_ci_log_tab(view, cx);
                 }
             });
         }
@@ -15043,6 +15179,28 @@ impl SirioWorkspace {
         .detach();
     }
 
+    fn active_ci_log(&self) -> Option<Entity<CiLogTab>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let mut found = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::CiLog(view) = content {
+                found = Some(view.clone());
+            }
+        });
+        found
+    }
+
+    fn control_read_ci_log(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let view = self.active_ci_log().ok_or_else(|| "the active tab is not a CI log".to_string())?;
+        Ok(view.read(cx).report())
+    }
+
+    fn control_ci_log_view(&mut self, toggle: Option<usize>, jump_error: bool, refresh: bool, copy: Option<String>, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let view = self.active_ci_log().ok_or_else(|| "the active tab is not a CI log".to_string())?;
+        view.update(cx, |tab, cx| tab.control_view(toggle, jump_error, refresh, copy.as_deref(), cx))?;
+        self.control_read_ci_log(cx)
+    }
+
     fn active_change_request(&self) -> Option<Entity<ChangeRequestTab>> {
         let tab = self.tabs.get(self.active_tab)?;
         let mut found = None;
@@ -15409,7 +15567,8 @@ impl SirioWorkspace {
                         | TabContent::Changes(_)
                         | TabContent::Browser(_)
                         | TabContent::ProjectSettings(_)
-                        | TabContent::ChangeRequest(_) => None,
+                        | TabContent::ChangeRequest(_)
+                        | TabContent::CiLog(_) => None,
                     };
                 }
             });
@@ -15667,7 +15826,8 @@ impl SirioWorkspace {
                             | TabContent::Changes(_)
                             | TabContent::Browser(_)
                             | TabContent::ProjectSettings(_)
-                            | TabContent::ChangeRequest(_) => None,
+                            | TabContent::ChangeRequest(_)
+                            | TabContent::CiLog(_) => None,
                         };
                     }
                 });
@@ -15697,7 +15857,8 @@ impl SirioWorkspace {
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
-                    | TabContent::ChangeRequest(_) => None,
+                    | TabContent::ChangeRequest(_)
+                    | TabContent::CiLog(_) => None,
                 };
             }
         });
@@ -15736,7 +15897,8 @@ impl SirioWorkspace {
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
-                    | TabContent::ChangeRequest(_) => None,
+                    | TabContent::ChangeRequest(_)
+                    | TabContent::CiLog(_) => None,
                 };
             }
         });
@@ -15842,6 +16004,10 @@ impl SirioWorkspace {
                     TabContent::ChangeRequest(view) => div()
                         .size_full()
                         .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    TabContent::CiLog(view) => div()
+                        .size_full()
+                        .child(view.clone())
                         .into_any_element(),
                     // Not cached: the browser positions a native child window
                     // from its paint, which a replayed frame would skip.
@@ -16422,7 +16588,7 @@ impl SirioWorkspace {
             .flatten();
         // A snapshot is read-only, and its tab says so with a lock on its icon
         // (B1 §7.2).
-        let read_only = tab.kind == TabKind::Editor && {
+        let read_only = tab.kind == TabKind::CiLog || tab.kind == TabKind::Editor && {
             let mut snapshot = false;
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::File { view } = content {
@@ -16799,7 +16965,8 @@ impl SirioWorkspace {
                 TabContent::Changes(_)
                 | TabContent::Browser(_)
                 | TabContent::ProjectSettings(_)
-                | TabContent::ChangeRequest(_) => false,
+                | TabContent::ChangeRequest(_)
+                | TabContent::CiLog(_) => false,
             };
         });
         dirty
@@ -17391,7 +17558,8 @@ impl SirioWorkspace {
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
-                    | TabContent::ChangeRequest(_) => None,
+                    | TabContent::ChangeRequest(_)
+                    | TabContent::CiLog(_) => None,
                 };
             }
         });
@@ -20736,6 +20904,17 @@ fn restore_tabs_with_terminal_cache(
                     cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, working_directory.to_path_buf(), cx)),
                 )
             }
+            Some(TabKind::CiLog) => {
+                let Some(saved) = tab_state.ci_log.clone() else {
+                    continue;
+                };
+                let job = sirio_forge::CheckJob {
+                    job_id: saved.job_id, run_id: saved.run_id, retryable: false,
+                };
+                TabContent::CiLog(cx.new(|_| {
+                    CiLogTab::new(saved.change_request, job, saved.name, saved.web_url)
+                }))
+            }
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
             Some(TabKind::ProjectSettings) => continue,
@@ -21268,6 +21447,17 @@ fn restore_tabs_in_workspace(
                 TabContent::ChangeRequest(
                     cx.new(|cx| ChangeRequestTab::restored(reference, title, inner, working_directory.to_path_buf(), cx)),
                 )
+            }
+            Some(TabKind::CiLog) => {
+                let Some(saved) = tab_state.ci_log.clone() else {
+                    continue;
+                };
+                let job = sirio_forge::CheckJob {
+                    job_id: saved.job_id, run_id: saved.run_id, retryable: false,
+                };
+                TabContent::CiLog(cx.new(|_| {
+                    CiLogTab::new(saved.change_request, job, saved.name, saved.web_url)
+                }))
             }
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
@@ -36961,6 +37151,9 @@ done
             | ControlAction::OpenChangeRequest { reply, .. }
             | ControlAction::SelectChangeRequestTab { reply, .. }
             | ControlAction::ReadChangeRequest { reply }
+            | ControlAction::CiLogOpen { reply, .. }
+            | ControlAction::CiLogRead { reply }
+            | ControlAction::CiLogView { reply, .. }
             | ControlAction::RevealChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestCommit { reply, .. }
@@ -37093,6 +37286,9 @@ done
             "surface.change_request.open" => request::change_request_open("1"),
             "surface.change_request.tab" => request::change_request_tab("checks"),
             "surface.change_request.read" => request::change_request_read(),
+            "surface.ci_log.open" => request::ci_log_open("2"),
+            "surface.ci_log.read" => request::ci_log_read(),
+            "surface.ci_log.view" => request::ci_log_view(None, true, false, None),
             "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
@@ -37548,7 +37744,7 @@ done
                     TabContent::Changes(_) => {}
                     TabContent::Browser(_) => {}
                     TabContent::ProjectSettings(_) => {}
-                    TabContent::ChangeRequest(_) => {}
+                    TabContent::ChangeRequest(_) | TabContent::CiLog(_) => {}
                 });
             }
             (failed, live)

@@ -2512,7 +2512,7 @@ fn render_content(
 /// paints it (Preview has no caret blink to repaint on). The canvas
 /// prepaints after its sibling has, sees this frame's overflow, and asks
 /// for one more frame. Self-limiting: once the bar is up it is not here.
-fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) -> AnyElement {
+pub(crate) fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) -> AnyElement {
     let has_overflow = |handle: &ScrollHandle| {
         scroll::thumb(
             handle.bounds().size.height,
@@ -2553,11 +2553,11 @@ fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) ->
 /// it; a drag moves only X, leaving the vertical offset where it was.
 /// While there is nothing to show, the same canvas watch asks for the
 /// frame that paints the bar once the content first lays out wider.
-fn horizontal_scrollbar(
+pub(crate) fn horizontal_scrollbar<V: 'static>(
     id: &'static str,
     handle: &ScrollHandle,
     state: &HorizontalBarState,
-    entity: gpui::Entity<FileView>,
+    entity: gpui::Entity<V>,
 ) -> AnyElement {
     let has_overflow = |handle: &ScrollHandle| {
         scroll::thumb(

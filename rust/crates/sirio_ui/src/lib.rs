@@ -15,6 +15,7 @@ extern crate self as sirio_ui;
 
 pub mod caret;
 pub mod change_request_tab;
+pub mod ci_log_tab;
 mod change_request_style;
 pub(crate) mod ely_ui;
 pub mod changes;

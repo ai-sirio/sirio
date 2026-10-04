@@ -13,7 +13,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use sirio_forge::{
-    ChangeHeader, ChangeRef, Check, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
+    ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
     FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
     TimelineItem,
 };
@@ -99,6 +99,12 @@ pub enum ChangeRequestTabEvent {
         revisions: Revisions,
         deleted: bool,
     },
+    /// Open a CI job's log in its own tab (spec §15.1).
+    OpenLog {
+        job: CheckJob,
+        name: String,
+        web_url: Option<String>,
+    },
     /// The user closed a tab that can no longer reach its change request.
     Close,
     /// A write reached the forge and the tab re-read it: the host refreshes
@@ -127,13 +133,13 @@ impl<T> Slot<T> {
         }
     }
 
-    fn begin(&mut self) {
+    pub(crate) fn begin(&mut self) {
         if !matches!(self, Self::Loaded { .. }) {
             *self = Self::Loading;
         }
     }
 
-    fn finish(&mut self, result: Result<T, ForgeError>) {
+    pub(crate) fn finish(&mut self, result: Result<T, ForgeError>) {
         *self = match (result, std::mem::replace(self, Self::Idle)) {
             (Ok(value), _) => Self::Loaded { value, stale: None },
             (Err(error), Self::Loaded { value, .. }) => Self::Loaded {
@@ -291,6 +297,23 @@ impl ChangeRequestTab {
             commit_task: None,
             actions: actions::ActionsState::new(),
         }
+    }
+
+    /// Opens the log of the loaded check whose job is `job_id` — what a row's
+    /// click does, and `surface.ci_log.open`.
+    pub fn open_log_by_job(&mut self, job_id: u64, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some(listing) = self.checks.value() else {
+            return Err("the checks are not loaded".to_string());
+        };
+        let Some(check) = listing.items.iter().find(|check| check.job.as_ref().is_some_and(|job| job.job_id == job_id)) else {
+            return Err(format!("no CI job {job_id} among the checks"));
+        };
+        cx.emit(ChangeRequestTabEvent::OpenLog {
+            job: check.job.clone().expect("found by its job"),
+            name: check.name.clone(),
+            web_url: check.url.clone(),
+        });
+        Ok(())
     }
 
     pub fn reference(&self) -> &ChangeRef {
@@ -1020,7 +1043,7 @@ fn slot_state<T>(slot: &Slot<T>) -> &'static str {
     }
 }
 
-fn unreachable_text(connection: &Connection) -> String {
+pub(crate) fn unreachable_text(connection: &Connection) -> String {
     match connection {
         Connection::NotConnected { forge, host } => format!(
             "Not signed in to {host}. Sign in with `{} auth login --hostname {host}`, or add a token in Settings → Git Hosting.",

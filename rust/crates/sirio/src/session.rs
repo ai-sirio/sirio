@@ -140,6 +140,9 @@ pub struct SessionTabState {
     /// A snapshot tab's file at a revision; `None` for every other tab.
     #[serde(default)]
     pub snapshot: Option<PersistedSnapshot>,
+    /// A CI log tab stores only its identity; never its log text.
+    #[serde(default)]
+    pub ci_log: Option<PersistedCiLog>,
 }
 
 /// A snapshot tab's identity (spec §8): which file, at which revision, of
@@ -156,6 +159,19 @@ pub struct PersistedSnapshot {
     /// before it existed, which restore as not deleted.
     #[serde(default)]
     pub deleted: bool,
+}
+
+/// A CI log tab's identity: which job of which change request (spec §8).
+/// The log itself is never saved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedCiLog {
+    pub change_request: sirio_forge::ChangeRef,
+    pub job_id: u64,
+    #[serde(default)]
+    pub run_id: Option<u64>,
+    pub name: String,
+    #[serde(default)]
+    pub web_url: Option<String>,
 }
 
 impl SessionTabState {
@@ -191,6 +207,7 @@ impl SessionTabState {
             change_request: self.change_request.clone(),
             change_request_tab: self.change_request_tab.clone(),
             snapshot: self.snapshot.clone(),
+            ci_log: self.ci_log.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -516,6 +533,7 @@ pub fn persisted_kind(kind: TabKind) -> &'static str {
         TabKind::Diff => "diff",
         TabKind::ProjectSettings => "settings",
         TabKind::ChangeRequest => "change_request",
+        TabKind::CiLog => "ci_log",
     }
 }
 
@@ -531,6 +549,7 @@ pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
         "diff" => TabKind::Diff,
         "settings" => TabKind::ProjectSettings,
         "change_request" => TabKind::ChangeRequest,
+        "ci_log" => TabKind::CiLog,
         _ => return None,
     };
     Some(kind)
@@ -2741,6 +2760,25 @@ mod tests {
         assert_eq!(restored.tab_states[0].snapshot.as_ref(), Some(&snapshot));
     }
 
+    #[test]
+    fn a_ci_log_tabs_identity_survives_the_round_trip() {
+        let mut state = SessionTabState::default();
+        state.ci_log = Some(PersistedCiLog {
+            change_request: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "github.com".to_string(),
+                project: "acme/widgets".to_string(),
+                number: 101,
+            },
+            job_id: 2,
+            run_id: Some(1),
+            name: "test".to_string(),
+            web_url: Some("https://github.com/acme/widgets/actions/runs/1/job/2".to_string()),
+        });
+        let decoded = SessionTabState::decode(&state.encode()).expect("it decodes");
+        assert_eq!(decoded.ci_log, state.ci_log);
+    }
+
     /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
     /// compile until it is listed here too — and then the round trip below
     /// covers it.
@@ -2753,6 +2791,7 @@ mod tests {
             TabKind::Diff,
             TabKind::ProjectSettings,
             TabKind::ChangeRequest,
+            TabKind::CiLog,
         ];
         for kind in &all {
             match kind {
@@ -2762,7 +2801,8 @@ mod tests {
                 | TabKind::Editor
                 | TabKind::Diff
                 | TabKind::ProjectSettings
-                | TabKind::ChangeRequest => {}
+                | TabKind::ChangeRequest
+                | TabKind::CiLog => {}
             }
         }
         all

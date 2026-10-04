@@ -266,6 +266,96 @@ write_gh_hosts() { # dir credential
   printf 'github.localhost:\n    users:\n        fake-user:\n            oauth_token: %s\n    git_protocol: https\n    user: fake-user\n    oauth_token: %s\n' "$2" "$2" >"$1/hosts.yml"
 }
 
+ui_helpers() {
+BIN="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirio"
+CTL="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirioctl"
+if [ "$STATE_ONLY" -eq 0 ]; then
+  [ -n "$DISPLAY_TARGET" ] || fail "no DISPLAY; pass --display :N or --state-only"
+  for tool in import identify xwininfo xprop; do
+    command -v "$tool" >/dev/null || fail "$tool is required for captures; pass --state-only to skip them"
+  done
+fi
+echo "building sirio and sirioctl"
+(cd "$CARGO_DIR" && cargo build --quiet -p sirio --bin sirio && cargo build --quiet -p sirio_control --bin sirioctl)
+
+APP_PID=""
+stop_app() {
+  [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; APP_PID=""; }
+}
+trap 'stop_app; cleanup' EXIT
+
+ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
+reply() { "$CTL" "$@" --json; }
+field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get(sys.argv[1], ""))' "$1"; }
+key() { reply "${@:2}" | field "$1"; } # key sirioctl-args...
+wait_for() { # key value sirioctl-args...
+  local want_key=$1 want=$2
+  shift 2
+  local got=""
+  for _ in $(seq 1 100); do
+    got=$(reply "$@" | field "$want_key" || true)
+    [ "$got" = "$want" ] && { echo "OK: $want_key=$want"; return 0; }
+    sleep 0.3
+  done
+  reply "$@" || true
+  fail "$want_key never became '$want' (last: '$got') for: $*"
+}
+find_window() {
+  DISPLAY_TARGET="$DISPLAY_TARGET" APP_PID="$APP_PID" python3 - <<'PY'
+import os, re, subprocess
+display = os.environ["DISPLAY_TARGET"]
+want = int(os.environ["APP_PID"])
+listing = subprocess.run(["xwininfo", "-display", display, "-root", "-children"], capture_output=True, text=True, timeout=5).stdout
+best = None
+for line in listing.splitlines():
+    match = re.match(r"\s+(0x[0-9a-fA-F]+).*?\s(\d+)x(\d+)\+", line)
+    if not match:
+        continue
+    window, width, height = match.group(1), int(match.group(2)), int(match.group(3))
+    prop = subprocess.run(["xprop", "-display", display, "-id", window, "_NET_WM_PID"], capture_output=True, text=True, timeout=5).stdout
+    pid = re.search(r"=\s*(\d+)\s*$", prop)
+    if pid and int(pid.group(1)) == want and (best is None or width * height > best[0]):
+        best = (width * height, window)
+if best:
+    print(best[1])
+PY
+}
+capture() { # name
+  [ "$STATE_ONLY" -eq 0 ] || return 0
+  sleep 2
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID for $1"
+  import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png"
+  local colours
+  colours=$(identify -format '%k' "$OUT_DIR/frames/$1.png")
+  [ "$colours" -ge 200 ] || fail "$1 is blank ($colours colours)"
+  echo "FRAME: $1 ($colours colours)"
+}
+
+# Where the change request tab is in the tab list, so it can be closed and
+# opened again -- which is how it picks up another token.
+reopen_tab() { # number
+  local index
+  index=$(reply surface tabs read | python3 -c '
+import json, sys
+row = json.load(sys.stdin)[0]
+print(next((name.split(".")[1] for name, value in row.items() if name.startswith("tab.") and value.startswith("change_request|")), ""))')
+  [ -z "$index" ] || ctl surface tabs close "$index" >/dev/null
+  ctl surface change-request open "$1" >/dev/null
+  wait_for state loaded surface change-request read
+}
+saved_token() { # host forge token
+  local account
+  account=$(reply surface change-requests token --host "$1" --forge "$2" --token "$3" | field account)
+  [ "$account" = "fake-user" ] || fail "token $3 signed in as '$account'"
+  # A new token makes the right panel connect again; the tab's list is what
+  # `surface change-request open` reads, so it waits for it.
+  wait_for state ready surface change-requests read >/dev/null
+}
+
+}
+
 if wanted wire-github; then
 echo "stage wire-github: every action of B2a reaches GitHub as the mutation it means"
 reset_forge github "$GH_PORT"
@@ -843,97 +933,177 @@ if command -v gh >/dev/null; then
     expect_line "ERR UnexpectedResponse"
   done
 fi
+ui_helpers
+echo "stage ci: job logs in a real Sirio"
+run_ci() { # flavour host project number origin-url job running-job
+  local flavour=$1 host=$2 number=$4 origin=$5 job=$6 running=$7
+  local port=$GH_PORT
+  [ "$flavour" = gitlab ] && port=$GL_PORT
+  local run_dir
+  run_dir=$(mktemp -d "${TMPDIR:-/tmp}/sirio-forge-actions-XXXXXX")
+  reset_forge "$flavour" "$port"
+
+  local repo="$run_dir/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@example.com
+  git -C "$repo" config user.name Tester
+  git -C "$repo" commit -q --allow-empty -m first
+  git -C "$repo" checkout -q -b feat/work
+  git -C "$repo" remote add origin "$origin"
+
+  export SIRIO_SOCKET="$run_dir/control.sock" SIRIO_DB="$run_dir/session.sqlite" SIRIO_CREDENTIALS="$run_dir/credentials.json"
+  export GH_CONFIG_DIR="$run_dir/gh" GLAB_CONFIG_DIR="$run_dir/glab"
+  mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
+  chmod 700 "$GLAB_CONFIG_DIR"
+  if [ "$STATE_ONLY" -eq 1 ]; then
+    (cd "$repo" && exec env -u DISPLAY -u WAYLAND_DISPLAY "$BIN" >"$run_dir/app.log" 2>&1) &
+  else
+    (cd "$repo" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 "$BIN" >"$run_dir/app.log" 2>&1) &
+  fi
+  APP_PID=$!
+  for _ in $(seq 1 75); do [ -S "$SIRIO_SOCKET" ] && break; sleep 0.2; done
+  [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket"
+
+  ctl project add "$repo" >/dev/null
+  ctl select-workspace --workspace "$repo" >/dev/null
+  ctl surface change-requests show >/dev/null
+  saved_token "$host" "$flavour" good
+
+  ctl surface change-request open "$number" >/dev/null
+  wait_for state loaded surface change-request read
+  ctl surface change-request tab checks >/dev/null
+  wait_for state loaded surface change-request read
+  ctl surface ci-log open --job "$job" >/dev/null
+  wait_for state loaded surface ci-log read
+  [ "$(key first_error surface ci-log read)" != "-" ] || fail "$flavour: the log's first error was not found"
+  [ "$(key groups surface ci-log read)" -ge 1 ] || fail "$flavour: the log has no groups"
+  capture "$flavour-log"
+  local before after
+  before=$(reply surface tabs read | python3 -c 'import json,sys; print(sum(1 for k,v in json.load(sys.stdin)[0].items() if k.startswith("tab.") and v.startswith("ci_log|")))')
+  ctl surface change-request open "$number" >/dev/null
+  wait_for state loaded surface change-request read
+  ctl surface change-request tab checks >/dev/null
+  wait_for state loaded surface change-request read
+  ctl surface ci-log open --job "$job" >/dev/null
+  wait_for state loaded surface ci-log read
+  after=$(reply surface tabs read | python3 -c 'import json,sys; print(sum(1 for k,v in json.load(sys.stdin)[0].items() if k.startswith("tab.") and v.startswith("ci_log|")))')
+  [ "$before" = "$after" ] || fail "$flavour: opening the same log twice made a second tab"
+  local folded visible
+  folded=$(key folded surface ci-log read)
+  visible=$(key visible surface ci-log read)
+  ctl surface ci-log view --toggle 0 >/dev/null
+  [ "$(key visible surface ci-log read)" != "$visible" ] || fail "$flavour: toggling a group did not change its visible members"
+  ctl surface ci-log view --toggle 0 >/dev/null
+  [ "$(key folded surface ci-log read)" = "$folded" ] || fail "$flavour: toggling twice did not restore the folds"
+  [ "$(key visible surface ci-log read)" = "$visible" ] || fail "$flavour: toggling twice did not restore the visible lines"
+  ctl surface ci-log view --copy 0 >/dev/null
+  [ "$(key copied surface ci-log read)" -gt 0 ] || fail "$flavour: Copy group copied nothing"
+  ctl surface ci-log view --jump-error >/dev/null
+  if [ "$(key top surface ci-log read)" != "$(key first_error surface ci-log read)" ]; then
+    reply surface ci-log read
+    fail "$flavour: the jump did not bring the first error to the top"
+  fi
+  capture "$flavour-log-error"
+  ctl surface ci-log view --copy all >/dev/null
+  [ "$(key copied surface ci-log read)" -gt 0 ] || fail "$flavour: Copy log copied nothing"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__expire"
+  ctl surface ci-log view --refresh >/dev/null
+  wait_for state error surface ci-log read
+  capture "$flavour-log-gone"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__reset"
+  ctl surface ci-log view --refresh >/dev/null
+  wait_for state loaded surface ci-log read
+  # Refuse a nonexistent job while the checks are active, so this tests the
+  # lookup rather than merely the active-tab type guard.
+  ctl surface change-request open "$number" >/dev/null
+  ctl surface change-request tab checks >/dev/null
+  wait_for state loaded surface change-request read
+  local invalid
+  if invalid=$("$CTL" surface ci-log open --job 999 2>&1); then
+    fail "$flavour: a job not among the checks opened a log"
+  fi
+  [[ "$invalid" == *"no CI job 999"* ]] || fail "$flavour: nonexistent job was refused for the wrong reason: $invalid"
+  ctl surface ci-log open --job "$job" >/dev/null
+  wait_for state loaded surface ci-log read
+  local title restored_index
+  title=$(key title surface ci-log read)
+  stop_app
+  rm -f "$SIRIO_SOCKET"
+  if [ "$STATE_ONLY" -eq 1 ]; then
+    (cd "$repo" && exec env -u DISPLAY -u WAYLAND_DISPLAY "$BIN" >"$run_dir/app.log" 2>&1) &
+  else
+    (cd "$repo" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 "$BIN" >"$run_dir/app.log" 2>&1) &
+  fi
+  APP_PID=$!
+  for _ in $(seq 1 75); do [ -S "$SIRIO_SOCKET" ] && break; sleep 0.2; done
+  [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket"
+
+
+  restored_index=$(reply surface tabs read | python3 -c 'import json,sys; print(next((k.split(".")[1] for k,v in json.load(sys.stdin)[0].items() if k.startswith("tab.") and v.startswith("ci_log|")), ""))')
+  [ -n "$restored_index" ] || fail "$flavour: the saved log tab was not restored"
+  ctl surface tabs select "$restored_index" >/dev/null
+  wait_for state loaded surface ci-log read
+  wait_for title "$title" surface ci-log read
+  ctl surface change-requests show >/dev/null
+  wait_for state ready surface change-requests read
+  if [ "$flavour" = github ]; then
+    ctl surface tabs close "$restored_index" >/dev/null
+    saved_token "$host" "$flavour" biglog
+    reopen_tab "$number"
+    ctl surface change-request tab checks >/dev/null
+    wait_for state loaded surface change-request read
+    ctl surface ci-log open --job "$job" >/dev/null
+    wait_for state loaded surface ci-log read
+    wait_for truncated yes surface ci-log read
+    capture github-log-truncated
+    saved_token "$host" "$flavour" good
+  fi
+  reopen_tab "$number"
+  ctl surface change-request tab checks >/dev/null
+  wait_for state loaded surface change-request read
+  ctl surface ci-log open --job "$running" >/dev/null
+  if [ "$flavour" = github ]; then
+    wait_for state not-published surface ci-log read
+    capture github-log-waiting
+  else
+    wait_for state loaded surface ci-log read
+    wait_for job running surface ci-log read
+    if [ "$STATE_ONLY" -eq 0 ]; then
+      local traces
+      traces=$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)
+      sleep 12
+      [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" -ge "$((traces + 2))" ] || fail "GitLab: a drawn running log did not reload"
+      ctl surface change-request open "$number" >/dev/null
+      traces=$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)
+      sleep 12
+      [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" = "$traces" ] || fail "GitLab: a hidden log kept reloading"
+      ctl surface change-request tab checks >/dev/null
+      wait_for state loaded surface change-request read
+      ctl surface ci-log open --job "$running" >/dev/null
+      curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__ratelimit?seconds=20"
+      ctl surface ci-log view --refresh >/dev/null
+      wait_for state error surface ci-log read
+      traces=$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)
+      sleep 12
+      [ "$(grep -c 'GET .*/jobs/3/trace' "$WORK/gitlab-requests.log" || true)" = "$traces" ] || fail "GitLab: a rate-limited log kept reloading"
+    else
+      echo "SKIP: reloading while visible needs window draws (--state-only)"
+    fi
+  fi
+  stop_app
+  cp "$run_dir/app.log" "$OUT_DIR/app-$flavour-ci.log" 2>/dev/null || true
+  rm -rf "$run_dir"
+}
+run_ci github ghe.test acme/widgets 101 https://ghe.test/acme/widgets.git 2 3
+run_ci gitlab gitlab.test team/app 201 https://gitlab.test/team/app.git 2 3
+
 # Later parts of stage ci are added above this line.
 fi
 
 if wanted ui; then
+ui_helpers
 echo "stage ui: a real Sirio, the change request tab, every action of B2a and B2b"
-BIN="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirio"
-CTL="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirioctl"
-if [ "$STATE_ONLY" -eq 0 ]; then
-  [ -n "$DISPLAY_TARGET" ] || fail "no DISPLAY; pass --display :N or --state-only"
-  for tool in import identify xwininfo xprop; do
-    command -v "$tool" >/dev/null || fail "$tool is required for captures; pass --state-only to skip them"
-  done
-fi
-echo "building sirio and sirioctl"
-(cd "$CARGO_DIR" && cargo build --quiet -p sirio --bin sirio && cargo build --quiet -p sirio_control --bin sirioctl)
-
-APP_PID=""
-stop_app() {
-  [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; APP_PID=""; }
-}
-trap 'stop_app; cleanup' EXIT
-
-ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
-reply() { "$CTL" "$@" --json; }
-field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get(sys.argv[1], ""))' "$1"; }
-key() { reply "${@:2}" | field "$1"; } # key sirioctl-args...
-wait_for() { # key value sirioctl-args...
-  local want_key=$1 want=$2
-  shift 2
-  local got=""
-  for _ in $(seq 1 100); do
-    got=$(reply "$@" | field "$want_key" || true)
-    [ "$got" = "$want" ] && { echo "OK: $want_key=$want"; return 0; }
-    sleep 0.3
-  done
-  reply "$@" || true
-  fail "$want_key never became '$want' (last: '$got') for: $*"
-}
-find_window() {
-  DISPLAY_TARGET="$DISPLAY_TARGET" APP_PID="$APP_PID" python3 - <<'PY'
-import os, re, subprocess
-display = os.environ["DISPLAY_TARGET"]
-want = int(os.environ["APP_PID"])
-listing = subprocess.run(["xwininfo", "-display", display, "-root", "-children"], capture_output=True, text=True, timeout=5).stdout
-best = None
-for line in listing.splitlines():
-    match = re.match(r"\s+(0x[0-9a-fA-F]+).*?\s(\d+)x(\d+)\+", line)
-    if not match:
-        continue
-    window, width, height = match.group(1), int(match.group(2)), int(match.group(3))
-    prop = subprocess.run(["xprop", "-display", display, "-id", window, "_NET_WM_PID"], capture_output=True, text=True, timeout=5).stdout
-    pid = re.search(r"=\s*(\d+)\s*$", prop)
-    if pid and int(pid.group(1)) == want and (best is None or width * height > best[0]):
-        best = (width * height, window)
-if best:
-    print(best[1])
-PY
-}
-capture() { # name
-  [ "$STATE_ONLY" -eq 0 ] || return 0
-  sleep 2
-  local window
-  window=$(find_window)
-  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID for $1"
-  import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png"
-  local colours
-  colours=$(identify -format '%k' "$OUT_DIR/frames/$1.png")
-  [ "$colours" -ge 200 ] || fail "$1 is blank ($colours colours)"
-  echo "FRAME: $1 ($colours colours)"
-}
-
-# Where the change request tab is in the tab list, so it can be closed and
-# opened again -- which is how it picks up another token.
-reopen_tab() { # number
-  local index
-  index=$(reply surface tabs read | python3 -c '
-import json, sys
-row = json.load(sys.stdin)[0]
-print(next((name.split(".")[1] for name, value in row.items() if name.startswith("tab.") and value.startswith("change_request|")), ""))')
-  [ -z "$index" ] || ctl surface tabs close "$index" >/dev/null
-  ctl surface change-request open "$1" >/dev/null
-  wait_for state loaded surface change-request read
-}
-saved_token() { # host forge token
-  local account
-  account=$(reply surface change-requests token --host "$1" --forge "$2" --token "$3" | field account)
-  [ "$account" = "fake-user" ] || fail "token $3 signed in as '$account'"
-  # A new token makes the right panel connect again; the tab's list is what
-  # `surface change-request open` reads, so it waits for it.
-  wait_for state ready surface change-requests read >/dev/null
-}
 
 run_ui() { # flavour host project number origin-url commentIndex noteOperation editedTitle
   local flavour=$1 host=$2 number=$4 origin=$5 comment_index=$6 comment_op=$7
