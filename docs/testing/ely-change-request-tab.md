@@ -109,9 +109,11 @@ push between the dialog and the click.
 
 Not seen, or seen with a remark:
 
-- Ely's `Dialog` scrim is opaque under lavapipe: the app is hidden behind the
-  dialog, not dimmed. Its text fields draw no border, as Ely's `TextInput`
-  draws them elsewhere in this tab.
+- Ely's `Dialog` text fields draw no border, as Ely's `TextInput` draws them
+  elsewhere in this tab. (Its scrim used to hide the app: the theme mapped
+  Ely's `backdrop` to Sirio's `overlay`, a hover tint that is opaque on the
+  grey ladders. It is now bezel's modal scrim, and the frame shows the app
+  dimmed behind the dialog.)
 - The method `Select`'s open list, a picker's empty or failed line, and the
   dialog in Light were not captured.
 - A reviewer who only reviewed (no pending request) has no id on GitHub and is

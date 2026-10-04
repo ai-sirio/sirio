@@ -1908,6 +1908,27 @@ mod tests {
     }
 
     #[test]
+    fn modal_backdrop_dims_the_window_without_hiding_it() {
+        // Ely paints `backdrop` over the whole window behind a dialog: an
+        // opaque one hides the app, a near-transparent one leaves the dialog
+        // floating over a live-looking window.
+        for base in BaseColor::ALL {
+            for (mode, appearance) in [
+                (ThemeMode::Dark, Appearance::Dark),
+                (ThemeMode::Light, Appearance::Light),
+            ] {
+                let backdrop = Theme::for_appearance(mode, appearance, base).ely.backdrop;
+                assert_eq!(backdrop.l, 0.0, "{base:?} {appearance:?} backdrop darkens");
+                assert!(
+                    (0.25..=0.75).contains(&backdrop.a),
+                    "{base:?} {appearance:?} backdrop alpha {} must dim, not hide",
+                    backdrop.a
+                );
+            }
+        }
+    }
+
+    #[test]
     fn translucency_preserves_the_chosen_base_colour() {
         // `with_translucency` rebuilds the palette from the theme's own
         // fields; the base colour has to be one of them or the toggle

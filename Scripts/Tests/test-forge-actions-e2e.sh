@@ -803,7 +803,7 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   local port=$GH_PORT
   [ "$flavour" = gitlab ] && port=$GL_PORT
   local run_dir
-  run_dir=$(mktemp -d /tmp/sirio-forge-actions-XXXXXX)
+  run_dir=$(mktemp -d "${TMPDIR:-/tmp}/sirio-forge-actions-XXXXXX")
   reset_forge "$flavour" "$port"
 
   local repo="$run_dir/repo"
