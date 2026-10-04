@@ -1223,6 +1223,7 @@ impl ChangeRequestList {
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .gap(px(8.0))
                 .child(ely_ui::text_button(
                     "change-requests-forge-github",
@@ -1826,6 +1827,45 @@ mod tests {
                 title: "Fix the login".into()
             }]
         );
+    }
+
+    #[gpui::test]
+    fn both_unknown_forge_choices_fit_and_gitlab_can_be_chosen_at_240_px(cx: &mut TestAppContext) {
+        struct ForgePanel(Entity<ChangeRequestList>, f32);
+
+        impl Render for ForgePanel {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(self.1)).h_full().overflow_hidden().child(self.0.clone())
+            }
+        }
+
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        for width in [240.0, 220.0] {
+            let source = FakeSource::with(Connection::NotConnected {
+                forge: Forge::GitLab,
+                host: "git.corp".into(),
+            });
+            cx.update(|cx| forge_source::set_source(source.clone(), cx));
+            let list = cx.new(|cx| {
+                let mut list = ChangeRequestList::new(PathBuf::from("/tmp/checkout"), cx);
+                list.link = Link::Settled(Connection::UnknownForge { host: "git.corp".into() });
+                list
+            });
+            let window = cx.add_window(|_, _| ForgePanel(list, width));
+            let mut view = gpui::VisualTestContext::from_window(window.into(), cx);
+            view.run_until_parked();
+            let panel = view.debug_bounds("change-requests").expect("panel drawn");
+            let github = view.debug_bounds("change-requests-forge-github").expect("GitHub choice drawn");
+            let gitlab = view.debug_bounds("change-requests-forge-gitlab").expect("GitLab choice drawn");
+            for choice in [github, gitlab] {
+                assert!(choice.left() >= panel.left() && choice.right() <= panel.right(),
+                    "both choices must fit at {width}px: choice={choice:?}, panel={panel:?}");
+            }
+            assert!(gitlab.top() >= github.bottom(), "the narrow row must wrap");
+            view.simulate_click(gitlab.center(), gpui::Modifiers::none());
+            assert_eq!(*source.forges.lock().unwrap(), vec![("git.corp".to_string(), Forge::GitLab)]);
+        }
     }
 
     #[gpui::test]
