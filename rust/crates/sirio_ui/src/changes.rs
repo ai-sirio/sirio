@@ -42,7 +42,7 @@
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
-    HighlightStyle, Hsla, PromptLevel, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
+    HighlightStyle, Hsla, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -63,12 +63,13 @@ use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, ToggleGroup, ToggleItem},
     data_display::CountBadge,
     feedback::Callout,
+    motion::Skeleton,
+    overlays::Dialog,
     git::{DiffStat as EDiffStat, GitStatus, GitStatusBadge},
     primitives::{Icon as EIcon, IconName, Severity},
     theme::{ControlSize, IconSize as EIconSize},
 };
 use crate::horizontal_scroll::{self, HorizontalBarState};
-use crate::loading;
 use crate::text_selection::{SelectableText, selectable_text};
 
 #[cfg(test)]
@@ -273,6 +274,9 @@ pub struct ChangesReport {
     pub sections: Vec<ChangesSectionReport>,
     pub loading: bool,
     pub error: Option<String>,
+    /// The Discard confirmation open over the surface, if any:
+    /// `discard:<path>` or `discard-all`.
+    pub dialog: Option<String>,
 }
 
 /// The three buckets `git status` reports, in display order. A file can
@@ -540,6 +544,13 @@ enum ChangesSource {
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
 
+/// What an open Discard confirmation would throw away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DiscardAsk {
+    One(PathBuf),
+    All(Vec<String>),
+}
+
 /// The full-width git changes surface.
 pub struct ChangesTab {
     repo_root: PathBuf,
@@ -631,6 +642,10 @@ pub struct ChangesTab {
     /// because one path can appear in two sections and Enter has to act on
     /// the one the user is actually on.
     selected_change: Option<(ChangeSection, PathBuf)>,
+    /// The Discard confirmation open over the surface: what it would throw
+    /// away. In the window, not the system's prompt (spec §8), so a test and
+    /// the control socket can see it and answer it.
+    discard_ask: Option<DiscardAsk>,
     /// Focus for the list, so `on_key_down` reaches it. Built lazily at
     /// first render, the way the Files tree's is.
     list_focus: Option<FocusHandle>,
@@ -769,6 +784,7 @@ impl ChangesTab {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -866,6 +882,10 @@ impl ChangesTab {
             sections,
             loading: self.git_task.is_some(),
             error: self.git_error.clone(),
+            dialog: self.discard_ask.as_ref().map(|ask| match ask {
+                DiscardAsk::One(path) => format!("discard:{}", path.display()),
+                DiscardAsk::All(_) => "discard-all".to_string(),
+            }),
         }
     }
 
@@ -1125,33 +1145,18 @@ impl ChangesTab {
         );
     }
 
-    fn confirm_discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks, inside the window, before throwing away `path`'s worktree changes.
+    pub fn ask_discard(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.allows_staging() {
             return;
         }
-        let display_path = sirio_project::display_path(&path);
-        let detail = format!(
-            "This will throw away the worktree changes to {display_path}. This cannot be undone."
-        );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard changes?",
-            Some(&detail),
-            &["Discard", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await.unwrap_or(1) != 0 {
-                return;
-            }
-            let _ = this.update(cx, |tab, cx| {
-                tab.start_operation(move |repo| discard(repo, &path), cx)
-            });
-        })
-        .detach();
+        self.discard_ask = Some(DiscardAsk::One(path));
+        cx.notify();
     }
 
-    fn confirm_discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks before throwing away every worktree change; nothing to ask about
+    /// asks nothing.
+    pub fn ask_discard_all(&mut self, cx: &mut Context<Self>) {
         if !self.allows_staging() {
             return;
         }
@@ -1164,24 +1169,29 @@ impl ChangesTab {
         if paths.is_empty() {
             return;
         }
-        let detail = format!(
-            "This will throw away the worktree changes to:\n{}\n\nThis cannot be undone.",
-            paths.join("\n")
-        );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard all changes?",
-            Some(&detail),
-            &["Discard All", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await.unwrap_or(1) != 0 {
-                return;
-            }
-            let _ = this.update(cx, |tab, cx| tab.start_operation(discard_all, cx));
-        })
-        .detach();
+        self.discard_ask = Some(DiscardAsk::All(paths));
+        cx.notify();
+    }
+
+    pub fn close_discard(&mut self, cx: &mut Context<Self>) {
+        if self.discard_ask.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The dialog's confirm: closes it and queues the discard behind whatever
+    /// git work is in flight, the way a click always did. `false` when no
+    /// dialog was open, so a second press does nothing.
+    pub fn confirm_discard(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(ask) = self.discard_ask.take() else {
+            return false;
+        };
+        match ask {
+            DiscardAsk::One(path) => self.start_operation(move |repo| discard(repo, &path), cx),
+            DiscardAsk::All(_) => self.start_operation(discard_all, cx),
+        }
+        cx.notify();
+        true
     }
 
     /// #325: every file row currently drawn, in draw order, as the pair the
@@ -2107,9 +2117,9 @@ impl ChangesTab {
                                 format!("discard-{}-{}", section.slug(), path.display()),
                                 "changes-discard",
                                 "Discard",
-                                move |window, cx| {
+                                move |_, cx| {
                                     entity_for_discard.update(cx, |tab, cx| {
-                                        tab.confirm_discard(path_for_discard.clone(), window, cx);
+                                        tab.ask_discard(path_for_discard.clone(), cx);
                                     });
                                 },
                             ))
@@ -2461,8 +2471,8 @@ impl ChangesTab {
                     IconName::Undo2,
                     "Discard all",
                     true,
-                    move |window, cx| {
-                        discard_entity.update(cx, |tab, cx| tab.confirm_discard_all(window, cx));
+                    move |_, cx| {
+                        discard_entity.update(cx, |tab, cx| tab.ask_discard_all(cx));
                     },
                 ))
             })
@@ -2765,26 +2775,24 @@ impl ChangesTab {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(theme.spacing.card_gap)
-                .text_size(theme.typography.headline)
-                .text_color(theme.ely.fg_muted)
-                .child(loading::indeterminate(
-                    "changes-loading-orb",
-                    loading::GENERIC_ORB,
-                    &theme,
-                    window,
-                    cx,
-                ))
-                .child("Loading changes…")
-                .child(loading::skeleton_rows(
-                    "changes-skeleton",
-                    loading::SKELETON_ROWS,
-                    &theme,
-                    window,
-                    cx,
-                ))
+                .children((0..6usize).map(|ix| {
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .px(px(DIFF_ROW_PADDING))
+                        .flex()
+                        .items_center()
+                        .gap(px(DIFF_ROW_GAP))
+                        .border_b_1()
+                        .border_color(theme.ely.border)
+                        .child(Skeleton::new(("changes-skeleton-icon", ix)).size(px(14.0)))
+                        .child(
+                            Skeleton::new(("changes-skeleton-path", ix))
+                                .h(px(10.0))
+                                .w(gpui::relative(0.5)),
+                        )
+                        .child(div().flex_1())
+                        .child(Skeleton::new(("changes-skeleton-stat", ix)).h(px(10.0)).w(px(48.0)))
+                }))
                 .into_any_element();
         }
         let sections = self.section_rows(mode);
@@ -3155,9 +3163,9 @@ impl ChangesTab {
     fn render_error_state(
         error: &str,
         entity: gpui::Entity<Self>,
-        theme: Theme,
+        _theme: Theme,
     ) -> impl IntoElement {
-        let retry_entity = entity;
+        let retry = entity;
         div()
             .id("changes-error")
             .debug_selector(|| "changes-error".into())
@@ -3167,21 +3175,67 @@ impl ChangesTab {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.0))
             .p(px(24.0))
             .child(
-                div()
-                    .max_w(px(560.0))
-                    .text_size(theme.typography.headline)
-                    .text_color(theme.ely.danger)
-                    .child(format!("Git is unavailable: {error}")),
+                div().w_full().max_w(px(560.0)).child(
+                    Callout::new(Severity::Danger)
+                        .title("Git is unavailable")
+                        .child(selectable_text(error.to_string()))
+                        .child(crate::ely_ui::text_button(
+                            "changes-retry",
+                            "Retry",
+                            Some(IconName::RotateCw),
+                            crate::ely_ui::ButtonState::IDLE,
+                            move |_, cx| retry.update(cx, |tab, cx| tab.retry_refresh(cx)),
+                        )),
+                ),
             )
-            .child(action_text_button(
-                "Retry",
-                "changes-retry".to_owned(),
-                theme,
-                move |cx| retry_entity.update(cx, |tab, cx| tab.retry_refresh(cx)),
-            ))
+    }
+
+    /// The Discard confirmation, drawn over the surface while it is asked.
+    fn render_discard_dialog(&self, entity: &gpui::Entity<Self>) -> Option<AnyElement> {
+        let ask = self.discard_ask.as_ref()?;
+        let (title, body, label) = match ask {
+            DiscardAsk::One(path) => (
+                "Discard changes?",
+                format!(
+                    "This will throw away the worktree changes to {}. This cannot be undone.",
+                    sirio_project::display_path(path)
+                ),
+                "Discard",
+            ),
+            DiscardAsk::All(paths) => (
+                "Discard all changes?",
+                format!(
+                    "This will throw away the worktree changes to:\n{}\n\nThis cannot be undone.",
+                    paths.join("\n")
+                ),
+                "Discard All",
+            ),
+        };
+        let (close, confirm) = (entity.clone(), entity.clone());
+        let dialog = Dialog::new("changes-discard-dialog", title, move |_, cx| {
+            close.update(cx, |tab, cx| tab.close_discard(cx))
+        })
+        .child(selectable_text(body))
+        .action(|close| {
+            dialog_button("changes-discard-cancel", "Cancel", ButtonVariant::Ghost, move |window, cx| {
+                close(window, cx)
+            })
+        })
+        .action(move |_| {
+            dialog_button("changes-discard-confirm", label, ButtonVariant::Danger, move |_, cx| {
+                confirm.update(cx, |tab, cx| {
+                    tab.confirm_discard(cx);
+                });
+            })
+        });
+        Some(
+            div()
+                .debug_selector(|| "changes-discard-dialog".into())
+                .child(dialog)
+                .into_any_element(),
+        )
     }
 }
 
@@ -3214,6 +3268,7 @@ impl Render for ChangesTab {
         let toolbar = self
             .render_toolbar(entity.clone(), theme, mode)
             .into_any_element();
+        let dialog = self.render_discard_dialog(&entity);
         let body = self.render_body(entity, theme, mode, _window, cx);
         div()
             // The surface's own extent, so a drawn test can assert that
@@ -3226,6 +3281,7 @@ impl Render for ChangesTab {
             .bg(theme.ely.bg)
             .child(toolbar)
             .child(body)
+            .children(dialog)
     }
 }
 
@@ -3263,6 +3319,25 @@ fn git_status(section: ChangeSection, entry: &StatusEntry) -> GitStatus {
         Some(StatusKind::Untracked) => GitStatus::Untracked,
         Some(StatusKind::Modified | StatusKind::TypeChanged) | None => GitStatus::Modified,
     }
+}
+
+/// A button of the Discard dialog, findable by its id.
+fn dialog_button(
+    id: &'static str,
+    label: &'static str,
+    variant: ButtonVariant,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex_none()
+        .child(
+            Button::new(id, label)
+                .variant(variant)
+                .on_click(move |_, window, cx| on_click(window, cx)),
+        )
+        .into_any_element()
 }
 
 /// A row's labelled action: a small ghost button. The click stops there, so
@@ -3436,40 +3511,6 @@ impl Render for DiffDragPreview {
             .text_color(self.theme.ely.fg)
             .child("Diff")
     }
-}
-
-fn action_text_button(
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id.clone())
-        // The id drives click dispatch; the selector is what tests can
-        // find in the drawn frame's debug-bounds map.
-        .debug_selector(move || match label {
-            "Stage" => "changes-stage".to_owned(),
-            "Unstage" => "changes-unstage".to_owned(),
-            "Retry" => "changes-retry".to_owned(),
-            "Stage all" => "changes-stage-all".to_owned(),
-            "Expand All" => "changes-expand-all".to_owned(),
-            "Collapse All" => "changes-collapse-all".to_owned(),
-            "Open diff" => "changes-open-diff".to_owned(),
-            "Resolve in terminal" => "changes-resolve".to_owned(),
-            _ => format!("changes-action-{label}"),
-        })
-        .px(theme.spacing.titlebar_control_spacing)
-        .py(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.caption2)
-        .text_color(theme.ely.fg)
-        .hover(|style| style.bg(theme.ely.hover))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(label)
 }
 
 /// Loads the status, per-file counts and per-file diffs for one checkout.
@@ -4042,6 +4083,7 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -5273,6 +5315,25 @@ mod tests {
         wait_for_tab(&cx, &tab, |tab| tab.diffs.contains_key(&path) && !tab.diff_errors.contains_key(&path));
     }
 
+    /// A confirm closes the dialog at once and queues exactly one discard, even
+    /// pressed again before the refresh in flight finishes.
+    #[gpui::test]
+    async fn a_confirm_pressed_twice_discards_once(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        tab.update(&mut cx.cx, |tab, cx| {
+            tab.refresh(cx);
+            tab.ask_discard(PathBuf::from("tracked.txt"), cx);
+            assert!(tab.confirm_discard(cx), "the first confirm runs");
+            assert!(!tab.confirm_discard(cx), "the dialog is closed: a second confirm does nothing");
+            assert_eq!(tab.pending_operations.len(), 1, "one discard is queued behind the refresh");
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
+    }
+
     /// Ely's single-choice group empties its selection when the chosen face is
     /// pressed again; the surface must keep its mode rather than read that as
     /// "no mode".
@@ -5319,8 +5380,13 @@ mod tests {
             .debug_bounds("changes-discard")
             .expect("Discard is drawn after expanding the row");
         cx.simulate_click(discard.center(), Modifiers::none());
-        assert!(cx.cx.has_pending_prompt(), "Discard asks for confirmation");
-        cx.cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard asks inside the window");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let cancel = cx.debug_bounds("changes-discard-cancel").expect("the dialog's Cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_none(), "Cancel closes it");
         cx.run_until_parked();
         assert_eq!(
             tab.read_with(&cx.cx, |tab, _| section_count(tab, "Changed")),
@@ -5332,8 +5398,11 @@ mod tests {
             .debug_bounds("changes-discard")
             .expect("Discard remains available after cancellation");
         cx.simulate_click(discard.center(), Modifiers::none());
-        assert!(cx.cx.has_pending_prompt());
-        cx.cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard asks inside the window");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
         wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
         assert!(
             status(&dir.0)
@@ -5426,11 +5495,11 @@ mod tests {
             "the refresh must be in flight before Discard is clicked"
         );
         cx.simulate_click(discard.center(), Modifiers::none());
-        assert!(
-            cx.cx.has_pending_prompt(),
-            "Discard still asks for confirmation during a refresh"
-        );
-        cx.cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard still asks for confirmation during a refresh");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
 
         wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
         assert!(
@@ -5505,11 +5574,13 @@ mod tests {
                 .debug_bounds("changes-discard-all")
                 .expect("Discard all drawn");
             view.simulate_click(discard.center(), Modifiers::none());
-            assert!(
-                view.cx.has_pending_prompt(),
-                "the last toolbar action must take a click"
-            );
-            view.cx.simulate_prompt_answer("Cancel");
+            view.run_until_parked();
+            assert!(view.debug_bounds("changes-discard-dialog").is_some(), "the last toolbar action must take a click");
+            assert!(!view.cx.has_pending_prompt(), "and never through the system's own prompt");
+            let cancel = view.debug_bounds("changes-discard-cancel").expect("the dialog's Cancel");
+            view.simulate_click(cancel.center(), Modifiers::none());
+            view.run_until_parked();
+            assert!(view.debug_bounds("changes-discard-dialog").is_none(), "Cancel closes it");
             view.run_until_parked();
         }
     }
@@ -5563,11 +5634,13 @@ mod tests {
             .debug_bounds("changes-discard-all")
             .expect("Discard all is in the drawn toolbar");
         cx.simulate_click(discard_all.center(), Modifiers::none());
-        assert!(
-            cx.cx.has_pending_prompt(),
-            "Discard all asks for confirmation"
-        );
-        cx.cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard all asks for confirmation");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let cancel = cx.debug_bounds("changes-discard-cancel").expect("the dialog's Cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_none(), "Cancel closes it");
         cx.run_until_parked();
         assert_eq!(
             tab.read_with(&cx.cx, |tab, _| {
@@ -5581,8 +5654,11 @@ mod tests {
             .debug_bounds("changes-discard-all")
             .expect("Discard all remains available after cancellation");
         cx.simulate_click(discard_all.center(), Modifiers::none());
-        assert!(cx.cx.has_pending_prompt());
-        cx.cx.simulate_prompt_answer("Discard All");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-discard-dialog").is_some(), "Discard asks inside the window");
+        assert!(!cx.cx.has_pending_prompt(), "and never through the system's own prompt");
+        let confirm = cx.debug_bounds("changes-discard-confirm").expect("the dialog's confirm");
+        cx.simulate_click(confirm.center(), Modifiers::none());
         // `git restore --worktree` deliberately leaves untracked files alone
         // (`git clean` is the separate, more destructive action — see
         // `sirio_git::discard_all`). The confirmed click clears every
@@ -5804,6 +5880,7 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -5888,6 +5965,7 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -6166,6 +6244,7 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -6631,6 +6710,7 @@ mod tests {
                 last_focus: None,
                 reveal_line: None,
                 selected_change: None,
+                discard_ask: None,
                 list_focus: None,
                 list_state: new_list_state(),
                 list_fingerprint: 0,
@@ -7090,6 +7170,7 @@ mod tests {
             last_focus: None,
             reveal_line: None,
             selected_change: None,
+            discard_ask: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,

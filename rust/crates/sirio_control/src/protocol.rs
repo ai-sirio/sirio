@@ -462,6 +462,28 @@ pub mod request {
         request("surface.changes.view", params)
     }
 
+    /// Opens (`discard` a path, or `all`) or closes (`close`) the Changes
+    /// surface's Discard confirmation. Writes nothing.
+    pub fn changes_dialog(discard: Option<&str>, all: bool, close: bool) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if let Some(path) = discard {
+            params.insert("discard".to_string(), path.to_string());
+        }
+        if all {
+            params.insert("all".to_string(), "true".to_string());
+        }
+        if close {
+            params.insert("close".to_string(), "true".to_string());
+        }
+        request("surface.changes.dialog", params)
+    }
+
+    /// Presses the open Discard confirmation's confirm. It writes to the
+    /// checkout, so a release build does not serve it.
+    pub fn changes_confirm() -> ControlRequest {
+        request("surface.changes.confirm", BTreeMap::new())
+    }
+
     pub fn settings_open(section: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();
         if let Some(section) = section {

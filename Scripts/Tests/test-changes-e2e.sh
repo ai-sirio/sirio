@@ -213,6 +213,7 @@ echo "OK: the confirmed Discard restored src/app.rs"
 
 echo "step 6: Discard all asks too, and closing it discards nothing"
 echo "more" >> "$WT/README.md"
+ctl surface changes view --refresh
 wait_for changedCount 1 surface changes read
 ctl surface changes dialog --discard-all
 wait_for dialog discard-all surface changes read

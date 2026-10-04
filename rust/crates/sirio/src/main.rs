@@ -1039,6 +1039,15 @@ enum ControlAction {
         refresh: bool,
         reply: ControlReply,
     },
+    ChangesDialog {
+        discard: Option<String>,
+        all: bool,
+        close: bool,
+        reply: ControlReply,
+    },
+    ChangesConfirm {
+        reply: ControlReply,
+    },
     OpenSettings {
         section: Option<SettingsCategory>,
         reply: ControlReply,
@@ -2069,6 +2078,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.changes.stage_all",
                     "surface.changes.discard_all",
                     "surface.changes.view",
+                    "surface.changes.dialog",
                     "git.branches",
                     "surface.settings.open",
                     "surface.settings.select",
@@ -2100,6 +2110,7 @@ impl ControlHandler for AppControlHandler {
                 methods.extend(BROWSER_CAPABILITIES);
                 if cfg!(debug_assertions) {
                     methods.push("surface.change_request.act");
+                    methods.push("surface.changes.confirm");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2243,6 +2254,15 @@ impl ControlHandler for AppControlHandler {
                 let expand = request.params.get("expand").cloned();
                 let refresh = request.params.get("refresh").is_some_and(|value| value == "true");
                 self.queue_action(request, move |reply| ControlAction::ChangesView { mode, expand, refresh, reply })
+            }
+            "surface.changes.dialog" => {
+                let discard = request.params.get("discard").cloned();
+                let all = request.params.get("all").is_some_and(|value| value == "true");
+                let close = request.params.get("close").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::ChangesDialog { discard, all, close, reply })
+            }
+            "surface.changes.confirm" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::ChangesConfirm { reply })
             }
             // F-GIT-BRANCH-01: GitBranches::list has no UI caller (the New
             // Worktree prompt is free-text with no read-back), so this
@@ -3802,6 +3822,7 @@ fn changes_report_pairs(
             "error".to_string(),
             report.error.clone().unwrap_or_default(),
         ),
+        ("dialog".to_string(), report.dialog.clone().unwrap_or_default()),
         ("stagedCount".to_string(), staged.count.to_string()),
         ("changedCount".to_string(), changed.count.to_string()),
         ("untrackedCount".to_string(), untracked.count.to_string()),
@@ -5215,6 +5236,12 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::ChangesView { mode, expand, refresh, reply } => {
                                     let _ = reply.send(workspace.control_changes_view(mode, expand, refresh, cx));
+                                }
+                                ControlAction::ChangesDialog { discard, all, close, reply } => {
+                                    let _ = reply.send(workspace.control_changes_dialog(discard, all, close, cx));
+                                }
+                                ControlAction::ChangesConfirm { reply } => {
+                                    let _ = reply.send(workspace.control_changes_confirm(cx));
                                 }
                                 ControlAction::OpenSettings { section, reply } => {
                                     let result = workspace.control_open_settings(section, cx);
@@ -14875,6 +14902,44 @@ impl SirioWorkspace {
             ),
         };
         view.update(cx, |tab, cx| tab.control_view(mode, expand.as_deref().map(Path::new), refresh, cx));
+        self.control_read_changes(cx)
+    }
+
+    fn control_changes_dialog(
+        &mut self,
+        discard: Option<String>,
+        all: bool,
+        close: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some((_, view)) = self.active_changes_view() else {
+            return Err("Changes surface is not open".to_string());
+        };
+        view.update(cx, |tab, cx| match (discard, all, close) {
+            (_, _, true) => {
+                tab.close_discard(cx);
+                Ok(())
+            }
+            (Some(path), false, false) => {
+                tab.ask_discard(PathBuf::from(path), cx);
+                Ok(())
+            }
+            (None, true, false) => {
+                tab.ask_discard_all(cx);
+                Ok(())
+            }
+            _ => Err("pass one of discard <path>, all or close".to_string()),
+        })?;
+        self.control_read_changes(cx)
+    }
+
+    fn control_changes_confirm(&mut self, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
+        let Some((_, view)) = self.active_changes_view() else {
+            return Err("Changes surface is not open".to_string());
+        };
+        if !view.update(cx, |tab, cx| tab.confirm_discard(cx)) {
+            return Err("no Discard confirmation is open".to_string());
+        }
         self.control_read_changes(cx)
     }
 
@@ -36833,6 +36898,8 @@ done
             | ControlAction::OpenChanges { reply, .. }
             | ControlAction::ReadChanges { reply }
             | ControlAction::ChangesView { reply, .. }
+            | ControlAction::ChangesDialog { reply, .. }
+            | ControlAction::ChangesConfirm { reply }
             | ControlAction::OpenSettings { reply, .. }
             | ControlAction::SelectSettings { reply, .. }
             | ControlAction::ReadSettings { reply }
@@ -36962,6 +37029,8 @@ done
             "surface.changes.stage_all" => request::changes_stage_all(Some("workspace-1")),
             "surface.changes.discard_all" => request::changes_discard_all(Some("workspace-1")),
             "surface.changes.view" => request::changes_view(Some("split"), None, false),
+            "surface.changes.dialog" => request::changes_dialog(None, false, true),
+            "surface.changes.confirm" => request::changes_confirm(),
             "git.branches" => request_with_params(method, &[]),
             "surface.settings.open" => request::settings_open(None),
             "surface.settings.select" => request_with_params(method, &[]),
@@ -37022,6 +37091,7 @@ done
             ],
             loading: false,
             error: None,
+            dialog: None,
         };
         let pairs = changes_report_pairs(1, &report).expect("a Changes section is accepted");
         let staged = pairs.iter().find(|(key, _)| key == "stagedCount").map(|(_, value)| value.as_str());
@@ -37057,6 +37127,7 @@ done
             ],
             loading: false,
             error: None,
+            dialog: None,
         };
         ControlResponse::success(
             id,
