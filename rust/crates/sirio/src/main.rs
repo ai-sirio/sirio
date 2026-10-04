@@ -3785,7 +3785,7 @@ fn changes_report_pairs(
             .find(|section| section.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| format!("Changes report is missing {name} section"))
     };
-    let staged = section("Staged")?;
+    let staged = section("Staged").or_else(|_| section("Changes"))?;
     let changed = section("Changed")?;
     let untracked = section("Untracked")?;
 
@@ -37001,6 +37001,31 @@ done
         };
         request.id = format!("path-scan-{method}");
         request
+    }
+
+    /// The host reads a Range surface's *Changes* section as the staged one,
+    /// so the report keeps its keys when the heading changes (B1 §13).
+    #[test]
+    fn a_changes_section_is_read_as_staged() {
+        let file = sirio_ui::changes::ChangesFileReport {
+            path: PathBuf::from("a.rs"),
+            additions: 2,
+            deletions: 1,
+            is_binary: false,
+        };
+        let report = ChangesReport {
+            repo_root: PathBuf::from("/repo"),
+            sections: vec![
+                sirio_ui::changes::ChangesSectionReport { name: "Changes", count: 1, files: vec![file] },
+                sirio_ui::changes::ChangesSectionReport { name: "Changed", count: 0, files: vec![] },
+                sirio_ui::changes::ChangesSectionReport { name: "Untracked", count: 0, files: vec![] },
+            ],
+            loading: false,
+            error: None,
+        };
+        let pairs = changes_report_pairs(1, &report).expect("a Changes section is accepted");
+        let staged = pairs.iter().find(|(key, _)| key == "stagedCount").map(|(_, value)| value.as_str());
+        assert_eq!(staged, Some("1"));
     }
 
     #[cfg(windows)]

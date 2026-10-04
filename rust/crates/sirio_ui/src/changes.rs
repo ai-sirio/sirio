@@ -39,14 +39,10 @@
 //! numbers, and the report's `error` field covers the git-broken case. The
 //! human surface is the honest one.
 
-use bezel::{
-    theme::ink,
-    ui::{icons as bezel_icons, tooltip::Tooltip},
-};
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
-    Hsla, PromptLevel, Render, Task, Window, canvas, div, list, prelude::*, px,
+    Hsla, PromptLevel, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -62,15 +58,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::controls;
 use ely_gpui_component::{
-    buttons::{ToggleGroup, ToggleItem},
-    primitives::IconName,
-    theme::ControlSize,
+    buttons::{Button, ButtonVariant, IconButton, ToggleGroup, ToggleItem},
+    data_display::CountBadge,
+    git::{DiffStat as EDiffStat, GitStatus, GitStatusBadge},
+    primitives::{Icon as EIcon, IconName},
+    theme::{ControlSize, IconSize as EIconSize},
 };
 use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::loading;
-use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
 #[cfg(test)]
@@ -299,6 +295,16 @@ impl ChangeSection {
             ChangeSection::Staged => "Staged",
             ChangeSection::Changed => "Changed",
             ChangeSection::Untracked => "Untracked",
+        }
+    }
+
+    /// The heading this section wears on `source`: a change request's diff
+    /// is not "staged" anything (B1 §13), so its one section reads Changes.
+    /// A commit keeps Staged; §8 names only the Range.
+    fn label_in(self, source: &ChangesSource) -> &'static str {
+        match (self, source) {
+            (ChangeSection::Staged, ChangesSource::Range { .. }) => "Changes",
+            _ => self.label(),
         }
     }
 
@@ -835,7 +841,7 @@ impl ChangesTab {
                     })
                     .collect::<Vec<_>>();
                 ChangesSectionReport {
-                    name: section.label(),
+                    name: section.label_in(&self.source),
                     count: files.len(),
                     files,
                 }
@@ -1741,7 +1747,7 @@ impl ChangesTab {
                 .gap(px(DIFF_ROW_GAP))
                 .px(px(DIFF_ROW_PADDING))
                 .py(px(1.0))
-                .bg(ink(0.02))
+                .bg(theme.ely.fg.opacity(0.02))
                 .font_family(theme.typography.code_family)
                 .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
@@ -1838,6 +1844,8 @@ impl ChangesTab {
     ) -> impl IntoElement {
         let band_entity = entity.clone();
         let band_path = path.clone();
+        let toggle_entity = entity.clone();
+        let toggle_path = path.clone();
         let label = if count == 1 {
             "1 hidden line".to_owned()
         } else {
@@ -1859,7 +1867,7 @@ impl ChangesTab {
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             .text_color(theme.ely.fg_subtle)
-            .bg(ink(0.02))
+            .bg(theme.ely.fg.opacity(0.02))
             .hover(|style| style.bg(theme.ely.hover))
             .on_click(move |_, _, cx| {
                 band_entity.update(cx, |tab, cx| {
@@ -1869,11 +1877,17 @@ impl ChangesTab {
             .child(div().h(px(1.0)).w(px(24.0)).bg(theme.ely.border))
             .child(div().text_color(theme.ely.fg_subtle).child(label))
             .child(div().h(px(1.0)).w(px(24.0)).bg(theme.ely.border))
-            .child(
-                div()
-                    .text_color(theme.ely.fg_subtle)
-                    .child(if expanded { "⌃" } else { "⌄" }),
-            )
+            .child(row_icon_button(
+                format!("band-toggle-{}-{path_for_id}-{key}", section.slug()),
+                "changes-context-band-toggle",
+                if expanded { IconName::ChevronUp } else { IconName::ChevronsUpDown },
+                if expanded { "Hide lines" } else { "Show lines" },
+                move |_, cx| {
+                    toggle_entity.update(cx, |tab, cx| {
+                        tab.toggle_band(section, toggle_path.clone(), key, cx);
+                    });
+                },
+            ))
     }
 
     /// The collapsible header of one section, stating its size the way the
@@ -1882,20 +1896,16 @@ impl ChangesTab {
     /// remembering the choice across refreshes.
     fn render_section_header(
         section: ChangeSection,
+        label: &'static str,
         count: usize,
         collapsed: bool,
         allows_staging: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        tooltip_builder: controls::TooltipBuilder,
     ) -> impl IntoElement {
         let entity_for_toggle = entity.clone();
         let entity_for_action = entity.clone();
         let action_label = section.batch_action_label();
-        let action_icon = match section {
-            ChangeSection::Staged => Icon::SquareMinus,
-            ChangeSection::Changed | ChangeSection::Untracked => Icon::SquarePlus,
-        };
         let action_id = format!("changes-section-{}-all", section.slug());
         div()
             .id(format!("changes-section-{}", section.slug()))
@@ -1907,51 +1917,46 @@ impl ChangesTab {
             .flex()
             .items_center()
             .gap(px(DIFF_ROW_GAP))
-            // Section chrome ("Staged (N)" + batch action), not code: the
+            // Section chrome ("Staged" + count + batch action), not code: the
             // sidebar face, like every other section heading in the app.
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
-            .bg(ink(0.02))
+            .bg(theme.ely.fg.opacity(0.02))
             .hover(|style| style.bg(theme.ely.hover))
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| tab.toggle_section(section, cx));
             })
             .child(
-                div()
-                    .w(px(10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if collapsed {
-                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    } else {
-                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    }),
+                div().w(px(10.0)).flex().items_center().justify_center().child(
+                    EIcon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
+                        .size(EIconSize::Xs)
+                        .color(theme.ely.fg_muted),
+                ),
             )
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.ely.fg_muted)
-                    .child(section.label()),
+                    .child(label),
             )
-            .child(
-                div()
-                    .text_color(theme.ely.fg_subtle)
-                    .child(format!("({count})")),
-            )
+            .child(CountBadge::new(format!("changes-section-count-{}", section.slug()), count))
             .child(div().flex_1())
             // A commit view renders no stage/unstage batch action either:
             // the header keeps its collapse toggle but not the mutation.
             .when(allows_staging, |this| {
-                this.child(section_action_button(
-                    action_icon,
-                    action_label,
+                this.child(row_icon_button(
                     action_id,
-                    theme,
-                    tooltip_builder,
-                    move |cx| {
+                    match section {
+                        ChangeSection::Staged => "changes-section-staged-all",
+                        ChangeSection::Changed => "changes-section-changed-all",
+                        ChangeSection::Untracked => "changes-section-untracked-all",
+                    },
+                    match section {
+                        ChangeSection::Staged => IconName::Minus,
+                        ChangeSection::Changed | ChangeSection::Untracked => IconName::Plus,
+                    },
+                    action_label,
+                    move |_, cx| {
                         entity_for_action.update(cx, |tab, cx| tab.section_action(section, cx));
                     },
                 ))
@@ -1980,16 +1985,7 @@ impl ChangesTab {
         let unstages = section == ChangeSection::Staged;
         let stage_label = section.action_label();
         let color = status_color(&entry, theme);
-        // Unknown counts render `·` (the same glyph as binary), never a
-        // confident +0 −0.
-        let (additions, deletions) = match stat {
-            Some(stat) if stat.is_binary => ("·".to_owned(), "·".to_owned()),
-            Some(stat) => (
-                format!("+{}", stat.additions),
-                format!("−{}", stat.deletions),
-            ),
-            None => ("·".to_owned(), "·".to_owned()),
-        };
+        let status = git_status(section, &entry);
         let entity_for_toggle = entity.clone();
         let entity_for_stage = entity.clone();
         let entity_for_discard = entity.clone();
@@ -2015,7 +2011,7 @@ impl ChangesTab {
             // they are chrome, and the path is a label, not content.
             .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
-            // The path is neutral text — the +/− counts carry the status.
+            // The path is neutral text — the badge and the stat carry the status.
             .text_color(theme.ely.fg)
             .hover(|style| style.bg(theme.ely.hover))
             // #325: the keyboard selection has to be visible, or up/down
@@ -2036,18 +2032,11 @@ impl ChangesTab {
                 });
             })
             .child(
-                div()
-                    .w(px(10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if expanded {
-                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    } else {
-                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.ely.fg_muted)
-                    }),
+                div().w(px(10.0)).flex().items_center().justify_center().child(
+                    EIcon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                        .size(EIconSize::Xs)
+                        .color(theme.ely.fg_muted),
+                ),
             )
             .child(
                 div()
@@ -2055,12 +2044,12 @@ impl ChangesTab {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        bezel_icons::icon(bezel_icons::DOCUMENT)
-                            .size(px(14.0))
-                            .text_color(color),
-                    ),
+                    .child(EIcon::new(IconName::File).size(EIconSize::Sm).color(color)),
             )
+            .child(GitStatusBadge::new(
+                format!("changes-status-{}-{}", section.slug(), path.display()),
+                status,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -2068,18 +2057,14 @@ impl ChangesTab {
                     .text_ellipsis()
                     .child(path.to_string_lossy().to_string()),
             )
-            .child(
-                div()
-                    .text_size(theme.typography.scaled(11.5))
-                    .text_color(theme.sirio.diff_add)
-                    .child(additions),
-            )
-            .child(
-                div()
-                    .text_size(theme.typography.scaled(11.5))
-                    .text_color(theme.sirio.diff_del)
-                    .child(deletions),
-            )
+            // Known text counts are Ely's stat; unknown or binary counts stay
+            // `·`, never a confident +0 −0 (the honesty contract).
+            .child(match stat {
+                Some(stat) if !stat.is_binary => {
+                    EDiffStat::new(stat.additions, stat.deletions).into_any_element()
+                }
+                _ => div().text_color(theme.ely.fg_subtle).child("·").into_any_element(),
+            })
             .when(expanded, |this| {
                 this.child(
                     div()
@@ -2090,21 +2075,21 @@ impl ChangesTab {
                         // row keeps its diff navigation, but nothing to
                         // mutate.
                         .when(allows_staging, |this| {
-                            this.child(destructive_action_text_button(
-                                "Discard",
+                            this.child(row_button(
                                 format!("discard-{}-{}", section.slug(), path.display()),
-                                theme,
+                                "changes-discard",
+                                "Discard",
                                 move |window, cx| {
                                     entity_for_discard.update(cx, |tab, cx| {
                                         tab.confirm_discard(path_for_discard.clone(), window, cx);
                                     });
                                 },
                             ))
-                            .child(action_text_button(
-                                stage_label,
+                            .child(row_button(
                                 format!("stage-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |cx| {
+                                if unstages { "changes-unstage" } else { "changes-stage" },
+                                stage_label,
+                                move |_, cx| {
                                     entity_for_stage.update(cx, |tab, cx| {
                                         if unstages {
                                             tab.unstage_path(path_for_stage.clone(), cx);
@@ -2119,11 +2104,11 @@ impl ChangesTab {
                         // it reveals the tab you are already in, and expands
                         // the row it is drawn inside (#217).
                         .when(draws_open_diff, |this| {
-                            this.child(action_text_button(
-                                "Open diff",
+                            this.child(row_button(
                                 format!("changes-open-diff-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |cx| {
+                                "changes-open-diff",
+                                "Open diff",
+                                move |_, cx| {
                                     entity_for_open_diff.update(cx, |_, cx| {
                                         cx.emit(ChangesTabActionEvent::OpenDiff(
                                             open_diff_path.clone(),
@@ -2133,11 +2118,11 @@ impl ChangesTab {
                             ))
                         })
                         .when(entry.is_conflicted(), |this| {
-                            this.child(action_text_button(
-                                "Resolve in terminal",
+                            this.child(row_button(
                                 format!("resolve-{}-{}", section.slug(), path.display()),
-                                theme,
-                                move |cx| {
+                                "changes-resolve",
+                                "Resolve in terminal",
+                                move |_, cx| {
                                     entity_for_resolve.update(cx, |_, cx| {
                                         cx.emit(ChangesTabActionEvent::ResolveInTerminal(
                                             conflict_path.clone(),
@@ -2146,31 +2131,26 @@ impl ChangesTab {
                                 },
                             ))
                         })
-                        .child(
-                            div()
-                                .id(format!("open-{}-{}", section.slug(), path.display()))
-                                .debug_selector(|| "changes-open-file".into())
-                                .text_color(theme.ely.fg_muted)
-                                .hover(|style| style.text_color(theme.ely.fg))
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    // `entry.path` is repo-relative, and the
-                                    // host opens an editor tab straight from
-                                    // whatever this event carries — a
-                                    // relative path made `FileView` resolve
-                                    // against the process CWD and render
-                                    // "This file does not exist: <name>" for
-                                    // a file that plainly does. Resolve
-                                    // against this surface's own root, the
-                                    // way the Files tree already emits
-                                    // absolute paths.
-                                    entity_for_open.update(cx, |tab, cx| {
-                                        let absolute = tab.repo_root.join(&path);
-                                        cx.emit(ChangesTabEvent::OpenFile(absolute));
-                                    });
-                                })
-                                .child("↗"),
-                        ),
+                        .child(row_icon_button(
+                            format!("open-{}-{}", section.slug(), path.display()),
+                            "changes-open-file",
+                            IconName::SquarePen,
+                            "Open file",
+                            move |_, cx| {
+                                // `entry.path` is repo-relative, and the host
+                                // opens an editor tab straight from whatever
+                                // this event carries — a relative path made
+                                // `FileView` resolve against the process CWD
+                                // and render "This file does not exist" for a
+                                // file that plainly does. Resolve against this
+                                // surface's own root, the way the Files tree
+                                // already emits absolute paths.
+                                entity_for_open.update(cx, |tab, cx| {
+                                    let absolute = tab.repo_root.join(&path);
+                                    cx.emit(ChangesTabEvent::OpenFile(absolute));
+                                });
+                            },
+                        )),
                 )
             })
     }
@@ -2838,7 +2818,7 @@ impl ChangesTab {
         let row_entity = entity.clone();
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
-        let tooltip_builder = change_tooltip_builder(self.embedded_in_panel);
+        let source = self.source.clone();
         let selected = self.selected_change.clone();
         let unified_x = self.unified_x;
         let split_left_x = self.split_left_x;
@@ -2883,12 +2863,12 @@ impl ChangesTab {
                             collapsed,
                         }) => Self::render_section_header(
                             *section,
+                            section.label_in(&source),
                             *count,
                             *collapsed,
                             allows_staging,
                             row_entity.clone(),
                             theme,
-                            tooltip_builder,
                         )
                         .into_any_element(),
                         Some(ListRow::Change(row)) => Self::render_change_row(
@@ -3192,6 +3172,79 @@ fn status_color(entry: &StatusEntry, theme: Theme) -> Hsla {
     crate::git_status_style::entry_color(entry, theme)
 }
 
+/// The letter a row's badge shows. The section decides which column of
+/// porcelain's two it reads — the index in Staged, the worktree in Changed —
+/// because that is the side of the split the row acts on. A commit's or a
+/// range's rows carry their status in the index column.
+fn git_status(section: ChangeSection, entry: &StatusEntry) -> GitStatus {
+    if section == ChangeSection::Untracked || entry.is_untracked() {
+        return GitStatus::Untracked;
+    }
+    if entry.is_conflicted() {
+        return GitStatus::Conflicted;
+    }
+    let kind = match section {
+        ChangeSection::Staged => entry.index_status,
+        ChangeSection::Changed | ChangeSection::Untracked => entry.worktree_status,
+    };
+    match kind {
+        Some(StatusKind::Added | StatusKind::Copied) => GitStatus::Added,
+        Some(StatusKind::Deleted) => GitStatus::Deleted,
+        Some(StatusKind::Renamed) => GitStatus::Renamed,
+        Some(StatusKind::Unmerged) => GitStatus::Conflicted,
+        Some(StatusKind::Untracked) => GitStatus::Untracked,
+        Some(StatusKind::Modified | StatusKind::TypeChanged) | None => GitStatus::Modified,
+    }
+}
+
+/// A row's labelled action: a small ghost button. The click stops there, so
+/// the row it sits in does not also toggle.
+fn row_button(
+    id: String,
+    selector: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id.clone())
+        .debug_selector(move || selector.to_owned())
+        .flex_none()
+        .child(
+            Button::new(SharedString::from(format!("{id}-button")), label)
+                .size(ControlSize::Sm)
+                .variant(ButtonVariant::Ghost)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_click(window, cx);
+                }),
+        )
+        .into_any_element()
+}
+
+/// A row's icon action, with its tooltip. Stops the click like `row_button`.
+fn row_icon_button(
+    id: String,
+    selector: &'static str,
+    icon: IconName,
+    tooltip: &'static str,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id.clone())
+        .debug_selector(move || selector.to_owned())
+        .flex_none()
+        .child(
+            IconButton::new(SharedString::from(format!("{id}-button")), icon)
+                .size(ControlSize::Sm)
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_click(window, cx);
+                }),
+        )
+        .into_any_element()
+}
+
 /// The gallery derives row washes from the semantic ink rather than keeping
 /// a second palette entry for the same meaning.
 fn diff_wash(color: Hsla) -> Hsla {
@@ -3278,70 +3331,6 @@ fn action_text_button(
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
-        })
-        .child(label)
-}
-
-fn change_tooltip_builder(embedded_in_panel: bool) -> controls::TooltipBuilder {
-    if embedded_in_panel {
-        controls::sidebar_tooltip
-    } else {
-        Tooltip::text
-    }
-}
-
-fn section_action_button(
-    icon: Icon,
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    tooltip_builder: controls::TooltipBuilder,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id.clone())
-        .debug_selector(move || id.clone())
-        // The token layer has no compact-section-action padding yet; use its
-        // titlebar spacing as the nearest COSMIC control rhythm.
-        .px(theme.spacing.titlebar_control_spacing)
-        .py(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.caption2)
-        .text_color(theme.ely.fg_muted)
-        .hover(|style| style.bg(theme.ely.hover).text_color(theme.ely.fg))
-        .tooltip(move |window, cx| tooltip_builder(label, window, cx))
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(IconElement::new(icon, IconSize::XSmall))
-}
-
-fn destructive_action_text_button<F>(
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    on_click: F,
-) -> impl IntoElement
-where
-    F: Fn(&mut Window, &mut App) + 'static,
-{
-    div()
-        .id(id)
-        .debug_selector(move || match label {
-            "Discard" => "changes-discard".to_owned(),
-            "Discard all" => "changes-discard-all".to_owned(),
-            _ => format!("changes-destructive-{label}"),
-        })
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
-        .text_size(theme.typography.scaled(12.5))
-        .text_color(theme.ely.fg_muted)
-        .hover(|style| style.text_color(theme.ely.danger))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx);
         })
         .child(label)
 }
@@ -5025,6 +5014,44 @@ mod tests {
             cx.debug_bounds("changes-list").is_some(),
             "Retry returns the surface to the usable changes list"
         );
+    }
+
+    /// A file staged and then modified again sits in two sections, and each
+    /// row names its own side of the split: what the index holds in Staged,
+    /// what the worktree holds in Changed.
+    #[test]
+    fn a_file_in_two_sections_shows_each_sections_own_letter() {
+        let entry = StatusEntry {
+            path: PathBuf::from("a.rs"),
+            original_path: None,
+            index_status: Some(StatusKind::Added),
+            worktree_status: Some(StatusKind::Modified),
+        };
+        assert_eq!(git_status(ChangeSection::Staged, &entry), GitStatus::Added);
+        assert_eq!(git_status(ChangeSection::Changed, &entry), GitStatus::Modified);
+    }
+
+    /// A commit's or a range's rows carry their status in the index column
+    /// (`commit_status_kind`), so a file the commit deletes reads D.
+    #[test]
+    fn a_commit_row_reads_its_status_from_the_index_column() {
+        let entry = StatusEntry {
+            path: PathBuf::from("gone.txt"),
+            original_path: None,
+            index_status: Some(commit_status_kind('D')),
+            worktree_status: None,
+        };
+        assert_eq!(git_status(ChangeSection::Staged, &entry), GitStatus::Deleted);
+    }
+
+    /// B1 §13: a change request's diff is not "staged" anything. Its one
+    /// section is headed, and reported, as Changes.
+    #[test]
+    fn a_range_reports_its_one_section_as_changes() {
+        let report = range_tab_with_one_diff(false).report();
+        let names: Vec<_> = report.sections.iter().map(|section| section.name).collect();
+        assert!(names.contains(&"Changes"), "{names:?}");
+        assert!(!names.contains(&"Staged"), "{names:?}");
     }
 
     /// Ely's single-choice group empties its selection when the chosen face is
