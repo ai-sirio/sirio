@@ -76,7 +76,7 @@ impl ChangeRequestTab {
     }
 
     pub(crate) fn render_composer(&self, _theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
-        let caps = self.header.value()?.capabilities;
+        let caps = &self.header.value()?.capabilities;
         if !caps.can_comment {
             return None;
         }

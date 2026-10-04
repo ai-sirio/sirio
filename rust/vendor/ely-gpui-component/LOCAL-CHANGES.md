@@ -181,3 +181,22 @@ Caveats a host must respect:
 
 Native rendering evidence: `sirio_ui/examples/ely_forge_probe.rs`, driven by
 `Scripts/Tests/test-ely-forge-probe.sh` (`docs/testing/ely-forge-probe.md`).
+
+### `Popover::on_close` (delivery 3, B2b)
+
+`src/overlays/popover.rs` gains `Popover::on_close(handler)`, which runs each
+time the panel closes, however it closed: its trigger, Escape, a press outside,
+or focus leaving it. All four already went through the private `close`; the
+hook is stored in the popover's keyed state on every render and called there
+after focus is handed back, only when the panel was open. Upstream has no way
+for an owner to learn the panel closed, and the change-request pickers send
+their one write when it does (spec §6). `src/overlays/tests.rs` drives each
+path in a real window
+(`every_way_a_popover_closes_tells_its_owner_once`).
+
+`Popover::open(bool)` lets the owner hold the panel open or closed; it
+follows on the next draw, the usual ways out still close it, and every close
+(the owner's included) runs `on_close`. The change-request pickers are opened
+and closed over the control socket too (debug builds), and the panel must
+follow the picker's own state rather than drift from it.
+`a_popover_follows_its_owner_open_and_closed` proves both directions.

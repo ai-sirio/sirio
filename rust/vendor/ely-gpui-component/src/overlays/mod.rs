@@ -3,6 +3,8 @@ mod dialogs;
 mod floats;
 mod hover;
 mod popover;
+#[cfg(test)]
+mod tests;
 
 pub use dialog::{Close, Dialog};
 pub use dialogs::{AlertDialog, ConfirmDialog, PromptDialog};

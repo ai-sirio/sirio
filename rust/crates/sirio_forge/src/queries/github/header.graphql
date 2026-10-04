@@ -1,9 +1,12 @@
 query ChangeRequestHeader($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed deleteBranchOnMerge
     pullRequest(number: $number) {
       ...ChangeSummary
       body baseRefOid headRefOid
       id locked viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor
+      mergeStateStatus isCrossRepository viewerCanEnableAutoMerge autoMergeRequest { mergeMethod }
+      labels(first: 20) { nodes { id name color } }
       additions
       deletions
       changedFiles

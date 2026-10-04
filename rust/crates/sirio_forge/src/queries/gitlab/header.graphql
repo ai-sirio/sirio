@@ -4,7 +4,9 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
       ...MergeRequestSummary
       id
       discussionLocked
-      userPermissions { canApprove createNote updateMergeRequest }
+      userPermissions { canApprove canMerge createNote updateMergeRequest }
+      diffHeadSha detailedMergeStatus squashOnMerge squashReadOnly autoMergeEnabled availableAutoMergeStrategies shouldRemoveSourceBranch
+      labels { nodes { id title color } }
       description
       diffRefs { baseSha headSha startSha }
       diffStatsSummary { additions deletions fileCount }

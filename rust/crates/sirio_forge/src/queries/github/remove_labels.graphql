@@ -1,0 +1,3 @@
+mutation RemoveLabelsFromLabelable($input: RemoveLabelsFromLabelableInput!) {
+  removeLabelsFromLabelable(input: $input) { clientMutationId }
+}

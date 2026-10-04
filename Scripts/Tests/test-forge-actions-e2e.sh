@@ -15,7 +15,8 @@ set -euo pipefail
 # have gone through.
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
-# `--stage NAME` runs one: wire-github, wire-gitlab, failures, cli, scopes, ui. Nothing
+# `--stage NAME` runs one: wire-github, wire-gitlab, failures, merge, metadata, cli,
+# scopes, ui. Nothing
 # is published and the user's own gh/glab configuration is never read.
 #
 # The `ui` stage launches a real, isolated Sirio (debug build) against the
@@ -450,6 +451,222 @@ expect_line "ERR RateLimited"
 [ "$(sent_count github AddComment)" = "$before" ] || fail "a comment was sent to a rate limited host"
 fi
 
+# Every input the fake forge saw of an operation, one canonical JSON per line.
+sent_inputs() { # flavour Operation
+  "$PYTHON" - "$WORK/$1-requests.log" "$2" <<'PY'
+import json, re, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    found = re.match(r"^POST \S+ (\S+) interaction=\w+ vars=(.*)$", line)
+    if found and found.group(1) == sys.argv[2]:
+        print(json.dumps(json.loads(found.group(2)).get("input"), sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+PY
+}
+expect_nth_input() { # flavour Operation n(1-based) json
+  local got want
+  got=$(sent_inputs "$1" "$2" | sed -n "${3}p")
+  want=$("$PYTHON" -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True, separators=(",", ":"), ensure_ascii=False))' "$4")
+  [ "$got" = "$want" ] || { cat "$WORK/$1-requests.log" >&2; fail "$1 $2 #$3 was sent as $got, expected $want"; }
+}
+expect_prefix() { echo "$PROBE_OUT" | grep -q -- "^$1" || { dump; fail "no line starting: $1"; }; }
+no_prefix() { ! echo "$PROBE_OUT" | grep -q -- "^$1" || { dump; fail "a line starts: $1"; }; }
+no_rest() { # flavour "METHOD /path-prefix"
+  ! grep -q -- "^$2" "$WORK/$1-requests.log" || { cat "$WORK/$1-requests.log" >&2; fail "the $1 forge saw: $2"; }
+}
+expect_var() { # flavour Operation key value -- a read's variable, as the forge saw it
+  "$PYTHON" - "$WORK/$1-requests.log" "$2" "$3" "$4" <<'PY' || { cat "$WORK/$1-requests.log" >&2; fail "$1 $2 never carried $3=$4"; }
+import json, re, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    found = re.match(r"^POST \S+ (\S+) interaction=\w+ vars=(.*)$", line)
+    if found and found.group(1) == sys.argv[2] and json.loads(found.group(2)).get(sys.argv[3]) == sys.argv[4]:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+GH_HEAD=b2c3d4e5f60718293a4b5c6d7e8f901234567890
+GL_HEAD=d4e5f60718293a4b5c6d7e8f901234567890a1b2
+
+if wanted merge; then
+echo "stage merge: a merge reaches each forge with the head the user saw, and only when the forge would take it"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" header 101
+expect_code 0 "github header"
+expect_line "MERGE ready methods=merge,squash,rebase default=merge auto=yes enabled=- delete-default=no"
+probe "${GH[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Ship it" --message "because"
+expect_code 0 "a squash merge"
+expect_input github MergePullRequest "{\"commitBody\":\"because\",\"commitHeadline\":\"Ship it\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
+no_rest github "DELETE "
+echo "  a forge still working out whether it can merge offers nothing yet"
+reset_forge github "$GH_PORT"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$GH_PORT/__checking"
+probe "${GH[@]}" header 101
+expect_prefix "MERGE checking "
+probe "${GH[@]}" act 101 merge --method merge --head "$GH_HEAD"
+expect_code 20 "a merge while github is checking"
+expect_line "ERR Rejected"
+expect_sent github MergePullRequest 0
+echo "  a rebase carries no message; delete-branch is a REST call after the merge"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" act 101 merge --method rebase --head "$GH_HEAD" --title "ignored" --delete-branch yes
+expect_code 0 "a rebase merge"
+expect_input github MergePullRequest "{\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"REBASE\",$GH_ID}"
+expect_rest github "DELETE /api/v3/repos/acme/widgets/git/refs/heads/feat/login"
+echo "  a moved head is refused before the wire"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" act 101 merge --method merge --head 0000000000000000000000000000000000000000
+expect_code 20 "a merge of a head that moved"
+expect_line "ERR HeadMoved"
+expect_sent github MergePullRequest 0
+echo "  a failed branch deletion leaves the merge done, with a warning"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token deletefails act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
+expect_code 0 "a merge whose branch deletion fails"
+expect_line "ACT ok"
+expect_prefix "WARNING merged; deleting the branch failed:"
+echo "  a branch the forge already deleted on merge is not a failure"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token autodeleted act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
+expect_code 0 "a merge whose branch the forge deleted itself"
+expect_line "ACT ok"
+no_prefix "WARNING"
+echo "  a head in a fork is never deleted"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token fork act 101 merge --method merge --head "$GH_HEAD" --delete-branch yes
+expect_code 0 "a merge of a fork's head"
+expect_sent github MergePullRequest 1
+no_rest github "DELETE "
+echo "  a blocked pull request sends nothing and says why"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token blocked header 101
+expect_line "MERGE blocked:a-review-is-required methods=merge,squash,rebase default=merge auto=yes enabled=- delete-default=no"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token blocked act 101 merge --method merge --head "$GH_HEAD"
+expect_code 20 "a blocked merge"
+expect_line "MESSAGE It cannot be merged yet: a review is required."
+expect_sent github MergePullRequest 0
+echo "  waiting on checks: only merge-when-checks-pass, then cancel it"
+reset_forge github "$GH_PORT"
+GHW=("$PROBE" --forge github --host ghe.test --project acme/widgets --token waiting)
+probe "${GHW[@]}" act 101 merge --method merge --head "$GH_HEAD"
+expect_code 20 "a merge while checks run"
+expect_line "MESSAGE Checks are still running."
+probe "${GHW[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Ship it" --when-checks-pass yes --delete-branch yes
+expect_code 0 "auto-merge"
+expect_input github EnablePullRequestAutoMerge "{\"commitHeadline\":\"Ship it\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
+no_rest github "DELETE "
+probe "${GHW[@]}" header 101
+expect_line "MERGE waiting methods=merge,squash,rebase default=merge auto=yes enabled=squash delete-default=no"
+probe "${GHW[@]}" act 101 cancel-auto-merge
+expect_code 0 "cancel auto-merge"
+expect_input github DisablePullRequestAutoMerge "{$GH_ID}"
+echo "  a token without a write scope is Forbidden on a merge too"
+reset_forge github "$GH_PORT"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token scopeless act 101 merge --method merge --head "$GH_HEAD"
+expect_line "ERR Forbidden"
+
+echo "  a merge request gitlab is still checking offers nothing yet"
+reset_forge gitlab "$GL_PORT"
+curl -s -o /dev/null -X POST "http://127.0.0.1:$GL_PORT/__checking"
+probe "${GL[@]}" header 201
+expect_prefix "MERGE checking "
+probe "${GL[@]}" act 201 merge --method merge --head "$GL_HEAD"
+expect_code 20 "a merge while gitlab is checking"
+expect_line "ERR Rejected"
+expect_sent gitlab MergeRequestAccept 0
+reset_forge gitlab "$GL_PORT"
+MR_ID='"iid":"201","projectPath":"team/app"'
+probe "${GL[@]}" header 201
+expect_code 0 "gitlab header"
+expect_line "MERGE ready methods=merge,squash default=merge auto=yes enabled=- delete-default=yes"
+probe "${GL[@]}" act 201 merge --method squash --head "$GL_HEAD" --title "Ship it" --message "because" --delete-branch yes
+expect_code 0 "a gitlab squash merge"
+expect_input gitlab MergeRequestAccept "{$MR_ID,\"sha\":\"$GL_HEAD\",\"shouldRemoveSourceBranch\":true,\"squash\":true,\"squashCommitMessage\":\"Ship it\\n\\nbecause\"}"
+reset_forge gitlab "$GL_PORT"
+probe "${GL[@]}" act 201 merge --method merge --head "$GL_HEAD" --title "Merge it"
+expect_input gitlab MergeRequestAccept "{\"commitMessage\":\"Merge it\",$MR_ID,\"sha\":\"$GL_HEAD\",\"shouldRemoveSourceBranch\":false,\"squash\":false}"
+probe "${GL[@]}" act 201 merge --method rebase --head "$GL_HEAD"
+expect_code 20 "a rebase on gitlab"
+expect_line "ERR Rejected"
+probe "${GL[@]}" act 201 merge --method merge --head 0000000000000000000000000000000000000000
+expect_line "ERR HeadMoved"
+expect_sent gitlab MergeRequestAccept 1
+reset_forge gitlab "$GL_PORT"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token blocked act 201 merge --method merge --head "$GL_HEAD"
+expect_line "MESSAGE It cannot be merged yet: a review is required."
+expect_sent gitlab MergeRequestAccept 0
+GLW=("$PROBE" --forge gitlab --host gitlab.test --project team/app --token waiting)
+probe "${GLW[@]}" act 201 merge --method merge --head "$GL_HEAD" --when-checks-pass yes
+expect_code 0 "gitlab auto-merge"
+expect_input gitlab MergeRequestAccept "{$MR_ID,\"sha\":\"$GL_HEAD\",\"shouldRemoveSourceBranch\":false,\"squash\":false,\"strategy\":\"MERGE_WHEN_CHECKS_PASS\"}"
+probe "${GLW[@]}" act 201 cancel-auto-merge
+expect_code 0 "gitlab cancel auto-merge"
+expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/cancel_merge_when_pipeline_succeeds"
+echo "  an older GitLab reports no merge capability, and nothing is offered"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token old header 201
+expect_code 0 "an old gitlab header"
+expect_line "MERGE unreported methods=- default=- auto=no enabled=- delete-default=no"
+fi
+
+if wanted metadata; then
+echo "stage metadata: reviewers and labels change by one write each, with ids the forge gave"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" header 101
+expect_line "REVIEWER_ID fake-user U_kwDOfake"
+expect_line "LABEL LA_kwDObug bug"
+probe "${GH[@]}" act 101 set-reviewers --add U_kwDOann --remove U_kwDOfake
+expect_code 0 "github reviewers"
+expect_input github RequestReviews "{\"botIds\":[\"BOT_kwDOcopilot\"],$GH_ID,\"teamIds\":[\"T_kwDOcore\"],\"union\":false,\"userIds\":[\"U_kwDOann\"]}"
+echo "  adding only adds: the requests already there, a bot's among them, are not sent"
+probe "${GH[@]}" act 101 set-reviewers --add U_kwDOann
+expect_code 0 "github reviewers, add only"
+expect_nth_input github RequestReviews 2 "{$GH_ID,\"union\":true,\"userIds\":[\"U_kwDOann\"]}"
+echo "  a removal that would drop a request Sirio cannot send back is refused"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token mannequin act 101 set-reviewers --remove U_kwDOfake
+expect_code 20 "a removal beside a mannequin's request"
+expect_line "ERR Rejected"
+expect_line "MESSAGE Removing a reviewer here would also drop the review request of a mannequin; change it on the forge."
+expect_sent github RequestReviews 2
+probe "${GH[@]}" act 101 set-reviewers
+expect_code 20 "reviewers with nothing to change"
+expect_line "MESSAGE There is nothing to change."
+probe "${GH[@]}" act 101 set-labels --add LA_kwDOfeat --remove LA_kwDObug
+expect_code 0 "github labels"
+expect_input github AddLabelsToLabelable '{"labelIds":["LA_kwDOfeat"],"labelableId":"PR_kwDOfake101"}'
+expect_input github RemoveLabelsFromLabelable '{"labelIds":["LA_kwDObug"],"labelableId":"PR_kwDOfake101"}'
+probe "${GH[@]}" candidates reviewers 101 --text ann
+expect_code 0 "github reviewer candidates"
+expect_var github ReviewerCandidates q ann
+expect_line "CANDIDATE U_kwDOann ann Ann Lee"
+no_line "CANDIDATE U_kwDOalice alice Alice"
+probe "${GH[@]}" candidates labels 101 --text fe
+expect_line "CANDIDATE LA_kwDOfeat feature -"
+
+reset_forge gitlab "$GL_PORT"
+probe "${GL[@]}" header 201
+expect_line "REVIEWER_ID carol carol"
+expect_line "LABEL gid://gitlab/ProjectLabel/1 bug"
+probe "${GL[@]}" act 201 set-reviewers --add ann --remove carol
+expect_code 0 "gitlab reviewers"
+expect_sent gitlab MergeRequestSetReviewers 2
+expect_nth_input gitlab MergeRequestSetReviewers 1 '{"iid":"201","operationMode":"APPEND","projectPath":"team/app","reviewerUsernames":["ann"]}'
+expect_nth_input gitlab MergeRequestSetReviewers 2 '{"iid":"201","operationMode":"REMOVE","projectPath":"team/app","reviewerUsernames":["carol"]}'
+probe "${GL[@]}" act 201 set-labels --add gid://gitlab/ProjectLabel/2
+expect_code 0 "gitlab labels"
+expect_sent gitlab MergeRequestSetLabels 1
+expect_input gitlab MergeRequestSetLabels '{"iid":"201","labelIds":["gid://gitlab/ProjectLabel/2"],"operationMode":"APPEND","projectPath":"team/app"}'
+probe "${GL[@]}" candidates reviewers 201 --text ann
+expect_var gitlab ReviewerCandidates q ann
+expect_line "CANDIDATE ann ann Ann Lee"
+probe "${GL[@]}" candidates labels 201 --text fe
+expect_line "CANDIDATE gid://gitlab/ProjectLabel/2 feature -"
+echo "  an organisation's labels, kept on a group above the project's own, are offered"
+probe "${GL[@]}" candidates labels 201 --text plat
+expect_line "CANDIDATE gid://gitlab/GroupLabel/9 platform -"
+echo "  a GitLab without the reviewers mutation says so, rather than failing to read"
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token old act 201 set-reviewers --add ann
+expect_code 20 "reviewers on an old gitlab"
+expect_line "ERR Unsupported"
+fi
+
 if wanted scopes; then
 echo "stage scopes: what a token says it may do, for Settings"
 probe "${GH[@]}" scopes
@@ -498,6 +715,13 @@ if command -v gh >/dev/null; then
   expect_body_is_file github AddComment "$BODY_FILE"
   probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" act 101 approve --body "Via gh"
   expect_input github AddPullRequestReview "{\"body\":\"Via gh\",\"event\":\"APPROVE\",$GH_ID}"
+  reset_forge github "$GH_PORT"
+  probe GH_CONFIG_DIR="$WORK/gh-good" "${GH_CLI[@]}" "$PROBE" "${GH_CLI_ARGS[@]}" act 101 merge --method squash --head "$GH_HEAD" --title "Via gh" --delete-branch yes
+  expect_code 0 "a merge through gh, then the branch deletion (REST DELETE)"
+  expect_line "ACT ok"
+  ! echo "$PROBE_OUT" | grep -q "^WARNING" || { dump; fail "the branch deletion through gh failed"; }
+  expect_input github MergePullRequest "{\"commitHeadline\":\"Via gh\",\"expectedHeadOid\":\"$GH_HEAD\",\"mergeMethod\":\"SQUASH\",$GH_ID}"
+  expect_rest github "DELETE /repos/acme/widgets/git/refs/heads/feat/login"  # gh drops /api/v3 for *.localhost
 else
   echo "SKIP: gh is not on PATH -- writes through gh were not exercised"
 fi
@@ -509,14 +733,21 @@ if command -v glab >/dev/null; then
   probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" "${GL_CLI_ARGS[@]}" act 201 approve
   expect_code 0 "an approval (REST) through glab"
   expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/approve"
+  reset_forge gitlab "$GL_PORT"
+  write_glab_config "$WORK/glab-waiting" waiting
+  probe GLAB_CONFIG_DIR="$WORK/glab-waiting" "$PROBE" "${GL_CLI_ARGS[@]}" act 201 merge --method merge --head "$GL_HEAD" --when-checks-pass yes
+  expect_code 0 "an auto-merge through glab"
+  probe GLAB_CONFIG_DIR="$WORK/glab-waiting" "$PROBE" "${GL_CLI_ARGS[@]}" act 201 cancel-auto-merge
+  expect_code 0 "a cancel of the auto-merge (REST) through glab"
+  expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/cancel_merge_when_pipeline_succeeds"
 else
-  echo "SKIP: glab is not on PATH -- writes through glab (and the REST approval) were not exercised"
+  echo "SKIP: glab is not on PATH -- writes through glab (the REST approval and the REST cancel of an auto-merge) were not exercised"
 fi
 fi
 
 
 if wanted ui; then
-echo "stage ui: a real Sirio, the change request tab, every action of B2a"
+echo "stage ui: a real Sirio, the change request tab, every action of B2a and B2b"
 BIN="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$CARGO_DIR/target}/debug/sirioctl"
 if [ "$STATE_ONLY" -eq 0 ]; then
@@ -609,7 +840,7 @@ run_ui() { # flavour host project number origin-url commentIndex noteOperation e
   local port=$GH_PORT
   [ "$flavour" = gitlab ] && port=$GL_PORT
   local run_dir
-  run_dir=$(mktemp -d /tmp/sirio-forge-actions-XXXXXX)
+  run_dir=$(mktemp -d "${TMPDIR:-/tmp}/sirio-forge-actions-XXXXXX")
   reset_forge "$flavour" "$port"
 
   local repo="$run_dir/repo"
@@ -723,6 +954,119 @@ PY
   ctl surface change-request act edit-comment --index "$comment_index" --text "Edited comment" >/dev/null
   wait_for comment_editing "" surface change-request read
   expect_sent "$flavour" "$comment_op" 1
+
+  echo "  [$flavour] merge: the strip, the dialog, and the head the user saw"
+  local merge_op=MergePullRequest head=$GH_HEAD head_key=expectedHeadOid
+  local auto_op=EnablePullRequestAutoMerge
+  local reviewers_op=RequestReviews labels_op=AddLabelsToLabelable ann=U_kwDOann feature=LA_kwDOfeat
+  if [ "$flavour" = gitlab ]; then
+    merge_op=MergeRequestAccept head=$GL_HEAD head_key=sha auto_op=MergeRequestAccept
+    reviewers_op=MergeRequestSetReviewers labels_op=MergeRequestSetLabels ann=ann feature=gid://gitlab/ProjectLabel/2
+  fi
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  wait_for merge_strip merge surface change-request read
+  wait_for merge_verdict ready surface change-request read
+  capture "$flavour-merge-strip"
+  ctl surface change-request act merge-open --method squash >/dev/null
+  wait_for merge_dialog open surface change-request read
+  capture "$flavour-merge-dialog"
+  ctl surface change-request act merge-confirm --title "Ship it" --message "because" >/dev/null
+  wait_for merge_dialog closed surface change-request read
+  wait_for cr_state merged surface change-request read
+  wait_for merge_strip none surface change-request read
+  expect_sent "$flavour" "$merge_op" 1
+  [ "$(sent_input "$flavour" "$merge_op" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$head_key")" = "$head" ] || fail "the merge did not carry the head the user saw"
+
+  echo "  [$flavour] someone pushes between the dialog and the click: nothing is merged"
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  ctl surface change-request act merge-open --method merge >/dev/null
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__push"
+  ctl surface change-request act merge-confirm >/dev/null
+  wait_for merge_dialog closed surface change-request read
+  wait_for action failed surface change-request read
+  case "$(key action_message surface change-request read)" in *"The branch changed since you opened this"*) ;; *) fail "a moved head was not named" ;; esac
+  expect_sent "$flavour" "$merge_op" 0
+
+  echo "  [$flavour] a refused merge says why inside the dialog, which stays open"
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  ctl surface change-request act merge-open --method merge >/dev/null
+  wait_for merge_dialog open surface change-request read
+  ctl surface change-request act merge-confirm --title "   " >/dev/null 2>&1 || true
+  wait_for action failed surface change-request read
+  [ "$(key merge_dialog surface change-request read)" = open ] || fail "a refused merge closed its dialog"
+  case "$(key merge_dialog_message surface change-request read)" in *"The commit title cannot be empty."*) ;; *) fail "the dialog did not say why the merge was refused" ;; esac
+  [ "$(key merge_sending surface change-request read)" = no ] || fail "the strip still spins after a refused merge"
+  capture "$flavour-merge-refused"
+  ctl surface change-request act merge-close >/dev/null
+  wait_for merge_dialog closed surface change-request read
+  expect_sent "$flavour" "$merge_op" 0
+
+  echo "  [$flavour] a forge still checking offers no merge, and the tab looks again by itself"
+  reset_forge "$flavour" "$port"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__checking"
+  reopen_tab "$number"
+  wait_for merge_strip checking surface change-request read
+  if ctl surface change-request act merge-open >/dev/null 2>&1; then fail "a change request being checked opened the merge dialog"; fi
+  capture "$flavour-merge-checking"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/__reset"
+  wait_for merge_strip merge surface change-request read
+
+  echo "  [$flavour] a blocked change request offers no merge"
+  saved_token "$host" "$flavour" blocked
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  wait_for merge_strip blocked surface change-request read
+  case "$(key merge_message surface change-request read)" in *"a review is required"*) ;; *) fail "the block's reason was not shown" ;; esac
+  capture "$flavour-merge-blocked"
+  if ctl surface change-request act merge-open >/dev/null 2>&1; then fail "a blocked change request opened the merge dialog"; fi
+  expect_sent "$flavour" "$merge_op" 0
+
+  echo "  [$flavour] checks still running: merge when they pass, then cancel it"
+  saved_token "$host" "$flavour" waiting
+  reopen_tab "$number"
+  reset_forge "$flavour" "$port"
+  wait_for merge_strip auto-merge surface change-request read
+  ctl surface change-request act merge-open --when-checks-pass yes >/dev/null
+  ctl surface change-request act merge-confirm >/dev/null
+  wait_for action idle surface change-request read
+  wait_for merge_strip cancel surface change-request read
+  expect_sent "$flavour" "$auto_op" 1
+  capture "$flavour-merge-cancel"
+  ctl surface change-request act cancel-auto-merge >/dev/null
+  wait_for action idle surface change-request read
+  if [ "$flavour" = gitlab ]; then expect_rest gitlab "POST /api/v4/projects/team%2Fapp/merge_requests/201/cancel_merge_when_pipeline_succeeds"; else expect_sent github DisablePullRequestAutoMerge 1; fi
+
+  echo "  [$flavour] reviewers and labels: one write when the picker closes, none when nothing changed"
+  saved_token "$host" "$flavour" good
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  ctl surface change-request act picker-open --kind reviewers >/dev/null
+  wait_for picker reviewers surface change-request read
+  ctl surface change-request act picker-type --text ann --now yes >/dev/null
+  wait_for picker_candidates 1 surface change-request read
+  capture "$flavour-picker"
+  ctl surface change-request act picker-pick --id "$ann" >/dev/null
+  ctl surface change-request act picker-close >/dev/null
+  wait_for picker closed surface change-request read
+  wait_for action idle surface change-request read
+  expect_sent "$flavour" "$reviewers_op" 1
+  ctl surface change-request act picker-open --kind labels >/dev/null
+  wait_for picker labels surface change-request read
+  ctl surface change-request act picker-close >/dev/null
+  wait_for picker closed surface change-request read
+  expect_sent "$flavour" "$labels_op" 0
+  ctl surface change-request act picker-open --kind labels >/dev/null
+  ctl surface change-request act picker-type --text fe --now yes >/dev/null
+  wait_for picker_candidates 1 surface change-request read
+  ctl surface change-request act picker-pick --id "$feature" >/dev/null
+  ctl surface change-request act picker-pick --id "$feature" >/dev/null
+  ctl surface change-request act picker-pick --id "$feature" >/dev/null
+  ctl surface change-request act picker-close >/dev/null
+  wait_for action idle surface change-request read
+  expect_sent "$flavour" "$labels_op" 1
 
   echo "  [$flavour] a double send while the first is in flight is one request; words typed meanwhile stay"
   saved_token "$host" "$flavour" slow

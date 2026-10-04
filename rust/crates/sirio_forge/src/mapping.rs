@@ -3,7 +3,7 @@
 //! never make a list fail to draw.
 
 use crate::model::{
-    Capabilities, ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress,
+    BlockReason, Capabilities, MergeCapability, MergeMethod, MergeMethods, MergeVerdict, ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress,
     ReviewOutcome, ReviewState,
 };
 
@@ -297,6 +297,9 @@ pub(crate) fn github_capabilities(facts: GitHubFacts<'_>) -> Capabilities {
             _ => false,
         },
         can_toggle_draft: open && facts.viewer_can_update,
+        can_edit_reviewers: facts.viewer_can_update,
+        can_edit_labels: facts.viewer_can_update,
+        merge: MergeCapability::default(),
     }
 }
 
@@ -325,6 +328,138 @@ pub(crate) fn gitlab_capabilities(facts: GitLabFacts<'_>) -> Capabilities {
         can_edit: can_update,
         can_change_state: can_update && matches!(facts.state, "opened" | "closed"),
         can_toggle_draft: can_update && opened,
+        can_edit_reviewers: can_update,
+        can_edit_labels: can_update,
+        merge: MergeCapability::default(),
+    }
+}
+
+/// What `github_merge` reads: the pull request's merge state and the
+/// repository's merge settings.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitHubMergeFacts<'a> {
+    /// Sirio's own state word: `OPEN`, `DRAFT`, `CLOSED` or `MERGED`.
+    pub state: &'a str,
+    pub merge_state_status: Option<&'a str>,
+    pub review_decision: Option<&'a str>,
+    /// The head commit's `statusCheckRollup.state`.
+    pub rollup: Option<&'a str>,
+    pub merge_commit_allowed: bool,
+    pub squash_merge_allowed: bool,
+    pub rebase_merge_allowed: bool,
+    pub auto_merge_allowed: bool,
+    pub viewer_can_enable_auto_merge: bool,
+    /// `autoMergeRequest.mergeMethod`, when an auto-merge is set.
+    pub auto_merge_method: Option<&'a str>,
+    pub delete_branch_on_merge: bool,
+}
+
+/// GitHub's `BLOCKED` covers both a missing review and running required
+/// checks; the review decision and the rollup tell them apart. A status
+/// GitHub adds later is a block named in GitHub's own word.
+pub(crate) fn github_merge(facts: GitHubMergeFacts<'_>) -> MergeCapability {
+    let methods = MergeMethods {
+        merge: facts.merge_commit_allowed,
+        squash: facts.squash_merge_allowed,
+        rebase: facts.rebase_merge_allowed,
+    };
+    let verdict = match facts.merge_state_status {
+        None => MergeVerdict::Unreported,
+        Some(_) if methods.is_empty() => MergeVerdict::Blocked(BlockReason::NoMethod),
+        Some(_) if facts.state == "DRAFT" => MergeVerdict::Blocked(BlockReason::Draft),
+        Some("CLEAN" | "UNSTABLE" | "HAS_HOOKS") => MergeVerdict::Ready,
+        Some("DIRTY") => MergeVerdict::Blocked(BlockReason::Conflicts),
+        Some("BEHIND") => MergeVerdict::Blocked(BlockReason::Behind),
+        Some("BLOCKED") => match (facts.review_decision, facts.rollup) {
+            (Some("CHANGES_REQUESTED"), _) => MergeVerdict::Blocked(BlockReason::ChangesRequested),
+            (Some("REVIEW_REQUIRED"), _) => MergeVerdict::Blocked(BlockReason::ReviewRequired),
+            (_, Some("PENDING" | "EXPECTED")) => MergeVerdict::WaitingOnChecks,
+            (_, Some("FAILURE" | "ERROR")) => MergeVerdict::Blocked(BlockReason::ChecksFailing),
+            _ => MergeVerdict::Blocked(BlockReason::Other("BLOCKED".to_string())),
+        },
+        // GitHub works mergeability out lazily, after a push to either side.
+        Some("UNKNOWN") => MergeVerdict::Checking,
+        Some(word) => MergeVerdict::Blocked(BlockReason::Other(word.to_string())),
+    };
+    MergeCapability {
+        verdict,
+        methods,
+        default_method: methods.list().first().copied(),
+        can_auto_merge: facts.auto_merge_allowed && facts.viewer_can_enable_auto_merge,
+        auto_merge_enabled: facts.auto_merge_method.map(|word| match word {
+            "SQUASH" => MergeMethod::Squash,
+            "REBASE" => MergeMethod::Rebase,
+            _ => MergeMethod::Merge,
+        }),
+        delete_branch_default: facts.delete_branch_on_merge,
+    }
+}
+
+/// What `gitlab_merge` reads. `None` is "the server did not report it".
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GitLabMergeFacts<'a> {
+    pub state: &'a str,
+    pub detailed_status: Option<&'a str>,
+    pub can_merge: Option<bool>,
+    pub squash_read_only: Option<bool>,
+    pub squash_on_merge: Option<bool>,
+    pub auto_merge_enabled: Option<bool>,
+    pub auto_merge_strategies: Option<&'a [&'a str]>,
+    pub remove_source_branch: Option<bool>,
+}
+
+/// GitLab picks the merge method per project, not per merge: Sirio offers
+/// a merge commit and, where the project lets the user choose, a squash.
+pub(crate) fn gitlab_merge(facts: GitLabMergeFacts<'_>) -> MergeCapability {
+    let (Some(status), Some(can_merge)) = (facts.detailed_status, facts.can_merge) else {
+        return MergeCapability::default();
+    };
+    let read_only = facts.squash_read_only == Some(true);
+    let squash_on = facts.squash_on_merge == Some(true);
+    let methods = MergeMethods {
+        merge: !(read_only && squash_on),
+        squash: !read_only || squash_on,
+        rebase: false,
+    };
+    let verdict = if !can_merge {
+        MergeVerdict::Blocked(BlockReason::Other("cannot merge".to_string()))
+    } else if facts.state != "opened" {
+        MergeVerdict::Blocked(BlockReason::Other("not open".to_string()))
+    } else {
+        match status {
+            "MERGEABLE" => MergeVerdict::Ready,
+            "CI_STILL_RUNNING" => MergeVerdict::WaitingOnChecks,
+            "CI_MUST_PASS" => MergeVerdict::Blocked(BlockReason::ChecksFailing),
+            "NOT_APPROVED" => MergeVerdict::Blocked(BlockReason::ReviewRequired),
+            "REQUESTED_CHANGES" => MergeVerdict::Blocked(BlockReason::ChangesRequested),
+            "CONFLICT" => MergeVerdict::Blocked(BlockReason::Conflicts),
+            "NEED_REBASE" => MergeVerdict::Blocked(BlockReason::Behind),
+            "DRAFT_STATUS" => MergeVerdict::Blocked(BlockReason::Draft),
+            "DISCUSSIONS_NOT_RESOLVED" => MergeVerdict::Blocked(BlockReason::Discussions),
+            // Passing states: GitLab has not finished its checks yet.
+            "UNCHECKED" | "CHECKING" | "PREPARING" | "APPROVALS_SYNCING" => MergeVerdict::Checking,
+            word => MergeVerdict::Blocked(BlockReason::Other(word.to_string())),
+        }
+    };
+    let default_method = if squash_on && methods.squash {
+        Some(MergeMethod::Squash)
+    } else {
+        methods.list().first().copied()
+    };
+    MergeCapability {
+        verdict,
+        methods,
+        default_method,
+        // GitLab lists its strategies as its own lower-case constants
+        // (`merge_when_checks_pass`); the mutation's enum spells them in
+        // capitals. Either spelling is read.
+        can_auto_merge: facts.auto_merge_strategies.is_some_and(|strategies| {
+            strategies.iter().any(|strategy| strategy.eq_ignore_ascii_case("merge_when_checks_pass"))
+        }),
+        auto_merge_enabled: (facts.auto_merge_enabled == Some(true)).then(|| {
+            if squash_on { MergeMethod::Squash } else { MergeMethod::Merge }
+        }),
+        delete_branch_default: facts.remove_source_branch == Some(true),
     }
 }
 
@@ -822,5 +957,192 @@ mod tests {
         });
         assert!(!caps.can_edit && !caps.can_change_state && !caps.can_toggle_draft);
         assert!(caps.can_approve, "approving is its own permission");
+    }
+
+    fn gh() -> GitHubMergeFacts<'static> {
+        GitHubMergeFacts {
+            state: "OPEN",
+            merge_state_status: Some("CLEAN"),
+            review_decision: None,
+            rollup: None,
+            merge_commit_allowed: true,
+            squash_merge_allowed: true,
+            rebase_merge_allowed: true,
+            auto_merge_allowed: true,
+            viewer_can_enable_auto_merge: true,
+            auto_merge_method: None,
+            delete_branch_on_merge: false,
+        }
+    }
+
+    #[test]
+    fn a_clean_pull_request_is_ready_with_every_allowed_method() {
+        let cap = github_merge(gh());
+        assert_eq!(cap.verdict, MergeVerdict::Ready);
+        assert_eq!(cap.methods.list(), vec![MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase]);
+        assert_eq!(cap.default_method, Some(MergeMethod::Merge));
+    }
+
+    #[test]
+    fn a_status_word_github_adds_tomorrow_is_blocked_with_its_own_word() {
+        let cap = github_merge(GitHubMergeFacts { merge_state_status: Some("QUANTUM_FOAM"), ..gh() });
+        assert_eq!(cap.verdict, MergeVerdict::Blocked(BlockReason::Other("QUANTUM_FOAM".into())));
+    }
+
+    #[test]
+    fn a_missing_status_is_unreported_not_ready() {
+        let cap = github_merge(GitHubMergeFacts { merge_state_status: None, ..gh() });
+        assert_eq!(cap.verdict, MergeVerdict::Unreported);
+    }
+
+    #[test]
+    fn blocked_is_told_apart_by_the_review_decision_and_the_rollup() {
+        let blocked = |decision, rollup| {
+            github_merge(GitHubMergeFacts {
+                merge_state_status: Some("BLOCKED"),
+                review_decision: decision,
+                rollup,
+                ..gh()
+            })
+            .verdict
+        };
+        assert_eq!(blocked(Some("REVIEW_REQUIRED"), None), MergeVerdict::Blocked(BlockReason::ReviewRequired));
+        assert_eq!(blocked(Some("CHANGES_REQUESTED"), None), MergeVerdict::Blocked(BlockReason::ChangesRequested));
+        assert_eq!(blocked(None, Some("PENDING")), MergeVerdict::WaitingOnChecks);
+        assert_eq!(blocked(None, Some("EXPECTED")), MergeVerdict::WaitingOnChecks);
+        assert_eq!(blocked(None, Some("FAILURE")), MergeVerdict::Blocked(BlockReason::ChecksFailing));
+        assert_eq!(blocked(None, None), MergeVerdict::Blocked(BlockReason::Other("BLOCKED".into())));
+    }
+
+    #[test]
+    fn dirty_behind_and_a_draft_name_their_reason() {
+        let verdict = |status, state| {
+            github_merge(GitHubMergeFacts { merge_state_status: Some(status), state, ..gh() }).verdict
+        };
+        assert_eq!(verdict("DIRTY", "OPEN"), MergeVerdict::Blocked(BlockReason::Conflicts));
+        assert_eq!(verdict("BEHIND", "OPEN"), MergeVerdict::Blocked(BlockReason::Behind));
+        assert_eq!(verdict("CLEAN", "DRAFT"), MergeVerdict::Blocked(BlockReason::Draft));
+        assert_eq!(verdict("UNSTABLE", "OPEN"), MergeVerdict::Ready, "failing non-required checks do not block");
+        assert_eq!(verdict("HAS_HOOKS", "OPEN"), MergeVerdict::Ready);
+    }
+
+    #[test]
+    fn a_repository_that_allows_no_method_is_blocked_with_none_to_choose() {
+        let cap = github_merge(GitHubMergeFacts {
+            merge_commit_allowed: false,
+            squash_merge_allowed: false,
+            rebase_merge_allowed: false,
+            ..gh()
+        });
+        assert!(cap.methods.is_empty());
+        assert_eq!(cap.default_method, None);
+        assert_eq!(cap.verdict, MergeVerdict::Blocked(BlockReason::NoMethod));
+    }
+
+    #[test]
+    fn the_default_method_is_the_first_allowed_one() {
+        let cap = github_merge(GitHubMergeFacts { merge_commit_allowed: false, rebase_merge_allowed: false, ..gh() });
+        assert_eq!(cap.default_method, Some(MergeMethod::Squash));
+    }
+
+    #[test]
+    fn auto_merge_needs_the_repository_and_the_viewer() {
+        assert!(github_merge(gh()).can_auto_merge);
+        assert!(!github_merge(GitHubMergeFacts { auto_merge_allowed: false, ..gh() }).can_auto_merge);
+        assert!(!github_merge(GitHubMergeFacts { viewer_can_enable_auto_merge: false, ..gh() }).can_auto_merge);
+        let on = github_merge(GitHubMergeFacts { auto_merge_method: Some("SQUASH"), ..gh() });
+        assert_eq!(on.auto_merge_enabled, Some(MergeMethod::Squash));
+    }
+
+    #[test]
+    fn an_unknown_auto_merge_method_still_reads_as_enabled() {
+        let on = github_merge(GitHubMergeFacts { auto_merge_method: Some("TELEPORT"), ..gh() });
+        assert_eq!(on.auto_merge_enabled, Some(MergeMethod::Merge), "enabled, shown with the default method rather than hidden");
+    }
+
+    fn gl() -> GitLabMergeFacts<'static> {
+        GitLabMergeFacts {
+            state: "opened",
+            detailed_status: Some("MERGEABLE"),
+            can_merge: Some(true),
+            squash_read_only: Some(false),
+            squash_on_merge: Some(false),
+            auto_merge_enabled: Some(false),
+            auto_merge_strategies: Some(&["merge_when_checks_pass"]),
+            remove_source_branch: Some(false),
+        }
+    }
+
+    #[test]
+    fn a_forge_still_working_out_mergeability_is_checking_not_blocked() {
+        for status in ["UNCHECKED", "CHECKING", "PREPARING", "APPROVALS_SYNCING"] {
+            let cap = gitlab_merge(GitLabMergeFacts { detailed_status: Some(status), ..gl() });
+            assert_eq!(cap.verdict, MergeVerdict::Checking, "{status}");
+        }
+        let cap = github_merge(GitHubMergeFacts { merge_state_status: Some("UNKNOWN"), ..gh() });
+        assert_eq!(cap.verdict, MergeVerdict::Checking);
+    }
+
+    #[test]
+    fn a_mergeable_merge_request_offers_merge_and_squash_never_rebase() {
+        let cap = gitlab_merge(gl());
+        assert_eq!(cap.verdict, MergeVerdict::Ready);
+        assert_eq!(cap.methods.list(), vec![MergeMethod::Merge, MergeMethod::Squash]);
+        assert!(cap.can_auto_merge);
+    }
+
+    #[test]
+    fn a_read_only_squash_setting_removes_squash_or_forces_it() {
+        let off = gitlab_merge(GitLabMergeFacts { squash_read_only: Some(true), squash_on_merge: Some(false), ..gl() });
+        assert_eq!(off.methods.list(), vec![MergeMethod::Merge]);
+        let forced = gitlab_merge(GitLabMergeFacts { squash_read_only: Some(true), squash_on_merge: Some(true), ..gl() });
+        assert_eq!(forced.methods.list(), vec![MergeMethod::Squash], "a project that always squashes offers only squash");
+        assert_eq!(forced.default_method, Some(MergeMethod::Squash));
+    }
+
+    #[test]
+    fn gitlab_statuses_map_and_an_unknown_one_keeps_its_word() {
+        let v = |word| gitlab_merge(GitLabMergeFacts { detailed_status: Some(word), ..gl() }).verdict;
+        assert_eq!(v("CI_STILL_RUNNING"), MergeVerdict::WaitingOnChecks);
+        assert_eq!(v("CI_MUST_PASS"), MergeVerdict::Blocked(BlockReason::ChecksFailing));
+        assert_eq!(v("NOT_APPROVED"), MergeVerdict::Blocked(BlockReason::ReviewRequired));
+        assert_eq!(v("REQUESTED_CHANGES"), MergeVerdict::Blocked(BlockReason::ChangesRequested));
+        assert_eq!(v("CONFLICT"), MergeVerdict::Blocked(BlockReason::Conflicts));
+        assert_eq!(v("NEED_REBASE"), MergeVerdict::Blocked(BlockReason::Behind));
+        assert_eq!(v("DRAFT_STATUS"), MergeVerdict::Blocked(BlockReason::Draft));
+        assert_eq!(v("DISCUSSIONS_NOT_RESOLVED"), MergeVerdict::Blocked(BlockReason::Discussions));
+        assert_eq!(
+            v("SECURITY_POLICIES_VIOLATIONS"),
+            MergeVerdict::Blocked(BlockReason::Other("SECURITY_POLICIES_VIOLATIONS".into()))
+        );
+        assert_eq!(v("A_NEW_WORD"), MergeVerdict::Blocked(BlockReason::Other("A_NEW_WORD".into())));
+    }
+
+    #[test]
+    fn a_baseline_gitlab_answer_reports_no_merge_capability() {
+        let cap = gitlab_merge(GitLabMergeFacts {
+            detailed_status: None,
+            can_merge: None,
+            squash_read_only: None,
+            squash_on_merge: None,
+            auto_merge_enabled: None,
+            auto_merge_strategies: None,
+            remove_source_branch: None,
+            ..gl()
+        });
+        assert_eq!(cap.verdict, MergeVerdict::Unreported);
+        assert!(cap.methods.is_empty() && !cap.can_auto_merge);
+    }
+
+    #[test]
+    fn a_user_who_cannot_merge_on_gitlab_is_blocked() {
+        let cap = gitlab_merge(GitLabMergeFacts { can_merge: Some(false), ..gl() });
+        assert_eq!(cap.verdict, MergeVerdict::Blocked(BlockReason::Other("cannot merge".into())));
+    }
+
+    #[test]
+    fn a_block_reason_reads_as_words() {
+        assert_eq!(BlockReason::Other("SECURITY_POLICIES_VIOLATIONS".into()).text(), "security policies violations");
+        assert_eq!(BlockReason::ReviewRequired.text(), "a review is required");
     }
 }

@@ -24,7 +24,8 @@ use std::process::ExitCode;
 use sirio_forge::{
     Action, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
     CommentKind, CommentRef, EventKind, FileChangeKind, Filter, Forge, ForgeClient, ForgeError,
-    ForgeTarget, HostSetting, ListQuery, Means, Resolution, ReviewOutcome, ReviewState,
+    ForgeTarget, HostSetting, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
+    Resolution, ReviewOutcome, ReviewState,
     ReviewVerdict, SystemProbes, TimelineItem, TokenTransport, Transport, resolve,
 };
 
@@ -225,6 +226,10 @@ fn run(args: &Args) -> Result<(), Failure> {
             }
             println!("BODY {}", header.body.lines().next().unwrap_or(""));
             println!("CAPS {}", caps_words(&header.capabilities));
+            println!("{}", merge_line(&header.capabilities.merge));
+            for label in &header.labels {
+                println!("LABEL {} {}", label.id, label.name);
+            }
             for item in &header.timeline {
                 if let Some(edit) = edit_of(item) {
                     println!("EDITABLE {} {}", kind_name(edit.kind), edit.id);
@@ -236,6 +241,9 @@ fn run(args: &Args) -> Result<(), Failure> {
                     reviewer.login,
                     outcome_word(reviewer.outcome)
                 );
+                if let Some(id) = &reviewer.id {
+                    println!("REVIEWER_ID {} {id}", reviewer.login);
+                }
             }
             for item in &header.timeline {
                 println!("{}", timeline_line(item));
@@ -278,6 +286,30 @@ fn run(args: &Args) -> Result<(), Failure> {
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }
         "act" => act_command(&client, args)?,
+        "candidates" => {
+            let kind = args.words.get(1).ok_or_else(|| usage("candidates reviewers|labels N"))?;
+            let text = args.flag("text").unwrap_or_default();
+            let found = match kind.as_str() {
+                "reviewers" => {
+                    let number = args
+                        .words
+                        .get(2)
+                        .and_then(|word| word.parse().ok())
+                        .ok_or_else(|| usage("candidates reviewers N"))?;
+                    client.reviewer_candidates(number, text)?
+                }
+                "labels" => client.label_candidates(text)?,
+                other => return Err(usage(&format!("unknown candidates {other}"))),
+            };
+            for candidate in found {
+                println!(
+                    "CANDIDATE {} {} {}",
+                    candidate.id,
+                    candidate.label,
+                    candidate.note.as_deref().unwrap_or("-")
+                );
+            }
+        }
         "scopes" => match client.token_scopes() {
             Some(scopes) => {
                 let listed = if scopes.0.is_empty() { "-".to_string() } else { scopes.0.join(",") };
@@ -510,6 +542,35 @@ fn caps_words(caps: &Capabilities) -> String {
     }
 }
 
+/// The merge strip's facts in one line: the verdict, then what is offered.
+fn merge_line(merge: &MergeCapability) -> String {
+    let verdict = match &merge.verdict {
+        MergeVerdict::Unreported => "unreported".to_string(),
+        MergeVerdict::Ready => "ready".to_string(),
+        MergeVerdict::WaitingOnChecks => "waiting".to_string(),
+        MergeVerdict::Checking => "checking".to_string(),
+        MergeVerdict::Blocked(reason) => format!("blocked:{}", reason.text().replace(' ', "-")),
+    };
+    let methods: Vec<&str> = merge.methods.list().into_iter().map(MergeMethod::word).collect();
+    format!(
+        "MERGE {verdict} methods={} default={} auto={} enabled={} delete-default={}",
+        if methods.is_empty() { "-".to_string() } else { methods.join(",") },
+        merge.default_method.map_or("-", MergeMethod::word),
+        yes_no(merge.can_auto_merge),
+        merge.auto_merge_enabled.map_or("-", MergeMethod::word),
+        yes_no(merge.delete_branch_default),
+    )
+}
+
+/// Every value of a repeatable flag (`--add a --add b`).
+fn all_flags(args: &Args, name: &str) -> Vec<String> {
+    args.flags
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
 fn edit_of(item: &TimelineItem) -> Option<&CommentRef> {
     match item {
         TimelineItem::Comment { edit, .. } | TimelineItem::Review { edit, .. } => edit.as_ref(),
@@ -567,6 +628,31 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
                 },
             },
             body: body_of(args)?,
+        },
+        "merge" => {
+            let method = match args.flag("method") {
+                Some("squash") => MergeMethod::Squash,
+                Some("rebase") => MergeMethod::Rebase,
+                Some("merge") | None => MergeMethod::Merge,
+                Some(other) => return Err(usage(&format!("unknown method {other}"))),
+            };
+            Action::Merge {
+                method,
+                commit_title: args.flag("title").map(str::to_string),
+                commit_message: args.flag("message").map(str::to_string),
+                delete_branch: args.flag("delete-branch") == Some("yes"),
+                when_checks_pass: args.flag("when-checks-pass") == Some("yes"),
+                expected_head: args.flag("head").ok_or_else(|| usage("merge needs --head"))?.to_string(),
+            }
+        }
+        "cancel-auto-merge" => Action::CancelAutoMerge,
+        "set-reviewers" => Action::SetReviewers {
+            add: all_flags(args, "add"),
+            remove: all_flags(args, "remove"),
+        },
+        "set-labels" => Action::SetLabels {
+            add: all_flags(args, "add"),
+            remove: all_flags(args, "remove"),
         },
         other => return Err(usage(&format!("unknown action {other}"))),
     };

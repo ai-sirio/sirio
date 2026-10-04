@@ -78,6 +78,8 @@ pub(crate) struct ActionsState {
     /// cleared only if it still holds exactly that, so words typed while the
     /// request was in flight are never wiped.
     pub(crate) sent: Option<String>,
+    pub(crate) merge: super::merge::MergeUi,
+    pub(crate) picker: Option<super::people::PickerState>,
 }
 
 impl ActionsState {
@@ -90,6 +92,8 @@ impl ActionsState {
             composer: None,
             composer_blank: true,
             sent: None,
+            merge: super::merge::MergeUi::default(),
+            picker: None,
         }
     }
 }
@@ -219,6 +223,8 @@ impl ChangeRequestTab {
             Err(error) => {
                 self.note_rate_limited(&error);
                 if matches!(error, ForgeError::HeadMoved { .. }) {
+                    // What was being confirmed is not what is there now.
+                    self.actions.merge.dialog = None;
                     self.refresh(cx);
                 }
                 self.actions.state = ActionState::Failed {
@@ -244,6 +250,7 @@ impl ChangeRequestTab {
         match kind {
             "edit" => self.actions.edit = None,
             "edit-comment" => self.actions.comment_edit = None,
+            "merge" | "auto-merge" => self.actions.merge.dialog = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();
                 if let (false, Some(sent), Some(composer)) =
@@ -262,7 +269,7 @@ impl ChangeRequestTab {
     /// close ↔ reopen the forge says the viewer may use on this state.
     pub(crate) fn render_action_bar(&self, _theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
         let header = self.header.value()?;
-        let caps = header.capabilities;
+        let caps = &header.capabilities;
         let state = header.summary.state;
         let mut items: Vec<(&'static str, IconName, &'static str, HeaderAction)> = Vec::new();
         if caps.can_edit {
@@ -331,23 +338,25 @@ impl ChangeRequestTab {
         )
     }
 
+    /// What the status line says, and how loud: what is being sent, or why
+    /// it failed.
+    pub(crate) fn action_status(&self) -> Option<(Severity, String)> {
+        Some(match &self.actions.state {
+            ActionState::Idle => return None,
+            ActionState::Working(kind) => (Severity::Info, format!("Sending {kind}…")),
+            ActionState::Failed { message, .. } => (Severity::Danger, message.clone()),
+            ActionState::Warning(message) => (Severity::Warning, message.clone()),
+            ActionState::Unconfirmed { .. } => (
+                Severity::Warning,
+                "Could not confirm that it went through. Look at the conversation before sending it again."
+                    .to_string(),
+            ),
+        })
+    }
+
     /// One line under the header: what is being sent, or why it failed.
     pub(crate) fn render_action_status(&self, theme: &Theme) -> Option<AnyElement> {
-        let severity = match &self.actions.state {
-            ActionState::Idle => return None,
-            ActionState::Working(_) => Severity::Info,
-            ActionState::Failed { .. } => Severity::Danger,
-            ActionState::Unconfirmed { .. } | ActionState::Warning(_) => Severity::Warning,
-        };
-        let text = match &self.actions.state {
-            ActionState::Working(kind) => format!("Sending {kind}…"),
-            ActionState::Failed { message, .. } | ActionState::Warning(message) => message.clone(),
-            ActionState::Unconfirmed { .. } => {
-                "Could not confirm that it went through. Look at the conversation before sending it again."
-                    .to_string()
-            }
-            ActionState::Idle => return None,
-        };
+        let (severity, text) = self.action_status()?;
         Some(
             div()
                 .id("change-request-action-status")
@@ -363,7 +372,7 @@ impl ChangeRequestTab {
         let Some(header) = self.header.value() else {
             return String::new();
         };
-        let caps = header.capabilities;
+        let caps = &header.capabilities;
         let words: Vec<&str> = [
             (caps.can_comment, "comment"),
             (caps.can_approve, "approve"),
@@ -448,6 +457,12 @@ impl ChangeRequestTab {
                 let words = text("text").ok_or("edit-comment needs text")?;
                 edit.field.update(cx, |input, cx| input.set_text(words, cx));
                 self.save_comment_edit(cx)
+            }
+            "merge-open" | "merge-confirm" | "merge-close" | "cancel-auto-merge" => {
+                self.control_merge(name, params, window, cx)
+            }
+            "picker-open" | "picker-type" | "picker-pick" | "picker-close" => {
+                self.control_picker(name, params, window, cx)
             }
             other => Err(format!("unknown action {other}")),
         }

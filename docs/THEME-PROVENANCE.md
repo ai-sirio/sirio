@@ -100,7 +100,7 @@ receives today (spec §3.3):
 | `accent`, `focus`, `tooltip_fg` | `text` |
 | `accent_hover` | `text_muted` |
 | `on_accent` | `surface` |
-| `backdrop` | `overlay` |
+| `backdrop` | bezel's modal scrim (`paint::scrim_for`): black at 60% dark, 32% light — Sirio's `overlay` is a hover tint, opaque on the grey ladders |
 | `success_subtle`, `warning_subtle`, `danger_subtle` | the hue at 12% opacity |
 | `on_media`, `media_backdrop`, `shimmer`, `glass`, `shadow`, `paper`, `ink`, `info`, `info_subtle`, `chart`, `ansi`, `syntax` | Ely's own default for the appearance, retained |
 

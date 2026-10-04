@@ -1,0 +1,5 @@
+query LabelCandidates($owner: String!, $name: String!, $q: String) {
+  repository(owner: $owner, name: $name) {
+    labels(first: 20, query: $q) { nodes { id name color } }
+  }
+}

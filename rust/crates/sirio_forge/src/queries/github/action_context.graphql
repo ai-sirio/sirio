@@ -1,8 +1,13 @@
 query ChangeRequestActionContext($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed deleteBranchOnMerge
     pullRequest(number: $number) {
-      id state isDraft locked
-      viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor
+      id state isDraft locked headRefOid headRefName isCrossRepository
+      viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor viewerCanEnableAutoMerge
+      mergeStateStatus reviewDecision
+      autoMergeRequest { mergeMethod }
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on Node { id } } } }
     }
   }
 }

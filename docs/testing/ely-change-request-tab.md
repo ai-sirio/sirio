@@ -69,3 +69,67 @@ resizes the app's window before each capture.
   not explained.
 - **Platforms**: Linux X11 under Xvfb only. `glab` is not installed, so the
   scripts' `cli` stage prints `SKIP:` for its GitLab half.
+
+## Delivery 3: merge, reviewers, labels (B2b)
+
+`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` §6. The
+forge side is proven on the wire, then the tab in a real Sirio:
+
+    Scripts/Tests/test-forge-actions-e2e.sh --stage merge
+    Scripts/Tests/test-forge-actions-e2e.sh --stage metadata
+    Scripts/Tests/test-forge-actions-e2e.sh --stage cli
+    Scripts/Tests/test-forge-actions-e2e.sh --stage ui --display :93
+
+`merge` sends each merge, auto-merge and cancel to both fake forges and reads
+back what they logged: the head the user saw (`expectedHeadOid` / `sha`), the
+method, the message; a blocked change request, a moved head and a waiting one
+without auto-merge send nothing; GitHub's branch deletion is a REST `DELETE`
+after the merge, skipped for a fork's head, and a failed one leaves the merge
+done with a warning. `metadata` sends reviewers and labels by the ids each
+forge gave, searches candidates by the typed text, and an older GitLab without
+`mergeRequestSetReviewers` answers *Unsupported*. `ui` drives the strip, the
+dialog and both pickers through the debug-only control verbs (`merge-open`,
+`merge-confirm`, `cancel-auto-merge`, `picker-open`, `picker-type`,
+`picker-pick`, `picker-close`); `POST /__push` on the fake forge stands for a
+push between the dialog and the click, and `POST /__checking` for a forge
+still working out whether it can merge (GitHub `UNKNOWN`, GitLab `CHECKING`)
+until the next `/__reset`. The fake forge also stands for GitHub having
+deleted a merged head itself (`autodeleted`: no warning), a review request
+Sirio cannot send back (`mannequin`: a removal is refused), and a GitLab
+organisation's labels above the project's own group (offered only with
+`includeAncestorGroups: true`).
+
+### What was seen (2026-10-03, Xvfb, lavapipe)
+
+- **The strip**, dark and Light, GitHub and GitLab: *Ready to merge* in green
+  with the method `Select` (*Merge commit* preset) and a primary *Merge*;
+  *Blocked: a review is required* in amber with both controls disabled;
+  *Auto-merge enabled · squash* with *Cancel auto-merge*. In the narrow
+  Secondary pane the strip and the reviewer/label row wrap.
+- **The dialog**: *Merge #101* / *Merge !201*, the method, target and short head
+  sha, the preset title (*Fix the login redirect (#101)* for a squash), an
+  empty message, *Delete branch* (ticked on GitLab, whose project says so),
+  *Cancel* and *Merge*.
+- **The pickers**: the search field, the current reviewers ticked, the found
+  candidate with its name as a note.
+- (2026-10-04, after the final review) **A refused merge** names its reason
+  inside the dialog (*The commit title cannot be empty.*) while the strip's
+  button no longer spins; **a forge still checking** shows *Checking whether
+  it can merge…* with *Merge* disabled, and the tab turns it into *Ready to
+  merge* by itself once the forge has decided.
+
+Not seen, or seen with a remark:
+
+- Ely's `Dialog` text fields draw no border, as Ely's `TextInput` draws them
+  elsewhere in this tab. (Its scrim used to hide the app: the theme mapped
+  Ely's `backdrop` to Sirio's `overlay`, a hover tint that is opaque on the
+  grey ladders. It is now bezel's modal scrim, and the frame shows the app
+  dimmed behind the dialog.)
+- The method `Select`'s open list, a picker's empty or failed line, and the
+  dialog in Light were not captured.
+- A reviewer who only reviewed (no pending request) has no id on GitHub and is
+  not listed in the picker: `requestReviews` manages pending requests only.
+- The GitLab half of the `cli` stage, and with it the REST approval and the
+  REST cancel of an auto-merge through `glab`, printed `SKIP:` (no `glab`).
+- The framed `ui` run's GitLab start-up flake (above) did not recur in the run
+  these frames come from; it did in an earlier one.

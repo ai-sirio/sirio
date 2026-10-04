@@ -1,0 +1,3 @@
+mutation MergeRequestAccept($input: MergeRequestAcceptInput!) {
+  mergeRequestAccept(input: $input) { errors mergeRequest { iid state } }
+}

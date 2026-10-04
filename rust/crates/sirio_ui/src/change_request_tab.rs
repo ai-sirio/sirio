@@ -23,6 +23,8 @@ mod actions;
 mod composer;
 mod edit;
 mod ely_ui;
+mod merge;
+mod people;
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -148,6 +150,8 @@ impl<T> Slot<T> {
 const FRESH_FOR: Duration = Duration::from_secs(10);
 /// While its CI runs, a tab refreshes on its own at this pace (spec §9).
 const CI_REFRESH: Duration = Duration::from_secs(60);
+/// How soon to look again while the forge works out whether it can merge.
+const MERGE_CHECK_REFRESH: Duration = Duration::from_secs(5);
 
 /// The *Files* inner tab's diff, beside the forge's own list (spec §7.1),
 /// which stays the fallback for every state but `Ready`.
@@ -216,7 +220,9 @@ pub struct ChangeRequestTab {
     commits_task: Option<Task<()>>,
     checks_task: Option<Task<()>>,
     files_task: Option<Task<()>>,
-    ci_timer: Option<Task<()>>,
+    /// The next look, and how long it waits: a minute while CI runs, a few
+    /// seconds while the forge is still checking mergeability.
+    ci_timer: Option<(Duration, Task<()>)>,
     /// The worktree the tab was opened in: where its revisions are made
     /// local and its diff is read.
     worktree: PathBuf,
@@ -388,12 +394,7 @@ impl ChangeRequestTab {
         if self.rate_paused() {
             // Stay armed: the pause ends by itself, and a running CI is still
             // worth looking at once it does.
-            if matches!(
-                self.header.value().map(|header| header.summary.ci),
-                Some(CiState::Running(_))
-            ) {
-                self.schedule_ci_refresh(CiState::Running(None), cx);
-            }
+            self.schedule_refresh(self.header.value().and_then(refresh_wait), cx);
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -439,40 +440,39 @@ impl ChangeRequestTab {
                         .map(|body| markdown_doc(body, &theme))
                 })
                 .collect();
-            self.schedule_ci_refresh(header.summary.ci, cx);
+            self.schedule_refresh(refresh_wait(header), cx);
         }
         if let Err(error) = &result {
             self.note_rate_limited(error);
             // The timer cleared itself before asking; a failed answer must not
             // end the polling while the header we still show says CI runs.
-            if matches!(
-                self.header.value().map(|header| header.summary.ci),
-                Some(CiState::Running(_))
-            ) {
-                self.schedule_ci_refresh(CiState::Running(None), cx);
-            }
+            self.schedule_refresh(self.header.value().and_then(refresh_wait), cx);
         }
         self.header.finish(result);
         self.ensure_range(cx);
         cx.notify();
     }
 
-    /// While CI runs, look again in a minute; otherwise stop (spec §9).
-    fn schedule_ci_refresh(&mut self, ci: CiState, cx: &mut Context<Self>) {
-        if !matches!(ci, CiState::Running(_)) {
+    /// Look again after `wait`, or stop when there is nothing to wait for
+    /// (spec §9). A shorter wait replaces a longer one already armed.
+    fn schedule_refresh(&mut self, wait: Option<Duration>, cx: &mut Context<Self>) {
+        let Some(wait) = wait else {
             self.ci_timer = None;
             return;
-        }
-        if self.ci_timer.is_some() {
+        };
+        if self.ci_timer.as_ref().is_some_and(|(armed, _)| *armed <= wait) {
             return;
         }
-        self.ci_timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CI_REFRESH).await;
-            let _ = this.update(cx, |tab, cx| {
-                tab.ci_timer = None;
-                tab.refresh(cx);
-            });
-        }));
+        self.ci_timer = Some((
+            wait,
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |tab, cx| {
+                    tab.ci_timer = None;
+                    tab.refresh(cx);
+                });
+            }),
+        ));
     }
 
     pub fn select_inner(&mut self, inner: InnerTab, cx: &mut Context<Self>) {
@@ -954,7 +954,55 @@ impl ChangeRequestTab {
             ("action".to_string(), self.actions.state.word().to_string()),
             ("action_kind".to_string(), self.actions.state.kind().to_string()),
             ("action_message".to_string(), self.action_message()),
+            ("merge_strip".to_string(), self.strip().word().to_string()),
+            ("merge_message".to_string(), self.strip().text()),
+            ("merge_verdict".to_string(), self.merge_verdict_word()),
+            (
+                "merge_method".to_string(),
+                self.merge_method().map_or("", |method| method.word()).to_string(),
+            ),
+            (
+                "picker".to_string(),
+                self.actions
+                    .picker
+                    .as_ref()
+                    .map_or("closed", |picker| picker.kind.word())
+                    .to_string(),
+            ),
+            ("picker_candidates".to_string(), self.picker_candidates().to_string()),
+            (
+                "picker_chosen".to_string(),
+                self.actions
+                    .picker
+                    .as_ref()
+                    .map(|picker| picker.chosen.iter().cloned().collect::<Vec<_>>().join(","))
+                    .unwrap_or_default(),
+            ),
+            (
+                "merge_dialog".to_string(),
+                if self.actions.merge.dialog.is_some() { "open" } else { "closed" }.to_string(),
+            ),
+            (
+                "merge_sending".to_string(),
+                if self.merge_sending(&["merge", "auto-merge", "cancel-auto-merge"]) { "yes" } else { "no" }.to_string(),
+            ),
+            (
+                "merge_dialog_message".to_string(),
+                self.merge_dialog_status().map(|(_, text)| text).unwrap_or_default(),
+            ),
         ]
+    }
+}
+
+/// How long the tab waits before looking again at what it shows: shortly
+/// while the forge is still checking mergeability, a minute while CI runs.
+fn refresh_wait(header: &ChangeHeader) -> Option<Duration> {
+    if merge::strip_kind(header.summary.state, &header.capabilities.merge) == merge::StripKind::Checking {
+        Some(MERGE_CHECK_REFRESH)
+    } else if matches!(header.summary.ci, CiState::Running(_)) {
+        Some(CI_REFRESH)
+    } else {
+        None
     }
 }
 
@@ -1244,6 +1292,7 @@ impl ChangeRequestTab {
                         ),
                 )
             })
+            .when_some(self.render_people_row(theme, entity), |this, row| this.child(row))
             .when_some(self.render_action_status(theme), |this, status| this.child(status))
     }
 
@@ -2023,7 +2072,9 @@ impl Render for ChangeRequestTab {
             .bg(theme.sirio.canvas)
             .text_color(theme.ely.fg)
             .child(self.render_header(&theme, &entity))
+            .children(self.render_merge_strip(&theme, &entity))
             .child(body)
+            .children(self.render_merge_dialog(&theme, &entity))
     }
 }
 

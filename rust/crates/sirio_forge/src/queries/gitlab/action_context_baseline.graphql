@@ -1,8 +1,9 @@
 query MergeRequestActionContext($fullPath: ID!, $iid: String!) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
-      id state draft discussionLocked
+      id state draft discussionLocked diffHeadSha
       userPermissions { createNote updateMergeRequest }
+      reviewers { nodes { username } }
     }
   }
 }

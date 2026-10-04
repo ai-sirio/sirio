@@ -27,7 +27,7 @@ use crate::graphql::{
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef,
+    Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
     ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -75,6 +75,11 @@ const ACTION_CONTEXT: (&str, &str) = (
     include_str!("queries/gitlab/action_context.graphql"),
     include_str!("queries/gitlab/action_context_baseline.graphql"),
 );
+const ACCEPT: &str = include_str!("queries/gitlab/accept.graphql");
+const SET_LABELS: &str = include_str!("queries/gitlab/set_labels.graphql");
+const SET_REVIEWERS: &str = include_str!("queries/gitlab/set_reviewers.graphql");
+const REVIEWER_CANDIDATES: &str = include_str!("queries/gitlab/reviewer_candidates.graphql");
+const LABEL_CANDIDATES: &str = include_str!("queries/gitlab/label_candidates.graphql");
 const CREATE_NOTE: &str = include_str!("queries/gitlab/create_note.graphql");
 const UPDATE_NOTE: &str = include_str!("queries/gitlab/update_note.graphql");
 const UPDATE: &str = include_str!("queries/gitlab/update.graphql");
@@ -359,6 +364,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         capabilities: capabilities(client, node),
         body: str_at(node, "/description"),
         reviewers: reviewers(node),
+        labels: labels(node),
         additions: opt_u32(node, "/diffStatsSummary/additions"),
         deletions: opt_u32(node, "/diffStatsSummary/deletions"),
         changed_files: opt_u32(node, "/diffStatsSummary/fileCount"),
@@ -376,14 +382,43 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
 /// What the viewer may do. A baseline query leaves the fields an old server
 /// lacks unasked, and the mapping reads "not reported" as "not offered".
 fn capabilities(client: &ForgeClient, node: &Value) -> Capabilities {
-    mapping::gitlab_capabilities(mapping::GitLabFacts {
+    let strategies: Option<Vec<&str>> = node
+        .pointer("/availableAutoMergeStrategies")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect());
+    let merge = mapping::gitlab_merge(mapping::GitLabMergeFacts {
+        state: opt_str(node, "/state").unwrap_or(""),
+        detailed_status: opt_str(node, "/detailedMergeStatus"),
+        can_merge: opt_bool(node, "/userPermissions/canMerge"),
+        squash_read_only: opt_bool(node, "/squashReadOnly"),
+        squash_on_merge: opt_bool(node, "/squashOnMerge"),
+        auto_merge_enabled: opt_bool(node, "/autoMergeEnabled"),
+        auto_merge_strategies: strategies.as_deref(),
+        remove_source_branch: opt_bool(node, "/shouldRemoveSourceBranch"),
+    });
+    let mut caps = mapping::gitlab_capabilities(mapping::GitLabFacts {
         state: opt_str(node, "/state").unwrap_or(""),
         locked: bool_at(node, "/discussionLocked"),
         can_create_note: opt_bool(node, "/userPermissions/createNote"),
         can_update: opt_bool(node, "/userPermissions/updateMergeRequest"),
         can_approve: opt_bool(node, "/userPermissions/canApprove"),
         reports_review_state: !client.baseline.load(Ordering::Relaxed),
-    })
+    });
+    caps.merge = merge;
+    caps
+}
+
+fn labels(node: &Value) -> Vec<Label> {
+    array_at(node, "/labels/nodes")
+        .into_iter()
+        .filter_map(|label| {
+            Some(Label {
+                id: opt_str(label, "/id")?.to_string(),
+                name: opt_str(label, "/title")?.to_string(),
+                color: opt_str(label, "/color").map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 /// An edit handle for a note the viewer may administer.
@@ -402,8 +437,10 @@ fn reviewers(node: &Value) -> Vec<Reviewer> {
     let mut reviewers: Vec<Reviewer> = array_at(node, "/reviewers/nodes")
         .into_iter()
         .filter_map(|reviewer| {
+            let login = opt_str(reviewer, "/username")?.to_string();
             Some(Reviewer {
-                login: opt_str(reviewer, "/username")?.to_string(),
+                id: Some(login.clone()),
+                login,
                 outcome: mapping::gitlab_reviewer_outcome(opt_str(
                     reviewer,
                     "/mergeRequestInteraction/reviewState",
@@ -421,6 +458,7 @@ fn reviewers(node: &Value) -> Vec<Reviewer> {
         {
             Some(existing) => existing.outcome = ReviewOutcome::Approved,
             None => reviewers.push(Reviewer {
+                id: Some(login.to_string()),
                 login: login.to_string(),
                 outcome: ReviewOutcome::Approved,
             }),
@@ -585,6 +623,16 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
     Ok(ActionContext {
         node_id,
         state,
+        head_sha: opt_str(node, "/diffHeadSha").map(str::to_string),
+        head_ref_name: None,
+        cross_repository: false,
+        reviewer_ids: array_at(node, "/reviewers/nodes")
+            .into_iter()
+            .filter_map(|reviewer| opt_str(reviewer, "/username").map(str::to_string))
+            .collect(),
+        team_ids: Vec::new(),
+        bot_ids: Vec::new(),
+        unsendable_requests: Vec::new(),
         capabilities: capabilities(client, node),
     })
 }
@@ -714,6 +762,66 @@ pub(crate) fn act(
             }
             update(client, number, fields)?
         }
+        Action::Merge {
+            method,
+            commit_title,
+            commit_message,
+            delete_branch,
+            when_checks_pass,
+            expected_head,
+        } => {
+            let squash = match method {
+                MergeMethod::Merge => false,
+                MergeMethod::Squash => true,
+                MergeMethod::Rebase => {
+                    return Err(ForgeError::Unsupported {
+                        host: client.host.clone(),
+                        what: "rebase merge".to_string(),
+                    });
+                }
+            };
+            let mut input = json!({
+                "projectPath": client.project,
+                "iid": iid,
+                "sha": expected_head,
+                "squash": squash,
+                "shouldRemoveSourceBranch": delete_branch,
+            });
+            let message = commit_message.as_deref().filter(|m| !m.trim().is_empty());
+            let text = match (commit_title, message) {
+                (Some(title), Some(message)) => Some(format!("{title}\n\n{message}")),
+                (Some(title), None) => Some(title.clone()),
+                (None, Some(message)) => Some(message.to_string()),
+                (None, None) => None,
+            };
+            if let Some(text) = text {
+                input[if squash { "squashCommitMessage" } else { "commitMessage" }] = json!(text);
+            }
+            if *when_checks_pass {
+                input["strategy"] = json!("MERGE_WHEN_CHECKS_PASS");
+            }
+            newer_write(client, "MergeRequestAccept", ACCEPT, input)?
+        }
+        // GraphQL has no way to cancel an auto-merge (checked against
+        // gitlab.com on 2026-10-03).
+        Action::CancelAutoMerge => execute_rest(
+            client,
+            &RestRequest {
+                method: RestMethod::Post,
+                path: format!(
+                    "projects/{}/merge_requests/{number}/cancel_merge_when_pipeline_succeeds",
+                    percent_encode(&client.project, false)
+                ),
+                body: None,
+            },
+        )
+        .map(|_| ())?,
+        Action::SetReviewers { add, remove } => {
+            return set_each(client, "MergeRequestSetReviewers", SET_REVIEWERS, "reviewerUsernames", &iid, add, remove);
+        }
+        Action::SetLabels { add, remove } => {
+            return set_each(client, "MergeRequestSetLabels", SET_LABELS, "labelIds", &iid, add, remove);
+        }
         Action::EditComment { comment, body } => mutate(
             client,
             "UpdateNote",
@@ -722,6 +830,99 @@ pub(crate) fn act(
         )?,
     }
     Ok(ActionOutcome::default())
+}
+
+/// A field or mutation this server does not have: the action is not
+/// available here, which is not a malformed answer.
+fn unsupported(client: &ForgeClient, what: &str) -> impl Fn(ForgeError) -> ForgeError {
+    let (host, what) = (client.host.clone(), what.to_string());
+    move |error| match error {
+        ForgeError::UnknownField { .. } => ForgeError::Unsupported {
+            host: host.clone(),
+            what: what.clone(),
+        },
+        other => other,
+    }
+}
+
+/// A write only newer GitLab servers have.
+fn newer_write(client: &ForgeClient, operation: &str, document: &str, input: Value) -> Result<(), ForgeError> {
+    execute_mutation(client, operation, document, json!({ "input": input }))
+        .map(|_| ())
+        .map_err(unsupported(client, operation))
+}
+
+/// `APPEND` what was added, then `REMOVE` what was taken away; an empty
+/// side is not sent. A failed removal after an addition went through
+/// leaves the addition standing, and says so.
+fn set_each(
+    client: &ForgeClient,
+    operation: &str,
+    document: &str,
+    key: &str,
+    iid: &str,
+    add: &[String],
+    remove: &[String],
+) -> Result<ActionOutcome, ForgeError> {
+    let send = |mode: &str, ids: &[String]| {
+        let mut input = json!({ "projectPath": client.project, "iid": iid, "operationMode": mode });
+        input[key] = json!(ids);
+        newer_write(client, operation, document, input)
+    };
+    if !add.is_empty() {
+        send("APPEND", add)?;
+    }
+    if !remove.is_empty() {
+        match send("REMOVE", remove) {
+            Ok(()) => {}
+            Err(error) if !add.is_empty() => {
+                return Ok(ActionOutcome {
+                    warning: Some(format!("added, but removing the others failed: {error}")),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(ActionOutcome::default())
+}
+
+pub(crate) fn reviewer_candidates(client: &ForgeClient, text: &str) -> Result<Vec<Candidate>, ForgeError> {
+    let data = execute(
+        client,
+        "ReviewerCandidates",
+        REVIEWER_CANDIDATES,
+        json!({ "fullPath": client.project, "q": text }),
+    )
+    .map_err(unsupported(client, "reviewer search"))?;
+    Ok(array_at(&data, "/project/projectMembers/nodes")
+        .into_iter()
+        .filter_map(|member| {
+            let username = opt_str(member, "/user/username")?;
+            Some(Candidate {
+                id: username.to_string(),
+                label: username.to_string(),
+                note: opt_str(member, "/user/name").filter(|name| !name.is_empty()).map(str::to_string),
+            })
+        })
+        .collect())
+}
+
+pub(crate) fn label_candidates(client: &ForgeClient, text: &str) -> Result<Vec<Candidate>, ForgeError> {
+    let data = execute(
+        client,
+        "LabelCandidates",
+        LABEL_CANDIDATES,
+        json!({ "fullPath": client.project, "q": text }),
+    )
+    .map_err(unsupported(client, "label search"))?;
+    Ok(labels(data.pointer("/project").unwrap_or(&Value::Null))
+        .into_iter()
+        .map(|label| Candidate {
+            id: label.id,
+            label: label.name,
+            note: None,
+        })
+        .collect())
 }
 
 /// A personal access token describes itself at `personal_access_tokens/self`.
@@ -788,5 +989,32 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
             REQUEST_CHANGES,
             json!({ "projectPath": project, "iid": "0" }),
         ),
+        write(
+            "MergeRequestAccept",
+            ACCEPT,
+            json!({ "projectPath": project, "iid": "0", "sha": "0", "squash": false,
+                    "shouldRemoveSourceBranch": false, "commitMessage": "x",
+                    "strategy": "MERGE_WHEN_CHECKS_PASS" }),
+        ),
+        write(
+            "MergeRequestSetLabels",
+            SET_LABELS,
+            json!({ "projectPath": project, "iid": "0", "labelIds": ["gid://gitlab/ProjectLabel/0"], "operationMode": "APPEND" }),
+        ),
+        write(
+            "MergeRequestSetReviewers",
+            SET_REVIEWERS,
+            json!({ "projectPath": project, "iid": "0", "reviewerUsernames": ["sirio-live-check-0"], "operationMode": "APPEND" }),
+        ),
+        LiveProbe {
+            operation: "ReviewerCandidates",
+            document: REVIEWER_CANDIDATES,
+            variables: json!({ "fullPath": project, "q": "a" }),
+        },
+        LiveProbe {
+            operation: "LabelCandidates",
+            document: LABEL_CANDIDATES,
+            variables: json!({ "fullPath": project, "q": "bug" }),
+        },
     ]
 }

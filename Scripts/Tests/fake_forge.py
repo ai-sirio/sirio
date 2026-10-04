@@ -47,13 +47,34 @@ normal -- so one server covers every error path of an action:
     finegrained  a token that reports no scopes at all
     notefails    GitLab only: `createNote` is refused with the reason in the
                  payload's `errors`, while the REST approval still answers 201
+    blocked, waiting, fork, mannequin
+                 reads serve `<Operation>.<credential>.json` where it exists
+                 (a merge blocked by a review, checks still running, a head
+                 in a fork, a review request Sirio cannot send back) -- the
+                 same rule as `readonly`
+    deletefails  GitHub's REST `DELETE .../git/refs/heads/<branch>` answers
+                 422 for a protected branch, so a merge whose branch deletion
+                 fails can be told apart
+    autodeleted  the same DELETE answers 422 "Reference does not exist", as
+                 GitHub does once its own delete-on-merge setting got there first
+
+Merge (B2b): GitHub's branch deletion is REST `DELETE /api/v3/repos/<o>/<r>/
+git/refs/heads/<branch>` (204); GitLab's cancel of an auto-merge is REST
+`POST /api/v4/projects/<p>/merge_requests/<iid>/cancel_merge_when_pipeline_
+succeeds` (200). `ReviewerCandidates` and `LabelCandidates` answer their
+fixture with the rows whose words contain the `q` variable.
 
 A write that succeeded is remembered, and a read then serves
 `<Operation>.after.<Mutation>.json` when it exists (the newest write that has
 one wins): a change request closed by a mutation reads as closed. GitLab's
 `MergeRequestUpdate` and `MergeRequestSetDraft` are told apart by their input,
-`<Mutation>.CLOSED`, `<Mutation>.OPEN`, `<Mutation>.true`, `<Mutation>.false`;
-the REST approval is `approve`. `POST /__reset` forgets every write.
+`<Mutation>.CLOSED`, `<Mutation>.OPEN`, `<Mutation>.true`, `<Mutation>.false`, and an
+accept with a strategy `MergeRequestAccept.MERGE_WHEN_CHECKS_PASS`;
+the REST approval is `approve`, the REST cancel `cancel-auto-merge`. `POST /__reset`
+forgets every write; `POST /__push` stands for a push to the head branch, and
+reads then serve `<Operation>.after.push.json`; `POST /__checking` stands for
+the forge still working out whether it can merge (`.after.checking.json`)
+until the next `/__reset`.
 
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
 2.100 and glab 1.119), so chunked bodies are decoded here.
@@ -92,7 +113,12 @@ def load_fixtures(root):
 
 # Operations that have a baseline variant, and the fields those variants omit.
 BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext"}
-NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove"}
+NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove",
+                       "canMerge", "detailedMergeStatus", "squashOnMerge", "squashReadOnly", "autoMergeEnabled",
+                       "availableAutoMergeStrategies", "shouldRemoveSourceBranch"}
+# Mutations an older GitLab lacks: the `old` credential answers them as such a
+# server would, with a schema error naming the field.
+NEWER_GITLAB_MUTATIONS = {"mergeRequestSetReviewers", "mergeRequestSetLabels"}
 # The newer fields a query can name, and the type an older GitLab would say lacks them.
 NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"))
 
@@ -107,6 +133,34 @@ def strip_newer(value, parent=None):
         }
     if isinstance(value, list):
         return [strip_newer(item, parent) for item in value]
+    return value
+
+
+def only_matching(value, text):
+    """A candidate search: every list of nodes keeps the rows whose words
+    contain `text`, as the forge's own search would."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "nodes" and isinstance(item, list):
+                out[key] = [row for row in item if text in json.dumps(row).lower()]
+            else:
+                out[key] = only_matching(item, text)
+        return out
+    return value
+
+
+def without_group_labels(value):
+    """GitLab lists a project's labels and its own group's; the `GroupLabel`
+    rows of the fixture stand for an organisation's labels above that, which
+    come only with `includeAncestorGroups: true`."""
+    if isinstance(value, dict):
+        return {
+            key: [row for row in item if "GroupLabel" not in str(row.get("id"))]
+            if key == "nodes" and isinstance(item, list)
+            else without_group_labels(item)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -193,8 +247,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             overlay = fixtures.get(f"{name}.after.{key}")
             if overlay:
                 return overlay
-        if self.credential() == "readonly" and fixtures.get(f"{name}.readonly"):
-            return fixtures[f"{name}.readonly"]
+        credential = self.credential()
+        if credential in ("readonly", "blocked", "waiting", "fork", "mannequin") and fixtures.get(f"{name}.{credential}"):
+            return fixtures[f"{name}.{credential}"]
         return fixtures.get(name)
 
     def write_failure(self, field):
@@ -224,6 +279,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def rest_write(self, path):
         """GitLab's approval: the only REST write B2a sends."""
         self.record("POST", path, None, None, None)
+        if self.flavor == "gitlab" and re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/cancel_merge_when_pipeline_succeeds", path):
+            error = self.scenario_error()
+            if error:
+                return self.answer(error[0], error[1], error[2])
+            self.remember("cancel-auto-merge")
+            return self.answer(200, {"iid": 201, "merge_when_pipeline_succeeds": False})
         if self.flavor != "gitlab" or not re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/approve", path):
             return self.answer(404, {"message": "404 Not Found"})
         error = self.scenario_error()
@@ -277,9 +338,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         scopes = {"readonly": "read:org", "finegrained": None}.get(self.credential(), "repo, read:org")
         return self.answer(200, who, [("X-OAuth-Scopes", scopes)] if scopes is not None else [])
 
+    def do_DELETE(self):
+        """GitHub's branch deletion after a merge: the only DELETE Sirio sends."""
+        path = self.plain_path()
+        self.body()
+        self.record("DELETE", path, None, None, None)
+        if self.flavor != "github" or not re.fullmatch(r"(/api/v3)?/repos/[^/]+/[^/]+/git/refs/heads/.+", path):
+            return self.answer(404, {"message": "Not Found"})
+        error = self.scenario_error()
+        if error:
+            return self.answer(error[0], error[1], error[2])
+        if self.credential() == "deletefails":
+            return self.answer(422, {"message": "Cannot delete this protected branch"})
+        if self.credential() == "autodeleted":
+            return self.answer(422, {"message": "Reference does not exist"})
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         path = self.plain_path()
         raw = self.body()
+        if path == "/__push":
+            # Someone pushed to the head branch: reads serve `.after.push`.
+            self.remember("push")
+            return self.answer(200, {"pushed": True})
+        if path == "/__checking":
+            # The forge has not yet worked out whether it can merge.
+            self.remember("checking")
+            return self.answer(200, {"checking": True})
         if path == "/__reset":
             with self.applied_lock:
                 del self.applied[:]
@@ -313,6 +400,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})
         with open(path, encoding="utf-8") as fixture:
             payload = json.load(fixture)
+        if operation in ("ReviewerCandidates", "LabelCandidates"):
+            payload = only_matching(payload, (variables.get("q") or "").lower())
+        if self.flavor == "gitlab" and operation == "LabelCandidates" and not re.search(r"includeAncestorGroups:\s*true", query):
+            payload = without_group_labels(payload)
         if old and operation in BASELINE_OPERATIONS:
             payload = strip_newer(payload)
         return self.answer(200, payload, [("X-RateLimit-Remaining", "4999")])
@@ -323,6 +414,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.credential() == "dropped":
             self.close_connection = True
             return
+        if self.flavor == "gitlab" and self.credential() == "old" and field in NEWER_GITLAB_MUTATIONS:
+            return self.answer(200, {"errors": [{"message": f"Field '{field}' doesn't exist on type 'Mutation'"}]})
         if self.credential() == "notefails" and self.flavor == "gitlab" and operation == "CreateNote":
             return self.answer(200, {"data": {field: {"errors": ["Note creation failed"]}}})
         failure = self.write_failure(field)
@@ -330,7 +423,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(failure[0], failure[1], failure[2])
         given = (variables.get("input") or {}) if isinstance(variables.get("input"), dict) else {}
         key = operation
-        for discriminator in ("state", "draft"):
+        for discriminator in ("state", "draft", "strategy"):
             if discriminator in given:
                 key = f"{operation}.{str(given[discriminator]).lower() if isinstance(given[discriminator], bool) else given[discriminator]}"
         self.remember(key)

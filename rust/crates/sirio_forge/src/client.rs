@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use crate::action::{Action, ActionOutcome};
 use crate::error::ForgeError;
 use crate::model::{
-    ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CommitSummary,
+    Candidate, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CommitSummary,
     FileChange, Forge, ListQuery, Listing, PageCursor,
 };
 use crate::scopes::TokenScopes;
@@ -159,6 +159,28 @@ impl ForgeClient {
         match self.forge {
             Forge::GitHub => github::act(self, number, action),
             Forge::GitLab => gitlab::act(self, number, action),
+        }
+    }
+
+    /// People who may be asked to review change request `number`, found by
+    /// the forge from `text` (not a local filter: an organisation's first
+    /// page may not hold the one sought). Ids are what the reviewer
+    /// mutation names.
+    pub fn reviewer_candidates(&self, number: u64, text: &str) -> Result<Vec<Candidate>, ForgeError> {
+        let _perf = sirio_perf::span("forge.reviewer_candidates", 0);
+        match self.forge {
+            Forge::GitHub => github::reviewer_candidates(self, number, text),
+            Forge::GitLab => gitlab::reviewer_candidates(self, text),
+        }
+    }
+
+    /// The project's labels matching `text`, with the ids the label
+    /// mutation names.
+    pub fn label_candidates(&self, text: &str) -> Result<Vec<Candidate>, ForgeError> {
+        let _perf = sirio_perf::span("forge.label_candidates", 0);
+        match self.forge {
+            Forge::GitHub => github::label_candidates(self, text),
+            Forge::GitLab => gitlab::label_candidates(self, text),
         }
     }
 
