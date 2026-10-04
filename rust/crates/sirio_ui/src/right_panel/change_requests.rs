@@ -485,6 +485,14 @@ impl ChangeRequestList {
         }));
     }
 
+    /// The socket's search: opens the field and types `text` into it, so the
+    /// debounce and the read run as they do for a person.
+    pub(crate) fn control_search(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = true;
+        self.search.update(cx, |field, cx| field.set_content(text, cx));
+        cx.notify();
+    }
+
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = !self.search_open;
         if self.search_open {

@@ -134,6 +134,7 @@ fn usage() {
          \x20 surface settings read             read the mounted Settings section\n\
          \x20 surface change-requests show|read      the right panel's change request view\n\
          \x20 surface change-requests filter <mine|to-review|all-open|closed>\n\
+         \x20 surface change-requests search --text t\n\
          \x20 surface change-requests token --host h --forge github|gitlab --token t\n\
          \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
@@ -792,6 +793,10 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .get(2)
                 .ok_or_else(|| "Missing filter: mine, to-review, all-open or closed".to_string())?;
             require_ok(socket, &sirio_control::protocol::request::change_requests_filter(filter))
+        }
+        ("change-requests", "search") => {
+            let text = parsed.value("text").ok_or_else(|| "Missing --text".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::change_requests_search(text))
         }
         ("change-requests", "token") => {
             let host = parsed.value("host").ok_or_else(|| "Missing --host".to_string())?;
