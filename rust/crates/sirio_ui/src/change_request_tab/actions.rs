@@ -338,23 +338,25 @@ impl ChangeRequestTab {
         )
     }
 
+    /// What the status line says, and how loud: what is being sent, or why
+    /// it failed.
+    pub(crate) fn action_status(&self) -> Option<(Severity, String)> {
+        Some(match &self.actions.state {
+            ActionState::Idle => return None,
+            ActionState::Working(kind) => (Severity::Info, format!("Sending {kind}…")),
+            ActionState::Failed { message, .. } => (Severity::Danger, message.clone()),
+            ActionState::Warning(message) => (Severity::Warning, message.clone()),
+            ActionState::Unconfirmed { .. } => (
+                Severity::Warning,
+                "Could not confirm that it went through. Look at the conversation before sending it again."
+                    .to_string(),
+            ),
+        })
+    }
+
     /// One line under the header: what is being sent, or why it failed.
     pub(crate) fn render_action_status(&self, theme: &Theme) -> Option<AnyElement> {
-        let severity = match &self.actions.state {
-            ActionState::Idle => return None,
-            ActionState::Working(_) => Severity::Info,
-            ActionState::Failed { .. } => Severity::Danger,
-            ActionState::Unconfirmed { .. } | ActionState::Warning(_) => Severity::Warning,
-        };
-        let text = match &self.actions.state {
-            ActionState::Working(kind) => format!("Sending {kind}…"),
-            ActionState::Failed { message, .. } | ActionState::Warning(message) => message.clone(),
-            ActionState::Unconfirmed { .. } => {
-                "Could not confirm that it went through. Look at the conversation before sending it again."
-                    .to_string()
-            }
-            ActionState::Idle => return None,
-        };
+        let (severity, text) = self.action_status()?;
         Some(
             div()
                 .id("change-request-action-status")

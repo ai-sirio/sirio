@@ -984,6 +984,14 @@ impl ChangeRequestTab {
                 "merge_dialog".to_string(),
                 if self.actions.merge.dialog.is_some() { "open" } else { "closed" }.to_string(),
             ),
+            (
+                "merge_sending".to_string(),
+                if self.merge_sending(&["merge", "auto-merge", "cancel-auto-merge"]) { "yes" } else { "no" }.to_string(),
+            ),
+            (
+                "merge_dialog_message".to_string(),
+                self.merge_dialog_status().map(|(_, text)| text).unwrap_or_default(),
+            ),
         ]
     }
 }
@@ -2056,7 +2064,7 @@ impl Render for ChangeRequestTab {
             .child(self.render_header(&theme, &entity))
             .children(self.render_merge_strip(&theme, &entity))
             .child(body)
-            .children(self.render_merge_dialog(&entity))
+            .children(self.render_merge_dialog(&theme, &entity))
     }
 }
 

@@ -8,6 +8,7 @@ use ely_gpui_component::overlays::Dialog;
 use ely_gpui_component::primitives::Severity;
 use sirio_forge::{Action, ChangeState, MergeCapability, MergeMethod, MergeVerdict};
 
+use super::actions::ActionState;
 use super::ely_ui::{ButtonState, message, new_input, normalize, text_button};
 use super::*;
 
@@ -235,7 +236,7 @@ impl ChangeRequestTab {
         }
         let header = self.header.value()?;
         let busy = self.action_busy();
-        let working = |kinds: &[&str]| kinds.contains(&self.actions.state.kind());
+        let working = |kinds: &[&str]| self.merge_sending(kinds);
         let controls = match &kind {
             StripKind::Cancel(_) => {
                 let entity = entity.clone();
@@ -321,8 +322,23 @@ impl ChangeRequestTab {
         )
     }
 
+    /// The strip's button spins while one of `kinds` is being sent.
+    pub(crate) fn merge_sending(&self, kinds: &[&str]) -> bool {
+        matches!(&self.actions.state, ActionState::Working(kind) if kinds.contains(kind))
+    }
+
+    /// Why the merge being confirmed was refused or not confirmed, said in
+    /// the dialog: the header's status line is behind the scrim.
+    pub(crate) fn merge_dialog_status(&self) -> Option<(Severity, String)> {
+        self.actions.merge.dialog.as_ref()?;
+        if !matches!(self.actions.state.kind(), "merge" | "auto-merge") {
+            return None;
+        }
+        self.action_status().filter(|(severity, _)| *severity != Severity::Info)
+    }
+
     /// The confirmation, drawn over the tab while a merge is being confirmed.
-    pub(crate) fn render_merge_dialog(&self, entity: &Entity<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_merge_dialog(&self, theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
         let dialog = self.actions.merge.dialog.as_ref()?;
         let busy = self.action_busy();
         let short = &dialog.head[..dialog.head.len().min(7)];
@@ -363,6 +379,9 @@ impl ChangeRequestTab {
             )
         })
         .child(dialog.title.clone());
+        if let Some((severity, text)) = self.merge_dialog_status() {
+            card = card.child(message(severity, text, theme));
+        }
         if let Some(message) = &dialog.message {
             card = card.child(message.clone());
         }

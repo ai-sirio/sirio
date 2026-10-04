@@ -971,6 +971,21 @@ PY
   case "$(key action_message surface change-request read)" in *"The branch changed since you opened this"*) ;; *) fail "a moved head was not named" ;; esac
   expect_sent "$flavour" "$merge_op" 0
 
+  echo "  [$flavour] a refused merge says why inside the dialog, which stays open"
+  reset_forge "$flavour" "$port"
+  reopen_tab "$number"
+  ctl surface change-request act merge-open --method merge >/dev/null
+  wait_for merge_dialog open surface change-request read
+  ctl surface change-request act merge-confirm --title "   " >/dev/null 2>&1 || true
+  wait_for action failed surface change-request read
+  [ "$(key merge_dialog surface change-request read)" = open ] || fail "a refused merge closed its dialog"
+  case "$(key merge_dialog_message surface change-request read)" in *"The commit title cannot be empty."*) ;; *) fail "the dialog did not say why the merge was refused" ;; esac
+  [ "$(key merge_sending surface change-request read)" = no ] || fail "the strip still spins after a refused merge"
+  capture "$flavour-merge-refused"
+  ctl surface change-request act merge-close >/dev/null
+  wait_for merge_dialog closed surface change-request read
+  expect_sent "$flavour" "$merge_op" 0
+
   echo "  [$flavour] a blocked change request offers no merge"
   saved_token "$host" "$flavour" blocked
   reopen_tab "$number"
