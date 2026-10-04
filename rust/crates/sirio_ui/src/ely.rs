@@ -148,3 +148,13 @@ mod tests {
         });
     }
 }
+
+/// The read-only mark a snapshot tab wears on its icon's corner.
+pub fn lock_mark(color: gpui::Hsla) -> gpui::AnyElement {
+    use ely_gpui_component::{
+        primitives::{Icon, IconName},
+        theme::IconSize,
+    };
+    use gpui::IntoElement;
+    Icon::new(IconName::Lock).size(IconSize::Xs).color(color).into_any_element()
+}

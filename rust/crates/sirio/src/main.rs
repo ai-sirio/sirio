@@ -6208,6 +6208,7 @@ impl SirioWorkspace {
                                             change_request: origin.reference.clone(),
                                             sha: origin.sha.clone(),
                                             path: origin.relative_path.to_string_lossy().into_owned(),
+                                            deleted: origin.deleted,
                                         });
                                     }
                                     None => {
@@ -13593,7 +13594,7 @@ impl SirioWorkspace {
         // as a refused path rather than a refused revision.
         if !snapshot_path_is_repository_relative(&path) {
             let sha = if deleted { &revisions.base_sha } else { &revisions.head_sha };
-            let origin = refused_snapshot_origin(reference, sha);
+            let origin = refused_snapshot_origin(reference, sha, deleted);
             self.add_snapshot_tab(origin, Err(INVALID_CHANGE_REQUEST_FILE_PATH.to_string()), None, cx);
             return;
         }
@@ -13621,6 +13622,7 @@ impl SirioWorkspace {
                 sha,
                 relative_path: path,
                 local_copy: (!deleted && local.is_file()).then_some(local),
+                deleted,
             };
             let _ = this.update(cx, |workspace, cx| {
                 if workspace.still_in(&worktree) {
@@ -13669,16 +13671,7 @@ impl SirioWorkspace {
             }
             return;
         }
-        let name = origin.relative_path.file_name().map_or_else(
-            || origin.relative_path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        // A refused origin has no path to name the tab by.
-        let title = if name.is_empty() {
-            origin.label()
-        } else {
-            format!("{name} @ {}", origin.reference.label())
-        };
+        let title = snapshot_tab_title(&origin);
         let view = cx.new(|cx| match read {
             Ok(bytes) => FileView::snapshot(origin, bytes, cx),
             Err(reason) => {
@@ -15188,6 +15181,13 @@ impl SirioWorkspace {
             ("path".to_string(), display_absolute_path(view.path())),
             ("read_only".to_string(), view.is_snapshot().to_string()),
             ("origin".to_string(), view.snapshot_origin().map(|origin| origin.label()).unwrap_or_default()),
+            (
+                "local_copy".to_string(),
+                view.snapshot_origin()
+                    .and_then(|origin| origin.local_copy.as_deref())
+                    .map(display_absolute_path)
+                    .unwrap_or_default(),
+            ),
             ("state".to_string(), state.to_string()),
             ("error".to_string(), view.snapshot_error().unwrap_or_default().to_string()),
             ("content".to_string(), text),
@@ -16420,6 +16420,17 @@ impl SirioWorkspace {
                 tint
             })
             .flatten();
+        // A snapshot is read-only, and its tab says so with a lock on its icon
+        // (B1 §7.2).
+        let read_only = tab.kind == TabKind::Editor && {
+            let mut snapshot = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content {
+                    snapshot |= view.read(cx).is_snapshot();
+                }
+            });
+            snapshot
+        };
         let width = Self::tab_render_width(tab);
         let close_entity = entity.clone();
         let menu_entity = entity.clone();
@@ -16530,8 +16541,19 @@ impl SirioWorkspace {
                 div()
                     .w(px(14.0))
                     .flex_none()
+                    .relative()
                     .text_color(change_request_tint.unwrap_or(glyph_color))
-                    .child(IconElement::new(icon, IconSize::Small)),
+                    .child(IconElement::new(icon, IconSize::Small))
+                    .when(read_only, |icon| {
+                        icon.child(
+                            div()
+                                .absolute()
+                                .right(px(-4.0))
+                                .bottom(px(-3.0))
+                                .debug_selector(move || format!("workspace-tab-lock-{id}"))
+                                .child(sirio_ui::ely::lock_mark(theme.ely.fg_muted)),
+                        )
+                    }),
             )
             .when(!renaming, |this| {
                 this.child(
@@ -20875,7 +20897,7 @@ fn restored_snapshot_view(
     cx: &mut App,
 ) -> Entity<FileView> {
     if let Some(refusal) = restored_snapshot_refusal(snapshot) {
-        let origin = refused_snapshot_origin(snapshot.change_request.clone(), &snapshot.sha);
+        let origin = refused_snapshot_origin(snapshot.change_request.clone(), &snapshot.sha, snapshot.deleted);
         return cx.new(|cx| {
             let mut view = FileView::snapshot_pending(origin, cx);
             view.finish_snapshot(Err(refusal.to_string()), cx);
@@ -20888,7 +20910,8 @@ fn restored_snapshot_view(
         reference: snapshot.change_request.clone(),
         sha: snapshot.sha.clone(),
         relative_path,
-        local_copy: local.is_file().then_some(local),
+        local_copy: (!snapshot.deleted && local.is_file()).then_some(local),
+        deleted: snapshot.deleted,
     };
     cx.new(|cx| FileView::snapshot_pending(origin, cx))
 }
@@ -20902,12 +20925,30 @@ const INVALID_CHANGE_REQUEST_FILE_PATH: &str = "This file's path is not one a re
 /// The origin of a snapshot tab that shows a refusal instead of a file: no
 /// path, and a sha only when it is a commit id, so nothing untrusted reaches
 /// a label or a join.
-fn refused_snapshot_origin(reference: sirio_forge::ChangeRef, sha: &str) -> SnapshotOrigin {
+fn refused_snapshot_origin(reference: sirio_forge::ChangeRef, sha: &str, deleted: bool) -> SnapshotOrigin {
     SnapshotOrigin {
         reference,
         sha: if sirio_git::is_commit_id(sha) { sha.to_owned() } else { String::new() },
         relative_path: PathBuf::new(),
         local_copy: None,
+        deleted,
+    }
+}
+
+/// A snapshot tab's title: `lib.rs @ #578`, or `gone.txt (deleted in #578)`
+/// for a file the change request deletes. A refused origin has no path to
+/// name it by.
+fn snapshot_tab_title(origin: &SnapshotOrigin) -> String {
+    let name = origin.relative_path.file_name().map_or_else(
+        || origin.relative_path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    if name.is_empty() {
+        origin.label()
+    } else if origin.deleted {
+        format!("{name} (deleted in {})", origin.reference.label())
+    } else {
+        format!("{name} @ {}", origin.reference.label())
     }
 }
 
@@ -26524,6 +26565,9 @@ done
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
+        // The tab strip draws a snapshot's lock with Ely, as the app does
+        // after `sirio_ui::ely::init`.
+        cx.update(sirio_ui::ely::init);
         let first = committed_test_repo("snapshot-switch-first");
         let second = committed_test_repo("snapshot-switch-second");
         std::fs::write(second.join("only.rs"), "fn only_in_second() {}\n")
@@ -26606,6 +26650,7 @@ done
                         },
                         sha: sha.clone(),
                         path: "only.rs".into(),
+                        deleted: false,
                     }),
                     ..SessionTabState::default()
                 }],
@@ -39337,6 +39382,59 @@ browser  profile  "
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn deleted_origin(path: &str, deleted: bool) -> SnapshotOrigin {
+        SnapshotOrigin {
+            reference: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".into(),
+                project: "acme/widgets".into(),
+                number: 578,
+            },
+            sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into(),
+            relative_path: PathBuf::from(path),
+            local_copy: None,
+            deleted,
+        }
+    }
+
+    /// B1 §5.3: a deleted file's snapshot says what happened to the file.
+    #[test]
+    fn a_deleted_files_snapshot_is_titled_deleted_in_its_change_request() {
+        assert_eq!(snapshot_tab_title(&deleted_origin("src/lib.rs", false)), "lib.rs @ #578");
+        assert_eq!(
+            snapshot_tab_title(&deleted_origin("gone.txt", true)),
+            "gone.txt (deleted in #578)"
+        );
+    }
+
+    /// B1 §13: a restored snapshot of a deleted file never offers the
+    /// worktree's same-named file as its "local copy".
+    #[gpui::test]
+    fn a_restored_deleted_snapshot_offers_no_local_copy(cx: &mut TestAppContext) {
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-restored-deleted-snapshot-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        std::fs::write(working_directory.join("gone.txt"), "a different file\n").expect("same-named file");
+        let snapshot = session::PersistedSnapshot {
+            change_request: deleted_origin("gone.txt", true).reference,
+            sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into(),
+            path: "gone.txt".into(),
+            deleted: true,
+        };
+        let view = cx.update(|cx| {
+            sirio_theme::Theme::init(cx);
+            restored_snapshot_view(&snapshot, &working_directory, cx)
+        });
+        let origin = view
+            .read_with(cx, |view, _| view.snapshot_origin().cloned())
+            .expect("a snapshot");
+        let _ = std::fs::remove_dir_all(&working_directory);
+        assert!(origin.deleted);
+        assert_eq!(origin.local_copy, None);
+    }
+
     /// A persisted sha is shown in the bar and joined into the view's
     /// virtual path before any read validates it, so the restore refuses
     /// one Sirio would never have written — before either happens.
@@ -39351,6 +39449,7 @@ browser  profile  "
             },
             sha: sha.into(),
             path: path.into(),
+            deleted: false,
         };
         let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
         assert_eq!(restored_snapshot_refusal(&snapshot(good, "src/lib.rs")), None);
@@ -39384,12 +39483,12 @@ browser  profile  "
             number: 578,
         };
         let good = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-        let kept = refused_snapshot_origin(reference.clone(), good);
+        let kept = refused_snapshot_origin(reference.clone(), good, false);
         assert_eq!(kept.sha, good);
         assert!(kept.relative_path.as_os_str().is_empty());
         assert!(kept.local_copy.is_none());
         for bad in ["", "--upload-pack=x", "/etc/passwd", &good[..39]] {
-            assert_eq!(refused_snapshot_origin(reference.clone(), bad).sha, "", "{bad:?}");
+            assert_eq!(refused_snapshot_origin(reference.clone(), bad, false).sha, "", "{bad:?}");
         }
     }
 

@@ -152,6 +152,10 @@ pub struct PersistedSnapshot {
     pub sha: String,
     /// Repository-relative.
     pub path: String,
+    /// The file is one the change request deletes. Absent in rows written
+    /// before it existed, which restore as not deleted.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 impl SessionTabState {
@@ -2709,6 +2713,7 @@ mod tests {
             },
             sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into(),
             path: "src/lib.rs".into(),
+            deleted: true,
         };
         let state = SessionTabState {
             root_id: Some(0),

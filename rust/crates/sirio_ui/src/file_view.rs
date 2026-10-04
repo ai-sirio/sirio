@@ -127,6 +127,9 @@ pub struct SnapshotOrigin {
     pub relative_path: PathBuf,
     /// The worktree's own copy, when it has one to offer.
     pub local_copy: Option<PathBuf>,
+    /// The change request deletes this file: the snapshot shows it at the
+    /// base, says so in its title, and has no local copy to offer.
+    pub deleted: bool,
 }
 
 impl SnapshotOrigin {
@@ -6088,6 +6091,7 @@ mod tests {
             sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string(),
             relative_path: PathBuf::from("src/lib.rs"),
             local_copy: None,
+            deleted: false,
         }
     }
 
