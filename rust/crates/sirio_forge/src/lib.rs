@@ -26,7 +26,7 @@ pub use client::ForgeClient;
 pub use error::ForgeError;
 
 pub use model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check,
+    Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob,
     CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
     FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
     ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem, BlockReason, Candidate, Label,

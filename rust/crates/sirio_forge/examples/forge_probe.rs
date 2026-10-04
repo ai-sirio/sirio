@@ -226,6 +226,7 @@ fn run(args: &Args) -> Result<(), Failure> {
             }
             println!("BODY {}", header.body.lines().next().unwrap_or(""));
             println!("CAPS {}", caps_words(&header.capabilities));
+            println!("RERUN {}", yes_no(header.capabilities.can_rerun_checks));
             println!("{}", merge_line(&header.capabilities.merge));
             for label in &header.labels {
                 println!("LABEL {} {}", label.id, label.name);
@@ -269,6 +270,15 @@ fn run(args: &Args) -> Result<(), Failure> {
                     check.name,
                     count_word(check.duration_secs.map(|secs| secs as u32)),
                 );
+                if let Some(job) = &check.job {
+                    println!(
+                        "JOB {} {} {} {}",
+                        check.name,
+                        job.job_id,
+                        job.run_id.map_or("-".to_string(), |run| run.to_string()),
+                        yes_no(job.retryable),
+                    );
+                }
             }
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }

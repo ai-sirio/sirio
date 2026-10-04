@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
 # `--stage NAME` runs one: wire-github, wire-gitlab, failures, merge, metadata, cli,
-# scopes, ui. Nothing
+# scopes, ci, ui. Nothing
 # is published and the user's own gh/glab configuration is never read.
 #
 # The `ui` stage launches a real, isolated Sirio (debug build) against the
@@ -97,6 +97,8 @@ def save(flavor, name, value):
 def github(name, change):
     doc = copy.deepcopy(load("github", "ChangeRequestHeader"))
     change(doc["data"]["repository"]["pullRequest"])
+    if name.endswith(".readonly"):
+        doc["data"]["repository"]["viewerPermission"] = "READ"
     save("github", name, doc)
 
 def comment_of(pr):
@@ -143,6 +145,7 @@ gitlab("MergeRequestHeader.after.UpdateNote", lambda mr: note_of(mr).update(body
 gitlab("MergeRequestHeader.readonly", lambda mr: (
     mr.update(discussionLocked=True, userPermissions={"canApprove": False, "createNote": False, "updateMergeRequest": False}),
     note_of(mr)["userPermissions"].update(adminNote=False),
+    mr["headPipeline"]["userPermissions"].update(updatePipeline=False),
 ))
 PY
 
@@ -254,6 +257,7 @@ BODY_FILE="$WORK/body.md"
 printf 'He said "ok" \\ naïve café ☕ 日本語\n\n\ttabbed line\nlast line\n' >"$BODY_FILE"
 
 GH=("$PROBE" --forge github --host ghe.test --project acme/widgets --token good)
+GH_RO=("$PROBE" --forge github --host ghe.test --project acme/widgets --token readonly)
 GL=("$PROBE" --forge gitlab --host gitlab.test --project team/app --token good)
 GH_ID='"pullRequestId":"PR_kwDOfake101"'
 
@@ -745,6 +749,30 @@ else
 fi
 fi
 
+
+if wanted ci; then
+echo "stage ci: CI jobs -- their ids, re-running them, reading their logs (B2c)"
+reset_forge github
+reset_forge gitlab
+probe "$PROBE" --forge gitlab --host gitlab.test --project team/app --token readonly header 201
+expect_line "RERUN no"
+probe "${GH[@]}" checks 101
+expect_code 0
+expect_line "JOB build 1 1 yes"
+expect_line "JOB test 2 1 yes"
+expect_line "JOB lint 3 4 no"
+! echo "$PROBE_OUT" | grep -q '^JOB deploy/preview' || { dump; fail "a status context has no CI job"; }
+probe "${GH[@]}" header 101
+expect_line "RERUN yes"
+probe "${GH_RO[@]}" header 101
+expect_line "RERUN no"
+probe "${GL[@]}" checks 201
+expect_line "JOB rspec 2 45 yes"
+expect_line "JOB lint 3 45 no"
+probe "${GL[@]}" header 201
+expect_line "RERUN yes"
+# Later parts of stage ci are added above this line.
+fi
 
 if wanted ui; then
 echo "stage ui: a real Sirio, the change request tab, every action of B2a and B2b"

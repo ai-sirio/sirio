@@ -27,7 +27,7 @@ use crate::graphql::{
 };
 use crate::mapping::{self, SystemNote};
 use crate::model::{
-    Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CommentKind, CommentRef,
+    Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
     ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -403,6 +403,7 @@ fn capabilities(client: &ForgeClient, node: &Value) -> Capabilities {
         can_update: opt_bool(node, "/userPermissions/updateMergeRequest"),
         can_approve: opt_bool(node, "/userPermissions/canApprove"),
         reports_review_state: !client.baseline.load(Ordering::Relaxed),
+        can_update_pipeline: opt_bool(node, "/headPipeline/userPermissions/updatePipeline"),
     });
     caps.merge = merge;
     caps
@@ -556,6 +557,7 @@ pub(crate) fn checks(client: &ForgeClient, number: u64) -> Result<Listing<Check>
             json!({ "fullPath": client.project, "iid": number.to_string(), "after": after }),
         )?;
         let merge_request = merge_request(client, &data)?;
+        let pipeline = opt_str(merge_request, "/headPipeline/id").and_then(mapping::gitlab_gid_number);
         let items = array_at(merge_request, "/headPipeline/jobs/nodes")
             .into_iter()
             .filter_map(|job| {
@@ -569,6 +571,13 @@ pub(crate) fn checks(client: &ForgeClient, number: u64) -> Result<Listing<Check>
                         .map(|seconds| seconds.max(0.0).round() as u64),
                     url: opt_str(job, "/webPath")
                         .map(|path| format!("https://{}{path}", client.host)),
+                    job: opt_str(job, "/id")
+                        .and_then(mapping::gitlab_gid_number)
+                        .map(|job_id| CheckJob {
+                            job_id,
+                            run_id: pipeline,
+                            retryable: opt_bool(job, "/retryable") == Some(true),
+                        }),
                 })
             })
             .collect();

@@ -337,6 +337,7 @@ mod tests {
             can_toggle_draft: true,
             can_edit_reviewers: true,
             can_edit_labels: true,
+            can_rerun_checks: false,
             merge: ready_merge(),
         }
     }

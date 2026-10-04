@@ -416,6 +416,8 @@ pub struct Capabilities {
     pub can_toggle_draft: bool,
     pub can_edit_reviewers: bool,
     pub can_edit_labels: bool,
+    /// Re-run a failed job or a run's failed jobs (spec §15.1).
+    pub can_rerun_checks: bool,
     pub merge: MergeCapability,
 }
 
@@ -463,6 +465,21 @@ pub enum CheckStatus {
     Neutral,
 }
 
+/// What makes a check a CI job Sirio can read and re-run: a GitHub Actions
+/// job or a GitLab CI job (spec §7.3, §15.1). A third-party check run and a
+/// GitHub `StatusContext` have none, and keep opening their page.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CheckJob {
+    /// GitHub: the check run's `databaseId`, which is the Actions job id.
+    /// GitLab: the number of `gid://gitlab/Ci::Build/N`.
+    pub job_id: u64,
+    /// The GitHub workflow run, or the GitLab pipeline, it ran in.
+    pub run_id: Option<u64>,
+    /// The forge would take a re-run of it now: on GitHub its run has
+    /// finished, on GitLab the job says `retryable`.
+    pub retryable: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
     pub name: String,
@@ -471,6 +488,8 @@ pub struct Check {
     pub group: Option<String>,
     pub duration_secs: Option<u64>,
     pub url: Option<String>,
+    /// `Some` for a GitHub Actions job and a GitLab CI job only.
+    pub job: Option<CheckJob>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

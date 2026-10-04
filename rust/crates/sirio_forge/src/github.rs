@@ -21,7 +21,7 @@ use crate::mapping;
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
-    Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CiState, CommentKind,
+    Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, CiState, CommentKind,
     CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
     PageCursor, ReviewOutcome, Reviewer, TimelineItem,
 };
@@ -388,6 +388,7 @@ fn capabilities(node: &Value, repository: &Value) -> Capabilities {
         viewer_can_update: bool_at(node, "/viewerCanUpdate"),
         viewer_can_close: bool_at(node, "/viewerCanClose"),
         viewer_can_reopen: bool_at(node, "/viewerCanReopen"),
+        viewer_permission: opt_str(repository, "/viewerPermission"),
     });
     caps.merge = merge_capability(node, repository);
     caps
@@ -612,6 +613,18 @@ fn check(node: &Value) -> Option<Check> {
             group: opt_str(node, "/checkSuite/workflowRun/workflow/name").map(str::to_string),
             duration_secs: duration(time_at(node, "/startedAt"), time_at(node, "/completedAt")),
             url: opt_str(node, "/detailsUrl").map(str::to_string),
+            // Only an Actions job has a workflow run; a third-party check run
+            // has none and keeps opening its page.
+            job: node
+                .pointer("/checkSuite/workflowRun/databaseId")
+                .and_then(Value::as_u64)
+                .and_then(|run| {
+                    Some(CheckJob {
+                        job_id: node.get("databaseId").and_then(Value::as_u64)?,
+                        run_id: Some(run),
+                        retryable: mapping::github_job_retryable(opt_str(node, "/checkSuite/status")),
+                    })
+                }),
         }),
         "StatusContext" => Some(Check {
             name: opt_str(node, "/context")?.to_string(),
@@ -619,6 +632,7 @@ fn check(node: &Value) -> Option<Check> {
             group: None,
             duration_secs: None,
             url: opt_str(node, "/targetUrl").map(str::to_string),
+            job: None,
         }),
         _ => None,
     }

@@ -2,9 +2,10 @@ query MergeRequestChecks($fullPath: ID!, $iid: String!, $after: String) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
       headPipeline {
+        id
         jobs(first: 100, after: $after) {
           pageInfo { hasNextPage endCursor }
-          nodes { name status stage { name } duration webPath }
+          nodes { id name status retryable stage { name } duration webPath }
         }
       }
     }
