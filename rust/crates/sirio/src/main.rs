@@ -16546,10 +16546,15 @@ impl SirioWorkspace {
                     .child(IconElement::new(icon, IconSize::Small))
                     .when(read_only, |icon| {
                         icon.child(
+                            // On the page's own ground, so the file glyph
+                            // under it does not show through the lock.
                             div()
                                 .absolute()
-                                .right(px(-4.0))
-                                .bottom(px(-3.0))
+                                .right(px(-5.0))
+                                .bottom(px(-4.0))
+                                .p(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(theme.ely.bg)
                                 .debug_selector(move || format!("workspace-tab-lock-{id}"))
                                 .child(sirio_ui::ely::lock_mark(theme.ely.fg_muted)),
                         )
