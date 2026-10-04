@@ -5,22 +5,32 @@ use crate::{ForgeError, LOG_DOWNLOAD_LIMIT, LOG_TAIL_BYTES, Log};
 
 /// Fetches a log from the signed URL a forge redirected to — with no
 /// credential, because the URL is its own authorisation and names another
-/// host (spec §4). Over https only, except in a debug build, whose e2e fake
-/// serves it on loopback.
+/// host (spec §4). Over https only, at every hop, except in a debug build,
+/// whose e2e fake serves it on loopback.
 pub(crate) fn fetch_signed(host: &str, location: &str) -> Result<Vec<u8>, ForgeError> {
-    if !cfg!(debug_assertions) && !location.starts_with("https://") {
+    fetch_from(host, location, !cfg!(debug_assertions))
+}
+
+fn fetch_from(host: &str, location: &str, https_only: bool) -> Result<Vec<u8>, ForgeError> {
+    if !location.starts_with("https://") && !location.starts_with("http://") {
         return Err(ForgeError::UnexpectedResponse {
             host: host.to_string(),
-            detail: "the log was offered over plain http".to_string(),
+            detail: "the log's redirect named no absolute address".to_string(),
         });
     }
     let _perf = sirio_perf::span("forge.log_download", 0);
-    let agent = crate::transport::http_agent(crate::transport::LOG_TIMEOUT);
+    let agent = crate::transport::signed_agent(https_only);
     let response = agent
         .get(location)
         .header("User-Agent", "Sirio")
         .call()
-        .map_err(|error| crate::transport::classify(host, error))?;
+        .map_err(|error| match error {
+            ureq::Error::RequireHttpsOnly(_) => ForgeError::UnexpectedResponse {
+                host: host.to_string(),
+                detail: "the log was offered over plain http".to_string(),
+            },
+            other => crate::transport::classify(host, other),
+        })?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         // An expired signature is a 403 from the storage host, not the forge's.
@@ -120,6 +130,24 @@ pub(crate) fn keep_tail(bytes: Vec<u8>, cap: usize) -> (Vec<u8>, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_fetch_refuses_plain_http_without_connecting_and_a_relative_address() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        listener.set_nonblocking(true).expect("non-blocking");
+        let port = listener.local_addr().expect("its address").port();
+        let refused = fetch_from("ghe.test", &format!("http://127.0.0.1:{port}/__blob/x"), true);
+        assert!(
+            matches!(&refused, Err(ForgeError::UnexpectedResponse { detail, .. }) if detail.contains("plain http")),
+            "{refused:?}"
+        );
+        assert!(listener.accept().is_err(), "nothing may reach a plain-http host");
+        let relative = fetch_from("ghe.test", "/__blob/x", false);
+        assert!(
+            matches!(&relative, Err(ForgeError::UnexpectedResponse { detail, .. }) if detail.contains("no absolute address")),
+            "{relative:?}"
+        );
+    }
 
     #[test]
     fn a_log_within_the_cap_is_kept_whole() {

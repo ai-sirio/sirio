@@ -205,6 +205,21 @@ pub(crate) fn http_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
+/// The agent for a log's signed URL: `https_only` holds at every redirect
+/// it follows, not only for the address it was handed.
+pub(crate) fn signed_agent(https_only: bool) -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+    let config = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .http_status_as_error(false)
+        .https_only(https_only)
+        .timeout_global(Some(LOG_TIMEOUT))
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
 /// How long a log download may take: a large log is tens of megabytes.
 pub(crate) const LOG_TIMEOUT: Duration = Duration::from_secs(120);
 
