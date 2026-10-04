@@ -20905,7 +20905,7 @@ fn restore_tabs_with_terminal_cache(
                 )
             }
             Some(TabKind::CiLog) => {
-                let Some(saved) = tab_state.ci_log.clone() else {
+                let Some(saved) = tab_state.ci_log.clone().map(session::PersistedCiLog::restorable) else {
                     continue;
                 };
                 let job = sirio_forge::CheckJob {
@@ -21449,7 +21449,7 @@ fn restore_tabs_in_workspace(
                 )
             }
             Some(TabKind::CiLog) => {
-                let Some(saved) = tab_state.ci_log.clone() else {
+                let Some(saved) = tab_state.ci_log.clone().map(session::PersistedCiLog::restorable) else {
                     continue;
                 };
                 let job = sirio_forge::CheckJob {

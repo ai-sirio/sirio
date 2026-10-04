@@ -174,6 +174,24 @@ pub struct PersistedCiLog {
     pub web_url: Option<String>,
 }
 
+impl PersistedCiLog {
+    /// What may come back from disk: a persisted value reaches a label and
+    /// the OS's URL opener, so a link survives only as `https://` on the
+    /// change request's own host, and the name loses control characters and
+    /// is capped (spec §8).
+    pub fn restorable(mut self) -> Self {
+        let host = self.change_request.host.as_str();
+        self.web_url = self.web_url.filter(|url| {
+            url.strip_prefix("https://")
+                .and_then(|rest| rest.strip_prefix(host))
+                .is_some_and(|path| path.starts_with('/'))
+        });
+        let name: String = self.name.chars().filter(|ch| !ch.is_control()).take(120).collect();
+        self.name = if name.trim().is_empty() { format!("job {}", self.job_id) } else { name };
+        self
+    }
+}
+
 impl SessionTabState {
     pub fn with_root(root_id: usize) -> Self {
         Self {
@@ -2777,6 +2795,40 @@ mod tests {
         });
         let decoded = SessionTabState::decode(&state.encode()).expect("it decodes");
         assert_eq!(decoded.ci_log, state.ci_log);
+    }
+
+    #[test]
+    fn a_restored_ci_log_keeps_only_a_link_to_its_own_forge_and_a_readable_name() {
+        let saved = |name: &str, web_url: Option<&str>| PersistedCiLog {
+            change_request: sirio_forge::ChangeRef {
+                forge: sirio_forge::Forge::GitHub,
+                host: "ghe.test".to_string(),
+                project: "acme/widgets".to_string(),
+                number: 101,
+            },
+            job_id: 2,
+            run_id: Some(1),
+            name: name.to_string(),
+            web_url: web_url.map(str::to_string),
+        };
+        let own = "https://ghe.test/acme/widgets/actions/runs/1/job/2";
+        assert_eq!(saved("test", Some(own)).restorable(), saved("test", Some(own)));
+        for hostile in [
+            "http://ghe.test/acme/widgets/actions/runs/1/job/2",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://evil.test/ghe.test",
+            "https://ghe.test.evil.test/x",
+            "https://ghe.test@evil.test/x",
+            "https://user@ghe.test/x",
+            "HTTPS://ghe.test/x",
+            "https://ghe.test",
+        ] {
+            assert_eq!(saved("test", Some(hostile)).restorable().web_url, None, "{hostile}");
+        }
+        assert_eq!(saved("li\u{1b}[31mnt\nx\u{7}", None).restorable().name, "li[31mntx");
+        assert_eq!(saved(&"a".repeat(500), None).restorable().name.chars().count(), 120);
+        assert_eq!(saved("\u{1b}\n\t", None).restorable().name, "job 2");
     }
 
     /// Every `TabKind`. The `match` has no `_` arm, so a new kind does not
