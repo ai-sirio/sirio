@@ -631,6 +631,8 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
             .filter_map(|reviewer| opt_str(reviewer, "/username").map(str::to_string))
             .collect(),
         team_ids: Vec::new(),
+        bot_ids: Vec::new(),
+        unsendable_requests: Vec::new(),
         capabilities: capabilities(client, node),
     })
 }

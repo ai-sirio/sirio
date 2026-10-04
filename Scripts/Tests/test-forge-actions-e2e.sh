@@ -589,11 +589,20 @@ expect_line "REVIEWER_ID fake-user U_kwDOfake"
 expect_line "LABEL LA_kwDObug bug"
 probe "${GH[@]}" act 101 set-reviewers --add U_kwDOann --remove U_kwDOfake
 expect_code 0 "github reviewers"
-expect_input github RequestReviews "{$GH_ID,\"teamIds\":[\"T_kwDOcore\"],\"union\":false,\"userIds\":[\"U_kwDOann\"]}"
+expect_input github RequestReviews "{\"botIds\":[\"BOT_kwDOcopilot\"],$GH_ID,\"teamIds\":[\"T_kwDOcore\"],\"union\":false,\"userIds\":[\"U_kwDOann\"]}"
+echo "  adding only adds: the requests already there, a bot's among them, are not sent"
+probe "${GH[@]}" act 101 set-reviewers --add U_kwDOann
+expect_code 0 "github reviewers, add only"
+expect_nth_input github RequestReviews 2 "{$GH_ID,\"union\":true,\"userIds\":[\"U_kwDOann\"]}"
+echo "  a removal that would drop a request Sirio cannot send back is refused"
+probe "$PROBE" --forge github --host ghe.test --project acme/widgets --token mannequin act 101 set-reviewers --remove U_kwDOfake
+expect_code 20 "a removal beside a mannequin's request"
+expect_line "ERR Rejected"
+expect_line "MESSAGE Removing a reviewer here would also drop the review request of a mannequin; change it on the forge."
+expect_sent github RequestReviews 2
 probe "${GH[@]}" act 101 set-reviewers
 expect_code 20 "reviewers with nothing to change"
 expect_line "MESSAGE There is nothing to change."
-expect_sent github RequestReviews 1
 probe "${GH[@]}" act 101 set-labels --add LA_kwDOfeat --remove LA_kwDObug
 expect_code 0 "github labels"
 expect_input github AddLabelsToLabelable '{"labelIds":["LA_kwDOfeat"],"labelableId":"PR_kwDOfake101"}'

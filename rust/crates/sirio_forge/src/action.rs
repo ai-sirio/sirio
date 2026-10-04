@@ -116,9 +116,15 @@ pub(crate) struct ActionContext {
     pub head_ref_name: Option<String>,
     /// The head lives in a fork: its branch is not Sirio's to delete.
     pub cross_repository: bool,
-    /// The users and teams asked to review now, as their mutation names them.
+    /// The users, teams and bots asked to review now, as their mutation
+    /// names them.
     pub reviewer_ids: Vec<String>,
     pub team_ids: Vec<String>,
+    pub bot_ids: Vec<String>,
+    /// The kinds of reviewer asked now that the mutation cannot name (a
+    /// GitHub mannequin or enterprise team): a write that replaces the set
+    /// would drop them.
+    pub unsendable_requests: Vec<String>,
 }
 
 fn blank(text: &str) -> bool {
@@ -271,6 +277,12 @@ pub(crate) fn check_action(
             if add.is_empty() && remove.is_empty() {
                 return refuse("There is nothing to change.");
             }
+            if !remove.is_empty() && !context.unsendable_requests.is_empty() {
+                return refuse(&format!(
+                    "Removing a reviewer here would also drop the review request of a {}; change it on the forge.",
+                    context.unsendable_requests.join(", ")
+                ));
+            }
         }
         Action::SetLabels { add, remove } => {
             if !caps.can_edit_labels {
@@ -365,6 +377,8 @@ mod tests {
             cross_repository: false,
             reviewer_ids: Vec::new(),
             team_ids: Vec::new(),
+            bot_ids: Vec::new(),
+            unsendable_requests: Vec::new(),
         }
     }
 
@@ -583,5 +597,18 @@ mod tests {
         caps.can_edit_labels = false;
         assert!(check_action("h", &labels, &context(ChangeState::Open, caps)).is_err());
         assert!(check_action("h", &labels, &ok).is_ok());
+    }
+
+    #[test]
+    fn a_removal_is_refused_beside_a_request_it_cannot_send_back() {
+        let mannequin = ActionContext {
+            unsendable_requests: vec!["Mannequin".into()],
+            ..context(ChangeState::Open, everything())
+        };
+        let remove = Action::SetReviewers { add: vec![], remove: vec!["u1".into()] };
+        let refused = check_action("h", &remove, &mannequin).expect_err("a removal would drop the mannequin");
+        assert!(matches!(refused, ForgeError::Rejected { .. }), "{refused:?}");
+        let add = Action::SetReviewers { add: vec!["u2".into()], remove: vec![] };
+        assert!(check_action("h", &add, &mannequin).is_ok(), "adding leaves every request alone");
     }
 }

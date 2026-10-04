@@ -7,7 +7,7 @@ query ChangeRequestActionContext($owner: String!, $name: String!, $number: Int!)
       mergeStateStatus reviewDecision
       autoMergeRequest { mergeMethod }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-      reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on User { id } ... on Team { id } } } }
+      reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on Node { id } } } }
     }
   }
 }

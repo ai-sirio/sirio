@@ -47,10 +47,11 @@ normal -- so one server covers every error path of an action:
     finegrained  a token that reports no scopes at all
     notefails    GitLab only: `createNote` is refused with the reason in the
                  payload's `errors`, while the REST approval still answers 201
-    blocked, waiting, fork
+    blocked, waiting, fork, mannequin
                  reads serve `<Operation>.<credential>.json` where it exists
                  (a merge blocked by a review, checks still running, a head
-                 in a fork) -- the same rule as `readonly`
+                 in a fork, a review request Sirio cannot send back) -- the
+                 same rule as `readonly`
     deletefails  GitHub's REST `DELETE .../git/refs/heads/<branch>` answers
                  422, so a merge whose branch deletion fails can be told apart
 
@@ -228,7 +229,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if overlay:
                 return overlay
         credential = self.credential()
-        if credential in ("readonly", "blocked", "waiting", "fork") and fixtures.get(f"{name}.{credential}"):
+        if credential in ("readonly", "blocked", "waiting", "fork", "mannequin") and fixtures.get(f"{name}.{credential}"):
             return fixtures[f"{name}.{credential}"]
         return fixtures.get(name)
 

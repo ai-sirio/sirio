@@ -691,6 +691,16 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
         cross_repository: bool_at(node, "/isCrossRepository"),
         reviewer_ids: requested("User"),
         team_ids: requested("Team"),
+        bot_ids: requested("Bot"),
+        unsendable_requests: array_at(node, "/reviewRequests/nodes")
+            .into_iter()
+            .filter_map(|request| opt_str(request, "/requestedReviewer/__typename"))
+            .filter(|typename| !matches!(*typename, "User" | "Team" | "Bot"))
+            .map(|typename| match typename {
+                "EnterpriseTeam" => "enterprise team".to_string(),
+                other => other.to_lowercase(),
+            })
+            .collect(),
         capabilities: capabilities(node, repository),
     })
 }
@@ -815,9 +825,20 @@ pub(crate) fn act(
             DISABLE_AUTO_MERGE,
             json!({ "pullRequestId": id }),
         )?,
+        Action::SetReviewers { add, remove } if remove.is_empty() => {
+            // Adding only: `union: true` leaves every request already there
+            // alone, whatever kind of reviewer it names.
+            mutate(
+                client,
+                "RequestReviews",
+                REQUEST_REVIEWS,
+                json!({ "pullRequestId": id, "userIds": add, "union": true }),
+            )?
+        }
         Action::SetReviewers { add, remove } => {
             // `union: false` replaces the whole set of requests, so the set
-            // is built from the fresh read, never from the tab's copy.
+            // is built from the fresh read, never from the tab's copy; a
+            // kind it cannot name was refused in `check_action`.
             let mut users: Vec<String> = context
                 .reviewer_ids
                 .iter()
@@ -830,12 +851,14 @@ pub(crate) fn act(
                 }
             }
             let teams: Vec<&String> = context.team_ids.iter().filter(|team| !remove.contains(team)).collect();
-            mutate(
-                client,
-                "RequestReviews",
-                REQUEST_REVIEWS,
-                json!({ "pullRequestId": id, "userIds": users, "teamIds": teams, "union": false }),
-            )?
+            let bots: Vec<&String> = context.bot_ids.iter().filter(|bot| !remove.contains(bot)).collect();
+            let mut input = json!({ "pullRequestId": id, "userIds": users, "teamIds": teams, "union": false });
+            // Named only when there are some: an older GitHub Enterprise
+            // without `botIds` would refuse the whole mutation.
+            if !bots.is_empty() {
+                input["botIds"] = json!(bots);
+            }
+            mutate(client, "RequestReviews", REQUEST_REVIEWS, input)?
         }
         Action::SetLabels { add, remove } => {
             if !add.is_empty() {
