@@ -91,7 +91,13 @@ forge gave, searches candidates by the typed text, and an older GitLab without
 dialog and both pickers through the debug-only control verbs (`merge-open`,
 `merge-confirm`, `cancel-auto-merge`, `picker-open`, `picker-type`,
 `picker-pick`, `picker-close`); `POST /__push` on the fake forge stands for a
-push between the dialog and the click.
+push between the dialog and the click, and `POST /__checking` for a forge
+still working out whether it can merge (GitHub `UNKNOWN`, GitLab `CHECKING`)
+until the next `/__reset`. The fake forge also stands for GitHub having
+deleted a merged head itself (`autodeleted`: no warning), a review request
+Sirio cannot send back (`mannequin`: a removal is refused), and a GitLab
+organisation's labels above the project's own group (offered only with
+`includeAncestorGroups: true`).
 
 ### What was seen (2026-10-03, Xvfb, lavapipe)
 
@@ -106,6 +112,11 @@ push between the dialog and the click.
   *Cancel* and *Merge*.
 - **The pickers**: the search field, the current reviewers ticked, the found
   candidate with its name as a note.
+- (2026-10-04, after the final review) **A refused merge** names its reason
+  inside the dialog (*The commit title cannot be empty.*) while the strip's
+  button no longer spins; **a forge still checking** shows *Checking whether
+  it can merge…* with *Merge* disabled, and the tab turns it into *Ready to
+  merge* by itself once the forge has decided.
 
 Not seen, or seen with a remark:
 
