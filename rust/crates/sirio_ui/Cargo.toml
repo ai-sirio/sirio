@@ -53,6 +53,9 @@ futures = "0.3"
 unicode-segmentation = "1.13"
 raw-window-handle = "0.6.2"
 wry = "0.56.1"
+# *Open on the forge* anchors a file of a GitHub pull request by the SHA-256
+# of its path. Already in the lock for sirio_release and three more.
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # SF Symbol rasterization (NSImage -> bitmap); macOS-only, so the rest of

@@ -34,7 +34,7 @@ use ely_gpui_component::{
     theme::IconSize as EIconSize,
 };
 use crate::ely_ui::{self, ButtonState};
-use crate::changes::{ChangesTab, ChangesTabEvent};
+use crate::changes::{ChangesTab, ChangesTabEvent, ForgeFiles};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
 use crate::text_selection::selectable_text;
@@ -670,6 +670,13 @@ impl ChangeRequestTab {
                     revisions.head_sha.clone(),
                 );
                 let changes = cx.new(|cx| ChangesTab::for_range(worktree, base, head, cx));
+                if let Some(header) = self.header.value() {
+                    let files = ForgeFiles {
+                        forge: header.summary.reference.forge,
+                        web_url: header.summary.web_url.clone(),
+                    };
+                    changes.update(cx, |changes, _| changes.set_forge_files(files));
+                }
                 changes.update(cx, |changes, cx| {
                     for path in &carried {
                         changes.focus_path(path, cx);

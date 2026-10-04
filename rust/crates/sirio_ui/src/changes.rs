@@ -40,7 +40,7 @@
 //! human surface is the honest one.
 
 use gpui::{
-    AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
+    AnyElement, App, AppContext, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
     HighlightStyle, Hsla, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
@@ -63,6 +63,7 @@ use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton, ToggleGroup, ToggleItem},
     data_display::CountBadge,
     feedback::Callout,
+    menus::{ContextMenu, Menu, MenuItem},
     motion::Skeleton,
     overlays::Dialog,
     git::{DiffStat as EDiffStat, GitStatus, GitStatusBadge},
@@ -544,6 +545,14 @@ enum ChangesSource {
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
 
+/// Where a change request's files live on its forge, for a row's *Open on
+/// the forge*. Only a Range surface has one; the change request tab sets it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeFiles {
+    pub forge: sirio_forge::Forge,
+    pub web_url: String,
+}
+
 /// What an open Discard confirmation would throw away.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DiscardAsk {
@@ -646,6 +655,9 @@ pub struct ChangesTab {
     /// away. In the window, not the system's prompt (spec §8), so a test and
     /// the control socket can see it and answer it.
     discard_ask: Option<DiscardAsk>,
+    /// Where a Range surface's change request lives on its forge, for each
+    /// row's *Open on the forge*; `None` for every other source.
+    forge_files: Option<Rc<ForgeFiles>>,
     /// Focus for the list, so `on_key_down` reaches it. Built lazily at
     /// first render, the way the Files tree's is.
     list_focus: Option<FocusHandle>,
@@ -785,6 +797,7 @@ impl ChangesTab {
             reveal_line: None,
             selected_change: None,
             discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -1143,6 +1156,12 @@ impl ChangesTab {
             },
             cx,
         );
+    }
+
+    /// Gives a Range surface its change request's place on the forge, for
+    /// each row's *Open on the forge*.
+    pub fn set_forge_files(&mut self, files: ForgeFiles) {
+        self.forge_files = Some(Rc::new(files));
     }
 
     /// Asks, inside the window, before throwing away `path`'s worktree changes.
@@ -1731,6 +1750,7 @@ impl ChangesTab {
         allows_staging: bool,
         draws_open_diff: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
+        forge: Option<Rc<ForgeFiles>>,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -1743,19 +1763,22 @@ impl ChangesTab {
                 expanded,
             } => {
                 let is_selected = selected == Some(&(section, entry.path.clone()));
-                Self::render_change_file(
-                    section,
-                    entry,
-                    stat,
-                    drag_payload,
-                    expanded,
-                    allows_staging,
-                    draws_open_diff,
-                    is_selected,
-                    entity,
-                    theme,
-                )
-                .into_any_element()
+                let menu = file_menu(&entry.path, forge.as_deref());
+                let id = format!("changes-menu-host-{}-{}", section.slug(), entry.path.display());
+                ContextMenu::new(id, menu)
+                    .child(Self::render_change_file(
+                        section,
+                        entry,
+                        stat,
+                        drag_payload,
+                        expanded,
+                        allows_staging,
+                        draws_open_diff,
+                        is_selected,
+                        entity,
+                        theme,
+                    ))
+                    .into_any_element()
             }
             ChangeRow::Hunk {
                 section,
@@ -2895,6 +2918,7 @@ impl ChangesTab {
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
+        let forge = self.forge_files.clone();
         let selected = self.selected_change.clone();
         let unified_x = self.unified_x;
         let split_left_x = self.split_left_x;
@@ -2959,6 +2983,7 @@ impl ChangesTab {
                             allows_staging,
                             draws_open_diff,
                             selected.as_ref(),
+                            forge.clone(),
                             row_entity.clone(),
                             theme,
                         ),
@@ -3319,6 +3344,51 @@ fn git_status(section: ChangeSection, entry: &StatusEntry) -> GitStatus {
         Some(StatusKind::Untracked) => GitStatus::Untracked,
         Some(StatusKind::Modified | StatusKind::TypeChanged) | None => GitStatus::Modified,
     }
+}
+
+/// One file of a change request on its forge. GitHub anchors a file on the
+/// *Files changed* page by the SHA-256 of its path; GitLab's page opens at
+/// its top, because its per-file anchor is not one Sirio can check here.
+fn forge_file_url(files: &ForgeFiles, path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let base = files.web_url.trim_end_matches('/');
+    match files.forge {
+        sirio_forge::Forge::GitHub => {
+            // The forge's path, `/`-separated whatever the platform's is.
+            let path = path
+                .iter()
+                .map(|part| part.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let hex: String = Sha256::digest(path.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("{base}/files#diff-{hex}")
+        }
+        sirio_forge::Forge::GitLab => format!("{base}/diffs"),
+    }
+}
+
+/// A file row's right-click menu (B1 §7.1).
+fn file_menu(path: &Path, forge: Option<&ForgeFiles>) -> Menu {
+    let copy = path.to_string_lossy().into_owned();
+    let mut menu = Menu::new().item(
+        MenuItem::new("Copy path")
+            .icon(IconName::Copy)
+            .selectors("changes-menu-copy-path", None)
+            .on_click(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
+    );
+    if let Some(files) = forge {
+        let url = forge_file_url(files, path);
+        menu = menu.item(
+            MenuItem::new("Open on the forge")
+                .icon(IconName::ExternalLink)
+                .selectors("changes-menu-open-forge", None)
+                .on_click(move |_, cx| cx.open_url(&url)),
+        );
+    }
+    menu
 }
 
 /// A button of the Discard dialog, findable by its id.
@@ -4084,6 +4154,7 @@ mod tests {
             reveal_line: None,
             selected_change: None,
             discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -5334,6 +5405,74 @@ mod tests {
         wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
     }
 
+    /// GitHub anchors a file on the Files page by the SHA-256 of its path
+    /// (`#diff-<hex>`); the value below is `printf 'src/login.rs' | sha256sum`.
+    #[test]
+    fn a_github_file_opens_at_its_anchor_on_the_files_page() {
+        let files = ForgeFiles {
+            forge: sirio_forge::Forge::GitHub,
+            web_url: "https://ghe.test/acme/widgets/pull/101/".into(),
+        };
+        assert_eq!(
+            forge_file_url(&files, Path::new("src/login.rs")),
+            "https://ghe.test/acme/widgets/pull/101/files#diff-9aab51a5bbaf3c93f5972ab49fcaaca7a705b3258ba2dab5c387dfa8a85b7535"
+        );
+    }
+
+    #[test]
+    fn a_gitlab_file_opens_its_merge_requests_diffs() {
+        let files = ForgeFiles {
+            forge: sirio_forge::Forge::GitLab,
+            web_url: "https://git.corp/acme/widgets/-/merge_requests/201".into(),
+        };
+        assert_eq!(
+            forge_file_url(&files, Path::new("src/login.rs")),
+            "https://git.corp/acme/widgets/-/merge_requests/201/diffs"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_right_click_on_a_file_row_copies_its_path(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.run_until_parked();
+        let row = cx.debug_bounds("changes-file-row").expect("the row").center();
+        cx.simulate_mouse_down(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-menu-open-forge").is_none(), "a worktree row has no forge");
+        let copy = cx.debug_bounds("changes-menu-copy-path").expect("Copy path").center();
+        cx.simulate_click(copy, Modifiers::none());
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("tracked.txt".to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn a_change_requests_row_offers_its_file_on_the_forge(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_, _| {
+            let mut tab = range_tab_with_one_diff(false);
+            tab.set_forge_files(ForgeFiles {
+                forge: sirio_forge::Forge::GitHub,
+                web_url: "https://ghe.test/acme/widgets/pull/101".into(),
+            });
+            tab
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let row = cx.debug_bounds("changes-file-row").expect("the row").center();
+        cx.simulate_mouse_down(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(row, gpui::MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-menu-open-forge").is_some());
+    }
+
     /// Ely's single-choice group empties its selection when the chosen face is
     /// pressed again; the surface must keep its mode rather than read that as
     /// "no mode".
@@ -5881,6 +6020,7 @@ mod tests {
             reveal_line: None,
             selected_change: None,
             discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -5966,6 +6106,7 @@ mod tests {
             reveal_line: None,
             selected_change: None,
             discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -6245,6 +6386,7 @@ mod tests {
             reveal_line: None,
             selected_change: None,
             discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
@@ -6711,6 +6853,7 @@ mod tests {
                 reveal_line: None,
                 selected_change: None,
                 discard_ask: None,
+                forge_files: None,
                 list_focus: None,
                 list_state: new_list_state(),
                 list_fingerprint: 0,
@@ -7171,6 +7314,7 @@ mod tests {
             reveal_line: None,
             selected_change: None,
             discard_ask: None,
+            forge_files: None,
             list_focus: None,
             list_state: new_list_state(),
             list_fingerprint: 0,
