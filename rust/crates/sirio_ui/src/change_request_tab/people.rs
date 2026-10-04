@@ -47,9 +47,9 @@ pub(crate) fn difference(
     )
 }
 
-/// The rows a picker lists: who or what is set now, then what the search
-/// found, one row per id — so a current reviewer the search did not return
-/// can still be taken away.
+/// The rows a picker lists: who or what was set when it opened and every
+/// pick since, then what the search found, one row per id — so neither a
+/// current reviewer nor an earlier pick drops out of sight with a new search.
 pub(crate) fn picker_choices(current: &BTreeMap<String, String>, found: &[Candidate]) -> Vec<Choice> {
     let mut seen = BTreeSet::new();
     let mut choices = Vec::new();
@@ -76,6 +76,7 @@ pub(crate) struct PickerState {
     text: String,
     pub(crate) found: Option<Vec<Candidate>>,
     error: Option<String>,
+    /// The set when it opened, and every pick since: always listed.
     current: BTreeMap<String, String>,
     pub(crate) original: BTreeSet<String>,
     pub(crate) chosen: BTreeSet<String>,
@@ -237,6 +238,25 @@ impl ChangeRequestTab {
         }
     }
 
+    /// What the list hands back after a click: the rows it shows that are
+    /// ticked, with the clicked one toggled.
+    /// A pick stays listed through later searches, and a row the list
+    /// does not show keeps its tick.
+    pub(crate) fn choose_in_picker(&mut self, values: BTreeSet<String>, cx: &mut Context<Self>) {
+        if let Some(picker) = self.actions.picker.as_mut() {
+            let found = picker.found.as_deref().unwrap_or(&[]);
+            let shown: BTreeSet<String> = picker_choices(&picker.current, found)
+                .into_iter()
+                .map(|choice| choice.value.to_string())
+                .collect();
+            for candidate in found.iter().filter(|candidate| values.contains(&candidate.id)) {
+                picker.current.entry(candidate.id.clone()).or_insert_with(|| candidate.label.clone());
+            }
+            picker.chosen = picker.chosen.difference(&shown).cloned().chain(values).collect();
+        }
+        cx.notify();
+    }
+
     /// Closing is the send: one write with the difference, or none.
     pub(crate) fn close_picker(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let Some(picker) = self.actions.picker.take() else {
@@ -291,12 +311,7 @@ impl ChangeRequestTab {
                 .selected(picker.chosen.iter().cloned())
                 .on_change(move |values, _, cx| {
                     let values: BTreeSet<String> = values.iter().map(|value| value.to_string()).collect();
-                    pick.update(cx, |tab, cx| {
-                        if let Some(picker) = tab.actions.picker.as_mut() {
-                            picker.chosen = values;
-                        }
-                        cx.notify();
-                    });
+                    pick.update(cx, |tab, cx| tab.choose_in_picker(values, cx));
                 })
                 .into_any_element()
         };
@@ -555,6 +570,48 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("change-request-picker").is_some(), "the picker's panel was not drawn");
         assert_eq!(tab.read_with(cx, |tab, _| tab.picker_candidates()), 0);
+    }
+
+    /// The rows the open picker lists, as ids.
+    fn listed(tab: &Entity<ChangeRequestTab>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+        tab.read_with(cx, |tab, _| {
+            let picker = tab.actions.picker.as_ref().expect("a picker is open");
+            picker_choices(&picker.current, picker.found.as_deref().unwrap_or(&[]))
+                .into_iter()
+                .map(|choice| choice.value.to_string())
+                .collect()
+        })
+    }
+
+    /// A click on row `id`, as Ely's `ListBox` reports it (`check::toggled`):
+    /// only the rows it shows, the ticked ones, with `id` toggled.
+    fn click_row(tab: &Entity<ChangeRequestTab>, id: &str, cx: &mut gpui::VisualTestContext) {
+        let chosen = tab.read_with(cx, |tab, _| tab.actions.picker.as_ref().expect("a picker is open").chosen.clone());
+        let values = listed(tab, cx)
+            .into_iter()
+            .filter(|row| if row == id { !chosen.contains(id) } else { chosen.contains(row) })
+            .collect();
+        tab.update(cx, |tab, cx| tab.choose_in_picker(values, cx));
+    }
+
+    #[gpui::test]
+    fn a_pick_survives_the_next_search(cx: &mut TestAppContext) {
+        let forge = forge();
+        let (tab, cx) = opened(cx, forge.clone());
+        click_row(&tab, "U_ann", cx);
+        forge.answer(
+            "ReviewerCandidates",
+            json!({"data": {"repository": {"pullRequest": {"author": {"login": "alice"}},
+                "assignableUsers": {"nodes": [{"id": "U_bob", "login": "bob", "name": null}]}}}})
+            .to_string(),
+        );
+        tab.update(cx, |tab, cx| tab.type_in_picker("bob".into(), cx));
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+        assert!(listed(&tab, cx).contains(&"U_ann".to_string()), "a pick vanished from the list");
+        click_row(&tab, "U_bob", cx);
+        let chosen = tab.read_with(cx, |tab, _| tab.actions.picker.as_ref().expect("open").chosen.clone());
+        assert_eq!(chosen, ids(&["U_ann", "U_bob"]), "picks across two searches");
     }
 
     #[gpui::test]
