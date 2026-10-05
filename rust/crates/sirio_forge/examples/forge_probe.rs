@@ -643,6 +643,7 @@ fn kind_name(kind: CommentKind) -> &'static str {
     match kind {
         CommentKind::Comment => "comment",
         CommentKind::Review => "review",
+        CommentKind::ReviewComment => "review-comment",
     }
 }
 
@@ -687,6 +688,7 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
                 id: args.flag("id").ok_or_else(|| usage("edit-comment needs --id"))?.to_string(),
                 kind: match args.flag("kind") {
                     Some("review") => CommentKind::Review,
+                    Some("review-comment") => CommentKind::ReviewComment,
                     _ => CommentKind::Comment,
                 },
             },

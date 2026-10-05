@@ -57,6 +57,7 @@ const DRAFT: &str = include_str!("queries/github/draft.graphql");
 const UPDATE: &str = include_str!("queries/github/update.graphql");
 const UPDATE_COMMENT: &str = include_str!("queries/github/update_comment.graphql");
 const UPDATE_REVIEW: &str = include_str!("queries/github/update_review.graphql");
+const UPDATE_REVIEW_COMMENT: &str = include_str!("queries/github/update_review_comment.graphql");
 const MERGE: &str = include_str!("queries/github/merge.graphql");
 const ENABLE_AUTO_MERGE: &str = include_str!("queries/github/enable_auto_merge.graphql");
 const DISABLE_AUTO_MERGE: &str = include_str!("queries/github/disable_auto_merge.graphql");
@@ -813,6 +814,7 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
             })
             .collect(),
         capabilities: capabilities(node, repository),
+        thread: None,
     })
 }
 
@@ -1016,6 +1018,10 @@ pub(crate) fn act(
                 },
             )?;
         }
+        // Task 2:
+        Action::Reply { .. } | Action::Resolve { .. } | Action::LineComment { .. } => {
+            return Err(ForgeError::Unsupported { host: client.host.clone(), what: action.kind().to_string() });
+        }
         Action::EditComment { comment, body } => match comment.kind {
             CommentKind::Comment => mutate(
                 client,
@@ -1028,6 +1034,12 @@ pub(crate) fn act(
                 "UpdatePullRequestReview",
                 UPDATE_REVIEW,
                 json!({ "pullRequestReviewId": comment.id, "body": body }),
+            )?,
+            CommentKind::ReviewComment => mutate(
+                client,
+                "UpdatePullRequestReviewComment",
+                UPDATE_REVIEW_COMMENT,
+                json!({ "pullRequestReviewCommentId": comment.id, "body": body }),
             )?,
         },
     }

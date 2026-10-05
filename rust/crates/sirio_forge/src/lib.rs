@@ -27,9 +27,9 @@ pub use client::ForgeClient;
 pub use error::ForgeError;
 
 pub use model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob,
+    AnchorLine, Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob,
     CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
-    FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
+    FileChangeKind, Filter, Forge, LineAnchor, LineComment, LineKind, ListQuery, Listing, PageCursor, Progress,
     ReviewOutcome, ReviewState, ReviewThread, Reviewer, Revisions, Side, ThreadComment, TimelineItem, BlockReason, Candidate, Label,
     MergeCapability, MergeMethod, MergeMethods, MergeVerdict,
 };

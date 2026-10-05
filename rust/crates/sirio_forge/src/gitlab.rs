@@ -752,6 +752,7 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
         bot_ids: Vec::new(),
         unsendable_requests: Vec::new(),
         capabilities: capabilities(client, node),
+        thread: None,
     })
 }
 
@@ -952,6 +953,10 @@ pub(crate) fn act(
                 RerunTarget::Job(job) => ("JobRetry", JOB_RETRY, format!("gid://gitlab/Ci::Build/{job}")),
             };
             mutate(client, operation, document, json!({ "id": id }))?;
+        }
+        // Task 3:
+        Action::Reply { .. } | Action::Resolve { .. } | Action::LineComment { .. } => {
+            return Err(ForgeError::Unsupported { host: client.host.clone(), what: action.kind().to_string() });
         }
         Action::EditComment { comment, body } => mutate(
             client,
