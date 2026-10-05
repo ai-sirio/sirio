@@ -993,6 +993,11 @@ impl ChangeRequestTab {
         self.thread_views.get(&thread_key(thread)).and_then(|view| view.read(cx).write.error.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn thread_in_review(&self, thread: &str, cx: &App) -> Option<bool> {
+        self.thread_views.get(&thread_key(thread)).map(|view| view.read(cx).write.in_review)
+    }
+
     /// Selects Files and opens the thread's card or outdated section. Queued
     /// reveals retain the side and annotation key until the range is ready.
     pub fn reveal_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
@@ -1188,6 +1193,7 @@ impl ChangeRequestTab {
         self.thread_ids = self.threads.value().map(|listing| listing.items.iter()
             .map(|thread| (thread_key(&thread.id), thread.id.clone())).collect()).unwrap_or_default();
         self.rebuild_thread_views(cx);
+        self.sync_writes(cx);
         self.push_annotations(cx);
         cx.notify();
     }

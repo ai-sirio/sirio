@@ -517,6 +517,7 @@ impl ChangeRequestTab {
                 let (changes, commentable) = (changes.clone(), self.commentable(cx));
                 changes.update(cx, |changes, cx| changes.set_commentable(commentable, cx));
             }
+            self.sync_writes(cx);
         }
         cx.notify();
     }
@@ -3640,6 +3641,84 @@ mod tests {
         assert_eq!(input["pullRequestReviewId"], "PRR_7");
         assert_eq!((input["startLine"].clone(), input["line"].clone()), (serde_json::json!(41), serde_json::json!(43)));
         assert_eq!(forge.count("AddPullRequestReview"), 0);
+    }
+
+    #[gpui::test]
+    async fn a_review_in_progress_is_named_on_every_card_as_the_tab_opens(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer(
+            "ChangeRequestHeader",
+            with_pending_review(
+                testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &head),
+                "PRR_1",
+                1,
+            ),
+        );
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        forge.answer("ChangeRequestActionContext", action_context_json(&head));
+        forge.answer("ReviewThreadContext", facts_json(true, true, true));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.header.value().is_some_and(|header| header.draft.is_some())
+                    && tab.threads.value().is_some()
+            })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.thread_in_review("PRRT_1", cx), Some(true));
+        });
+        for operation in [
+            "AddPullRequestReview",
+            "AddPullRequestReviewThread",
+            "AddPullRequestReviewThreadReply",
+            "ResolveReviewThread",
+            "UnresolveReviewThread",
+            "SubmitPullRequestReview",
+            "DeletePullRequestReview",
+            "DeletePullRequestReviewComment",
+            "UpdatePullRequestReview",
+            "UpdatePullRequestReviewComment",
+        ] {
+            assert_eq!(forge.count(operation), 0, "no write was sent");
+        }
+    }
+
+    #[gpui::test]
+    async fn the_label_follows_the_header_after_a_review_is_started(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        forge.answer("ChangeRequestActionContext", action_context_json(&head));
+        forge.answer("ReviewThreadContext", facts_json(true, true, true));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| tab.header.value().is_some() && tab.threads.value().is_some())
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.thread_in_review("PRRT_1", cx), Some(false));
+        });
+        forge.answer(
+            "ChangeRequestHeader",
+            with_pending_review(
+                testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &head),
+                "PRR_1",
+                1,
+            ),
+        );
+        let header_reads = forge.count("ChangeRequestHeader");
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || {
+            forge.count("ChangeRequestHeader") > header_reads
+                && tab.read_with(cx, |tab, _| {
+                    tab.header.value().is_some_and(|header| header.draft.is_some())
+                })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.thread_in_review("PRRT_1", cx), Some(true));
+        });
     }
 
     #[gpui::test]
