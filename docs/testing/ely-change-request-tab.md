@@ -521,11 +521,6 @@ socket in a real, isolated Sirio. The `threads` stage of
 wire. State-only runs capture no frames; the controller's framed run
 reads them.
 
-### Known gaps
-
-- Outdated threads cannot be resolved, replied to or edited in B3b; users do those writes on the forge until B3c.
-- A re-read that outdates a thread drops its open reply or edit draft.
-
 Frames captured per flavour (`<flavour>` is `github` or `gitlab`); the
 script's `capture` prefixes each name with the scenario, so on disk they read
 `*thread-writes-thread-writes-<flavour>-composer.png` and
@@ -535,6 +530,37 @@ script's `capture` prefixes each name with the scenario, so on disk they read
   before the send.
 - `…-resolved.png`: the thread folded after the resolve the forge confirmed.
 
-### What was seen
+### Known gaps
 
-(filled in by the controller after the framed run)
+- Outdated threads cannot be resolved, replied to or edited in B3b; users do those writes on the forge until B3c.
+- A re-read that outdates a thread drops its open reply or edit draft.
+
+### What was seen (2026-10-05, Xvfb, lavapipe, dark)
+
+Run from the repository root, with a private display:
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :95 -screen 0 1600x1500x24 -nolisten tcp -noreset &
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-diff-e2e.sh --display :95 --out-dir "$TMPDIR/b3b-framed-final"
+```
+
+- **Composer**, GitHub and GitLab: a card titled *Comment on src/login.rs
+  lines 41–43* sits directly under line 43, inside the diff list, with an
+  empty field (*Leave a comment…*), *Cancel* and a *Comment* button that stays
+  disabled while the field is empty. The thread cards beside it (below on
+  GitHub, above on GitLab) keep their *Reply…* control, plus *Resolve* on GitHub.
+- **Resolved**, GitHub and GitLab: after the resolve the forge confirmed, the
+  thread folds into one row (*Resolved · alice · 0 r…*, *1 comment*,
+  *Unresolve*) above line 41. The open old-side thread at line 42 keeps its
+  *old* tag and, on GitHub, *Resolve*.
+- **Found and fixed by this run**: the first framed run (on `ac3f0a5c`) showed
+  *Unresolve* crossing the card's right border on both forges. The summary
+  could not shrink, so the header pushed its action out. The fix
+  (`b021296f`) truncates the summary with an ellipsis. On the final run
+  (`742a5665`), *Unresolve* sits inside the card with its margin.
+- **Not seen**: the gutter *+* is hover-only and every write is driven over the
+  socket. So these frames do not show the *+*, a click on *Resolve* (versus
+  the header's fold), the field growing with multiline text, or the reply
+  field's focus on open. Light appearance was not run; the script has no
+  `--appearance`.
