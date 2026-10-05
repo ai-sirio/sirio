@@ -366,6 +366,9 @@ impl ChangeRequestTab {
             .line_composer
             .as_ref()
             .ok_or("No comment is being written.")?;
+        let RangeState::Ready { .. } = &self.range else {
+            return Err("The diff is not loaded.".to_string());
+        };
         let anchor = to_line_anchor(&open.anchor);
         let body = open.view.read(cx).text(cx);
         let action = Action::ReviewAdd {
@@ -376,24 +379,48 @@ impl ChangeRequestTab {
     }
 
     /// *Suggest*: the anchored lines, as the diff reads them now, in a
-    /// ```suggestion block after what is written (spec §7.3).
+    /// ```suggestion block after what is written (spec §7.3). A refusal
+    /// shows under the composer like a send's does, and keeps the text; a
+    /// later successful Suggest clears it the way a send or a cancel does.
     pub(crate) fn insert_suggestion(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        match self.suggested_text(cx) {
+            Ok(text) => {
+                if self
+                    .write_refusal
+                    .as_ref()
+                    .is_some_and(|(target, _)| target == &WriteTarget::Composer)
+                {
+                    self.write_refusal = None;
+                }
+                self.composer_set_text(&text, cx);
+                self.sync_writes(cx);
+                Ok(())
+            }
+            Err(message) => {
+                self.write_refusal = Some((WriteTarget::Composer, message.clone()));
+                self.sync_writes(cx);
+                Err(message)
+            }
+        }
+    }
+
+    /// What *Suggest* would insert: what is written plus the anchored
+    /// lines' current text in a ```suggestion block.
+    fn suggested_text(&self, cx: &App) -> Result<String, String> {
         let open = self
             .line_composer
             .as_ref()
-            .ok_or("No comment is being written.")?;
+            .ok_or("No comment is being written.".to_string())?;
         if open.anchor.side != AnnotationSide::New {
             return Err("A suggestion replaces lines on the new side.".to_string());
         }
         let RangeState::Ready { changes, .. } = &self.range else {
             return Err("The diff is not loaded.".to_string());
         };
-        let lines = changes.read(cx).anchored_text(&open.anchor).ok_or("Those lines are not in the loaded diff.")?;
+        let lines = changes.read(cx).anchored_text(&open.anchor).ok_or("Those lines are not in the loaded diff.".to_string())?;
         let written = open.view.read(cx).text(cx);
         let block = suggestion::suggestion_block(&lines);
-        let text = if written.trim().is_empty() { block } else { format!("{}\n\n{block}", written.trim_end()) };
-        self.composer_set_text(&text, cx);
-        Ok(())
+        Ok(if written.trim().is_empty() { block } else { format!("{}\n\n{block}", written.trim_end()) })
     }
 
     #[cfg(test)]

@@ -89,8 +89,6 @@ pub(crate) fn replaced_lines(hunk: &str, count: usize) -> Option<Vec<String>> {
 
 /// The block *Suggest* inserts: the anchored lines as they read now, in a
 /// fence longer than any backtick run they hold.
-// Task 7's Suggest inserts this block.
-#[allow(dead_code)]
 pub(crate) fn suggestion_block(lines: &[String]) -> String {
     let longest = lines
         .iter()

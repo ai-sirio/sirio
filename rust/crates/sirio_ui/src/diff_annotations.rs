@@ -253,8 +253,6 @@ pub(crate) fn anchor_in(
 
 /// The lines a new-side anchor covers, as the diff reads them now, for
 /// *Suggest*; `None` on the old side or when the lines are not in one hunk.
-// Task 7's Suggest reads the anchored lines through this.
-#[allow(dead_code)]
 pub(crate) fn anchored_text(diff: &FileDiff, anchor: &CommentAnchor) -> Option<Vec<String>> {
     if anchor.side != AnnotationSide::New {
         return None;

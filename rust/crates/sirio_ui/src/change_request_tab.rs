@@ -3740,6 +3740,33 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_suggest_that_cannot_read_the_lines_says_why_under_the_composer(cx: &mut TestAppContext) {
+        let (tab, _forge, _repo, _head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Keep these words", cx));
+        tab.update(cx, |tab, _| tab.range = RangeState::Fetching);
+        let refused = tab.update(cx, |tab, cx| tab.insert_suggestion(cx));
+        assert_eq!(refused, Err("The diff is not loaded.".to_string()));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer_error"), "The diff is not loaded.");
+            assert_eq!(tab.composer_text(cx).as_deref(), Some("Keep these words"));
+        });
+    }
+
+    #[gpui::test]
+    async fn start_a_review_waits_for_the_diff(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, _| tab.range = RangeState::Fetching);
+        let review_refused = tab.update(cx, |tab, cx| tab.send_line_to_review(cx));
+        let comment_refused = tab.update(cx, |tab, cx| tab.send_line_comment(cx));
+        assert_eq!(review_refused, comment_refused);
+        assert_eq!(review_refused, Err("The diff is not loaded.".to_string()));
+        assert_eq!(forge.count("AddPullRequestReview"), 0);
+        assert_eq!(forge.count("AddPullRequestReviewThread"), 0);
+    }
+
+    #[gpui::test]
     async fn a_rate_paused_send_shows_its_refusal_under_the_composer(cx: &mut TestAppContext) {
         let (tab, forge, _repo, _head) = composing(cx).await;
         tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
