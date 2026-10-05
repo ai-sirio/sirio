@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
 pub struct DetachedSpawn {
@@ -632,13 +633,109 @@ mod imp {
     }
 }
 
+/// A Windows command line, built by hand because the Windows arm calls
+/// `CreateProcessW` itself. Every argument must come back out of
+/// `CommandLineToArgvW` (the MSVC runtime's rules) exactly as it went in.
+#[cfg(any(test, windows))]
+mod command_line {
+    /// Appends `arg` as one argument, quoted only when it has to be.
+    pub fn append(out: &mut Vec<u16>, arg: &[u16]) {
+        const QUOTE: u16 = b'"' as u16;
+        const BACKSLASH: u16 = b'\\' as u16;
+        let needs_quotes = arg.is_empty()
+            || arg
+                .iter()
+                .any(|&c| c == b' ' as u16 || c == b'\t' as u16 || c == QUOTE);
+        if !needs_quotes {
+            out.extend_from_slice(arg);
+            return;
+        }
+        out.push(QUOTE);
+        // Backslashes are literal unless a quote follows them, so a run of
+        // them is only doubled before an embedded quote or the closing one.
+        let mut backslashes = 0;
+        for &c in arg {
+            if c == BACKSLASH {
+                backslashes += 1;
+                continue;
+            }
+            let run = if c == QUOTE { 2 * backslashes + 1 } else { backslashes };
+            out.extend(std::iter::repeat_n(BACKSLASH, run));
+            out.push(c);
+            backslashes = 0;
+        }
+        out.extend(std::iter::repeat_n(BACKSLASH, 2 * backslashes));
+        out.push(QUOTE);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::append;
+
+        fn line(args: &[&str]) -> String {
+            let mut out = Vec::new();
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push(u16::from(b' '));
+                }
+                append(&mut out, &arg.encode_utf16().collect::<Vec<_>>());
+            }
+            String::from_utf16(&out).unwrap()
+        }
+
+        #[test]
+        fn a_plain_argument_is_left_as_it_is() {
+            assert_eq!(line(&["--mode", "on-demand"]), "--mode on-demand");
+        }
+
+        #[test]
+        fn backslashes_outside_quotes_are_literal() {
+            assert_eq!(line(&[r"C:\Users\a\host"]), r"C:\Users\a\host");
+        }
+
+        #[test]
+        fn an_empty_argument_survives_as_a_pair_of_quotes() {
+            assert_eq!(line(&["", "x"]), r#""" x"#);
+        }
+
+        #[test]
+        fn a_space_or_a_tab_quotes_the_argument() {
+            assert_eq!(line(&[r"C:\Program Files\Sirio"]), r#""C:\Program Files\Sirio""#);
+            assert_eq!(line(&["a\tb"]), "\"a\tb\"");
+        }
+
+        #[test]
+        fn an_embedded_quote_is_escaped_with_its_backslashes_doubled() {
+            assert_eq!(line(&[r#"say "hi""#]), r#""say \"hi\"""#);
+            assert_eq!(line(&[r#"a\"b"#]), r#""a\\\"b""#);
+        }
+
+        #[test]
+        fn trailing_backslashes_are_doubled_before_the_closing_quote() {
+            // Undoubled, `C:\dir with space\` would escape the closing quote.
+            assert_eq!(line(&[r"C:\dir with space\"]), r#""C:\dir with space\\""#);
+        }
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use std::os::windows::ffi::OsStrExt;
+    use std::{mem, ptr};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
     use windows_sys::Win32::System::Threading::{
-        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
     };
 
     pub fn spawn(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
@@ -656,15 +753,146 @@ mod imp {
         }
     }
 
+    /// `CreateProcessW` by hand, not `Command`: `Command` inherits every
+    /// inheritable handle of the caller, the caller's own stdout and stderr
+    /// among them when it was started with pipes, and a host holding the
+    /// launcher's pipe keeps whoever reads it waiting for the host's whole
+    /// life. `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` narrows what is inherited to
+    /// one handle on `NUL`, the host's stdin, stdout and stderr. The
+    /// environment is the caller's, as with `Command`.
     fn start(spec: &DetachedSpawn, flags: u32) -> io::Result<()> {
-        Command::new(&spec.program)
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(flags)
-            .spawn()
-            .map(drop)
+        let nul = Owned(open_nul()?);
+        let inherited = [nul.0];
+        let mut list = AttributeList::with_handles(&inherited)?;
+
+        let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
+        startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = nul.0;
+        startup.StartupInfo.hStdOutput = nul.0;
+        startup.StartupInfo.hStdError = nul.0;
+        startup.lpAttributeList = list.as_ptr();
+
+        let program = wide(spec.program.as_os_str());
+        let mut line = Vec::new();
+        command_line::append(&mut line, &program[..program.len() - 1]);
+        for arg in &spec.args {
+            line.push(u16::from(b' '));
+            command_line::append(&mut line, &arg.encode_wide().collect::<Vec<_>>());
+        }
+        line.push(0);
+        let cwd = wide(spec.cwd.as_os_str());
+
+        let mut info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+        let created = unsafe {
+            CreateProcessW(
+                program.as_ptr(),
+                line.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                1, // inherit, but only what the attribute list names
+                flags | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                ptr::null(),
+                cwd.as_ptr(),
+                &startup.StartupInfo,
+                &mut info,
+            )
+        };
+        if created == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe {
+            CloseHandle(info.hThread);
+            CloseHandle(info.hProcess);
+        }
+        Ok(())
+    }
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn open_nul() -> io::Result<HANDLE> {
+        let inheritable = SECURITY_ATTRIBUTES {
+            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let name = wide(std::ffi::OsStr::new("NUL"));
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &inheritable,
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(handle)
+    }
+
+    struct Owned(HANDLE);
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// A one-entry attribute list naming the only handles a child inherits.
+    /// It borrows the handle array, which must outlive the list.
+    struct AttributeList<'a> {
+        buffer: Vec<usize>,
+        _handles: std::marker::PhantomData<&'a [HANDLE]>,
+    }
+
+    impl<'a> AttributeList<'a> {
+        fn with_handles(handles: &'a [HANDLE]) -> io::Result<Self> {
+            let mut size = 0usize;
+            // The sizing call fails by design and reports the size it needs.
+            unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) };
+            let words = size.div_ceil(mem::size_of::<usize>());
+            let mut list = AttributeList {
+                buffer: vec![0usize; words],
+                _handles: std::marker::PhantomData,
+            };
+            if unsafe { InitializeProcThreadAttributeList(list.as_ptr(), 1, 0, &mut size) } == 0 {
+                // Never initialised: nothing for Drop to delete.
+                list.buffer = Vec::new();
+                return Err(io::Error::last_os_error());
+            }
+            let updated = unsafe {
+                UpdateProcThreadAttribute(
+                    list.as_ptr(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    handles.as_ptr().cast(),
+                    mem::size_of_val(handles),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            };
+            if updated == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(list)
+        }
+
+        fn as_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+            self.buffer.as_mut_ptr().cast()
+        }
+    }
+
+    impl Drop for AttributeList<'_> {
+        fn drop(&mut self) {
+            if !self.buffer.is_empty() {
+                unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+            }
+        }
     }
 }
