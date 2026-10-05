@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! forge_probe --forge github|gitlab --host H --project P (--cli | --token T) <command> [args]
+//! forge_probe ... files N | threads N
 //! forge_probe ... act N <action> [--body TEXT | --body-file PATH] [--title T] [--target BRANCH] [--id ID --kind comment|review]
 //! ```
 //!
@@ -309,6 +310,33 @@ fn run(args: &Args) -> Result<(), Failure> {
                     file.deletions,
                     file.path
                 );
+            }
+            println!("TRUNCATED {}", yes_no(listing.truncated));
+        }
+        "threads" => {
+            let listing = client.review_threads(number(args)?)?;
+            for thread in &listing.items {
+                println!(
+                    "THREAD {} {} {} {} {} outdated={} file={} reply={} resolve={} comments={} pending={} hunk={}",
+                    thread.path,
+                    match thread.side {
+                        sirio_forge::Side::Old => "old",
+                        sirio_forge::Side::New => "new",
+                    },
+                    count_word(thread.line),
+                    count_word(thread.start_line),
+                    if thread.resolved { "resolved" } else { "open" },
+                    yes_no(thread.outdated),
+                    yes_no(thread.file_level),
+                    yes_no(thread.can_reply),
+                    yes_no(thread.can_resolve),
+                    thread.comments.len(),
+                    thread.comments.iter().filter(|comment| comment.pending).count(),
+                    yes_no(thread.diff_hunk.is_some()),
+                );
+                for comment in &thread.comments {
+                    println!("TCOMMENT {} {}", comment.author, comment.body.lines().next().unwrap_or(""));
+                }
             }
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }

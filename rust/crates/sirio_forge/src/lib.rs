@@ -30,7 +30,7 @@ pub use model::{
     Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob,
     CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
     FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
-    ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem, BlockReason, Candidate, Label,
+    ReviewOutcome, ReviewState, ReviewThread, Reviewer, Revisions, Side, ThreadComment, TimelineItem, BlockReason, Candidate, Label,
     MergeCapability, MergeMethod, MergeMethods, MergeVerdict,
 };
 pub use scopes::TokenScopes;

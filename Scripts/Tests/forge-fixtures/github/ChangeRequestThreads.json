@@ -1,0 +1,91 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "PRRT_open42", "isResolved": false, "isOutdated": false,
+              "path": "src/login.rs", "line": 42, "startLine": null,
+              "originalLine": 42, "originalStartLine": null,
+              "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "LINE",
+              "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "resolvedBy": null,
+              "comments": { "nodes": [
+                { "id": "PRRC_1", "author": { "login": "bob" }, "body": "Handle the None case.", "createdAt": "2026-09-20T10:00:00Z", "diffHunk": "@@ -40,3 +40,3 @@\n line 40\n line 41\n-line 42\n+edited 42", "pullRequestReview": { "state": "CHANGES_REQUESTED" } },
+                { "id": "PRRC_2", "author": { "login": "alice" }, "body": "Done in the next push.", "createdAt": "2026-09-20T11:00:00Z", "diffHunk": "@@ -40,3 +40,3 @@\n line 40\n line 41\n-line 42\n+edited 42", "pullRequestReview": { "state": "COMMENTED" } }
+              ] }
+            },
+            {
+              "id": "PRRT_resolved40", "isResolved": true, "isOutdated": false,
+              "path": "src/login.rs", "line": 40, "startLine": null,
+              "originalLine": 40, "originalStartLine": null,
+              "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "LINE",
+              "viewerCanReply": true, "viewerCanResolve": false, "viewerCanUnresolve": true,
+              "resolvedBy": { "login": "alice" },
+              "comments": { "nodes": [
+                { "id": "PRRC_3", "author": { "login": "bob" }, "body": "Nit: rename this.", "createdAt": "2026-09-19T09:00:00Z", "diffHunk": "@@ -38,3 +38,3 @@\n line 38\n line 39\n line 40", "pullRequestReview": { "state": "COMMENTED" } }
+              ] }
+            },
+            {
+              "id": "PRRT_outdated", "isResolved": false, "isOutdated": true,
+              "path": "src/login.rs", "line": null, "startLine": null,
+              "originalLine": 30, "originalStartLine": null,
+              "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "LINE",
+              "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "resolvedBy": null,
+              "comments": { "nodes": [
+                { "id": "PRRC_4", "author": { "login": "bob" }, "body": "Why a loop here?", "createdAt": "2026-09-18T09:00:00Z", "diffHunk": "@@ -28,3 +28,3 @@\n line 28\n line 29\n-line 30\n+loop 30", "pullRequestReview": { "state": "COMMENTED" } }
+              ] }
+            },
+            {
+              "id": "PRRT_range", "isResolved": false, "isOutdated": false,
+              "path": "src/login.rs", "line": 45, "startLine": 44,
+              "originalLine": 45, "originalStartLine": 44,
+              "diffSide": "RIGHT", "startDiffSide": "RIGHT", "subjectType": "LINE",
+              "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "resolvedBy": null,
+              "comments": { "nodes": [
+                { "id": "PRRC_5", "author": { "login": "carol" }, "body": "These two lines could be one.", "createdAt": "2026-09-21T09:00:00Z", "diffHunk": "@@ -43,3 +43,3 @@\n line 43\n line 44\n line 45", "pullRequestReview": { "state": "COMMENTED" } }
+              ] }
+            },
+            {
+              "id": "PRRT_old42", "isResolved": false, "isOutdated": false,
+              "path": "src/login.rs", "line": 42, "startLine": null,
+              "originalLine": 42, "originalStartLine": null,
+              "diffSide": "LEFT", "startDiffSide": null, "subjectType": "LINE",
+              "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "resolvedBy": null,
+              "comments": { "nodes": [
+                { "id": "PRRC_6", "author": { "login": "dave" }, "body": "The old line had a comment worth keeping.", "createdAt": "2026-09-22T09:00:00Z", "diffHunk": "@@ -40,3 +40,3 @@\n line 40\n line 41\n-line 42", "pullRequestReview": { "state": "COMMENTED" } }
+              ] }
+            },
+            {
+              "id": "PRRT_file", "isResolved": false, "isOutdated": false,
+              "path": "src/redirect.rs", "line": null, "startLine": null,
+              "originalLine": null, "originalStartLine": null,
+              "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "FILE",
+              "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "resolvedBy": null,
+              "comments": { "nodes": [
+                { "id": "PRRC_7", "author": { "login": "bob" }, "body": "Is this file needed at all?", "createdAt": "2026-09-22T10:00:00Z", "diffHunk": "", "pullRequestReview": { "state": "COMMENTED" } }
+              ] }
+            },
+            {
+              "id": "PRRT_draft", "isResolved": false, "isOutdated": false,
+              "path": "src/login.rs", "line": 43, "startLine": null,
+              "originalLine": 43, "originalStartLine": null,
+              "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "LINE",
+              "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+              "resolvedBy": null,
+              "comments": { "nodes": [
+                { "id": "PRRC_8", "author": { "login": "fake-user" }, "body": "My unsent note.", "createdAt": "2026-09-23T09:00:00Z", "diffHunk": "@@ -43 +43 @@\n line 43", "pullRequestReview": { "state": "PENDING" } }
+              ] }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

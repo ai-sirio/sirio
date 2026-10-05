@@ -29,7 +29,7 @@ use crate::mapping::{self, SystemNote};
 use crate::model::{
     Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, Log, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
-    ReviewOutcome, Reviewer, TimelineItem,
+    ReviewOutcome, ReviewThread, Reviewer, TimelineItem,
 };
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
@@ -642,6 +642,10 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
         items,
         truncated: false,
     })
+}
+
+pub(crate) fn review_threads(_client: &ForgeClient, _number: u64) -> Result<Listing<ReviewThread>, ForgeError> {
+    Ok(Listing { items: Vec::new(), truncated: false })
 }
 
 /// The pre-flight read of one merge request: its global id (what a note is

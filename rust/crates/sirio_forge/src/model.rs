@@ -208,6 +208,53 @@ pub struct LineComment {
     pub at: Option<i64>,
 }
 
+/// Which side of a diff a thread or a line sits on: the base's lines
+/// (`Old`, GitHub `LEFT`) or the head's (`New`, GitHub `RIGHT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    Old,
+    New,
+}
+
+/// One review discussion anchored in a change request's diff (spec §3, §4):
+/// a GitHub review thread or a GitLab diff discussion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewThread {
+    /// GitHub's `PullRequestReviewThread` node id, or GitLab's discussion id.
+    pub id: String,
+    pub path: String,
+    pub side: Side,
+    /// The anchored line on `side`; for an outdated GitHub thread, the line
+    /// it was written on (`originalLine`). `None` for a file-level thread.
+    pub line: Option<u32>,
+    /// The first line of a range; GitLab's GraphQL does not report one.
+    pub start_line: Option<u32>,
+    /// The forge says the anchor no longer maps onto the current diff.
+    pub outdated: bool,
+    pub resolved: bool,
+    pub resolved_by: Option<String>,
+    /// The code the thread quoted, in diff form (`+`/`-`/` ` prefixes).
+    pub diff_hunk: Option<String>,
+    pub can_reply: bool,
+    /// May resolve it, or, when resolved, unresolve it.
+    pub can_resolve: bool,
+    /// About the whole file, not a line: never drawn in the diff.
+    pub file_level: bool,
+    pub comments: Vec<ThreadComment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub at: Option<i64>,
+    /// Filled from slice B3b on; `None` throughout B3a.
+    pub edit: Option<CommentRef>,
+    /// Part of the viewer's unsubmitted review (spec §3 "Draft").
+    pub pending: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventKind {
     CommitsPushed {
