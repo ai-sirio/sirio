@@ -252,7 +252,8 @@ impl ChangeRequestTab {
     }
 
     /// `path:old|new:line` or `path:old|new:first-last`, as the socket says it.
-    pub(crate) fn compose_at(&mut self, spec: &str, cx: &mut Context<Self>) -> Result<(), String> {
+    /// Served in every build: opening a composer writes nothing to a forge.
+    pub fn compose_at(&mut self, spec: &str, cx: &mut Context<Self>) -> Result<(), String> {
         let malformed = || "compose needs PATH:old|new:LINE or PATH:old|new:FIRST-LAST".to_string();
         let mut parts = spec.rsplitn(3, ':');
         let (lines, side, path) = (parts.next(), parts.next(), parts.next());
@@ -288,7 +289,8 @@ impl ChangeRequestTab {
         Ok(())
     }
 
-    pub(crate) fn cancel_composer(&mut self, cx: &mut Context<Self>) {
+    /// Closes the one line composer, if one is open. Served in every build.
+    pub fn cancel_composer(&mut self, cx: &mut Context<Self>) {
         if self.line_composer.take().is_some() {
             if self
                 .write_refusal

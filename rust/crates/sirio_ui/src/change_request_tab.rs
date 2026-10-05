@@ -2427,6 +2427,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use gpui::TestAppContext;
@@ -3072,6 +3073,101 @@ mod tests {
             assert_eq!(report_value(tab, cx, "thread_replying"), "PRRT_1");
             assert_eq!(tab.reply_text("PRRT_1", cx).as_deref(), Some("Wait for it"));
         });
+    }
+
+    /// Like `a_thread`, but the tab is built in a window, so the test can call
+    /// the socket entry `control_act`, which needs one. The window context is
+    /// cloned out of the borrow, so the caller keeps using `cx` afterwards.
+    async fn windowed_thread(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ChangeRequestTab>,
+        Arc<CannedForge>,
+        RepoDir,
+        gpui::VisualTestContext,
+    ) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        forge.answer("ChangeRequestActionContext", action_context_json(&head));
+        forge.answer("ReviewThreadContext", facts_json(true, true, true));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        cx.update(|cx| {
+            Theme::init(cx);
+            forge_source::set_source(source, cx);
+        });
+        let (tab, vcx) = {
+            let (tab, vcx) = cx.add_window_view(|_, cx| {
+                ChangeRequestTab::new(testing::reference(101), "Fix".to_string(), repo.0.clone(), cx)
+            });
+            (tab, vcx.clone())
+        };
+        tab.update(cx, |tab, cx| {
+            tab.on_selected(cx);
+            tab.select_inner(InnerTab::Files, cx);
+        });
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "threads_open") == "1"));
+        (tab, forge, repo, vcx)
+    }
+
+    /// A socket thread write refused while a reply is in flight leaves that
+    /// write — its Working state, task and target — alone, and the reason
+    /// shows on the thread's card instead of in `action_message`.
+    #[gpui::test]
+    async fn a_socket_resolve_while_a_reply_is_in_flight_keeps_that_reply(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut vcx) = windowed_thread(cx).await;
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Wait for it", cx)).expect("an open reply");
+        tab.update(cx, |tab, _| {
+            tab.actions.state = ActionState::Working("reply");
+            tab.write_target = Some(compose::WriteTarget::Reply("PRRT_1".to_string()));
+        });
+        let params = BTreeMap::from([("thread".to_string(), "PRRT_1".to_string())]);
+        let refused =
+            tab.update_in(&mut vcx, |tab, window, cx| tab.control_act("resolve", &params, window, cx));
+        assert_eq!(refused, Err("an action is already in flight".to_string()));
+        tab.read_with(cx, |tab, cx| {
+            assert!(matches!(tab.actions.state, ActionState::Working("reply")));
+            assert_eq!(tab.write_target, Some(compose::WriteTarget::Reply("PRRT_1".to_string())));
+            assert_eq!(report_value(tab, cx, "action_message"), "");
+            assert_eq!(
+                tab.thread_write_error("PRRT_1", cx).as_deref(),
+                Some("an action is already in flight")
+            );
+            assert_eq!(tab.reply_text("PRRT_1", cx).as_deref(), Some("Wait for it"));
+        });
+        assert_eq!(forge.count("ResolveReviewThread"), 0);
+    }
+
+    /// A socket thread write refused with nothing in flight reports its reason
+    /// in `action_message`, which is where the E2E reads it.
+    #[gpui::test]
+    async fn a_socket_thread_refusal_with_nothing_in_flight_is_reported(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut vcx) = windowed_thread(cx).await;
+        let params = BTreeMap::from([("text".to_string(), "Late note".to_string())]);
+        let refused =
+            tab.update_in(&mut vcx, |tab, window, cx| tab.control_act("line-comment", &params, window, cx));
+        assert_eq!(
+            refused,
+            Err("No comment is being written; open one with thread --compose.".to_string())
+        );
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "action"), "failed");
+            assert_eq!(report_value(tab, cx, "action_kind"), "line-comment");
+            assert_eq!(
+                report_value(tab, cx, "action_message"),
+                "No comment is being written; open one with thread --compose."
+            );
+        });
+        let empty: BTreeMap<String, String> = BTreeMap::new();
+        let refused =
+            tab.update_in(&mut vcx, |tab, window, cx| tab.control_act("reply", &empty, window, cx));
+        assert_eq!(refused, Err("reply needs thread".to_string()));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "action_kind"), "reply");
+            assert_eq!(report_value(tab, cx, "action_message"), "reply needs thread");
+        });
+        assert_eq!(forge.rest_count(COMMENTS), 0);
     }
 
     #[gpui::test]

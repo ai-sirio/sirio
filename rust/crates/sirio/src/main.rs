@@ -985,6 +985,16 @@ enum PaneQuery {
     Scrollback(Option<usize>),
 }
 
+/// Which thread gesture `surface.change_request.thread` drives: revealing
+/// and folding a thread, or opening and closing the one line composer.
+/// Opening a composer writes nothing to a forge, so every build serves it.
+enum ThreadCommand {
+    Reveal(String),
+    Toggle(String),
+    Compose(String),
+    Cancel,
+}
+
 enum ControlAction {
     Quit {
         reply: ControlReply,
@@ -1092,8 +1102,7 @@ enum ControlAction {
         reply: ControlReply,
     },
     ChangeRequestThread {
-        id: String,
-        reveal: bool,
+        op: ThreadCommand,
         reply: ControlReply,
     },
     RevealChangeRequestFile {
@@ -2431,12 +2440,21 @@ impl ControlHandler for AppControlHandler {
                 self.queue_action(request, move |reply| ControlAction::RevealChangeRequestFile { path, line, reply })
             }
             "surface.change_request.thread" => {
-                let (id, reveal) = match (request.params.get("reveal"), request.params.get("toggle")) {
-                    (Some(id), None) if !id.trim().is_empty() => (id.clone(), true),
-                    (None, Some(id)) if !id.trim().is_empty() => (id.clone(), false),
-                    _ => return ControlResponse::failure(&request.id, "surface.change_request.thread requires exactly one of reveal or toggle"),
+                let op = match (
+                    request.params.get("reveal"),
+                    request.params.get("toggle"),
+                    request.params.get("compose"),
+                    request.params.get("cancel"),
+                ) {
+                    (Some(id), None, None, None) if !id.trim().is_empty() => ThreadCommand::Reveal(id.clone()),
+                    (None, Some(id), None, None) if !id.trim().is_empty() => ThreadCommand::Toggle(id.clone()),
+                    (None, None, Some(spec), None) if !spec.trim().is_empty() => {
+                        ThreadCommand::Compose(spec.clone())
+                    }
+                    (None, None, None, Some(cancel)) if !cancel.trim().is_empty() => ThreadCommand::Cancel,
+                    _ => return ControlResponse::failure(&request.id, "surface.change_request.thread requires exactly one of reveal, toggle, compose or cancel"),
                 };
-                self.queue_action(request, move |reply| ControlAction::ChangeRequestThread { id, reveal, reply })
+                self.queue_action(request, move |reply| ControlAction::ChangeRequestThread { op, reply })
             }
             "surface.change_request.open_file" => {
                 let Some(path) = request.params.get("path").cloned() else {
@@ -5341,9 +5359,17 @@ impl SirioWorkspace {
                                         Ok(())
                                     }));
                                 }
-                                ControlAction::ChangeRequestThread { id, reveal, reply } => {
+                                ControlAction::ChangeRequestThread { op, reply } => {
                                     let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
-                                        if reveal { tab.reveal_thread(&id, cx) } else { tab.toggle_thread(&id, cx) }
+                                        match op {
+                                            ThreadCommand::Reveal(id) => tab.reveal_thread(&id, cx),
+                                            ThreadCommand::Toggle(id) => tab.toggle_thread(&id, cx),
+                                            ThreadCommand::Compose(spec) => tab.compose_at(&spec, cx),
+                                            ThreadCommand::Cancel => {
+                                                tab.cancel_composer(cx);
+                                                Ok(())
+                                            }
+                                        }
                                     }));
                                 }
                                 ControlAction::OpenChangeRequestFile { path, line, reply } => {
@@ -37311,7 +37337,7 @@ done
             "surface.ci_log.read" => request::ci_log_read(),
             "surface.ci_log.view" => request::ci_log_view(None, true, false, None),
             "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
-            "surface.change_request.thread" => request::change_request_thread(Some("PRRT_1"), None),
+            "surface.change_request.thread" => request::change_request_thread(request::ThreadOp::Reveal("PRRT_1")),
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),

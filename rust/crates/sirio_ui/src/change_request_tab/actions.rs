@@ -444,6 +444,20 @@ impl ChangeRequestTab {
         }
     }
 
+    /// Records a synchronous socket-write refusal for the report, so the E2E
+    /// reads it from `action_message`. The people.rs pattern, except a refusal
+    /// while another write is in flight leaves that write — its Working state,
+    /// task and target — alone: the reason already shows under the field that
+    /// sent it through `write_refusal`.
+    fn record_refusal(&mut self, kind: &'static str, outcome: Result<(), String>) -> Result<(), String> {
+        if let Err(message) = outcome.as_ref() {
+            if !self.action_busy() {
+                self.actions.state = ActionState::Failed { kind, message: message.clone() };
+            }
+        }
+        outcome
+    }
+
     /// The control socket's test hook: the buttons' own handlers, by name.
     /// The host serves it in debug builds only, so a release binary has no
     /// way to write to a forge over the socket (spec §10).
@@ -516,6 +530,45 @@ impl ChangeRequestTab {
             }
             "merge-open" | "merge-confirm" | "merge-close" | "cancel-auto-merge" => {
                 self.control_merge(name, params, window, cx)
+            }
+            "reply" => {
+                let outcome = (|| {
+                    let thread = text("thread").ok_or("reply needs thread")?;
+                    let words = text("text").ok_or("reply needs text")?;
+                    self.open_reply(&thread, cx)?;
+                    self.reply_set_text(&thread, &words, cx)?;
+                    self.send_reply(&thread, cx)
+                })();
+                self.record_refusal("reply", outcome)
+            }
+            "resolve" | "unresolve" => {
+                let kind = if name == "resolve" { "resolve" } else { "unresolve" };
+                let outcome = (|| {
+                    let thread = text("thread").ok_or("resolve needs thread")?;
+                    self.resolve_thread(&thread, name == "resolve", cx)
+                })();
+                self.record_refusal(kind, outcome)
+            }
+            "line-comment" => {
+                let outcome = (|| {
+                    let words = text("text").ok_or("line-comment needs text")?;
+                    if self.line_composer.is_none() {
+                        return Err("No comment is being written; open one with thread --compose.".to_string());
+                    }
+                    self.composer_set_text(&words, cx);
+                    self.send_line_comment(cx)
+                })();
+                self.record_refusal("line-comment", outcome)
+            }
+            "edit-thread-comment" => {
+                let outcome = (|| {
+                    let comment = text("comment").ok_or("edit-thread-comment needs comment")?;
+                    let words = text("text").ok_or("edit-thread-comment needs text")?;
+                    self.start_thread_comment_edit(&comment, cx)?;
+                    self.thread_comment_set_text(&words, cx)?;
+                    self.save_thread_comment_edit(cx)
+                })();
+                self.record_refusal("edit-comment", outcome)
             }
             "picker-open" | "picker-type" | "picker-pick" | "picker-close" => {
                 self.control_picker(name, params, window, cx)
