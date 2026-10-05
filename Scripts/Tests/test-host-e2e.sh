@@ -245,10 +245,12 @@ has_line() { grep -q "$2" "$1" 2>/dev/null; }
 # its stdout in OUT and its exit status in RC. Never fails the case on its
 # own; `probe` is the one that does.
 run_probe() {
-  local errf="$ROOT_BASE/probe.err"
+  local errf="$ROOT_BASE/probe.err" outf="$ROOT_BASE/probe.out"
   RC=0
-  OUT="$("$PROBE" "$@" 2>"$errf")" || RC=$?
-  OUT="$(printf '%s' "$OUT" | tr -d '\r')"
+  # Into a file, not $(...): bash 3.2 runs the inherited ERR trap inside a
+  # command substitution whose command fails, `|| RC=$?` outside or not.
+  "$PROBE" "$@" >"$outf" 2>"$errf" || RC=$?
+  OUT="$(tr -d '\r' <"$outf")"
   LAST_CALL="host_probe $* (SIRIO_HOST_PROTOCOL_MAJOR=${SIRIO_HOST_PROTOCOL_MAJOR:-unset})"
   {
     echo "[case $N $CASE_NAME] \$ $LAST_CALL -> exit $RC"

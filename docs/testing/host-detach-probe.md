@@ -40,15 +40,18 @@ over the 1.5 s after the kill.
 | Linux | `systemd-run --user --scope`, plus `setsid` (`SystemdScope`) | `sigkill` | `kill -9` of the parent | 2026-10-05, this machine: PASS |
 | Linux | same | `scope` | the desktop stopping the app's `app-*.scope` | 2026-10-05, this machine: PASS |
 | Linux | `setsid` alone (`Setsid`, when no user manager answers) | `sigkill` | `kill -9` of the parent | 2026-10-05, this machine, run with `XDG_RUNTIME_DIR` unset: PASS. Not offered against a scope stop — see below |
-| macOS | `launchctl bootstrap gui/<uid>` of a generated plist (`Launchd`) | `sigkill` | `kill -9` of the parent | pending: `macos-check.yml` (`macos-15`) runs it on every pull request |
+| macOS | `launchctl bootstrap gui/<uid>` of a generated plist (`Launchd`) | `sigkill` | `kill -9` of the parent | 2026-10-05, `macos-check.yml` on `macos-15-arm64` (PR #615, [run](https://github.com/ai-sirio/sirio/actions/runs/37321613329/job/111801815428)): PASS; the lifecycle E2E passed in the same run |
 | macOS | same | Force Quit | the app's coalition being terminated | manual, procedure below — not yet run |
-| Windows | `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB` (`WindowsBreakaway`) | `job` | a job object with kill-on-close around the app | pending: `windows-check.yml` (`windows-latest`) runs it on every pull request |
+| Windows | `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB` (`WindowsBreakaway`) | `job` | a job object with kill-on-close around the app | 2026-10-05, `windows-check.yml` on `windows-latest` (PR #615, [run](https://github.com/ai-sirio/sirio/actions/runs/37321613470/job/111801815190)): PASS. The hosted runner's own job refuses breakaway, so the E2E's hosts there start as `WindowsNoBreakaway` and survive their client only because that job outlives it |
 
-The two `pending` rows have not run yet: `macos-check.yml` and
-`windows-check.yml` run the probe, then the lifecycle E2E, on every pull
-request, and these rows are filled from this branch's first CI run, with the
-run's URL. Until then they are claims this document does not make. The
-Force Quit row is manual and stays so (below).
+`macos-check.yml` and `windows-check.yml` run the probe, then the lifecycle
+E2E, on every pull request; the macOS and Windows rows above record the first
+green run of each. The first Windows run also found that a host started with
+`Command::spawn` inherited its launcher's stdout pipe (every inheritable handle
+goes to the child on Windows), which kept a reader of the launcher's output
+waiting for the host's whole life; the Windows arm now starts the host with
+`CreateProcessW` and a handle list naming only `NUL`. The Force Quit row is
+manual and stays so (below).
 
 The `setsid` arm is not a defence against a scope stop: a cgroup scope kills
 every process in it whatever its session. It is chosen only when no user
