@@ -15,6 +15,11 @@ name: macOS check
 # So this builds the app on the release platform's own runner, and runs the
 # one program that exercises the privacy FFI for real. It does not run the
 # test suite: Scripts/ci.sh already does, on macOS, in the release gate.
+#
+# It also runs the host foundation's detach probe and lifecycle E2E (spec
+# docs/superpowers/specs/2026-10-05-host-foundation-design.md §9.3): the
+# launchd arm of the detach is macOS-only code, and a runner can drive its
+# SIGKILL row, though not its Force Quit one.
 on:
   pull_request:
     branches: [main]
@@ -75,3 +80,11 @@ jobs:
       - name: Read every permission
         working-directory: rust
         run: cargo run -p sirio_privacy --example permissions --locked
+
+      # The host foundation on the release platform (spec §9.3): the detach
+      # rows a runner can drive, then the full lifecycle E2E.
+      - name: Probe the host's detach
+        run: Scripts/Tests/probe-host-detach.sh
+
+      - name: Host E2E
+        run: Scripts/Tests/test-host-e2e.sh

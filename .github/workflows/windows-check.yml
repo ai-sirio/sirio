@@ -1,0 +1,64 @@
+name: Windows check
+
+# Windows builds only in the release job, once a night. The host foundation
+# (spec §9.3) has Windows-only code that Linux and macOS never compile: the
+# named-pipe endpoint, GetProcessTimes, CREATE_BREAKAWAY_FROM_JOB, LockFileEx
+# behind File::try_lock. This builds the host crates and runs the probe and
+# the E2E on the platform itself. It does not build the app: that needs Zig
+# and the whole GPUI stack, which the release job already covers.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: host (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # The two scripts below are bash (Git for Windows' bash, which the runner
+    # image ships), the same shell build-release.yml's windows job names
+    # explicitly for its own script steps.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The MSVC toolchain, named as build-release.yml's windows job names it:
+      # the GNU ABI is not what the release ships, and what is proven here must
+      # be what is shipped.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # sirio_control is here because the host foundation moved its Windows
+      # transport into sirio_ipc: its tests are the ones that notice the move
+      # changed a behaviour only Windows has.
+      - name: Test the transport and the protocol
+        working-directory: rust
+        run: cargo test --locked -p sirio_ipc -p sirio_control -p sirio_host_protocol -p sirio_host_client
+
+      - name: Probe the host's detach
+        run: Scripts/Tests/probe-host-detach.sh
+
+      - name: Host E2E
+        run: Scripts/Tests/test-host-e2e.sh
