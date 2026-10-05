@@ -37,6 +37,7 @@ members = [
     "crates/sirio_privacy",
     "crates/sirio_host_client",
     "crates/sirio_host_protocol",
+    "crates/sirio_host",
 ]
 
 [workspace.package]

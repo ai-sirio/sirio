@@ -7447,6 +7447,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_host"
+version = "0.31.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sirio_host_protocol",
+ "sirio_ipc",
+]
+
+[[package]]
 name = "sirio_host_client"
 version = "0.31.0"
 dependencies = [

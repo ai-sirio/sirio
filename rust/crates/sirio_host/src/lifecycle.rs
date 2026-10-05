@@ -1,0 +1,198 @@
+//! Spec §5: take the lock, bind, publish the state file, serve, idle out,
+//! and leave in the order a client can trust.
+
+use std::fs::{self, File, OpenOptions};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+use sirio_host_protocol::messages::{HostMode, ProtocolVersion};
+use sirio_host_protocol::state_file::HostStateFile;
+use sirio_host_protocol::version::PROTOCOL_MINOR;
+use sirio_ipc::{BindError, LocalListener};
+
+use crate::HostConfig;
+use crate::core::HostCore;
+use crate::log::Log;
+use crate::router::Router;
+
+const LOCK_RETRY: Duration = Duration::from_millis(500);
+/// How long a leaving host lets its connections write their last frame — the
+/// answer to `host.shutdown` above all — before it exits under them.
+const DRAIN: Duration = Duration::from_millis(250);
+
+pub fn run(config: HostConfig) -> i32 {
+    let root = &config.paths.root;
+    if let Err(e) = create_private_dir(root) {
+        eprintln!("sirio-host: cannot create data root: {e}");
+        return 5;
+    }
+    let log = Arc::new(Log::new(config.paths.log(config.major)));
+    // A client probing the lock holds it for an instant; retry briefly
+    // before concluding another host won.
+    let lock = match acquire_lock(&config.paths.lock(config.major)) {
+        Some(lock) => lock,
+        None => {
+            log.line("start.lost_lock", "");
+            return 3;
+        }
+    };
+    let mut listener = match LocalListener::bind(&config.paths.endpoint(config.major)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let detail = match &error {
+                BindError::PathTooLong { .. } => "endpoint path too long".to_string(),
+                other => other.to_string(),
+            };
+            log.line("start.bind_failed", &detail);
+            eprintln!("sirio-host: {detail}");
+            return 4;
+        }
+    };
+    let generation = random_token();
+    let core = Arc::new(HostCore::new(
+        config.version.clone(),
+        config.major,
+        config.mode.clone(),
+        generation.clone(),
+        random_token(),
+    ));
+    let state = HostStateFile {
+        pid: std::process::id(),
+        start_time: sirio_ipc::process::start_time(std::process::id()).unwrap_or(0),
+        version: config.version.clone(),
+        protocol: ProtocolVersion {
+            major: config.major,
+            minor: PROTOCOL_MINOR,
+        },
+        mode: config.mode.clone(),
+        endpoint: sirio_ipc::display_endpoint(&config.paths.endpoint(config.major)),
+        generation,
+    };
+    let published = serde_json::to_vec_pretty(&state)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| write_atomic(&config.paths.state(config.major), &bytes));
+    if let Err(e) = published {
+        log.line("start.state_file_failed", &e.to_string());
+        eprintln!("sirio-host: cannot write the state file: {e}");
+        return 4;
+    }
+    log.line(
+        "start.ready",
+        &format!("major={} mode={:?}", config.major, config.mode),
+    );
+    ignore_sighup();
+
+    let router = Arc::new(Router::new(Arc::clone(&core)));
+    let accept_core = Arc::clone(&core);
+    let accept_log = Arc::clone(&log);
+    let accept = std::thread::spawn(move || {
+        while let Some(stream) = listener.accept(&accept_core.shutdown) {
+            let (c, r, l) = (
+                Arc::clone(&accept_core),
+                Arc::clone(&router),
+                Arc::clone(&accept_log),
+            );
+            std::thread::spawn(move || crate::connection::serve(stream, c, r, l));
+        }
+    });
+
+    let mut idle_since: Option<Instant> = None;
+    while !core.shutdown.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(100));
+        if config.mode != HostMode::OnDemand {
+            continue;
+        }
+        if core.clients() == 0 && core.sessions() == 0 {
+            let since = *idle_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= config.idle_grace {
+                log.line("stop.idle", "");
+                core.shutdown.store(true, Ordering::SeqCst);
+            }
+        } else {
+            idle_since = None;
+        }
+    }
+    // Leave in the order of spec §5.5: stop accepting, endpoint, state file, lock.
+    let _ = accept.join();
+    #[cfg(unix)]
+    let _ = fs::remove_file(config.paths.endpoint(config.major));
+    let _ = fs::remove_file(config.paths.state(config.major));
+    // Each connection closes itself once it sees the shutdown flag; give them
+    // a moment so the answer to `host.shutdown` is on the wire before the
+    // process, and with it every socket, goes.
+    let deadline = Instant::now() + DRAIN;
+    while core.clients() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    log.line("stop.done", "");
+    drop(lock);
+    0
+}
+
+fn acquire_lock(path: &Path) -> Option<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .ok()?;
+    let deadline = Instant::now() + LOCK_RETRY;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("json.{}", std::process::id()));
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)
+}
+
+/// An identifier that only has to differ between host starts: two hashes of
+/// the process id and the clock, each seeded by `RandomState`'s own
+/// per-instance random keys, printed as 32 hex digits. It is not a secret and
+/// not drawn straight from the OS's entropy source — nothing may treat it as
+/// one — but needs no crate and behaves the same on every platform.
+fn random_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    let a = hasher.finish();
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(a);
+    format!("{a:016x}{:016x}", hasher.finish())
+}
+
+#[cfg(unix)]
+fn ignore_sighup() {
+    // SAFETY: installing SIG_IGN for a signal is async-signal-safe and
+    // touches no Rust state.
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
+}
+#[cfg(not(unix))]
+fn ignore_sighup() {}
