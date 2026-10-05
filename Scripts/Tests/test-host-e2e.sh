@@ -42,9 +42,12 @@ set -eEuo pipefail
 #                         client before it stages or starts anything; a host
 #                         started on that root by hand names it in its log
 #   12. foreign-client    the control socket's NDJSON is closed on, unanswered
+#   13. successor         a host whose root was removed and re-created under
+#                         it leaves its successor's endpoint and state file
 #
-# Cases 10 and 11 are unix-only and print SKIP on Windows. The systemd scope
-# arm of case 3 runs only on Linux with a user manager.
+# Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
+# Linux only. The systemd scope arm of case 3 runs only on Linux with a user
+# manager.
 #
 # Each case force-shuts every host in its own root and retires the root
 # afterwards (a staged host binary is 7 MB; a dozen of them have no business
@@ -779,6 +782,36 @@ case_foreign_client() {
   pass
 }
 
+# The root is removed under a running host and a second host starts there;
+# the first, idling out afterwards, must leave only what is still its own.
+# Linux only: Windows cannot remove a running host's files, and on macOS the
+# first host's launchd job holds the root's label until it leaves.
+case_successor() {
+  if [ "$OS" != linux ]; then skip "Linux only"; return 0; fi
+  fresh_root 4000
+  probe ensure
+  local first second holder out="$ROOT_BASE/successor.out"
+  first="$(getf pid)"
+  [ -n "$first" ] || fail "no pid"
+  rm -rf "$ROOT"
+  "$PROBE" ensure --hold >"$out" 2>"$ROOT_BASE/successor.err" &
+  holder=$!
+  HELPERS+=("$holder")
+  wait_until 20 has_line "$out" '^pid=' || fail "the second client never printed a pid: $(cat "$out" "$ROOT_BASE/successor.err" 2>/dev/null | head -c 600)"
+  second="$(sed -n 's/^pid=//p' "$out" | head -n 1)"
+  [ "$second" != "$first" ] || fail "the second client adopted the first host $first"
+  alive "$first" || fail "the first host left before its successor was serving: the case proves nothing (grace 4 s)"
+  wait_until 15 dead "$first" || fail "the first host $first did not idle out"
+  [ -S "$ROOT/host-v1.sock" ] || fail "the first host, leaving, removed its successor's endpoint"
+  [ "$(state_pid 1)" = "$second" ] || fail "host-v1.json names '$(state_pid 1)', not the successor $second: the first host removed it"
+  run_probe observe 1
+  [ "$(getf verdict)" = Live ] || fail "the successor reads '$(getf verdict)', not Live"
+  alive "$second" || fail "the successor $second died"
+  kill_hard "$holder"
+  wait "$holder" 2>/dev/null || true
+  pass
+}
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -791,5 +824,6 @@ run_case sessions-live     case_sessions_live
 run_case unverifiable      case_unverifiable
 run_case path-too-long     case_path_too_long
 run_case foreign-client    case_foreign_client
+run_case successor         case_successor
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"

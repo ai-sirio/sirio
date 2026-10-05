@@ -59,6 +59,10 @@ pub fn run(config: HostConfig) -> i32 {
             return 4;
         }
     };
+    // What this host bound, to tell its own endpoint from a successor's when
+    // it leaves.
+    #[cfg(unix)]
+    let bound = file_identity(&config.paths.endpoint(config.major));
     let generation = random_token();
     let core = Arc::new(HostCore::new(
         config.version.clone(),
@@ -77,7 +81,7 @@ pub fn run(config: HostConfig) -> i32 {
         },
         mode: config.mode.clone(),
         endpoint: sirio_ipc::display_endpoint(&config.paths.endpoint(config.major)),
-        generation,
+        generation: generation.clone(),
     };
     let published = serde_json::to_vec_pretty(&state)
         .map_err(std::io::Error::other)
@@ -116,11 +120,24 @@ pub fn run(config: HostConfig) -> i32 {
             log.line("stop.idle", "");
         }
     }
-    // Leave in the order of spec §5.5: stop accepting, endpoint, state file, lock.
+    // Leave in the order of spec §5.5: stop accepting, endpoint, state file,
+    // lock. Only what is still this host's own goes: a root removed and
+    // re-created under a running host holds a successor's files by now.
     let _ = accept.join();
     #[cfg(unix)]
-    let _ = fs::remove_file(config.paths.endpoint(config.major));
-    let _ = fs::remove_file(config.paths.state(config.major));
+    {
+        let endpoint = config.paths.endpoint(config.major);
+        if bound.is_some() && file_identity(&endpoint) == bound {
+            let _ = fs::remove_file(&endpoint);
+        }
+    }
+    let state_path = config.paths.state(config.major);
+    let recorded = fs::read(&state_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<HostStateFile>(&bytes).ok());
+    if recorded.is_some_and(|recorded| recorded.generation == generation) {
+        let _ = fs::remove_file(&state_path);
+    }
     // Each connection closes itself once it sees the shutdown flag; give them
     // a moment so the answer to `host.shutdown` is on the wire before the
     // process, and with it every socket, goes.
@@ -131,6 +148,15 @@ pub fn run(config: HostConfig) -> i32 {
     log.line("stop.done", "");
     drop(lock);
     0
+}
+
+/// The (device, inode) of the file at `path`, not following a symlink.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
 }
 
 fn acquire_lock(path: &Path) -> Option<File> {
