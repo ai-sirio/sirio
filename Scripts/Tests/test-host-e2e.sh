@@ -348,7 +348,8 @@ archive_root() { # ROOT
   dest="$OUT_DIR/roots/$(basename "$root" | cut -c1-40)"
   ( cd "$root" && find . -type f -not -path './bin/*' ) | while IFS= read -r f; do
     mkdir -p "$dest/$(dirname "$f")"
-    cp "$root/$f" "$dest/$f"
+    # A leaving host may remove its state file between find and cp.
+    cp "$root/$f" "$dest/$f" 2>/dev/null || true
   done
 }
 

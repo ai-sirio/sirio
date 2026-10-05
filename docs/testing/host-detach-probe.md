@@ -167,7 +167,9 @@ macOS.
 5. `cat /tmp/probe-fq/heartbeat; sleep 2; cat /tmp/probe-fq/heartbeat` — the number must grow.
 6. Record the date, macOS version and both numbers in the table above; `kill $(cat /tmp/probe-fq/child.pid)`.
 
-The probe loads a launchd job labelled `app.sirioai.sirio.host.probe` (its
-plist is written under the probe directory's `launchd/` and deleted again once
-loaded). The job stays loaded after the child is killed; remove it with
-`launchctl bootout gui/$(id -u)/app.sirioai.sirio.host.probe`.
+The probe loads a launchd job labelled `app.sirioai.sirio.host.probe.<16 hex>`,
+the suffix being a hash of the probe directory's `launchd/` (its plist is
+written there and deleted again once loaded). The job stays loaded after the
+child is killed; find and remove it with
+`launchctl list | grep app.sirioai.sirio.host.probe` and
+`launchctl bootout gui/$(id -u)/<the label it printed>`.
