@@ -7455,6 +7455,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_host_protocol"
+version = "0.31.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sirio_icons"
 version = "0.31.0"
 
