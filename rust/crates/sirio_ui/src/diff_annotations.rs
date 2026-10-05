@@ -107,15 +107,26 @@ pub(crate) const COMMENT_CONTEXT: usize = 3;
 /// Which lines of one hunk take a comment: the changed lines, and the
 /// context lines at most `context` lines from one.
 pub(crate) fn commentable(origins: &[DiffOrigin], context: usize) -> Vec<bool> {
-    let changed: Vec<usize> = origins
-        .iter()
-        .enumerate()
-        .filter(|(_, origin)| **origin != DiffOrigin::Context)
-        .map(|(index, _)| index)
-        .collect();
-    (0..origins.len())
-        .map(|index| changed.iter().any(|change| index.abs_diff(*change) <= context))
-        .collect()
+    let mut distances = vec![usize::MAX; origins.len()];
+    let mut distance = usize::MAX;
+    for (index, origin) in origins.iter().enumerate() {
+        if *origin != DiffOrigin::Context {
+            distance = 0;
+        } else {
+            distance = distance.saturating_add(1);
+        }
+        distances[index] = distance;
+    }
+    distance = usize::MAX;
+    for index in (0..origins.len()).rev() {
+        if origins[index] != DiffOrigin::Context {
+            distance = 0;
+        } else {
+            distance = distance.saturating_add(1);
+        }
+        distances[index] = distances[index].min(distance);
+    }
+    distances.into_iter().map(|distance| distance <= context).collect()
 }
 
 fn line_number(number: usize) -> u32 {
@@ -356,6 +367,21 @@ mod tests {
         let open = commentable(&origins, COMMENT_CONTEXT);
         assert_eq!(open, vec![false, true, true, true, true, true, true, true, true, false]);
         assert!(commentable(&[DiffOrigin::Context; 5], COMMENT_CONTEXT).iter().all(|open| !open), "no change, nothing to comment on");
+    }
+
+    #[test]
+    fn a_long_hunk_only_opens_the_lines_within_three_of_a_change() {
+        let mut origins = vec![DiffOrigin::Context; 20_000];
+        origins[0] = DiffOrigin::Addition;
+        origins[19_999] = DiffOrigin::Deletion;
+
+        let open = commentable(&origins, COMMENT_CONTEXT);
+
+        assert!(open[..4].iter().all(|line| *line));
+        assert!(!open[4]);
+        assert!(!open[10_000]);
+        assert!(!open[19_995]);
+        assert!(open[19_996..].iter().all(|line| *line));
     }
 
     #[test]

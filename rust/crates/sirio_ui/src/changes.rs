@@ -92,6 +92,8 @@ const CHANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// live-but-undrawn surface at ten seconds, while still removing nine of
 /// every ten reloads from a tab nobody is looking at.
 pub(crate) const SUSPENDED_TICK_BUDGET: u32 = 10;
+type CommentableByPath = HashMap<PathBuf, HashSet<(AnnotationSide, u32)>>;
+
 const TOOLBAR_HEIGHT: f32 = 34.0;
 /// File headers: sidebar-family 12px UI text at the app's 30px row
 /// rhythm — the rows and their action buttons read like the rest of the
@@ -604,6 +606,8 @@ pub struct ChangesTab {
     source: ChangesSource,
     entries: Vec<StatusEntry>,
     diffs: HashMap<PathBuf, FileDiff>,
+    /// Commentable diff positions, computed when their diff is loaded.
+    commentable_by_path: Rc<CommentableByPath>,
     annotations: Vec<Annotation>,
     annotation_views: Rc<HashMap<u64, AnyView>>,
     open_threads: Rc<HashMap<PathBuf, usize>>,
@@ -847,30 +851,10 @@ impl ChangesTab {
         self.gutter_press = None;
     }
 
-    /// Every drawn line a comment may start on, by side.
-    fn commentable_lines(&self) -> HashSet<(PathBuf, AnnotationSide, u32)> {
-        let mut open = HashSet::new();
-        for (path, diff) in &self.diffs {
-            for hunk in &diff.hunks {
-                let origins: Vec<DiffOrigin> = hunk.lines.iter().map(|line| line.origin).collect();
-                for (line, takes) in hunk
-                    .lines
-                    .iter()
-                    .zip(commentable(&origins, COMMENT_CONTEXT))
-                {
-                    if !takes {
-                        continue;
-                    }
-                    if let Some(old) = line.old_line_number.and_then(|n| u32::try_from(n).ok()) {
-                        open.insert((path.clone(), AnnotationSide::Old, old));
-                    }
-                    if let Some(new) = line.new_line_number.and_then(|n| u32::try_from(n).ok()) {
-                        open.insert((path.clone(), AnnotationSide::New, new));
-                    }
-                }
-            }
-        }
-        open
+    fn cache_diff(&mut self, path: PathBuf, diff: FileDiff) {
+        let open = commentable_in_diff(&diff);
+        self.diffs.insert(path.clone(), diff);
+        Rc::make_mut(&mut self.commentable_by_path).insert(path, open);
     }
 
     /// Every path with an expanded row — what a rebuilt surface reopens.
@@ -920,6 +904,7 @@ impl ChangesTab {
             source,
             entries: Vec::new(),
             diffs: HashMap::new(),
+            commentable_by_path: Rc::default(),
             stats: HashMap::new(),
             expanded_changes: HashSet::new(),
             collapsed_sections: HashSet::new(),
@@ -1119,12 +1104,16 @@ impl ChangesTab {
         let live_paths: HashSet<&PathBuf> =
             snapshot.entries.iter().map(|entry| &entry.path).collect();
         self.diffs.retain(|path, _| live_paths.contains(path));
+        Rc::make_mut(&mut self.commentable_by_path).retain(|path, _| live_paths.contains(path));
         self.diff_errors.retain(|path, _| live_paths.contains(path));
         for path in snapshot.diffs.keys().chain(snapshot.diff_errors.keys()) {
             self.diffs.remove(path);
+            Rc::make_mut(&mut self.commentable_by_path).remove(path);
             self.diff_errors.remove(path);
         }
-        self.diffs.extend(snapshot.diffs);
+        for (path, diff) in snapshot.diffs {
+            self.cache_diff(path, diff);
+        }
         self.diff_errors.extend(snapshot.diff_errors);
         self.entries = snapshot.entries;
         self.stats = snapshot.stats;
@@ -1145,6 +1134,7 @@ impl ChangesTab {
             self.git_error_from_mutation = false;
             self.entries.clear();
             self.diffs.clear();
+            Rc::make_mut(&mut self.commentable_by_path).clear();
             self.stats.clear();
             self.diff_errors.clear();
             cx.notify();
@@ -1558,9 +1548,10 @@ impl ChangesTab {
             let _ = this.update(cx, |tab, cx| {
                 match result {
                     Ok(diff) => {
-                        tab.diffs.insert(path, diff);
+                        tab.cache_diff(path, diff);
                     }
                     Err(error) => {
+                        Rc::make_mut(&mut tab.commentable_by_path).remove(&path);
                         tab.diff_errors.insert(path, error.to_string());
                     }
                 }
@@ -2091,7 +2082,7 @@ impl ChangesTab {
         forge: Option<Rc<ForgeFiles>>,
         annotation_view: Option<AnyView>,
         open_threads: usize,
-        open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+        open_lines: Rc<CommentableByPath>,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -2596,7 +2587,7 @@ impl ChangesTab {
         words: (Option<Range<usize>>, Option<Range<usize>>),
         left_x: Pixels,
         right_x: Pixels,
-        open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+        open_lines: Rc<CommentableByPath>,
         entity: gpui::Entity<ChangesTab>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -2663,7 +2654,7 @@ impl ChangesTab {
         line: DiffLine,
         words: Option<Range<usize>>,
         unified_x: Pixels,
-        open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+        open_lines: Rc<CommentableByPath>,
         entity: gpui::Entity<ChangesTab>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -2675,25 +2666,27 @@ impl ChangesTab {
             line.new_line_number.unwrap_or(0)
         );
         let group = SharedString::from(format!("diff-row-{row_id}"));
-        let point = if let Some(number) = line.new_line_number {
-            u32::try_from(number).ok().map(|line| GutterPoint {
-                path: path.clone(),
-                side: AnnotationSide::New,
-                line,
-            })
+        let position = if let Some(number) = line.new_line_number {
+            u32::try_from(number).ok().map(|line| (AnnotationSide::New, line))
         } else {
             line.old_line_number
                 .and_then(|number| u32::try_from(number).ok())
-                .map(|line| GutterPoint {
-                    path: path.clone(),
-                    side: AnnotationSide::Old,
-                    line,
-                })
+                .map(|line| (AnnotationSide::Old, line))
         };
-        let plus = point
-            .filter(|point| open_lines.contains(&(point.path.clone(), point.side, point.line)))
-            .map(|point| {
-                comment_plus(point, group.clone(), entity, theme.clone()).into_any_element()
+        let plus = position
+            .filter(|(side, line)| {
+                open_lines
+                    .get(&path)
+                    .is_some_and(|lines| lines.contains(&(*side, *line)))
+            })
+            .map(|(side, line)| {
+                comment_plus(
+                    GutterPoint { path: path.clone(), side, line },
+                    group.clone(),
+                    entity,
+                    theme.clone(),
+                )
+                .into_any_element()
             });
         let colors = &theme.ely;
         let (background, marker_color, marker, text_color, word_wash) = match line.origin {
@@ -3108,7 +3101,7 @@ fn split_cell(
     side_x: Pixels,
     path: PathBuf,
     side: AnnotationSide,
-    open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+    open_lines: Rc<CommentableByPath>,
     group: SharedString,
     entity: gpui::Entity<ChangesTab>,
     theme: Theme,
@@ -3175,12 +3168,17 @@ fn split_cell(
     } else {
         line.new_line_number
     };
-    let point = number
+    let plus = number
         .and_then(|number| u32::try_from(number).ok())
-        .map(|line| GutterPoint { path, side, line });
-    let plus = point
-        .filter(|point| open_lines.contains(&(point.path.clone(), point.side, point.line)))
-        .map(|point| comment_plus(point, group, entity, theme.clone()).into_any_element());
+        .filter(|line| {
+            open_lines
+                .get(&path)
+                .is_some_and(|lines| lines.contains(&(side, *line)))
+        })
+        .map(|line| {
+            comment_plus(GutterPoint { path, side, line }, group, entity, theme.clone())
+                .into_any_element()
+        });
     cell.bg(background).children(plus).child(
         div()
             .absolute()
@@ -3436,11 +3434,11 @@ impl ChangesTab {
         }
         let rows = self.sync_list_rows(sections);
         let row_entity = entity.clone();
-        let open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>> = Rc::new(if self.commentable {
-            self.commentable_lines()
+        let open_lines: Rc<CommentableByPath> = if self.commentable {
+            self.commentable_by_path.clone()
         } else {
-            HashSet::new()
-        });
+            Rc::default()
+        };
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
@@ -4332,6 +4330,25 @@ fn band_key_containing_annotations(
         .map(|(key, _)| key)
 }
 
+fn commentable_in_diff(diff: &FileDiff) -> HashSet<(AnnotationSide, u32)> {
+    let mut open = HashSet::new();
+    for hunk in &diff.hunks {
+        let origins: Vec<DiffOrigin> = hunk.lines.iter().map(|line| line.origin).collect();
+        for (line, takes) in hunk.lines.iter().zip(commentable(&origins, COMMENT_CONTEXT)) {
+            if !takes {
+                continue;
+            }
+            if let Some(old) = line.old_line_number.and_then(|number| u32::try_from(number).ok()) {
+                open.insert((AnnotationSide::Old, old));
+            }
+            if let Some(new) = line.new_line_number.and_then(|number| u32::try_from(number).ok()) {
+                open.insert((AnnotationSide::New, new));
+            }
+        }
+    }
+    open
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4367,7 +4384,7 @@ mod tests {
             index_status: None,
             worktree_status: Some(StatusKind::Modified),
         }];
-        tab.diffs.insert(path.clone(), diff);
+        tab.cache_diff(path.clone(), diff);
         tab.expanded_changes.insert((ChangeSection::Changed, path));
         tab.annotations = annotations;
         tab
@@ -5015,7 +5032,7 @@ mod tests {
             index_status: Some(StatusKind::Modified),
             worktree_status: None,
         }];
-        tab.diffs = HashMap::from([(path.clone(), diff)]);
+        tab.cache_diff(path.clone(), diff);
         if expanded {
             tab.expanded_changes.insert((ChangeSection::Staged, path));
         }
@@ -5095,6 +5112,7 @@ mod tests {
             source: ChangesSource::WorkingTree,
             entries: Vec::new(),
             diffs: HashMap::new(),
+            commentable_by_path: Rc::default(),
             stats: HashMap::new(),
             expanded_changes: HashSet::new(),
             collapsed_sections: HashSet::new(),
@@ -7038,6 +7056,7 @@ mod tests {
                 worktree_status: Some(StatusKind::Modified),
             }],
             diffs: HashMap::new(),
+            commentable_by_path: Rc::default(),
             stats: HashMap::new(),
             diff_errors: HashMap::from([(
                 PathBuf::from("x.rs"),
@@ -7134,6 +7153,7 @@ mod tests {
                     is_submodule: false,
                 },
             )]),
+            commentable_by_path: Rc::default(),
             stats: HashMap::new(),
             diff_errors: HashMap::new(),
             expanded_changes: HashSet::new(),
@@ -7418,6 +7438,7 @@ mod tests {
                 worktree_status: Some(StatusKind::Unmerged),
             }],
             diffs: HashMap::new(),
+            commentable_by_path: Rc::default(),
             stats: HashMap::new(),
             expanded_changes: HashSet::from([
                 (ChangeSection::Staged, path.clone()),
@@ -7885,6 +7906,7 @@ mod tests {
                     worktree_status: Some(StatusKind::Modified),
                 }],
                 diffs: HashMap::from([(path.clone(), diff)]),
+                commentable_by_path: Rc::default(),
                 stats: HashMap::from([(
                     path,
                     DiffStat {
@@ -8363,6 +8385,7 @@ mod tests {
             source: ChangesSource::Commit("synthetic".to_owned()),
             entries: vec![entry],
             diffs,
+            commentable_by_path: Rc::default(),
             stats,
             expanded_changes,
             collapsed_sections: HashSet::new(),
