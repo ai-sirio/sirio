@@ -37,6 +37,8 @@ use ely_gpui_component::{
 };
 use crate::ely_ui::{self, ButtonState};
 use crate::changes::{ChangesTab, ChangesTabEvent, ForgeFiles};
+use crate::diff_annotations::AnnotationSide;
+use threads::{ConversationEntry, merge_threads};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
 use crate::text_selection::selectable_text;
@@ -214,6 +216,9 @@ pub struct ChangeRequestTab {
     pub(crate) description: Option<markdown::Doc>,
     /// The Markdown of each timeline entry that has a body, aligned with it.
     bodies: Vec<Option<markdown::Doc>>,
+    /// First published thread bodies for the Conversation, cached by forge id.
+    thread_bodies: HashMap<String, markdown::Doc>,
+    thread_ids: HashMap<u64, String>,
     pub(crate) commits: Slot<Listing<CommitSummary>>,
     pub(crate) checks: Slot<Listing<Check>>,
     pub(crate) files: Slot<Listing<FileChange>>,
@@ -247,7 +252,7 @@ pub struct ChangeRequestTab {
     /// "Updated to head …" once a new head rebuilt the diff.
     updated_notice: Option<String>,
     /// A `reveal` asked before the diff existed.
-    pending_reveal: Option<(PathBuf, Option<u32>)>,
+    pending_reveal: Option<(PathBuf, AnnotationSide, Option<u32>, Option<u64>)>,
     /// A commit whose revisions could not be made local, with its forge URL.
     commit_error: Option<(RevisionError, String)>,
     commit_task: Option<Task<()>>,
@@ -284,6 +289,8 @@ impl ChangeRequestTab {
             header: Slot::Idle,
             description: None,
             bodies: Vec::new(),
+            thread_bodies: HashMap::new(),
+            thread_ids: HashMap::new(),
             commits: Slot::Idle,
             checks: Slot::Idle,
             files: Slot::Idle,
@@ -751,11 +758,8 @@ impl ChangeRequestTab {
                     changes: changes.clone(),
                 };
                 self.push_annotations(cx);
-                if let Some((path, line)) = self.pending_reveal.take() {
-                    changes.update(cx, |changes, cx| match line {
-                        Some(line) => changes.focus_line(&path, line as usize, cx),
-                        None => changes.focus_path(&path, cx),
-                    });
+                if let Some((path, side, line, key)) = self.pending_reveal.take() {
+                    changes.update(cx, |changes, cx| changes.focus_anchor(&path, side, line, key, cx));
                 }
             }
             Err(error) => {
@@ -791,7 +795,7 @@ impl ChangeRequestTab {
                     None => changes.focus_path(&path, cx),
                 });
             }
-            _ => self.pending_reveal = Some((path, line)),
+            _ => self.pending_reveal = Some((path, AnnotationSide::New, line, None)),
         }
     }
 
@@ -880,7 +884,9 @@ impl ChangeRequestTab {
             match self.inner {
                 InnerTab::Conversation => (
                     slot_state(&self.header),
-                    rows(self.header.value().map(|h| h.timeline.len())),
+                    rows(self.header.value().map(|header| self.threads.value().map_or(
+                        header.timeline.len(), |threads| merge_threads(&header.timeline, &threads.items).len(),
+                    ))),
                 ),
                 InnerTab::Commits => (
                     slot_state(&self.commits),
@@ -984,7 +990,7 @@ impl ChangeRequestTab {
                 row_words.push(word);
             }
         }
-        vec![
+        let mut report = vec![
             ("label".to_string(), self.reference.label()),
             ("title".to_string(), self.title.clone()),
             ("inner".to_string(), self.inner.as_str().to_string()),
@@ -1083,7 +1089,9 @@ impl ChangeRequestTab {
                 "merge_dialog_message".to_string(),
                 self.merge_dialog_status().map(|(_, text)| text).unwrap_or_default(),
             ),
-        ]
+        ];
+        report.extend(self.thread_report(cx));
+        report
     }
 }
 
@@ -1487,8 +1495,17 @@ impl ChangeRequestTab {
                     );
                 }
                 let mut rail = Timeline::new();
-                for (index, item) in header.timeline.iter().enumerate() {
-                    rail = rail.item(self.render_timeline_item(index, item, theme, entity));
+                if let Some(threads) = self.threads.value() {
+                    for entry in merge_threads(&header.timeline, &threads.items) {
+                        rail = rail.item(match entry {
+                            ConversationEntry::Item(index) => self.render_timeline_item(index, &header.timeline[index], theme, entity),
+                            ConversationEntry::Thread(index) => self.render_thread_entry(index, &threads.items[index], theme, entity),
+                        });
+                    }
+                } else {
+                    for (index, item) in header.timeline.iter().enumerate() {
+                        rail = rail.item(self.render_timeline_item(index, item, theme, entity));
+                    }
                 }
                 column = column.child(rail);
                 if let Some(composer) = self.render_composer(theme, entity) {
@@ -1583,7 +1600,7 @@ impl ChangeRequestTab {
                     .icon(icon)
                     .tone(tone)
                     .children(body)
-                    .children(line_comments.iter().enumerate().map(|(position, comment)| {
+                    .children(line_comments.iter().filter(|_| self.threads.value().is_none()).enumerate().map(|(position, comment)| {
                         div()
                             .id(("change-request-line-comment-row", index * 1000 + position))
                             .flex()

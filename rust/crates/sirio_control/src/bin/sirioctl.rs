@@ -142,6 +142,7 @@ fn usage() {
          \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 surface ci-log open --job N|read|view [--toggle N] [--jump-error] [--refresh] [--copy all|N]\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
+         \x20 surface change-request thread --reveal ID|--toggle ID\n\
          \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|rerun-job|rerun-failed\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
@@ -849,6 +850,14 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             let line = parsed.positional.get(3).map(String::as_str);
             require_ok(socket, &sirio_control::protocol::request::change_request_reveal(path, line))
         }
+        ("change-request", "thread") => {
+            let (reveal, toggle) = (parsed.value("reveal"), parsed.value("toggle"));
+            match (reveal, toggle) {
+                (Some(id), None) | (None, Some(id)) if !id.trim().is_empty() => {}
+                _ => return Err("thread needs exactly one of --reveal ID or --toggle ID".to_string()),
+            }
+            require_ok(socket, &sirio_control::protocol::request::change_request_thread(reveal, toggle))
+        }
         ("change-request", "open-file") => {
             let path = parsed.positional.get(2).ok_or_else(|| "Missing path".to_string())?;
             let line = parsed.positional.get(3).map(String::as_str);
@@ -914,6 +923,12 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             "label",
             "title",
             "inner",
+            "threads_open",
+            "threads_resolved",
+            "threads_outdated",
+            "threads_file",
+            "thread_rows",
+            "conversation_threads",
         ],
         parsed.flag("json"),
     );

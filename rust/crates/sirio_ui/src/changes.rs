@@ -959,7 +959,7 @@ impl ChangesTab {
         }
         let rows: Vec<ChangeRow> = self.section_rows(self.unified_mode)
             .into_iter().flat_map(|section| section.rows).collect();
-        self.annotations.iter().map(|annotation| {
+        let mut reports: Vec<AnnotationReport> = self.annotations.iter().map(|annotation| {
             let drawn = rows.iter().any(|row| matches!(row,
                 ChangeRow::Annotation { key, path, .. }
                     if *key == annotation.key && path == &annotation.path));
@@ -973,7 +973,11 @@ impl ChangesTab {
                 "file"
             };
             AnnotationReport { key: annotation.key, path: annotation.path.clone(), placed }
-        }).collect()
+        }).collect();
+        reports.sort_by_key(|report| rows.iter().position(|row| matches!(row,
+            ChangeRow::Annotation { key, path, .. } if *key == report.key && *path == report.path,
+        )).unwrap_or(usize::MAX));
+        reports
     }
 
     fn apply_snapshot(&mut self, snapshot: GitSnapshot, cx: &mut Context<Self>) {
@@ -4129,6 +4133,26 @@ mod tests {
             ChangeRow::Annotation { key, .. } => Some((index, *key)),
             _ => None,
         }).collect()
+    }
+
+    #[test]
+    fn annotation_reports_follow_drawn_row_order_before_hidden_rows() {
+        let outdated = Annotation {
+            key: 3, kind: AnnotationKind::Outdated { count: 1 }, line: None,
+            ..thread_at(3, "a.rs", AnnotationSide::New, 20)
+        };
+        let mut tab = sample_tab(vec![
+            thread_at(2, "a.rs", AnnotationSide::New, 23),
+            thread_at(1, "a.rs", AnnotationSide::New, 14),
+            outdated,
+            thread_at(4, "missing.rs", AnnotationSide::New, 4),
+        ]);
+        for mode in [DiffViewMode::Unified, DiffViewMode::Split] {
+            tab.unified_mode = mode;
+            let reports = tab.report().annotations;
+            assert_eq!(reports.iter().map(|report| report.key).collect::<Vec<_>>(), vec![3, 1, 2, 4]);
+            assert_eq!(reports[3].placed, "hidden");
+        }
     }
 
     #[test]

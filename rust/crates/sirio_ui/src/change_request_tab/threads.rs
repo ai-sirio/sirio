@@ -13,6 +13,45 @@ use sirio_forge::{ReviewThread, Side, ThreadComment};
 use crate::diff_annotations::{Annotation, AnnotationKind, AnnotationSide};
 use super::*;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum ConversationEntry {
+    Item(usize),
+    Thread(usize),
+}
+
+/// Keeps ordinary activity in its original order and inserts published threads
+/// before the next later timestamp. Without thread data the old timeline stays.
+pub(crate) fn merge_threads(timeline: &[TimelineItem], threads: &[ReviewThread]) -> Vec<ConversationEntry> {
+    if threads.is_empty() {
+        return (0..timeline.len()).map(ConversationEntry::Item).collect();
+    }
+    let mut published: Vec<(usize, Option<i64>)> = threads.iter().enumerate()
+        .filter_map(|(index, thread)| first_published(thread).map(|comment| (index, comment.at)))
+        .collect();
+    published.sort_by(|(a, at_a), (b, at_b)| {
+        at_a.is_none().cmp(&at_b.is_none())
+            .then_with(|| at_a.cmp(at_b))
+            .then_with(|| threads[*a].id.cmp(&threads[*b].id))
+    });
+    let mut pending = published.into_iter().peekable();
+    let mut entries = Vec::new();
+    for (index, item) in timeline.iter().enumerate() {
+        let at = match item {
+            TimelineItem::LineComment(_) => continue,
+            TimelineItem::Comment { at, .. } | TimelineItem::Review { at, .. }
+                | TimelineItem::Event { at, .. } => *at,
+        };
+        if let Some(at) = at {
+            while pending.peek().is_some_and(|(_, thread_at)| thread_at.is_some_and(|time| time < at)) {
+                entries.push(ConversationEntry::Thread(pending.next().unwrap().0));
+            }
+        }
+        entries.push(ConversationEntry::Item(index));
+    }
+    entries.extend(pending.map(|(index, _)| ConversationEntry::Thread(index)));
+    entries
+}
+
 /// How much of an outdated thread's quoted code is shown.
 const HUNK_LINES: usize = 8;
 
@@ -183,6 +222,15 @@ impl ThreadView {
         cx.notify();
     }
 
+    pub fn open(&mut self, cx: &mut Context<Self>) {
+        if !self.expanded {
+            self.expanded = true;
+            self.revision += 1;
+            cx.notify();
+            push_from(self.owner.clone(), cx);
+        }
+    }
+
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.expanded = !self.expanded;
         self.revision += 1;
@@ -279,6 +327,15 @@ impl OutdatedView {
         cx.notify();
     }
 
+    pub fn open(&mut self, cx: &mut Context<Self>) {
+        if !self.open {
+            self.open = true;
+            self.revision += 1;
+            cx.notify();
+            push_from(self.owner.clone(), cx);
+        }
+    }
+
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
         self.revision += 1;
@@ -351,6 +408,112 @@ impl Render for OutdatedView {
 }
 
 impl ChangeRequestTab {
+    /// Selects Files and opens the thread's card or outdated section. Queued
+    /// reveals retain the side and annotation key until the range is ready.
+    pub fn reveal_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let thread = self.threads.value().and_then(|listing| listing.items.iter().find(|thread| thread.id == id))
+            .cloned().ok_or_else(|| format!("no thread {id}"))?;
+        let key = thread_key(id);
+        let anchor = if let Some(view) = self.thread_views.get(&key) {
+            view.update(cx, |view, cx| view.open(cx));
+            Some(key)
+        } else if drawn_in_diff(std::slice::from_ref(&thread)).is_empty() {
+            None
+        } else if let Some(section) = self.outdated_views.get(&thread.path) {
+            section.update(cx, |section, cx| section.open(cx));
+            Some(outdated_key(&thread.path))
+        } else {
+            None
+        };
+        self.select_inner(InnerTab::Files, cx);
+        let path = PathBuf::from(&thread.path);
+        let side = annotation_side(thread.side);
+        let line = if thread.file_level { None } else { thread.line };
+        match &self.range {
+            RangeState::Ready { changes, .. } => {
+                changes.update(cx, |changes, cx| changes.focus_anchor(&path, side, line, anchor, cx));
+            }
+            _ => self.pending_reveal = Some((path, side, line, anchor)),
+        }
+        Ok(())
+    }
+
+    /// The socket folds the same cards as their clickable headers.
+    pub fn toggle_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let thread = self.threads.value().and_then(|listing| listing.items.iter().find(|thread| thread.id == id))
+            .ok_or_else(|| format!("no thread {id}"))?;
+        if let Some(view) = self.thread_views.get(&thread_key(id)) {
+            view.update(cx, |view, cx| view.toggle(cx));
+        } else if !drawn_in_diff(std::slice::from_ref(thread)).is_empty() {
+            if let Some(section) = self.outdated_views.get(&thread.path) {
+                section.update(cx, |section, cx| section.toggle(cx));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn render_thread_entry(&self, index: usize, thread: &ReviewThread, theme: &Theme, entity: &Entity<Self>) -> RailItem {
+        let first = first_published(thread).expect("merged entries have a published comment");
+        let published = thread.comments.iter().filter(|comment| !comment.pending).count();
+        let where_ = thread.line.filter(|_| !thread.file_level).map_or("file".to_string(), |line| line.to_string());
+        let (entity, id) = (entity.clone(), thread.id.clone());
+        RailItem::new(
+            div().id(("change-request-thread-entry-head", index)).flex().gap(px(6.0))
+                .child(div().font_weight(FontWeight::MEDIUM).child(selectable_text(first.author.clone())))
+                .child(div().text_color(theme.ely.fg_muted).child(selectable_text("commented"))),
+        )
+        .icon(IconName::MessageSquareDiff)
+        .time(div().id(("change-request-thread-entry-time", index)).text_color(theme.ely.fg_subtle)
+            .child(selectable_text(style::age(style::now(), first.at))))
+        .child(
+            div().id(("change-request-thread-entry-footnote", index)).flex().flex_wrap().gap(px(6.0))
+                .text_size(theme.typography.footnote).text_color(theme.ely.fg_muted)
+                .child(div().id(("change-request-thread-entry-link", index)).cursor_pointer()
+                    .text_color(theme.sirio.quantity).child(format!("on {}:{where_}", thread.path))
+                    .on_click(move |_, _, cx| { entity.update(cx, |tab, cx| { let _ = tab.reveal_thread(&id, cx); }); }))
+                .child(selectable_text(format!("· {}", plural(published.saturating_sub(1), "reply", "replies"))))
+                .when(thread.resolved, |this| this.child("· Resolved"))
+                .when(thread.outdated, |this| this.child("· Outdated")),
+        )
+        .children(self.thread_bodies.get(&thread.id).map(|doc| {
+            div().id(("change-request-thread-entry-body", index)).child(
+                Chat::render_markdown_document_with_link_override(doc.clone(), theme, open_links()),
+            )
+        }))
+    }
+
+    pub(super) fn thread_report(&self, cx: &App) -> Vec<(String, String)> {
+        let published: Vec<&ReviewThread> = self.threads.value().map(|listing| listing.items.iter()
+            .filter(|thread| first_published(thread).is_some()).collect()).unwrap_or_default();
+        let count = |predicate: fn(&ReviewThread) -> bool| published.iter().filter(|thread| predicate(thread)).count().to_string();
+        let rows = match &self.range {
+            RangeState::Ready { changes, .. } => changes.read(cx).report().annotations.into_iter().filter_map(|row| {
+                if let Some(view) = self.outdated_views.get(&row.path.to_string_lossy().into_owned())
+                    .filter(|_| row.key == outdated_key(&row.path.to_string_lossy()))
+                {
+                    let section = view.read(cx);
+                    Some(format!("outdated:{}:{}:{}", section.path, section.threads.len(), if section.open { "open" } else { "folded" }))
+                } else {
+                    let id = self.thread_ids.get(&row.key)?;
+                    let view = self.thread_views.get(&row.key)?.read(cx);
+                    Some(format!("{id}:{}:{}", row.placed, if view.thread.resolved && !view.expanded { "folded" } else { "open" }))
+                }
+            }).collect::<Vec<_>>().join("|"),
+            _ => String::new(),
+        };
+        let conversation = self.header.value().zip(self.threads.value()).map_or(0, |(header, threads)| {
+            merge_threads(&header.timeline, &threads.items).iter().filter(|entry| matches!(entry, ConversationEntry::Thread(_))).count()
+        });
+        vec![
+            ("threads_open".to_string(), count(|thread| !thread.resolved)),
+            ("threads_resolved".to_string(), count(|thread| thread.resolved)),
+            ("threads_outdated".to_string(), count(|thread| thread.outdated)),
+            ("threads_file".to_string(), count(|thread| thread.file_level)),
+            ("thread_rows".to_string(), rows),
+            ("conversation_threads".to_string(), conversation.to_string()),
+        ]
+    }
+
     /// Reads every thread on the background executor; a later call's answer
     /// replaces an earlier one's.
     pub(crate) fn load_threads(&mut self, cx: &mut Context<Self>) {
@@ -382,6 +545,12 @@ impl ChangeRequestTab {
 
     fn apply_threads(&mut self, result: Result<Listing<ReviewThread>, ForgeError>, cx: &mut Context<Self>) {
         self.threads.finish(result);
+        let theme = *Theme::get(cx);
+        self.thread_bodies = self.threads.value().map(|listing| listing.items.iter()
+            .filter_map(|thread| first_published(thread).map(|comment| (thread.id.clone(), markdown_doc(&comment.body, &theme))))
+            .collect()).unwrap_or_default();
+        self.thread_ids = self.threads.value().map(|listing| listing.items.iter()
+            .map(|thread| (thread_key(&thread.id), thread.id.clone())).collect()).unwrap_or_default();
         self.rebuild_thread_views(cx);
         self.push_annotations(cx);
         cx.notify();
@@ -552,5 +721,111 @@ mod tests {
         assert_eq!(thread_key("PRRT_1"), thread_key("PRRT_1"));
         assert_ne!(thread_key("PRRT_1"), thread_key("PRRT_2"));
         assert_ne!(outdated_key("a.rs"), thread_key("a.rs"));
+    }
+
+    #[gpui::test]
+    fn a_thread_reveal_before_the_diff_keeps_its_side_and_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let tab = cx.new(|cx| ChangeRequestTab::new(
+            crate::forge_source::testing::reference(101), String::new(), std::env::temp_dir(), cx,
+        ));
+        tab.update(cx, |tab, cx| {
+            let old = ReviewThread { side: Side::Old, resolved: true, ..thread("old", "a.rs", Some(4), Some(1)) };
+            tab.apply_threads(Ok(Listing { items: vec![old], truncated: false }), cx);
+            tab.reveal_thread("old", cx).expect("a loaded thread");
+            assert_eq!(tab.inner, InnerTab::Files);
+            assert_eq!(tab.pending_reveal, Some((PathBuf::from("a.rs"), AnnotationSide::Old, Some(4), Some(thread_key("old")))));
+            assert!(tab.thread_views[&thread_key("old")].read(cx).expanded);
+            assert_eq!(tab.reveal_thread("missing", cx), Err("no thread missing".to_string()));
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn opening_and_toggling_threads_updates_their_fold_and_report(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let tab = cx.new(|cx| ChangeRequestTab::new(
+            crate::forge_source::testing::reference(101), String::new(), std::env::temp_dir(), cx,
+        ));
+        tab.update(cx, |tab, cx| {
+            let resolved = ReviewThread { resolved: true, ..thread("r", "a.rs", Some(4), Some(1)) };
+            let outdated = ReviewThread { outdated: true, ..thread("o", "a.rs", Some(5), Some(2)) };
+            let file = ReviewThread { file_level: true, ..thread("f", "a.rs", None, Some(3)) };
+            let draft = ReviewThread { comments: vec![comment("p", Some(4), true)], ..thread("d", "a.rs", Some(6), None) };
+            tab.apply_threads(Ok(Listing { items: vec![resolved, outdated, file, draft], truncated: false }), cx);
+            tab.toggle_thread("r", cx).unwrap();
+            assert!(tab.thread_views[&thread_key("r")].read(cx).expanded);
+            tab.toggle_thread("o", cx).unwrap();
+            assert!(tab.outdated_views["a.rs"].read(cx).open);
+            tab.reveal_thread("o", cx).unwrap();
+            assert!(tab.outdated_views["a.rs"].read(cx).open, "reveal must open, rather than toggle, the section");
+            assert_eq!(tab.pending_reveal.as_ref().unwrap().3, Some(outdated_key("a.rs")));
+            assert_eq!(tab.toggle_thread("missing", cx), Err("no thread missing".to_string()));
+            let report: HashMap<_, _> = tab.report(cx).into_iter().collect();
+            assert_eq!(report["threads_open"], "2");
+            assert_eq!(report["threads_resolved"], "1");
+            assert_eq!(report["threads_outdated"], "1");
+            assert_eq!(report["threads_file"], "1");
+            tab.toggle_thread("o", cx).unwrap();
+            tab.reveal_thread("f", cx).unwrap();
+            assert_eq!(tab.pending_reveal, Some((PathBuf::from("a.rs"), AnnotationSide::New, None, None)));
+            assert!(!tab.outdated_views["a.rs"].read(cx).open, "a file-level reveal must not open an unrelated outdated section");
+            let changes = cx.new(|cx| ChangesTab::for_range(std::env::temp_dir(), "base".into(), "head".into(), cx));
+            tab.range = RangeState::Ready {
+                revisions: Revisions { base_sha: "base".into(), head_sha: "head".into(), start_sha: None },
+                changes,
+            };
+            tab.push_annotations(cx);
+            tab.toggle_thread("r", cx).unwrap();
+        });
+        // The owner must read the revisions after the toggling entity's
+        // update finishes, even when a diff is already receiving the cards.
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, cx| {
+            let report: HashMap<_, _> = tab.report(cx).into_iter().collect();
+            assert_eq!(report["thread_rows"], "r:hidden:folded|outdated:a.rs:1:folded");
+            assert_eq!(tab.annotations_for(cx)[0].revision, 2);
+        });
+    }
+
+    mod merge_threads {
+        use super::*;
+        use sirio_forge::{LineComment, TimelineItem, ReviewOutcome, EventKind};
+        fn timeline() -> Vec<TimelineItem> {
+            vec![
+                TimelineItem::Comment { author: "a".into(), body: "x".into(), at: Some(10), edit: None },
+                TimelineItem::LineComment(LineComment { author: "b".into(), path: "a.rs".into(), line: Some(4), body: "y".into(), at: Some(15) }),
+                TimelineItem::Review { author: "c".into(), outcome: ReviewOutcome::Commented, body: String::new(), at: Some(30), line_comments: Vec::new(), edit: None },
+                TimelineItem::Event { actor: None, kind: EventKind::Merged, at: None },
+            ]
+        }
+
+        #[test]
+        fn line_comments_leave_the_timeline_and_threads_join_it_by_time() {
+            let t1 = thread("t1", "a.rs", Some(1), Some(20));
+            let t2 = thread("t2", "a.rs", Some(2), Some(5));
+            let t3 = ReviewThread { comments: vec![comment("p", Some(1), true)], ..thread("t3", "a.rs", Some(3), None) };
+            let t4 = thread("t4", "a.rs", Some(4), None);
+            let threads = [t1, t2, t3, t4];
+            assert_eq!(
+                merge_threads(&timeline(), &threads),
+                vec![
+                    ConversationEntry::Thread(1),
+                    ConversationEntry::Item(0),
+                    ConversationEntry::Thread(0),
+                    ConversationEntry::Item(2),
+                    ConversationEntry::Item(3),
+                    ConversationEntry::Thread(3),
+                ]
+            );
+        }
+
+        #[test]
+        fn with_no_threads_loaded_the_timeline_is_unchanged() {
+            assert_eq!(
+                merge_threads(&timeline(), &[]),
+                (0..4).map(ConversationEntry::Item).collect::<Vec<_>>()
+            );
+        }
     }
 }
