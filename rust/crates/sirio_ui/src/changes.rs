@@ -1926,7 +1926,7 @@ impl ChangesTab {
                         _ => reveal_anchor_target(&rows, &path, side, line),
                     };
                     if let Some(index) = target {
-                        self.list_state.scroll_to_reveal_item(index);
+                        self.scroll_to_row(index);
                     }
                 }
             }
@@ -1938,15 +1938,25 @@ impl ChangesTab {
                 let settled = self.diffs.contains_key(path) || self.diff_errors.contains_key(path) || !listed;
                 if settled {
                     self.reveal_annotation = None;
+                    // A card is shown under the line it follows.
                     let target = reveal_annotation(&rows, key)
+                        .map(|index| index.saturating_sub(1))
                         .or_else(|| reveal_anchor_target(&rows, path, AnnotationSide::New, None));
                     if let Some(index) = target {
-                        self.list_state.scroll_to_reveal_item(index);
+                        self.scroll_to_row(index);
                     }
                 }
             }
         }
         Rc::new(rows)
+    }
+
+    /// Puts row `index` at the top of the view. A reveal runs in the rebuild
+    /// that spliced the list, when no row has a measured height yet, and
+    /// `scroll_to_reveal_item` works from measured heights: it would read
+    /// the target as already in view and leave the view where it was.
+    fn scroll_to_row(&self, index: usize) {
+        self.list_state.scroll_to(gpui::ListOffset { item_ix: index, offset_in_item: px(0.0) });
     }
 
     fn render_change_row(
@@ -4301,6 +4311,24 @@ mod tests {
             let rows = tab.sync_list_rows(rows);
             assert!(reveal_annotation(&rows, 1).is_some());
             assert!(tab.reveal_annotation.is_none());
+        });
+    }
+
+    /// A reveal is handled by the same rebuild that splices the list, when no
+    /// row has been measured yet: it must still bring the card to the top of
+    /// the view, not leave the view where it was.
+    #[gpui::test]
+    async fn a_reveal_brings_its_card_into_view_before_any_row_is_measured(cx: &mut TestAppContext) {
+        let tab = cx.new(|_| sample_tab(Vec::new()));
+        tab.update(cx, |tab, cx| {
+            tab.set_annotations(vec![thread_at(1, "a.rs", AnnotationSide::New, 22)], HashMap::new(), cx);
+            tab.focus_anchor(Path::new("a.rs"), AnnotationSide::New, Some(22), Some(1), cx);
+            let rows = tab.section_rows(DiffViewMode::Unified);
+            let rows = tab.sync_list_rows(rows);
+            let card = reveal_annotation(&rows, 1).expect("the card is drawn");
+            let top = tab.list_state.logical_scroll_top().item_ix;
+            assert!(card > 2, "the card sits below the file's first rows ({card})");
+            assert!(top > 0 && top <= card, "the view starts at row {top}; the card is row {card}");
         });
     }
 

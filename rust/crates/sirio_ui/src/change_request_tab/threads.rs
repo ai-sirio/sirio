@@ -37,7 +37,8 @@ pub(crate) fn merge_threads(timeline: &[TimelineItem], threads: &[ReviewThread])
     let mut entries = Vec::new();
     for (index, item) in timeline.iter().enumerate() {
         let at = match item {
-            TimelineItem::LineComment(_) => continue,
+            TimelineItem::LineComment(comment) if held_by_a_thread(comment, threads) => continue,
+            TimelineItem::LineComment(comment) => comment.at,
             TimelineItem::Comment { at, .. } | TimelineItem::Review { at, .. }
                 | TimelineItem::Event { at, .. } => *at,
         };
@@ -50,6 +51,15 @@ pub(crate) fn merge_threads(timeline: &[TimelineItem], threads: &[ReviewThread])
     }
     entries.extend(pending.map(|(index, _)| ConversationEntry::Thread(index)));
     entries
+}
+
+/// Whether a loaded thread carries this line comment: same file, author and
+/// words. One that none carries (a list cut short) stays in the timeline.
+fn held_by_a_thread(comment: &sirio_forge::LineComment, threads: &[ReviewThread]) -> bool {
+    threads.iter().any(|thread| {
+        thread.path == comment.path
+            && thread.comments.iter().any(|held| held.author == comment.author && held.body == comment.body)
+    })
 }
 
 /// How much of an outdated thread's quoted code is shown.
@@ -222,6 +232,11 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// Only the header is drawn.
+    pub(crate) fn folded(&self) -> bool {
+        !self.expanded
+    }
+
     pub fn open(&mut self, cx: &mut Context<Self>) {
         if !self.expanded {
             self.expanded = true;
@@ -253,8 +268,8 @@ impl Render for ThreadView {
         let theme = *Theme::get(cx);
         let thread = &self.thread;
         let published = thread.comments.iter().filter(|comment| !comment.pending).count();
-        let folded = thread.resolved && !self.expanded;
-        let summary = if folded {
+        let folded = self.folded();
+        let summary = if folded && thread.resolved {
             let who = thread
                 .resolved_by
                 .clone()
@@ -275,7 +290,7 @@ impl Render for ThreadView {
             .cursor_pointer()
             .child(EIcon::new(IconName::MessageSquare).size(EIconSize::Sm))
             .child(div().text_color(theme.ely.fg_muted).child(summary))
-            .when(thread.side == Side::Old && !folded, |this| {
+            .when(thread.side == Side::Old && !(folded && thread.resolved), |this| {
                 this.child(Tag::new(("change-request-thread-old", self.key), "old"))
             })
             .when(thread.resolved && !folded, |this| {
@@ -496,7 +511,7 @@ impl ChangeRequestTab {
                 } else {
                     let id = self.thread_ids.get(&row.key)?;
                     let view = self.thread_views.get(&row.key)?.read(cx);
-                    Some(format!("{id}:{}:{}", row.placed, if view.thread.resolved && !view.expanded { "folded" } else { "open" }))
+                    Some(format!("{id}:{}:{}", row.placed, if view.folded() { "folded" } else { "open" }))
                 }
             }).collect::<Vec<_>>().join("|"),
             _ => String::new(),
@@ -511,7 +526,55 @@ impl ChangeRequestTab {
             ("threads_file".to_string(), count(|thread| thread.file_level)),
             ("thread_rows".to_string(), rows),
             ("conversation_threads".to_string(), conversation.to_string()),
+            ("threads_notice".to_string(), self.threads_notice().map(|(_, text, _)| text).unwrap_or_default()),
         ]
+    }
+
+    /// What Files says above the diff about the thread read: a failure or a
+    /// stale answer, which Retry reads again, or a list the forge cut short.
+    pub(super) fn threads_notice(&self) -> Option<(Severity, String, bool)> {
+        match &self.threads {
+            Slot::Failed(error) => Some((Severity::Danger, format!("Review threads could not be read: {error}"), true)),
+            Slot::Loaded { stale: Some(error), .. } => {
+                Some((Severity::Warning, format!("Review threads may be out of date: {error}"), true))
+            }
+            Slot::Loaded { value, stale: None } if value.truncated => Some((
+                Severity::Info,
+                "Only the first review threads are shown; the rest are on the forge.".to_string(),
+                false,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The notice as drawn above the diff, with Retry when reading again helps.
+    pub(super) fn render_threads_notice(&self, theme: &Theme, entity: &Entity<Self>) -> Option<AnyElement> {
+        let (severity, text, retry) = self.threads_notice()?;
+        let entity = entity.clone();
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .pb(px(6.0))
+                .child(ely_ui::message(severity, text, theme))
+                .when(retry, |this| {
+                    this.child(ely_ui::text_button(
+                        "change-request-threads-retry",
+                        "Retry",
+                        Some(IconName::RefreshCw),
+                        ButtonState::IDLE,
+                        move |_, cx| entity.update(cx, |tab, cx| tab.retry_threads(cx)),
+                    ))
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The Retry under a failed or stale thread read.
+    pub(crate) fn retry_threads(&mut self, cx: &mut Context<Self>) {
+        self.load_threads(cx);
     }
 
     /// Reads every thread on the background executor; a later call's answer
@@ -794,7 +857,8 @@ mod tests {
         fn timeline() -> Vec<TimelineItem> {
             vec![
                 TimelineItem::Comment { author: "a".into(), body: "x".into(), at: Some(10), edit: None },
-                TimelineItem::LineComment(LineComment { author: "b".into(), path: "a.rs".into(), line: Some(4), body: "y".into(), at: Some(15) }),
+                // Held by the loaded threads below: `thread` writes bob's "b" on a.rs.
+                TimelineItem::LineComment(LineComment { author: "bob".into(), path: "a.rs".into(), line: Some(4), body: "b".into(), at: Some(15) }),
                 TimelineItem::Review { author: "c".into(), outcome: ReviewOutcome::Commented, body: String::new(), at: Some(30), line_comments: Vec::new(), edit: None },
                 TimelineItem::Event { actor: None, kind: EventKind::Merged, at: None },
             ]
@@ -816,6 +880,29 @@ mod tests {
                     ConversationEntry::Item(2),
                     ConversationEntry::Item(3),
                     ConversationEntry::Thread(3),
+                ]
+            );
+        }
+
+        /// A list cut short (GitLab pages every discussion, system notes
+        /// included) may lack the thread a line comment belongs to: the
+        /// comment then stays where it was instead of vanishing from both
+        /// the Conversation and the diff.
+        #[test]
+        fn a_line_comment_no_loaded_thread_holds_stays_in_place() {
+            let mut items = timeline();
+            items.insert(2, TimelineItem::LineComment(LineComment {
+                author: "dave".into(), path: "b.rs".into(), line: Some(9), body: "lost?".into(), at: Some(25),
+            }));
+            let threads = [thread("t1", "a.rs", Some(1), Some(20))];
+            assert_eq!(
+                merge_threads(&items, &threads),
+                vec![
+                    ConversationEntry::Item(0),
+                    ConversationEntry::Thread(0),
+                    ConversationEntry::Item(2),
+                    ConversationEntry::Item(3),
+                    ConversationEntry::Item(4),
                 ]
             );
         }

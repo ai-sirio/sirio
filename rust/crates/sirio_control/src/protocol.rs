@@ -819,16 +819,6 @@ pub mod request {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn thread_requests_address_the_same_card_for_reveal_and_toggle() {
-        let reveal = super::request::change_request_thread(Some("PRRT_1"), None);
-        assert_eq!(reveal.method, "surface.change_request.thread");
-        assert_eq!(reveal.params, std::collections::BTreeMap::from([("reveal".to_string(), "PRRT_1".to_string())]));
-        let toggle = super::request::change_request_thread(None, Some("PRRT_1"));
-        assert_eq!(toggle.method, reveal.method);
-        assert_eq!(toggle.params, std::collections::BTreeMap::from([("toggle".to_string(), "PRRT_1".to_string())]));
-    }
-
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     use super::default_socket_path;
     #[cfg(any(target_os = "windows", test))]

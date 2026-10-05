@@ -758,6 +758,11 @@ impl ChangeRequestTab {
                     changes: changes.clone(),
                 };
                 self.push_annotations(cx);
+                // A new head moves the lines threads sit on; the CI timer that
+                // noticed it reads no threads, so they are read for it here.
+                if was_ready {
+                    self.load_threads(cx);
+                }
                 if let Some((path, side, line, key)) = self.pending_reveal.take() {
                     changes.update(cx, |changes, cx| changes.focus_anchor(&path, side, line, key, cx));
                 }
@@ -2077,6 +2082,7 @@ impl ChangeRequestTab {
                             this.child(div().text_color(theme.ely.fg_subtle).child(notice))
                         }),
                 )
+                .children(self.render_threads_notice(theme, entity))
                 .child(div().flex_1().min_h(px(0.0)).child(changes.clone()))
                 .into_any_element(),
             RangeState::Fetching => div()
@@ -2915,6 +2921,113 @@ mod tests {
                 RangeState::Ready { changes, .. } => changes.read(cx).expanded_paths() == opened,
                 _ => false,
             })
+        });
+    }
+
+    fn threads_json(nodes: Vec<serde_json::Value>) -> String {
+        serde_json::json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes
+        }}}}})
+        .to_string()
+    }
+
+    /// One unresolved thread on new-side `line` of a.txt, with one comment.
+    fn thread_node(id: &str, line: u32) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "isResolved": false, "isOutdated": false, "path": "a.txt",
+            "line": line, "startLine": null, "originalLine": line, "originalStartLine": null,
+            "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "LINE",
+            "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+            "resolvedBy": null,
+            "comments": {"nodes": [{
+                "id": format!("{id}-c"), "author": {"login": "bob"}, "body": "Handle it.",
+                "createdAt": "2026-09-20T10:00:00Z", "diffHunk": "",
+                "pullRequestReview": {"state": "COMMENTED"}
+            }]}
+        })
+    }
+
+    /// The CI timer's refresh reads no threads, but a new head it brings
+    /// rebuilds the diff: the threads are read again for that head, or the
+    /// cards keep the old head's lines.
+    #[gpui::test]
+    async fn a_new_head_from_the_ci_timer_reads_the_threads_again(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff" && report_value(tab, cx, "threads_open") == "1"
+            })
+        });
+        let reads = forge.count("ChangeRequestThreads");
+        let newer = push_another(&repo.0);
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &newer),
+        );
+        tab.update(cx, |tab, cx| tab.refresh_header(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "head") == newer[..7] && report_value(tab, cx, "files_mode") == "diff"
+            })
+        });
+        pump_until(cx, || forge.count("ChangeRequestThreads") > reads);
+    }
+
+    /// A thread read that fails says so in Files, and its Retry reads again;
+    /// the diff is not left without cards and without a reason.
+    #[gpui::test]
+    async fn a_failed_thread_read_says_so_and_retry_reads_again(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.fail("ChangeRequestThreads", 500);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff" && !report_value(tab, cx, "threads_notice").is_empty()
+            })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert!(
+                report_value(tab, cx, "threads_notice").starts_with("Review threads could not be read"),
+                "{}",
+                report_value(tab, cx, "threads_notice")
+            );
+        });
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        tab.update(cx, |tab, cx| tab.retry_threads(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "threads_notice").is_empty() && report_value(tab, cx, "threads_open") == "1"
+            })
+        });
+    }
+
+    /// An unresolved card folds from its header like a resolved one: a header
+    /// that takes the click and changes nothing would be a dead control.
+    #[gpui::test]
+    async fn an_open_thread_folds_from_its_header(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        let source = FakeSource::ready(testing::github_client(forge), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff" && report_value(tab, cx, "threads_open") == "1"
+            })
+        });
+        tab.update(cx, |tab, cx| tab.reveal_thread("PRRT_1", cx)).expect("a loaded thread");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:open")
+        });
+        tab.update(cx, |tab, cx| tab.toggle_thread("PRRT_1", cx)).expect("a loaded thread");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:folded")
         });
     }
 
