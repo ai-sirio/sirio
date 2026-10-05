@@ -40,9 +40,15 @@ over the 1.5 s after the kill.
 | Linux | `systemd-run --user --scope`, plus `setsid` (`SystemdScope`) | `sigkill` | `kill -9` of the parent | 2026-10-05, this machine: PASS |
 | Linux | same | `scope` | the desktop stopping the app's `app-*.scope` | 2026-10-05, this machine: PASS |
 | Linux | `setsid` alone (`Setsid`, when no user manager answers) | `sigkill` | `kill -9` of the parent | 2026-10-05, this machine, run with `XDG_RUNTIME_DIR` unset: PASS. Not offered against a scope stop — see below |
-| macOS | `launchctl bootstrap gui/<uid>` of a generated plist (`Launchd`) | `sigkill` | `kill -9` of the parent | CI, `macos-check.yml` (Task 11) |
+| macOS | `launchctl bootstrap gui/<uid>` of a generated plist (`Launchd`) | `sigkill` | `kill -9` of the parent | pending: `macos-check.yml` (`macos-15`) runs it on every pull request |
 | macOS | same | Force Quit | the app's coalition being terminated | manual, procedure below — not yet run |
-| Windows | `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB` (`WindowsBreakaway`) | `job` | a job object with kill-on-close around the app | CI, `windows-check.yml` (Task 11) |
+| Windows | `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB` (`WindowsBreakaway`) | `job` | a job object with kill-on-close around the app | pending: `windows-check.yml` (`windows-latest`) runs it on every pull request |
+
+The two `pending` rows have not run yet: `macos-check.yml` and
+`windows-check.yml` run the probe, then the lifecycle E2E, on every pull
+request, and these rows are filled from this branch's first CI run, with the
+run's URL. Until then they are claims this document does not make. The
+Force Quit row is manual and stays so (below).
 
 The `setsid` arm is not a defence against a scope stop: a cgroup scope kills
 every process in it whatever its session. It is chosen only when no user

@@ -160,7 +160,7 @@ whether a process with the recorded pid exists with the recorded start time
 |---|---|---|
 | `Live` | the endpoint completes the handshake | adopt it |
 | `Unverifiable` | no handshake, but the lock is held, or the pid exists with the same start time | wait and retry with backoff (up to 10 s), then report it; **never** start a second host, **never** signal |
-| `Absent` | lock free, and the pid is gone or its start time differs (recycled pid) | clean the stale endpoint and state file, start a host |
+| `Absent` | lock free, and the pid is gone or its start time differs (recycled pid) | start a host; the new host's bind replaces a stale socket and its state file overwrites the stale one — the client deletes nothing (two clients that both saw `Absent` must not delete a live winner's socket) |
 
 ### §5.3 Starting a host (`ensure_host`)
 
@@ -181,7 +181,7 @@ The host must not belong to anything that dies with the app:
 | Platform | Mechanism | Protects against |
 |---|---|---|
 | Linux | `systemd-run --user --scope --unit=sirio-host-v<N>-<rand>` when a user systemd instance answers; otherwise double fork and `setsid` | the desktop closing the app's `app-*.scope` (orca's `KillMode` finding) |
-| macOS | a launchd job loaded on demand (`launchctl bootstrap gui/<uid>` of a plist generated under the data root, label `<bundle-id>.host.v<N>`, `RunAtLoad`, no `KeepAlive`) | Force Quit terminating the app's coalition (unpeel's finding, 2026-09-06) |
+| macOS | a launchd job loaded on demand (`launchctl bootstrap gui/<uid>` of a plist generated under the data root, label `<bundle-id>.host.v<N>`, `RunAtLoad`, no `KeepAlive`; the client consults `launchctl print` first and never boots out a job that is running — it is a concurrent client's host) | Force Quit terminating the app's coalition (unpeel's finding, 2026-09-06) |
 | Windows | `CreateProcessW` with `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB \| CREATE_NO_WINDOW` from the copy under the data root | a job object with kill-on-close around the app |
 
 **This table is a hypothesis until the probe confirms it.** The first task of
@@ -197,9 +197,10 @@ file), its working directory is the data root, and it ignores `SIGHUP`.
 
 In `on-demand` mode, after **60 s with zero sessions and zero connected
 clients**, the host exits in this order: stop accepting, remove the
-endpoint, remove its state file, release the lock (by exiting). A client
-that connects inside the window resets it. A client that loses the race
-sees `Absent` or `Unverifiable` and goes through §5.3 again.
+endpoint, remove its state file, release the lock (by exiting). The window
+is measured from the last client or session activity, not sampled: a client
+that connects inside it resets it. A client that loses the race sees
+`Absent` or `Unverifiable` and goes through §5.3 again.
 
 ### §5.6 Drain across a major
 
@@ -271,7 +272,11 @@ records for un-negotiated opcodes.
 - Request: `{id: u64, method: string, params: object}`.
 - Response: `{id, result: object}` or `{id, error: {code, message}}`. Codes
   are a closed enum on the host and an open one on the client
-  (`#[serde(other)] Other`).
+  (`#[serde(other)] Other`): `unknown_method`, `invalid_params`,
+  `sessions_live`, `stale_generation`, `handshake_required`, `frame_error`
+  and `internal`. A frame-level refusal after a parsed header (§6.1) is
+  answered `{id: 0, error: {code: "frame_error"}}`; a wrong magic is not a
+  frame at all, and the connection closes with zero bytes.
 - Event: `{subscription: u64, seq: u64, payload: object}`; `seq` is
   monotonic per subscription, so a client that reconnects knows where it
   stopped.
@@ -325,7 +330,7 @@ Written here as the contract every later sub-project inherits:
 | Name | Kind | Capability | Effect |
 |---|---|---|---|
 | `host.ping` | method | `host.v1` | none |
-| `host.info` | method | `host.v1` | none — `{version, pid, mode, sessions, clients, uptime_s, generation}` |
+| `host.info` | method | `host.v1` | none — `{version, pid, mode, sessions, clients, uptime_s, generation, protocol: {major, minor}}` |
 | `host.shutdown {force}` | method | `host.v1` | stops the host; `sessions_live` unless `force` |
 | `host.state` | topic | `host.v1` | events `{clients, sessions, mode, draining}` on change |
 | `host.debug.hold_session {held}` | method | none — **debug builds only**, absent from the ledger, answered `unknown_method` by a release build | counts a fake session, so tests can exercise `sessions_live` and drain before SP2 brings real sessions |
