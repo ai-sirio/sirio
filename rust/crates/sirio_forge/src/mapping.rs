@@ -2,10 +2,12 @@
 //! unknown value lands on a neutral member: a forge adding a state must
 //! never make a list fail to draw.
 
+use crate::action::ReviewTarget;
 use crate::model::{
-    AnchorLine, BlockReason, Capabilities, ChangeState, CheckStatus, CiState, EventKind,
-    FileChangeKind, LineAnchor, LineKind, MergeCapability, MergeMethod, MergeMethods, MergeVerdict,
-    Progress, ReviewOutcome, ReviewState, Revisions, Side,
+    AnchorLine, BlockReason, Capabilities, ChangeState, CheckStatus, CiState, CommentKind,
+    CommentRef, Draft, EventKind, FileChangeKind, LineAnchor, LineKind, MergeCapability, MergeMethod,
+    MergeMethods, MergeVerdict, Progress, ReviewOutcome, ReviewState, ReviewThread, Revisions, Side,
+    ThreadComment,
 };
 use serde_json::{Value, json};
 
@@ -65,6 +67,120 @@ pub(crate) fn github_line_comment(anchor: &LineAnchor, head: &str, body: &str) -
         comment["start_side"] = json!(side);
     }
     comment
+}
+
+/// A new thread of GitHub's pending review, as `DraftPullRequestReviewThread`
+/// and `AddPullRequestReviewThreadInput` both name it.
+pub(crate) fn github_draft_thread(anchor: &LineAnchor, body: &str) -> Value {
+    let side = match anchor.side {
+        Side::Old => "LEFT",
+        Side::New => "RIGHT",
+    };
+    let mut thread = json!({ "body": body, "path": anchor.path, "side": side });
+    if let Some(line) = anchor.line.on(anchor.side) {
+        thread["line"] = json!(line);
+    }
+    if let Some(start) = anchor.start.and_then(|start| start.on(anchor.side)) {
+        thread["startLine"] = json!(start);
+        thread["startSide"] = json!(side);
+    }
+    thread
+}
+
+/// The viewer's pending review, from a pull request read with
+/// `pendingReview: reviews(states: [PENDING], first: 1)`: GitHub shows a
+/// pending review to its author alone.
+pub(crate) fn github_pending_review(node: &Value) -> Option<Draft> {
+    let review = node.pointer("/pendingReview/nodes/0")?;
+    Some(Draft {
+        id: Some(review.get("id")?.as_str()?.to_string()),
+        comments: review
+            .pointer("/comments/totalCount")
+            .and_then(Value::as_u64)
+            .map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX)),
+    })
+}
+
+/// GitLab's REST discussion id: the hex its GraphQL global id ends with.
+pub(crate) fn gitlab_discussion_rest_id(id: &str) -> &str {
+    id.rsplit('/').next().unwrap_or(id)
+}
+
+/// GitLab's draft notes as a `Draft`: they have no review id.
+pub(crate) fn gitlab_draft(notes: &[Value]) -> Option<Draft> {
+    (!notes.is_empty()).then(|| Draft {
+        id: None,
+        comments: u32::try_from(notes.len()).unwrap_or(u32::MAX),
+    })
+}
+
+/// The body of `POST …/draft_notes`: a position like a line comment's, or
+/// the discussion a reply answers.
+pub(crate) fn gitlab_draft_note(target: &ReviewTarget, body: &str) -> Value {
+    match target {
+        ReviewTarget::Line { anchor, revisions } => {
+            json!({ "note": body, "position": gitlab_position(anchor, revisions) })
+        }
+        ReviewTarget::Reply { thread } => {
+            json!({ "note": body, "in_reply_to_discussion_id": gitlab_discussion_rest_id(thread) })
+        }
+    }
+}
+
+/// GitLab's draft notes placed among the threads (B3c revision (f)): a reply
+/// joins its discussion as a pending comment; a note on a line is a thread of
+/// its own that only its author sees; a note on neither is the review's
+/// summary, and a reply whose discussion is not listed has nowhere to go.
+pub(crate) fn gitlab_drafts_into(threads: &mut Vec<ReviewThread>, notes: &[Value], author: &str, head: Option<&str>) {
+    for note in notes {
+        let Some(id) = note.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let comment = ThreadComment {
+            id: format!("gid://gitlab/DraftNote/{id}"),
+            author: author.to_string(),
+            body: note.get("note").and_then(Value::as_str).unwrap_or_default().to_string(),
+            at: None,
+            edit: Some(CommentRef { id: id.to_string(), kind: CommentKind::Draft }),
+            pending: true,
+        };
+        if let Some(discussion) = note.get("discussion_id").and_then(Value::as_str) {
+            if let Some(thread) = threads.iter_mut().find(|thread| gitlab_discussion_rest_id(&thread.id) == discussion) {
+                thread.comments.push(comment);
+            }
+            continue;
+        }
+        let Some(position) = note
+            .get("position")
+            .filter(|position| position.get("position_type").and_then(Value::as_str) == Some("text"))
+        else {
+            continue;
+        };
+        let number = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).and_then(|line| u32::try_from(line).ok());
+        let (side, line) = gitlab_anchor(number(position, "new_line"), number(position, "old_line"));
+        let Some(path) = ["new_path", "old_path"].iter().find_map(|key| position.get(*key).and_then(Value::as_str)) else {
+            continue;
+        };
+        let start_line = position.pointer("/line_range/start").and_then(|start| match side {
+            Side::New => number(start, "new_line"),
+            Side::Old => number(start, "old_line"),
+        });
+        threads.push(ReviewThread {
+            id: format!("draft-note:{id}"),
+            path: path.to_string(),
+            side,
+            line,
+            start_line: start_line.filter(|start| Some(*start) != line),
+            outdated: gitlab_thread_outdated(position.get("head_sha").and_then(Value::as_str), head),
+            resolved: false,
+            resolved_by: None,
+            diff_hunk: None,
+            can_reply: false,
+            can_resolve: false,
+            file_level: false,
+            comments: vec![comment],
+        });
+    }
 }
 
 pub(crate) fn github_change_state(state: &str, is_draft: bool) -> ChangeState {
@@ -1404,5 +1520,95 @@ mod tests {
         );
         assert_eq!(range["line"], 43);
         assert_eq!((range["start_line"].as_u64(), range["start_side"].as_str()), (Some(41), Some("RIGHT")));
+    }
+
+    #[test]
+    fn a_github_draft_thread_names_its_side_and_a_range_its_start_in_camel_case() {
+        let single = anchor(Side::New, at(LineKind::Added, 0, 43), None);
+        assert_eq!(
+            github_draft_thread(&single, "One line."),
+            json!({ "body": "One line.", "path": "src/login.rs", "line": 43, "side": "RIGHT" })
+        );
+        let range = anchor(Side::Old, at(LineKind::Removed, 42, 42), Some(at(LineKind::Context, 40, 40)));
+        assert_eq!(
+            github_draft_thread(&range, "A range."),
+            json!({ "body": "A range.", "path": "src/login.rs", "line": 42, "side": "LEFT", "startLine": 40, "startSide": "LEFT" })
+        );
+    }
+
+    #[test]
+    fn the_viewer_s_pending_review_is_its_id_and_comment_count() {
+        let node = json!({ "pendingReview": { "nodes": [ { "id": "PRR_9", "comments": { "totalCount": 3 } } ] } });
+        assert_eq!(github_pending_review(&node), Some(Draft { id: Some("PRR_9".into()), comments: 3 }));
+        assert_eq!(github_pending_review(&json!({ "pendingReview": { "nodes": [] } })), None);
+        assert_eq!(github_pending_review(&json!({})), None, "a server that did not answer the field");
+    }
+
+    #[test]
+    fn gitlab_s_rest_discussion_id_is_the_tail_of_the_global_id() {
+        assert_eq!(gitlab_discussion_rest_id("gid://gitlab/Discussion/3f2a9c"), "3f2a9c");
+        assert_eq!(gitlab_discussion_rest_id("3f2a9c"), "3f2a9c");
+    }
+
+    #[test]
+    fn gitlab_s_draft_is_the_count_of_its_notes_and_none_without_any() {
+        assert_eq!(gitlab_draft(&[]), None);
+        assert_eq!(gitlab_draft(&[json!({ "id": 1 }), json!({ "id": 2 })]), Some(Draft { id: None, comments: 2 }));
+    }
+
+    #[test]
+    fn a_gitlab_draft_note_carries_a_position_or_the_discussion_it_answers() {
+        let target = ReviewTarget::Line { anchor: anchor(Side::New, at(LineKind::Added, 7, 43), None), revisions: revisions(Some("s")) };
+        let note = gitlab_draft_note(&target, "Here.");
+        assert_eq!(note["note"], "Here.");
+        assert_eq!(note["position"], gitlab_position(
+            match &target { ReviewTarget::Line { anchor, .. } => anchor, _ => unreachable!() },
+            match &target { ReviewTarget::Line { revisions, .. } => revisions, _ => unreachable!() },
+        ));
+        assert!(note.get("in_reply_to_discussion_id").is_none());
+        let reply = gitlab_draft_note(&ReviewTarget::Reply { thread: "gid://gitlab/Discussion/ab12".into() }, "Agreed.");
+        assert_eq!(reply, json!({ "note": "Agreed.", "in_reply_to_discussion_id": "ab12" }));
+    }
+
+    #[test]
+    fn gitlab_draft_notes_join_their_discussion_or_stand_alone_on_their_line() {
+        let published = ReviewThread {
+            id: "gid://gitlab/Discussion/ab12".into(),
+            path: "src/login.rs".into(),
+            side: Side::New,
+            line: Some(12),
+            start_line: None,
+            outdated: false,
+            resolved: false,
+            resolved_by: None,
+            diff_hunk: None,
+            can_reply: true,
+            can_resolve: true,
+            file_level: false,
+            comments: vec![],
+        };
+        let mut threads = vec![published];
+        let notes = [
+            json!({ "id": 5, "note": "A reply.", "discussion_id": "ab12", "position": null }),
+            json!({ "id": 6, "note": "On a range.", "discussion_id": null, "position": {
+                "position_type": "text", "new_path": "src/login.rs", "old_path": "src/login.rs",
+                "new_line": 43, "old_line": null, "head_sha": "head1",
+                "line_range": { "start": { "new_line": 41, "old_line": 41 }, "end": { "new_line": 43, "old_line": null } } } }),
+            json!({ "id": 7, "note": "The summary.", "discussion_id": null, "position": null }),
+            json!({ "id": 8, "note": "Old head.", "discussion_id": null, "position": {
+                "position_type": "text", "new_path": "src/login.rs", "old_path": "src/login.rs",
+                "new_line": null, "old_line": 9, "head_sha": "head0" } }),
+            json!({ "id": 9, "note": "Lost reply.", "discussion_id": "gone", "position": null }),
+        ];
+        gitlab_drafts_into(&mut threads, &notes, "fake-user", Some("head1"));
+        assert_eq!(threads.len(), 3, "a reply joins; a summary and a reply to nothing are not drawn");
+        let reply = &threads[0].comments[0];
+        assert_eq!((reply.id.as_str(), reply.author.as_str(), reply.body.as_str(), reply.pending), ("gid://gitlab/DraftNote/5", "fake-user", "A reply.", true));
+        assert_eq!(reply.edit, Some(CommentRef { id: "5".into(), kind: CommentKind::Draft }));
+        let range = &threads[1];
+        assert_eq!((range.id.as_str(), range.side, range.line, range.start_line, range.outdated), ("draft-note:6", Side::New, Some(43), Some(41), false));
+        assert_eq!((range.can_reply, range.can_resolve, range.resolved), (false, false, false));
+        let old = &threads[2];
+        assert_eq!((old.side, old.line, old.start_line, old.outdated), (Side::Old, Some(9), None, true));
     }
 }
