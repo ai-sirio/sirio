@@ -3767,6 +3767,39 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_composer_opened_during_a_review_offers_to_add_to_it(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![]));
+        forge.answer(
+            "ChangeRequestHeader",
+            with_pending_review(
+                testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &head),
+                "PRR_1",
+                1,
+            ),
+        );
+        forge.answer("ChangeRequestActionContext", with_pending_review(action_context_json(&head), "PRR_1", 1));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff"
+                    && report_value(tab, cx, "commentable") == "yes"
+            })
+        });
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |changes, cx| changes.focus_path(Path::new("a.txt"), cx));
+        pump_until(cx, || changes.read_with(cx, |changes, _| {
+            changes.comment_anchor(Path::new("a.txt"), AnnotationSide::New, 43, None).is_ok()
+        }));
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.composer_in_review(cx), Some(true));
+        });
+    }
+
+    #[gpui::test]
     async fn a_rate_paused_send_shows_its_refusal_under_the_composer(cx: &mut TestAppContext) {
         let (tab, forge, _repo, _head) = composing(cx).await;
         tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");

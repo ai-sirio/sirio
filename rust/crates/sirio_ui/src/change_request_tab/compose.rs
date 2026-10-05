@@ -276,6 +276,10 @@ impl ChangeRequestTab {
                 let owner = cx.entity().downgrade();
                 let view = cx.new(|_| ComposerView::new(&anchor, owner));
                 self.line_composer = Some(LineComposer { anchor: anchor.clone(), revisions, view });
+                // A fresh composer starts from a default status: pick up the
+                // tab's write state (e.g. a review already in progress) now.
+                // A re-anchored composer already has a status.
+                self.sync_writes(cx);
             }
         }
         self.push_annotations(cx);
@@ -426,6 +430,11 @@ impl ChangeRequestTab {
     #[cfg(test)]
     pub(crate) fn composer_text(&self, cx: &App) -> Option<String> {
         self.line_composer.as_ref().map(|open| open.view.read(cx).text(cx))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_in_review(&self, cx: &App) -> Option<bool> {
+        self.line_composer.as_ref().map(|open| open.view.read(cx).write.in_review)
     }
 
     /// Every thread write goes through here: `perform`, and the field it
