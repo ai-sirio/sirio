@@ -96,8 +96,8 @@ only its protocol.
 At most one live host per **protocol major** per **data root**. The data root
 is `<data>/host/` under Sirio's per-user data directory, overridable with
 `SIRIO_HOST_HOME` for tests and isolated runs (as `SIRIO_DB` is). The
-endpoint carries the major — `host-v1.sock`, or
-`\\.\pipe\sirio-host-v1-<user-sid-hash>` on Windows — so that during a drain
+endpoint carries the major — `host-v1.sock`, which on Windows `sirio_ipc`
+maps to a per-user named pipe the same way `sirio_control` maps its own — so that during a drain
 two majors coexist without contending for one endpoint, and neither host
 needs to know about the other.
 
@@ -211,10 +211,14 @@ N−1):
 - it ensures a host of major N and starts **new** sessions there;
 - the N−1 host exits by itself once it holds no sessions (§5.5).
 
-When the client finds a host whose major it does **not** speak (newer than
-N — a downgrade — or older than N−1), the handshake returns `Refused`, the
-client does not connect, and says so (§8). In SP1 there are no sessions;
-the drain is exercised through `SIRIO_HOST_PROTOCOL_MAJOR` (§9.2).
+Because the endpoint carries the major, a client only ever reaches hosts
+of the majors it speaks. A **downgrade** — an older app beside a newer host —
+therefore does not refuse anything locally: the older app finds no host of
+its own major and starts one, and the newer host's sessions stay invisible to
+it until the app is upgraded again. `Refused` exists on the wire for a peer
+that reaches a host by another route (SP7's remote transports) and is proven
+by a conformance case. In SP1 there are no sessions; the drain is exercised
+through `SIRIO_HOST_PROTOCOL_MAJOR` (§9.2).
 
 ### §5.7 Stopping
 
@@ -274,9 +278,13 @@ records for un-negotiated opcodes.
 
 The first frame on a connection is mandatory:
 
-- client → `Hello {client_version, majors: [N, N−1], minor}`;
-- host → `Welcome {host_version, protocol: {major, minor}, capabilities:
-  [string], host_id, generation}` or `Refused {reason, host_major}`.
+- client → a Request with `method: "host.hello"` and params
+  `Hello {client_version, majors: [N, N−1], minor}`;
+- host → its Response, whose `result` is `Welcome {host_version, protocol:
+  {major, minor}, capabilities: [string], host_id, generation}` or
+  `Refused {reason, host_major}` (tagged by `type`), after which a refused
+  connection is closed. Any other first request is answered
+  `handshake_required` and the connection closed.
 
 `generation` is fresh at every host start. Any request with an effect
 carries the `generation` the client was welcomed with, and the host refuses
@@ -290,7 +298,9 @@ Router::handle(&Principal, Request) -> Response
 Router::subscribe(&Principal, topic) -> impl Stream<Item = Event>
 ```
 
-`Principal` in SP1 is `{transport: Local, uid}`. The router never sees a
+`Principal` in SP1 is `{transport: Local}` — the transport has already
+verified that the peer is the host's own user (§6.7); SP7 adds the remote
+principals and their identities. The router never sees a
 connection, a socket or a pipe; transports turn frames into calls and back.
 This is what makes SP7 an addition and not a rewrite.
 
@@ -366,7 +376,7 @@ pre-empt it.
 |---|---|
 | The host cannot be started (binary missing, copy failed, detached start failed) | The reason in the diagnostic row; no retry loop |
 | `Unverifiable` | Backoff retries up to 10 s, then reported as such; never a second host |
-| `Refused` — a major the client does not speak | Not connected; the diagnostic row names both majors (an older app facing a newer host after a downgrade) |
+| `Refused` — a major the client does not speak (reachable only by a route other than the per-major endpoint) | Not connected; the diagnostic row names both majors |
 | Stale endpoint | Replaced only on `Absent` (`sirio_ipc`'s probe, behaviour already covered by `sirio_control`'s tests) |
 | Peer of another user | Closed before the handshake |
 | Frame errors (§6.1) | Error response when possible, connection closed |
