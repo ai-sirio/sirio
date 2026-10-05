@@ -99,7 +99,9 @@ is `<data>/host/` under Sirio's per-user data directory, overridable with
 endpoint carries the major — `host-v1.sock`, which on Windows `sirio_ipc`
 maps to a per-user named pipe the same way `sirio_control` maps its own — so that during a drain
 two majors coexist without contending for one endpoint, and neither host
-needs to know about the other.
+needs to know about the other. Whatever else names a host is keyed the same
+way: the macOS launchd label carries the major and a hash of the data root
+(§5.4), so a host in one root is never taken for another root's.
 
 ### §4.3 The binary and where it runs from
 
@@ -180,9 +182,9 @@ The host must not belong to anything that dies with the app:
 
 | Platform | Mechanism | Protects against |
 |---|---|---|
-| Linux | `systemd-run --user --scope --unit=sirio-host-v<N>-<rand>` when a user systemd instance answers; otherwise double fork and `setsid` | the desktop closing the app's `app-*.scope` (orca's `KillMode` finding) |
-| macOS | a launchd job loaded on demand (`launchctl bootstrap gui/<uid>` of a plist generated under the data root, label `<bundle-id>.host.v<N>`, `RunAtLoad`, no `KeepAlive`; the client consults `launchctl print` first and never boots out a job that is running — it is a concurrent client's host) | Force Quit terminating the app's coalition (unpeel's finding, 2026-09-06) |
-| Windows | `CreateProcessW` with `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB \| CREATE_NO_WINDOW` from the copy under the data root | a job object with kill-on-close around the app |
+| Linux | `systemd-run --user --scope --unit=sirio-host-v<N>-<rand>` when a user systemd instance answers, itself started with `setsid` in `pre_exec`; when there is none, or the scope fails within 300 ms, the host itself is started with a single `setsid` in `pre_exec` | the desktop closing the app's `app-*.scope` (orca's `KillMode` finding) |
+| macOS | a launchd job loaded on demand (`launchctl bootstrap gui/<uid>` of a plist generated under the data root, label `<bundle-id>.host.v<N>.<16 hex digits of FNV-1a-64 of <data root>/launchd>` — one job per major **per data root**, `RunAtLoad`, no `KeepAlive`; the client consults `launchctl print` first and never boots out a job that is running — it is a concurrent client's host; a `bootstrap` that fails while a job is now loaded under the label, running or not, is a lost start race and falls through to the endpoint wait, and only one that leaves nothing loaded is an error) | Force Quit terminating the app's coalition (unpeel's finding, 2026-09-06) |
+| Windows | `CreateProcessW` with `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB` from the copy under the data root; a job that refuses breakaway (`ERROR_ACCESS_DENIED`) gets the same start without `CREATE_BREAKAWAY_FROM_JOB`, and the diagnostic row says that host will not survive the app | a job object with kill-on-close around the app |
 
 **This table is a hypothesis until the probe confirms it.** The first task of
 SP1's plan is a probe that starts a host each way and kills its parent each
@@ -193,11 +195,21 @@ shows it working; a failed row is redesigned before any other task starts.
 On every platform the host's stdio is closed (or redirected to its log
 file), its working directory is the data root, and it ignores `SIGHUP`.
 
+**For SP2:** the Linux arm is one `setsid`, not a double fork, so the host
+is a session leader and the first terminal it opens without `O_NOCTTY`
+becomes its controlling terminal — the second fork existed to prevent
+exactly that. Every PTY the host opens must be opened with `O_NOCTTY`.
+
 ### §5.5 Idle exit
 
 In `on-demand` mode, after **60 s with zero sessions and zero connected
 clients**, the host exits in this order: stop accepting, remove the
-endpoint, remove its state file, release the lock (by exiting). The window
+endpoint, remove its state file, release the lock (by exiting). It removes
+only what is still its own: the endpoint only while its (device, inode) is
+the one it bound, the state file only while it records this host's
+`generation`. A data root removed and re-created under a running host holds
+a successor's endpoint and state file by the time the first host leaves, and
+those stay. The window
 is measured from the last client or session activity, not sampled: a client
 that connects inside it resets it. A client that loses the race sees
 `Absent` or `Unverifiable` and goes through §5.3 again.
@@ -269,7 +281,9 @@ records for un-negotiated opcodes.
 
 ### §6.2 Envelope and handshake
 
-- Request: `{id: u64, method: string, params: object}`.
+- Request: `{id: u64, method: string, params: object, generation?: string}`
+  — `generation` is top-level, beside `params`, and present on requests
+  with an effect (below).
 - Response: `{id, result: object}` or `{id, error: {code, message}}`. Codes
   are a closed enum on the host and an open one on the client
   (`#[serde(other)] Other`): `unknown_method`, `invalid_params`,
@@ -380,6 +394,7 @@ pre-empt it.
 | Situation | Behaviour |
 |---|---|
 | The host cannot be started (binary missing, copy failed, detached start failed) | The reason in the diagnostic row; no retry loop |
+| The endpoint path is too long for a unix socket address (it must fit `sun_path` with its terminating NUL) | Refused by the client before anything is staged or started (`EndpointPathTooLong`), the path and the limit in the diagnostic row; a host started on that root by another route exits 4 and logs `start.bind_failed` |
 | `Unverifiable` | Backoff retries up to 10 s, then reported as such; never a second host |
 | `Refused` — a major the client does not speak (reachable only by a route other than the per-major endpoint) | Not connected; the diagnostic row names both majors |
 | Stale endpoint | Replaced only on `Absent` (`sirio_ipc`'s probe, behaviour already covered by `sirio_control`'s tests) |

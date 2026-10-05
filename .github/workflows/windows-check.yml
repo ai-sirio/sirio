@@ -1,6 +1,7 @@
 name: Windows check
 
-# Windows builds only in the release job, once a night. The host foundation
+# Windows builds only in the release job, which runs nightly and for every
+# stable tag. The host foundation
 # (spec §9.3) has Windows-only code that Linux and macOS never compile: the
 # named-pipe endpoint, GetProcessTimes, CREATE_BREAKAWAY_FROM_JOB, LockFileEx
 # behind File::try_lock. This builds the host crates and runs the probe and
@@ -57,8 +58,13 @@ jobs:
         working-directory: rust
         run: cargo test --locked -p sirio_ipc -p sirio_control -p sirio_host_protocol -p sirio_host_client
 
+      # The probe and the E2E run even when a step before them failed, so a
+      # failing test elsewhere never hides the host's own evidence; the job
+      # still fails.
       - name: Probe the host's detach
+        if: success() || failure()
         run: Scripts/Tests/probe-host-detach.sh
 
       - name: Host E2E
+        if: success() || failure()
         run: Scripts/Tests/test-host-e2e.sh
