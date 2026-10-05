@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
 # `--stage NAME` runs one: wire-github, wire-gitlab, failures, merge, metadata, cli,
-# scopes, ci, ui. Nothing
+# scopes, ci, threads, review, ui. Nothing
 # is published and the user's own gh/glab configuration is never read.
 #
 # The `ui` stage launches a real, isolated Sirio (debug build) against the
@@ -155,6 +155,20 @@ threads_readonly["data"]["project"]["mergeRequest"]["userPermissions"]["createNo
 for discussion in threads_readonly["data"]["project"]["mergeRequest"]["discussions"]["nodes"]:
     discussion["userPermissions"]["resolveNote"] = False
 save("gitlab", "MergeRequestThreads.readonly", threads_readonly)
+
+# B3c: the pending review the action context and the header read after a
+# review is started, and its absence once submitted or discarded.
+pending = {"nodes": [{"id": "PRR_pending1", "comments": {"totalCount": 1}}]}
+for name in ("ChangeRequestActionContext", "ChangeRequestHeader"):
+    base = load("github", name)
+    started = json.loads(json.dumps(base))
+    started["data"]["repository"]["pullRequest"]["pendingReview"] = pending
+    for after in ("AddPullRequestReview", "AddPullRequestReviewThread", "AddPullRequestReviewThreadReply"):
+        save("github", f"{name}.after.{after}", started)
+    ended = json.loads(json.dumps(base))
+    ended["data"]["repository"]["pullRequest"]["pendingReview"] = {"nodes": []}
+    for after in ("SubmitPullRequestReview", "DeletePullRequestReview"):
+        save("github", f"{name}.after.{after}", ended)
 PY
 
 start_forge() { # flavour port
@@ -400,10 +414,16 @@ expect_body_is_file github AddComment "$BODY_FILE"
 probe "${GH[@]}" act 101 approve
 expect_code 0 "an approval with no words"
 expect_input github AddPullRequestReview "{\"event\":\"APPROVE\",$GH_ID}"
+# B3c: a review sent with an event publishes at once and leaves no pending
+# review on the real forge; the fake cannot tell it from an event-less start,
+# so each of these is sent from a clean slate.
+reset_forge github "$GH_PORT"
 probe "${GH[@]}" act 101 approve --body "Nice."
 expect_input github AddPullRequestReview "{\"body\":\"Nice.\",\"event\":\"APPROVE\",$GH_ID}"
+reset_forge github "$GH_PORT"
 probe "${GH[@]}" act 101 request-changes --body "Please handle None."
 expect_input github AddPullRequestReview "{\"body\":\"Please handle None.\",\"event\":\"REQUEST_CHANGES\",$GH_ID}"
+reset_forge github "$GH_PORT"
 probe "${GH[@]}" act 101 review-comment --body "A thought."
 expect_input github AddPullRequestReview "{\"body\":\"A thought.\",\"event\":\"COMMENT\",$GH_ID}"
 
@@ -1626,6 +1646,66 @@ probe "${GL_RO[@]}" act 201 resolve --thread gid://gitlab/Discussion/open12
 expect_line "MESSAGE You cannot resolve this thread."
 probe "${GL[@]}" act 201 edit-comment --id gid://gitlab/DiffNote/11 --body "Edited note"
 expect_input gitlab UpdateNote '{"body":"Edited note","id":"gid://gitlab/DiffNote/11"}'
+fi
+
+if wanted review; then
+echo "stage review: a review drafted on GitHub, added to, submitted and discarded"
+GH_HEAD=b2c3d4e5f60718293a4b5c6d7e8f901234567890
+GH_PR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"]["id"])' "$WORK/fixtures/github/ChangeRequestActionContext.json")
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" header 101
+expect_code 0 "github header"
+expect_line "DRAFT none"
+probe "${GH[@]}" threads 101
+expect_line "TEDIT PRRC_8 draft"
+
+echo "  a reply starts a review: an empty pending review, then the reply into it"
+probe "${GH[@]}" act 101 review-add --thread PRRT_open42 --body-file "$BODY_FILE"
+expect_code 0 "a reply that starts a review"
+expect_input github AddPullRequestReview "{\"commitOID\":\"$GH_HEAD\",\"pullRequestId\":\"$GH_PR\"}"
+expect_body_is_file github AddPullRequestReviewThreadReply "$BODY_FILE"
+sent_input github AddPullRequestReviewThreadReply | grep -q '"pullRequestReviewId":"PRR_pending1"' || fail "the reply did not join the new review"
+
+echo "  with a review in progress, a line comment joins it"
+probe "${GH[@]}" act 101 review-add --path src/login.rs --side new --line context:43:43 --start context:41:41 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body "Joins."
+expect_code 0 "a line comment added to the review"
+expect_input github AddPullRequestReviewThread '{"body":"Joins.","line":43,"path":"src/login.rs","pullRequestReviewId":"PRR_pending1","side":"RIGHT","startLine":41,"startSide":"RIGHT"}'
+probe "${GH[@]}" header 101
+expect_line "DRAFT PRR_pending1 1"
+
+echo "  a pending comment is edited and deleted, then the review is submitted"
+probe "${GH[@]}" act 101 edit-comment --id PRRC_8 --kind draft --body "Better."
+expect_input github UpdatePullRequestReviewComment '{"body":"Better.","pullRequestReviewCommentId":"PRRC_8"}'
+probe "${GH[@]}" act 101 draft-delete --id PRRC_8
+expect_input github DeletePullRequestReviewComment '{"id":"PRRC_8"}'
+probe "${GH[@]}" act 101 approve --body "Not like this."
+expect_code 20 "a separate review while one is in progress"
+expect_line "MESSAGE You have a review in progress; submit it instead."
+probe "${GH[@]}" act 101 review-submit --verdict approve --body "Ship it."
+expect_code 0 "submitting with Approve"
+expect_input github SubmitPullRequestReview '{"body":"Ship it.","event":"APPROVE","pullRequestReviewId":"PRR_pending1"}'
+probe "${GH[@]}" act 101 review-submit --verdict comment
+expect_code 20 "a second submit"
+expect_line "MESSAGE There is no review in progress."
+expect_sent github SubmitPullRequestReview 1
+
+echo "  a line comment with no review starts one in a single mutation; then it is discarded"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" act 101 review-add --path src/login.rs --side old --line removed:42:42 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body "Starts it."
+expect_code 0 "a line comment that starts a review"
+expect_input github AddPullRequestReview "{\"commitOID\":\"$GH_HEAD\",\"pullRequestId\":\"$GH_PR\",\"threads\":[{\"body\":\"Starts it.\",\"line\":42,\"path\":\"src/login.rs\",\"side\":\"LEFT\"}]}"
+expect_sent github AddPullRequestReviewThread 0
+probe "${GH[@]}" act 101 review-discard
+expect_code 0 "discard"
+expect_input github DeletePullRequestReview '{"pullRequestReviewId":"PRR_pending1"}'
+probe "${GH[@]}" act 101 review-add --path src/login.rs --side new --line context:43:43 \
+  --base "$GH_HEAD" --head 0000000000000000000000000000000000000000 --body "Stale."
+expect_code 20 "a review comment on a stale head"
+expect_line "ERR HeadMoved"
+probe "${GH_RO[@]}" act 101 review-add --thread PRRT_open42 --body "No."
+expect_line "MESSAGE You cannot reply to this thread."
 fi
 
 # Later stages are added above this line.

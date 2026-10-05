@@ -19,7 +19,8 @@
 //! `act`'s actions: `comment`, `approve`, `request-changes`, `review-comment`,
 //! `close`, `reopen`, `ready`, `draft`, `edit`, `edit-comment`, `merge`,
 //! `cancel-auto-merge`, `set-reviewers`, `set-labels`, `rerun-job`,
-//! `rerun-failed`. Re-runs take `--id <number>`. It prints
+//! `rerun-failed`, `review-add`, `review-submit`, `review-discard`,
+//! `draft-delete`. Re-runs take `--id <number>`. It prints
 //! `ACT ok`, then `WARNING <text>` when a second step failed.
 
 use std::process::ExitCode;
@@ -28,7 +29,7 @@ use sirio_forge::{
     Action, AnchorLine, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
     CommentKind, CommentRef, EventKind, FileChangeKind, Filter, Forge, ForgeClient, ForgeError,
     ForgeTarget, HostSetting, LineAnchor, LineKind, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
-    Resolution, RerunTarget, Revisions, ReviewOutcome, ReviewState, Side,
+    Resolution, RerunTarget, Revisions, ReviewOutcome, ReviewState, ReviewTarget, Side,
     ReviewVerdict, SystemProbes, TimelineItem, TokenTransport, Transport, resolve,
 };
 
@@ -226,6 +227,10 @@ fn run(args: &Args) -> Result<(), Failure> {
                     &revisions.head_sha[..7]
                 ),
                 None => println!("REVISIONS none"),
+            }
+            match &header.draft {
+                Some(draft) => println!("DRAFT {} {}", draft.id.as_deref().unwrap_or("-"), draft.comments),
+                None => println!("DRAFT none"),
             }
             println!("BODY {}", header.body.lines().next().unwrap_or(""));
             println!("CAPS {}", caps_words(&header.capabilities));
@@ -720,6 +725,41 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
         "approve" => Action::Review { verdict: ReviewVerdict::Approve, body: body_of(args)? },
         "request-changes" => Action::Review { verdict: ReviewVerdict::RequestChanges, body: body_of(args)? },
         "review-comment" => Action::Review { verdict: ReviewVerdict::Comment, body: body_of(args)? },
+        "review-add" => Action::ReviewAdd {
+            target: match args.flag("thread") {
+                Some(thread) => ReviewTarget::Reply { thread: thread.to_string() },
+                None => ReviewTarget::Line {
+                    anchor: LineAnchor {
+                        path: args.flag("path").ok_or_else(|| usage("review-add needs --thread or --path"))?.to_string(),
+                        side: side_of(args)?,
+                        line: anchor_line(args.flag("line"))?,
+                        start: args.flag("start").map(|start| anchor_line(Some(start))).transpose()?,
+                    },
+                    revisions: Revisions {
+                        base_sha: args.flag("base").ok_or_else(|| usage("review-add needs --base"))?.to_string(),
+                        head_sha: args.flag("head").ok_or_else(|| usage("review-add needs --head"))?.to_string(),
+                        start_sha: args.flag("start-sha").map(str::to_string),
+                    },
+                },
+            },
+            body: body_of(args)?,
+        },
+        "review-submit" => Action::ReviewSubmit {
+            verdict: match args.flag("verdict") {
+                Some("approve") => ReviewVerdict::Approve,
+                Some("request-changes") => ReviewVerdict::RequestChanges,
+                Some("comment") => ReviewVerdict::Comment,
+                _ => return Err(usage("review-submit needs --verdict comment|approve|request-changes")),
+            },
+            body: args.flag("body").unwrap_or_default().to_string(),
+        },
+        "review-discard" => Action::ReviewDiscard,
+        "draft-delete" => Action::DraftDelete {
+            comment: CommentRef {
+                id: args.flag("id").ok_or_else(|| usage("draft-delete needs --id"))?.to_string(),
+                kind: CommentKind::Draft,
+            },
+        },
         "rerun-job" => Action::Rerun(RerunTarget::Job(id_number(args)?)),
         "rerun-failed" => Action::Rerun(RerunTarget::FailedInRun(id_number(args)?)),
         "close" => Action::Close,
@@ -740,6 +780,7 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
                 kind: match args.flag("kind") {
                     Some("review") => CommentKind::Review,
                     Some("review-comment") => CommentKind::ReviewComment,
+                    Some("draft") => CommentKind::Draft,
                     _ => CommentKind::Comment,
                 },
             },

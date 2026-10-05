@@ -1,3 +1,3 @@
 mutation AddPullRequestReview($input: AddPullRequestReviewInput!) {
-  addPullRequestReview(input: $input) { clientMutationId }
+  addPullRequestReview(input: $input) { clientMutationId pullRequestReview { id } }
 }

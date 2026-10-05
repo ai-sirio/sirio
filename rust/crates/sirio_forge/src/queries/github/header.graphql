@@ -5,6 +5,7 @@ query ChangeRequestHeader($owner: String!, $name: String!, $number: Int!) {
       ...ChangeSummary
       body baseRefOid headRefOid
       id locked viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor
+      pendingReview: reviews(states: [PENDING], first: 1) { nodes { id comments { totalCount } } }
       mergeStateStatus isCrossRepository viewerCanEnableAutoMerge autoMergeRequest { mergeMethod }
       labels(first: 20) { nodes { id name color } }
       additions
