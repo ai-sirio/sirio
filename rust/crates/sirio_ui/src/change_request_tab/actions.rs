@@ -192,6 +192,8 @@ impl ChangeRequestTab {
         };
         let kind = action.kind();
         let number = self.reference.number;
+        self.write_target = None;
+        self.write_refusal = None;
         self.actions.state = ActionState::Working(kind);
         self.actions.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -210,6 +212,7 @@ impl ChangeRequestTab {
         cx: &mut Context<Self>,
     ) {
         self.actions.task = None;
+        self.write_refusal = None;
         match result {
             Ok(outcome) => {
                 let warned = outcome.warning.is_some();
@@ -225,15 +228,20 @@ impl ChangeRequestTab {
             }
             Err(error) => {
                 self.note_rate_limited(&error);
-                if matches!(error, ForgeError::HeadMoved { .. }) {
+                let head_moved = matches!(error, ForgeError::HeadMoved { .. });
+                if head_moved {
                     // What was being confirmed is not what is there now.
                     self.actions.merge.dialog = None;
-                    self.refresh(cx);
                 }
                 self.actions.state = ActionState::Failed {
                     kind,
                     message: action_error_text(&error, self.reference.forge, kind),
                 };
+                if head_moved {
+                    self.refresh(cx);
+                } else {
+                    self.reread_after_write(cx);
+                }
             }
         }
         self.sync_writes(cx);
@@ -253,7 +261,16 @@ impl ChangeRequestTab {
     /// the composer by mistake.
     fn action_succeeded(&mut self, kind: &'static str, warned: bool, cx: &mut Context<Self>) {
         match kind {
-            "line-comment" => self.line_composer = None,
+            "line-comment" => {
+                self.line_composer = None;
+                if self
+                    .write_refusal
+                    .as_ref()
+                    .is_some_and(|(target, _)| target == &super::compose::WriteTarget::Composer)
+                {
+                    self.write_refusal = None;
+                }
+            }
             "edit" => self.actions.edit = None,
             "edit-comment" => self.actions.comment_edit = None,
             "merge" | "auto-merge" => self.actions.merge.dialog = None,

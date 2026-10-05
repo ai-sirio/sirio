@@ -250,6 +250,13 @@ impl ChangeRequestTab {
 
     pub(crate) fn cancel_composer(&mut self, cx: &mut Context<Self>) {
         if self.line_composer.take().is_some() {
+            if self
+                .write_refusal
+                .as_ref()
+                .is_some_and(|(target, _)| target == &WriteTarget::Composer)
+            {
+                self.write_refusal = None;
+            }
             if self.write_target == Some(WriteTarget::Composer) && !self.action_busy() {
                 self.actions.state = actions::ActionState::Idle;
             }
@@ -284,8 +291,12 @@ impl ChangeRequestTab {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let sent = self.perform(action, cx);
-        if sent.is_ok() {
-            self.write_target = Some(target);
+        match &sent {
+            Ok(()) => {
+                self.write_target = Some(target);
+                self.write_refusal = None;
+            }
+            Err(message) => self.write_refusal = Some((target, message.clone())),
         }
         self.sync_writes(cx);
         sent
@@ -301,9 +312,14 @@ impl ChangeRequestTab {
             _ => None,
         };
         let write_target = self.write_target.clone();
+        let write_refusal = self.write_refusal.clone();
         let status_for = |target: &WriteTarget| WriteStatus {
             busy,
-            error: failed.clone().filter(|_| write_target.as_ref() == Some(target)),
+            error: write_refusal
+                .as_ref()
+                .filter(|(owner, _)| owner == target)
+                .map(|(_, message)| message.clone())
+                .or_else(|| failed.clone().filter(|_| write_target.as_ref() == Some(target))),
         };
         if let Some(open) = &self.line_composer {
             let status = status_for(&WriteTarget::Composer);

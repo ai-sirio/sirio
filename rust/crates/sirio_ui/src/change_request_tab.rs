@@ -233,6 +233,7 @@ pub struct ChangeRequestTab {
     outdated_views: HashMap<String, Entity<threads::OutdatedView>>,
     line_composer: Option<compose::LineComposer>,
     pub(crate) write_target: Option<compose::WriteTarget>,
+    write_refusal: Option<(compose::WriteTarget, String)>,
     check_folds: HashMap<String, bool>,
     generation: u64,
     /// A rate limit's reset: no request before it (spec §9).
@@ -304,6 +305,7 @@ impl ChangeRequestTab {
             outdated_views: HashMap::new(),
             line_composer: None,
             write_target: None,
+            write_refusal: None,
             check_folds: HashMap::new(),
             generation: 0,
             paused_until: None,
@@ -1075,12 +1077,18 @@ impl ChangeRequestTab {
             ),
             (
                 "line_composer_error".to_string(),
-                match (&self.actions.state, &self.write_target) {
-                    (actions::ActionState::Failed { message, .. }, Some(compose::WriteTarget::Composer)) => {
-                        message.clone()
-                    }
-                    _ => String::new(),
-                },
+                self.write_refusal
+                    .as_ref()
+                    .filter(|(target, _)| target == &compose::WriteTarget::Composer)
+                    .map(|(_, message)| message.clone())
+                    .or_else(|| match (&self.actions.state, &self.write_target) {
+                        (
+                            actions::ActionState::Failed { message, .. },
+                            Some(compose::WriteTarget::Composer),
+                        ) => Some(message.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
             ),
             (
                 "commentable".to_string(),
@@ -3160,6 +3168,9 @@ mod tests {
     #[gpui::test]
     async fn a_refused_position_keeps_the_text_and_says_why(cx: &mut TestAppContext) {
         let (tab, forge, _repo, _head) = composing(cx).await;
+        let header_reads = forge.count("ChangeRequestHeader");
+        let thread_reads = forge.count("ChangeRequestThreads");
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
         forge.answer_rest(COMMENTS, 422, r#"{"message":"pull_request_review_thread.line must be part of the diff"}"#);
         tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
         tab.update(cx, |tab, cx| tab.composer_set_text("Range", cx));
@@ -3173,6 +3184,122 @@ mod tests {
                 "pull_request_review_thread.line must be part of the diff"
             );
         });
+        pump_until(cx, || {
+            forge.count("ChangeRequestHeader") > header_reads
+                && forge.count("ChangeRequestThreads") > thread_reads
+                && tab.read_with(cx, |tab, cx| {
+                    report_value(tab, cx, "thread_rows").contains("PRRT_1:line:")
+                })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer"), "a.txt:new:41-43");
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "5");
+            assert_eq!(
+                report_value(tab, cx, "line_composer_error"),
+                "pull_request_review_thread.line must be part of the diff"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_rate_paused_send_shows_its_refusal_under_the_composer(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Keep this draft", cx));
+        tab.update(cx, |tab, cx| {
+            tab.write_target = Some(compose::WriteTarget::Composer);
+            tab.actions.state = actions::ActionState::Failed {
+                kind: "line-comment",
+                message: "an earlier failure".to_string(),
+            };
+            tab.paused_until = Some(style::now() + 3600);
+            assert_eq!(
+                tab.send_line_comment(cx),
+                Err("the forge asked Sirio to wait; try again after its reset".to_string())
+            );
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "15");
+            assert_eq!(
+                report_value(tab, cx, "line_composer_error"),
+                "the forge asked Sirio to wait; try again after its reset"
+            );
+            assert_eq!(report_value(tab, cx, "action"), "failed");
+        });
+        assert_eq!(forge.rest_count(COMMENTS), 0);
+    }
+
+    #[gpui::test]
+    async fn a_busy_refusal_is_shown_without_replacing_the_in_flight_write(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        forge.answer_rest(COMMENTS, 201, r#"{"id":1}"#);
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Keep this draft", cx));
+        tab.update(cx, |tab, cx| {
+            tab.send_line_comment(cx).expect("the first write is accepted");
+            assert!(matches!(tab.actions.state, actions::ActionState::Working("line-comment")));
+            let target = tab.write_target.clone();
+
+            assert_eq!(
+                tab.send_line_comment(cx),
+                Err("an action is already in flight".to_string())
+            );
+            assert!(matches!(tab.actions.state, actions::ActionState::Working("line-comment")));
+            assert_eq!(tab.write_target, target);
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "15");
+            assert_eq!(report_value(tab, cx, "line_composer_error"), "an action is already in flight");
+        });
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "action") == "idle"
+                    && report_value(tab, cx, "line_composer").is_empty()
+            })
+        });
+        assert_eq!(forge.rest_count(COMMENTS), 1, "the refused second send was not posted");
+    }
+
+    #[gpui::test]
+    async fn a_close_failure_is_not_shown_under_a_stale_line_composer(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        forge.answer_rest(COMMENTS, 422, r#"{"message":"line rejected"}"#);
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Keep this draft", cx));
+        tab.update(cx, |tab, cx| tab.send_line_comment(cx)).expect("the comment is sent");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed")
+        });
+
+        forge.fail("ClosePullRequest", 422);
+        tab.update(cx, |tab, cx| tab.perform(Action::Close, cx)).expect("Close is accepted");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                matches!(tab.actions.state, actions::ActionState::Failed { kind: "close", .. })
+            })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer"), "a.txt:new:43");
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "15");
+            assert_eq!(report_value(tab, cx, "line_composer_error"), "");
+            assert_eq!(report_value(tab, cx, "action_message"), "failed");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_rate_limited_failed_write_keeps_the_reread_guard(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        let header_reads = forge.count("ChangeRequestHeader");
+        let thread_reads = forge.count("ChangeRequestThreads");
+        forge.rate_limited("ClosePullRequest", style::now() + 3600);
+        tab.update(cx, |tab, cx| tab.perform(Action::Close, cx)).expect("Close is accepted");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                matches!(tab.actions.state, actions::ActionState::Failed { kind: "close", .. })
+            })
+        });
+        assert_eq!(forge.count("ChangeRequestHeader"), header_reads);
+        assert_eq!(forge.count("ChangeRequestThreads"), thread_reads);
     }
 
     #[gpui::test]
