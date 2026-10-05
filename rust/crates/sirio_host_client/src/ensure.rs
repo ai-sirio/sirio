@@ -144,7 +144,15 @@ fn ensure_major(
                         client_majors: majors.to_vec(),
                     });
                 }
-                return Ok((connect(options, major, majors)?, None));
+                match connect(options, major, majors) {
+                    Ok(session) => return Ok((session, None)),
+                    // The host answered a moment ago and is gone or turning
+                    // us away now (its idle exit, §5.5): the client that
+                    // loses that race goes through §5.3 again, bounded by
+                    // the same deadline as the wait for a silent host.
+                    Err(error) if started.elapsed() >= UNVERIFIABLE_WAIT => return Err(error),
+                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                }
             }
             Verdict::Unverifiable => {
                 if started.elapsed() >= UNVERIFIABLE_WAIT {

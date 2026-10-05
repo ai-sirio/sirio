@@ -42,6 +42,12 @@ pub enum DetachMethod {
 /// that fast reads the same as a scope that could not be created. It does
 /// **not** mean the program is serving. The caller must still treat "the
 /// endpoint never appeared" as the real start failure.
+///
+/// On macOS a job already running under the label is another client's host
+/// that won a start race (two clients may both have seen no host): it is
+/// neither booted out nor started again, and the call returns `Ok(Launchd)`
+/// as if it had started it. The caller's wait for the endpoint adopts that
+/// host, which is why that wait is the only success test.
 pub fn spawn_detached(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
     imp::spawn(spec)
 }
@@ -357,8 +363,94 @@ mod plist {
     }
 }
 
+/// What to do about a launchd job already under this label, decided from
+/// `launchctl print`, kept apart from the macOS arm so that it runs on every
+/// platform's test suite.
+#[cfg(any(test, target_os = "macos"))]
+mod launchd_plan {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Plan {
+        /// Nothing is loaded under the label.
+        Bootstrap,
+        /// A job is loaded but is not running: a leftover to remove first.
+        BootoutThenBootstrap,
+        /// The job is running: another client's host. Neither remove nor
+        /// start anything; the caller waits for its endpoint.
+        AlreadyRunning,
+    }
+
+    /// `print_succeeded` is whether `launchctl print` exited 0 (the job is
+    /// loaded), `stdout` what it printed. launchd prints a `pid = <n>` line
+    /// only while the job runs, so only a positive pid counts as running; a
+    /// misread toward "running" costs a start timeout, a misread toward "not
+    /// running" would boot out a live host.
+    pub fn decide(print_succeeded: bool, stdout: &str) -> Plan {
+        if !print_succeeded {
+            return Plan::Bootstrap;
+        }
+        if stdout.lines().any(prints_a_running_pid) {
+            Plan::AlreadyRunning
+        } else {
+            Plan::BootoutThenBootstrap
+        }
+    }
+
+    /// A line that is exactly the `pid` key (not `ppid`, not `parent pid`)
+    /// followed by a positive number, with whatever text may trail it ignored.
+    fn prints_a_running_pid(line: &str) -> bool {
+        let Some(value) = line.trim_start().strip_prefix("pid = ") else {
+            return false;
+        };
+        let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u64>().is_ok_and(|pid| pid > 0)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const RUNNING: &str = "gui/501/app.sirioai.sirio.host.v1 = {\n\tactive count = 1\n\tpath = /Users/u/launchd/app.sirioai.sirio.host.v1.plist\n\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = /Users/u/bin/sirio-host\n\tpid = 4242\n\timmediate reason = inefficient\n}\n";
+        const LOADED_IDLE: &str = "gui/501/app.sirioai.sirio.host.v1 = {\n\tactive count = 0\n\ttype = LaunchAgent\n\tstate = not running\n\n\tprogram = /Users/u/bin/sirio-host\n\tlast exit code = 0\n}\n";
+
+        #[test]
+        fn a_job_that_is_not_loaded_is_bootstrapped_without_a_bootout() {
+            assert_eq!(decide(false, ""), Plan::Bootstrap);
+            // Whatever a failed print wrote is not a description of a job.
+            assert_eq!(decide(false, RUNNING), Plan::Bootstrap);
+        }
+
+        #[test]
+        fn a_running_job_is_another_clients_host_and_is_left_alone() {
+            assert_eq!(decide(true, RUNNING), Plan::AlreadyRunning);
+            assert_eq!(decide(true, "\tpid = 7 (spawned)\n"), Plan::AlreadyRunning);
+        }
+
+        #[test]
+        fn a_loaded_job_with_no_pid_is_a_leftover_to_remove() {
+            assert_eq!(decide(true, LOADED_IDLE), Plan::BootoutThenBootstrap);
+            assert_eq!(decide(true, ""), Plan::BootoutThenBootstrap);
+        }
+
+        #[test]
+        fn only_a_positive_pid_counts_as_running() {
+            assert_eq!(decide(true, "\tpid = 0\n"), Plan::BootoutThenBootstrap);
+            assert_eq!(decide(true, "\tpid = \n"), Plan::BootoutThenBootstrap);
+            assert_eq!(decide(true, "\tpid = abc\n"), Plan::BootoutThenBootstrap);
+        }
+
+        #[test]
+        fn another_key_that_ends_in_pid_is_not_the_pid_line() {
+            assert_eq!(
+                decide(true, "\tparent pid = 99\n\tppid = 98\n"),
+                Plan::BootoutThenBootstrap
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
+    use super::launchd_plan::{self, Plan};
     use super::plist::plist_xml;
     use super::*;
     use std::io::Write;
@@ -373,17 +465,29 @@ mod imp {
             spec.label.trim_start_matches("sirio-host-")
         );
         let xml = plist_xml(&label, spec, std::env::vars_os())?;
+        let domain = format!("gui/{uid}");
+        let target = format!("{domain}/{label}");
+        // Two clients that both saw `Absent` both arrive here, so a job under
+        // this label may be the host the other one has just started: it is
+        // never booted out while it runs. (`print` to `bootout` is not
+        // atomic: a client that bootstraps in that gap still has its host
+        // booted out by this one, which then starts its own; the endpoint
+        // wait of whichever client survives adopts the host that is left.)
+        let plan = current_plan(&target);
+        if plan == Plan::AlreadyRunning {
+            return Ok(DetachMethod::Launchd);
+        }
         private_dir(&spec.launchd_dir)?;
         let plist = spec.launchd_dir.join(format!("{label}.plist"));
         write_private(&plist, &xml)?;
-        let domain = format!("gui/{uid}");
-        // Only reached on an `Absent` verdict, so nothing is running under
-        // this label: a leftover loaded job from a previous host is removed.
-        let _ = Command::new("launchctl")
-            .args(["bootout", &format!("{domain}/{label}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if plan == Plan::BootoutThenBootstrap {
+            // Loaded but not running: a leftover of a host that is gone.
+            let _ = Command::new("launchctl")
+                .args(["bootout", &target])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let bootstrap = Command::new("launchctl")
             .args(["bootstrap", &domain])
             .arg(&plist)
@@ -394,11 +498,35 @@ mod imp {
         let _ = std::fs::remove_file(&plist);
         let status = bootstrap?;
         if !status.success() {
+            // A bootstrap that fails because another client's just won is a
+            // lost race, not an error: the caller waits for that host.
+            if current_plan(&target) == Plan::AlreadyRunning {
+                return Ok(DetachMethod::Launchd);
+            }
             return Err(io::Error::other(format!(
                 "launchctl bootstrap exited {status}"
             )));
         }
         Ok(DetachMethod::Launchd)
+    }
+
+    /// What `launchctl print <target>` says about the job under the label. A
+    /// `launchctl` that cannot be run reads as not loaded; the bootstrap that
+    /// follows then fails with its own error.
+    fn current_plan(target: &str) -> Plan {
+        let (loaded, report) = Command::new("launchctl")
+            .args(["print", target])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|out| {
+                (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                )
+            })
+            .unwrap_or((false, String::new()));
+        launchd_plan::decide(loaded, &report)
     }
 
     fn private_dir(dir: &Path) -> io::Result<()> {
