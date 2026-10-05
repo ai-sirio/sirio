@@ -243,6 +243,33 @@ fn payload_error(host: &str, data: &Value) -> Option<ForgeError> {
 /// GitLab's `message` (a string, or an object of field errors) or `error`.
 fn rest_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
+    if let Some(errors) = value.get("errors").and_then(Value::as_array).filter(|errors| !errors.is_empty()) {
+        let reasons: Vec<String> = errors
+            .iter()
+            .filter_map(|error| match error {
+                Value::String(message) => Some(message.clone()),
+                Value::Object(error) => error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let field = error.get("field").and_then(Value::as_str);
+                        let code = error.get("code").and_then(Value::as_str);
+                        match (field, code) {
+                            (Some(field), Some(code)) => Some(format!("{field} {code}")),
+                            (Some(field), None) => Some(field.to_string()),
+                            (None, Some(code)) => Some(code.to_string()),
+                            (None, None) => None,
+                        }
+                    }),
+                _ => None,
+            })
+            .collect();
+        if !reasons.is_empty() {
+            return Some(reasons.join("; "));
+        }
+    }
     for key in ["message", "error_description", "error"] {
         match value.get(key) {
             Some(Value::String(text)) => return Some(text.clone()),
@@ -622,6 +649,39 @@ mod write_tests {
             rest(422, &[], json!({})),
             Err(ForgeError::Rejected { host: HOST.into(), message: "HTTP 422".into() }),
             "a refusal with no words still says what happened"
+        );
+    }
+
+    #[test]
+    fn github_rest_validation_errors_are_shown_instead_of_the_generic_message() {
+        let rejected = |body| match rest(422, &[], body) {
+            Err(ForgeError::Rejected { message, .. }) => message,
+            other => panic!("expected a REST rejection, got {other:?}"),
+        };
+        assert_eq!(
+            rejected(json!({
+                "message": "Unprocessable Entity",
+                "errors": ["pull_request_review_thread.line must be part of the diff"]
+            })),
+            "pull_request_review_thread.line must be part of the diff"
+        );
+        assert_eq!(
+            rejected(json!({
+                "message": "Validation Failed",
+                "errors": [{ "message": "line must be part of the diff", "field": "line", "code": "invalid" }]
+            })),
+            "line must be part of the diff"
+        );
+        assert_eq!(
+            rejected(json!({
+                "message": "Validation Failed",
+                "errors": [{ "field": "line", "code": "invalid" }]
+            })),
+            "line invalid"
+        );
+        assert_eq!(
+            rejected(json!({ "message": "Validation Failed" })),
+            "Validation Failed"
         );
     }
 

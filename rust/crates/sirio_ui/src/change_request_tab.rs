@@ -3461,7 +3461,11 @@ mod tests {
         let header_reads = forge.count("ChangeRequestHeader");
         let thread_reads = forge.count("ChangeRequestThreads");
         forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
-        forge.answer_rest(COMMENTS, 422, r#"{"message":"pull_request_review_thread.line must be part of the diff"}"#);
+        forge.answer_rest(
+            COMMENTS,
+            422,
+            r#"{"message":"Unprocessable Entity","errors":["pull_request_review_thread.line must be part of the diff"]}"#,
+        );
         tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
         tab.update(cx, |tab, cx| tab.composer_set_text("Range", cx));
         tab.update(cx, |tab, cx| tab.send_line_comment(cx)).expect("sent");

@@ -453,7 +453,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or not re.fullmatch(r"[0-9a-fA-F]{40}", body["commit_id"])
             or body.get("side") not in ("LEFT", "RIGHT")
         ):
-            return self.answer(422, {"message": "pull_request_review_thread.line must be part of the diff"})
+            return self.answer(422, {
+                "message": "Unprocessable Entity",
+                "errors": ["pull_request_review_thread.line must be part of the diff"],
+            })
         self.remember("line-comment")
         return self.answer(201, {"id": 1})
 
