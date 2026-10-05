@@ -7447,6 +7447,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_host_client"
+version = "0.31.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "sirio_icons"
 version = "0.31.0"
 
