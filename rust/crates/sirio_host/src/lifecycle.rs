@@ -41,11 +41,20 @@ pub fn run(config: HostConfig) -> i32 {
     let mut listener = match LocalListener::bind(&config.paths.endpoint(config.major)) {
         Ok(listener) => listener,
         Err(error) => {
-            let detail = match &error {
-                BindError::PathTooLong { .. } => "endpoint path too long".to_string(),
-                other => other.to_string(),
+            // The log names the kind of failure and never the path (spec
+            // §5.8); stderr, which nobody reads once the host is detached,
+            // keeps the whole message.
+            let (kind, detail) = match &error {
+                BindError::PathTooLong { .. } => (
+                    "endpoint path too long",
+                    "endpoint path too long".to_string(),
+                ),
+                BindError::AlreadyRunning { .. } => ("already_running", error.to_string()),
+                BindError::BindFailed { .. } => ("bind_failed", error.to_string()),
+                BindError::ChmodFailed { .. } => ("chmod_failed", error.to_string()),
+                BindError::InsecureSocket { .. } => ("insecure_socket", error.to_string()),
             };
-            log.line("start.bind_failed", &detail);
+            log.line("start.bind_failed", kind);
             eprintln!("sirio-host: {detail}");
             return 4;
         }
@@ -74,7 +83,7 @@ pub fn run(config: HostConfig) -> i32 {
         .map_err(std::io::Error::other)
         .and_then(|bytes| write_atomic(&config.paths.state(config.major), &bytes));
     if let Err(e) = published {
-        log.line("start.state_file_failed", &e.to_string());
+        log.line("start.state_file_failed", &format!("{:?}", e.kind()));
         eprintln!("sirio-host: cannot write the state file: {e}");
         return 4;
     }
@@ -98,20 +107,13 @@ pub fn run(config: HostConfig) -> i32 {
         }
     });
 
-    let mut idle_since: Option<Instant> = None;
+    // The decision is the core's (one critical section, measured from the last
+    // client or session event), so a client that came and went between two
+    // looks still restarts the window.
     while !core.shutdown.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(100));
-        if config.mode != HostMode::OnDemand {
-            continue;
-        }
-        if core.clients() == 0 && core.sessions() == 0 {
-            let since = *idle_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= config.idle_grace {
-                log.line("stop.idle", "");
-                core.shutdown.store(true, Ordering::SeqCst);
-            }
-        } else {
-            idle_since = None;
+        if config.mode == HostMode::OnDemand && core.try_begin_idle_exit(config.idle_grace) {
+            log.line("stop.idle", "");
         }
     }
     // Leave in the order of spec §5.5: stop accepting, endpoint, state file, lock.

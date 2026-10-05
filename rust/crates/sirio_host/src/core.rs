@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sirio_host_protocol::messages::{Event, HostMode, HostStateEvent};
 
@@ -19,12 +19,16 @@ pub struct HostCore {
     state: Mutex<Counters>,
 }
 
-#[derive(Default)]
 struct Counters {
     clients: u32,
     held_sessions: u32,
     next_subscription: u64,
     subscribers: Vec<(u64, u64, Sender<Event>)>, // (subscription, next seq, sink)
+    /// When a client last connected or left, or a session was last held or
+    /// released — or the host started. The idle window (spec §5.5) runs from
+    /// here, so a client that came and went between two samples of the idle
+    /// watcher still restarts it.
+    last_activity: Instant,
 }
 
 impl HostCore {
@@ -43,7 +47,13 @@ impl HostCore {
             host_id,
             started: Instant::now(),
             shutdown: AtomicBool::new(false),
-            state: Mutex::new(Counters::default()),
+            state: Mutex::new(Counters {
+                clients: 0,
+                held_sessions: 0,
+                next_subscription: 0,
+                subscribers: Vec::new(),
+                last_activity: Instant::now(),
+            }),
         }
     }
 
@@ -59,29 +69,72 @@ impl HostCore {
         self.counters().held_sessions
     }
 
-    pub fn client_connected(&self) {
-        self.counters().clients += 1;
-        self.broadcast();
+    /// Counts a client, unless the host has already decided to leave: a
+    /// client accepted during the exit is never counted after the decision,
+    /// and its connection closes at once.
+    pub fn client_connected(&self) -> bool {
+        let mut c = self.counters();
+        if self.shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+        c.clients += 1;
+        c.last_activity = Instant::now();
+        self.broadcast_locked(&mut c);
+        true
     }
 
     pub fn client_disconnected(&self) {
-        {
-            let mut c = self.counters();
-            c.clients = c.clients.saturating_sub(1);
-        }
-        self.broadcast();
+        let mut c = self.counters();
+        c.clients = c.clients.saturating_sub(1);
+        c.last_activity = Instant::now();
+        self.broadcast_locked(&mut c);
     }
 
-    pub fn hold_session(&self, held: bool) {
-        {
-            let mut c = self.counters();
-            c.held_sessions = if held {
-                c.held_sessions + 1
-            } else {
-                c.held_sessions.saturating_sub(1)
-            };
+    /// Holds or releases one session. Refuses to hold once the host is
+    /// leaving, so a session cannot appear after `try_shutdown` or
+    /// `try_begin_idle_exit` decided there were none.
+    pub fn hold_session(&self, held: bool) -> bool {
+        let mut c = self.counters();
+        if held && self.shutdown.load(Ordering::SeqCst) {
+            return false;
         }
-        self.broadcast();
+        c.held_sessions = if held {
+            c.held_sessions + 1
+        } else {
+            c.held_sessions.saturating_sub(1)
+        };
+        c.last_activity = Instant::now();
+        self.broadcast_locked(&mut c);
+        true
+    }
+
+    /// `host.shutdown`: the check for live sessions and the decision to leave
+    /// are one critical section, so a session cannot be held in between.
+    /// `Err` carries the number of live sessions that refused it.
+    pub fn try_shutdown(&self, force: bool) -> Result<(), u32> {
+        let mut c = self.counters();
+        if c.held_sessions > 0 && !force {
+            return Err(c.held_sessions);
+        }
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.broadcast_locked(&mut c);
+        Ok(())
+    }
+
+    /// The idle watcher's decision (spec §5.5): no client, no session and
+    /// nothing has happened for `grace`. Deciding and setting the flag happen
+    /// in one critical section; `true` means this call decided to leave.
+    pub fn try_begin_idle_exit(&self, grace: Duration) -> bool {
+        let c = self.counters();
+        if self.shutdown.load(Ordering::SeqCst)
+            || c.clients > 0
+            || c.held_sessions > 0
+            || c.last_activity.elapsed() < grace
+        {
+            return false;
+        }
+        self.shutdown.store(true, Ordering::SeqCst);
+        true
     }
 
     /// The state as it is under the lock the caller already holds. Reading it
@@ -115,9 +168,8 @@ impl HostCore {
 
     /// Sends the current state to every subscriber; drops sinks whose
     /// connection is gone.
-    pub fn broadcast(&self) {
-        let mut c = self.counters();
-        let payload = self.snapshot(&c);
+    fn broadcast_locked(&self, c: &mut Counters) {
+        let payload = self.snapshot(c);
         c.subscribers.retain_mut(|(id, seq, sink)| {
             let sent = sink
                 .send(Event {

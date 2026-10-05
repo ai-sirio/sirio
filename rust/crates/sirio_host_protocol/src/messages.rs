@@ -46,6 +46,12 @@ pub enum ErrorCode {
     SessionsLive,
     StaleGeneration,
     HandshakeRequired,
+    // The peer broke the framing (spec §6.1): the answer to a header that
+    // parsed but is refused, sent once before the connection closes. Not sent
+    // for a wrong magic, which is a foreign protocol. (A plain comment, not a
+    // doc comment: a doc comment would split the committed schema's flat
+    // enum into a `oneOf`.)
+    FrameError,
     Internal,
     #[serde(other)]
     Other,

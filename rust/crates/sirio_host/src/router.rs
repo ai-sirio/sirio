@@ -2,7 +2,6 @@
 //! response out. Nothing here knows about sockets or pipes.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 
 use sirio_host_protocol::messages::*;
@@ -50,25 +49,25 @@ impl Router {
                         return Response::err(request.id, ErrorCode::InvalidParams, e.to_string());
                     }
                 };
-                if core.sessions() > 0 && !params.force {
-                    return Response::err(
+                match core.try_shutdown(params.force) {
+                    Ok(()) => Response::ok(request.id, serde_json::json!({})),
+                    Err(live) => Response::err(
                         request.id,
                         ErrorCode::SessionsLive,
-                        format!("{} session(s) live; shutdown needs force", core.sessions()),
-                    );
+                        format!("{live} session(s) live; shutdown needs force"),
+                    ),
                 }
-                core.shutdown.store(true, Ordering::SeqCst);
-                core.broadcast();
-                Response::ok(request.id, serde_json::json!({}))
             }
             method::DEBUG_HOLD_SESSION if cfg!(debug_assertions) => {
                 if let Some(stale) = self.stale(request) {
                     return stale;
                 }
                 match serde_json::from_value::<HoldSessionParams>(params_or_empty(request)) {
-                    Ok(p) => {
-                        core.hold_session(p.held);
+                    Ok(p) if core.hold_session(p.held) => {
                         Response::ok(request.id, serde_json::json!({}))
+                    }
+                    Ok(_) => {
+                        Response::err(request.id, ErrorCode::Internal, "host is shutting down")
                     }
                     Err(e) => Response::err(request.id, ErrorCode::InvalidParams, e.to_string()),
                 }
