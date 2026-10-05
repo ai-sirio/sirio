@@ -521,12 +521,14 @@ socket in a real, isolated Sirio. The `threads` stage of
 wire. State-only runs capture no frames; the controller's framed run
 reads them.
 
-Frames captured per flavour (`<flavour>` is `github` or `gitlab`):
+Frames captured per flavour (`<flavour>` is `github` or `gitlab`); the
+script's `capture` prefixes each name with the scenario, so on disk they read
+`*thread-writes-thread-writes-<flavour>-composer.png` and
+`*thread-writes-thread-writes-<flavour>-resolved.png`:
 
-- `thread-writes-<flavour>-composer`: the open line composer on the
-  `41-43` new-side range, before the send.
-- `thread-writes-<flavour>-resolved`: the thread folded after the
-  resolve the forge confirmed.
+- `…-composer.png`: the open line composer on the `41-43` new-side range,
+  before the send.
+- `…-resolved.png`: the thread folded after the resolve the forge confirmed.
 
 ### What was seen
 

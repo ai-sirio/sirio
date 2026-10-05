@@ -500,7 +500,6 @@ in the framed observations in `docs/testing/ely-change-request-tab.md`.
 
 ### Rulings from the slice ledger
 
-- Task 1: Ruling: Step 2 names another worktree — run the same RED E2E command in the brief's assigned sdd-b3a-impl worktree — cost if wrong: validation would cover a different checkout.
 - Task 1: Ruling (pre-flight): `UpdatePullRequestReviewComment` missing from the github live probes — covered by Task 2 Step 4, which appends that probe; checked at Task 2's review — cost if wrong: one live probe missing.
 - Task 2: Ruling (implementer): `--stage ci` run with `--state-only` (headless) — cost if wrong: ci captures unverified here.
 - Task 2: Ruling (review): the brief's "act names" meant the parser arms, which exist and are E2E-proven; the stale `forge_probe.rs` module doc is a Minor for the final fix wave — cost if wrong: a doc line.

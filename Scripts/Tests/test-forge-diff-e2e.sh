@@ -808,10 +808,10 @@ scenario_thread_writes() { # flavour host forge number remote-url
   wait_for commentable yes surface change-request read
 
   echo "  a line too far from the change cannot be composed on"
-  if ctl surface change-request thread --compose src/login.rs:new:30 >/dev/null 2>"$RUN_DIR/compose-err.txt"; then
+  if ctl surface change-request thread --compose src/login.rs:new:30 >/dev/null 2>"$RUN_DIR/compose-err.log"; then
     fail "line 30 took a composer"
   fi
-  grep -q "That line cannot take a comment." "$RUN_DIR/compose-err.txt" || fail "line 30 was refused for the wrong reason"
+  grep -q "That line cannot take a comment." "$RUN_DIR/compose-err.log" || { cat "$RUN_DIR/compose-err.log"; fail "line 30 was refused for the wrong reason"; }
 
   echo "  a range on the new side, sent with unicode, closes the composer and reads the threads again"
   ctl surface change-request thread --compose src/login.rs:new:41-43 >/dev/null
@@ -821,17 +821,60 @@ scenario_thread_writes() { # flavour host forge number remote-url
   ctl surface change-request act line-comment --text $'Range → ok? naïve ☕' >/dev/null
   wait_for action idle surface change-request read
   wait_for line_composer "" surface change-request read
-  # The REST body reached the fake forge (Task 2/3's logging).
-  grep -q "/comments - \|/discussions - " "$RUN_DIR/$SCENARIO-forge-requests.log" || fail "no line comment reached the forge"
+  # What the range comment sent: the logged REST request, not just its endpoint.
+  if [ "$flavour" = github ]; then
+    python3 - "$RUN_DIR/$SCENARIO-forge-requests.log" <<'PY' || fail "the range comment did not reach GitHub as written"
+import json, re, sys
+lines = [l for l in open(sys.argv[1], encoding="utf-8") if re.match(r"^POST \S+/pulls/101/comments - ", l)]
+assert lines, "no line comment reached the forge"
+sent = json.loads(lines[-1].split(" vars=", 1)[1])
+assert sent["body"] == "Range \u2192 ok? na\u00efve \u2615", sent
+assert (sent["line"], sent["start_line"], sent["side"], sent["start_side"], sent["path"]) == (43, 41, "RIGHT", "RIGHT", "src/login.rs"), sent
+PY
+  else
+    python3 - "$RUN_DIR/$SCENARIO-forge-requests.log" <<'PY' || fail "the range comment did not reach GitLab as written"
+import json, re, sys
+lines = [l for l in open(sys.argv[1], encoding="utf-8") if re.match(r"^POST \S+/merge_requests/201/discussions - ", l)]
+assert lines, "no line comment reached the forge"
+sent = json.loads(lines[-1].split(" vars=", 1)[1])
+assert sent["body"] == "Range \u2192 ok? na\u00efve \u2615", sent
+ends = sent["position"]["line_range"]
+assert ends["start"]["line_code"].endswith("_41_41") and ends["end"]["line_code"].endswith("_43_43"), sent
+PY
+  fi
 
   echo "  a reply, then a resolve the forge confirms by folding the card"
   ctl surface change-request act reply --thread "$open_id" --text "On it." >/dev/null
   wait_for action idle surface change-request read
   wait_for thread_replying "" surface change-request read
+  # The reply reached the forge as the mutation each forge means.
+  if [ "$flavour" = github ]; then
+    python3 - "$RUN_DIR/$SCENARIO-forge-requests.log" <<'PY' || fail "the reply did not reach GitHub as written"
+import json, re, sys
+lines = [l for l in open(sys.argv[1], encoding="utf-8") if re.match(r"^POST \S+ AddPullRequestReviewThreadReply ", l)]
+assert lines, "no reply reached the forge"
+sent = json.loads(lines[-1].split(" vars=", 1)[1])["input"]
+assert (sent["body"], sent["pullRequestReviewThreadId"]) == ("On it.", "PRRT_open42"), sent
+PY
+  else
+    python3 - "$RUN_DIR/$SCENARIO-forge-requests.log" <<'PY' || fail "the reply did not reach GitLab as written"
+import json, re, sys
+lines = [l for l in open(sys.argv[1], encoding="utf-8") if re.match(r"^POST \S+ CreateNote ", l)]
+assert lines, "no reply reached the forge"
+sent = json.loads(lines[-1].split(" vars=", 1)[1])["input"]
+assert (sent["body"], sent["discussionId"]) == ("On it.", "gid://gitlab/Discussion/open12"), sent
+PY
+  fi
   ctl surface change-request act resolve --thread "$open_id" >/dev/null
   wait_for action idle surface change-request read
   wait_for threads_resolved 2 surface change-request read
   assert_contains thread_rows "$open_id:line:folded" surface change-request read
+  # The resolve named the open thread.
+  if [ "$flavour" = github ]; then
+    grep -qF 'ResolveReviewThread interaction=no vars={"input": {"threadId": "PRRT_open42"}}' "$RUN_DIR/$SCENARIO-forge-requests.log" || fail "the resolve did not name PRRT_open42"
+  else
+    grep -qF 'DiscussionToggleResolve interaction=no vars={"input": {"id": "gid://gitlab/Discussion/open12", "resolve": true}}' "$RUN_DIR/$SCENARIO-forge-requests.log" || fail "the resolve did not name open12"
+  fi
   capture "thread-writes-$flavour-resolved"
 
   echo "  the old side: a composer on the removed line, then cancelled"
