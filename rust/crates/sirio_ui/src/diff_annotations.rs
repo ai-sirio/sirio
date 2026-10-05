@@ -251,6 +251,28 @@ pub(crate) fn anchor_in(
     })
 }
 
+/// The lines a new-side anchor covers, as the diff reads them now, for
+/// *Suggest*; `None` on the old side or when the lines are not in one hunk.
+// Task 7's Suggest reads the anchored lines through this.
+#[allow(dead_code)]
+pub(crate) fn anchored_text(diff: &FileDiff, anchor: &CommentAnchor) -> Option<Vec<String>> {
+    if anchor.side != AnnotationSide::New {
+        return None;
+    }
+    let (hunk, last) = locate(diff, AnnotationSide::New, anchor.last())?;
+    let (first_hunk, first) = locate(diff, AnnotationSide::New, anchor.first())?;
+    if first_hunk != hunk || first > last {
+        return None;
+    }
+    Some(
+        diff.hunks[hunk].lines[first..=last]
+            .iter()
+            .filter(|line| line.origin != DiffOrigin::Deletion)
+            .map(|line| line.content.clone())
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +381,33 @@ mod tests {
         lines.push(diff_line(DiffOrigin::Addition, None, Some(42)));
         lines.extend((43..=46).map(|n| diff_line(DiffOrigin::Context, Some(n), Some(n))));
         Hunk { header: "@@ -38,9 +38,9 @@".into(), old_start: 38, old_lines: 9, new_start: 38, new_lines: 9, lines }
+    }
+
+    fn file_of(hunks: Vec<Hunk>) -> FileDiff {
+        FileDiff { path: "src/login.rs".into(), hunks, additions: 1, deletions: 1, is_binary: false, is_submodule: false }
+    }
+
+    fn texted(mut hunk: Hunk) -> Hunk {
+        for line in &mut hunk.lines {
+            line.content = match (line.origin, line.old_line_number, line.new_line_number) {
+                (DiffOrigin::Deletion, Some(old), _) => format!("old {old}"),
+                (_, _, Some(new)) => format!("line {new}"),
+                _ => String::new(),
+            };
+        }
+        hunk
+    }
+
+    #[test]
+    fn the_anchored_text_is_the_new_side_s_lines_without_the_removed_one() {
+        let diff = file_of(vec![texted(edited_hunk())]);
+        let range = anchor_in(Path::new("src/login.rs"), AnnotationSide::New, &diff.hunks[0], 3, 6).expect("41..=43");
+        assert_eq!(
+            anchored_text(&diff, &range),
+            Some(vec!["line 41".to_string(), "line 42".to_string(), "line 43".to_string()])
+        );
+        let old = anchor_in(Path::new("src/login.rs"), AnnotationSide::Old, &diff.hunks[0], 4, 4).expect("old 42");
+        assert_eq!(anchored_text(&diff, &old), None, "a suggestion replaces new-side lines only");
     }
 
     #[test]

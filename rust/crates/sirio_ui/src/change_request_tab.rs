@@ -26,6 +26,7 @@ mod composer;
 mod edit;
 mod merge;
 mod people;
+mod suggestion;
 mod threads;
 
 use crate::change_request_style as style;
