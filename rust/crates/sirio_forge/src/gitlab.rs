@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, ThreadFacts, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewTarget, ReviewVerdict, ThreadFacts, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -351,6 +351,23 @@ pub(crate) fn for_branch(
     Ok(pick_for_branch(candidates, source_owner))
 }
 
+/// The viewer's draft notes (REST: GraphQL has none, checked against the
+/// schema on 2026-10-05). A server or role without draft notes answers
+/// `NotFound` or `Forbidden`, which reads as none (B3c revision (h)).
+fn draft_notes(client: &ForgeClient, number: u64) -> Result<Vec<Value>, ForgeError> {
+    let path = format!(
+        "projects/{}/merge_requests/{number}/draft_notes?per_page=100",
+        percent_encode(&client.project, false)
+    );
+    match execute_rest(client, &RestRequest::get(path)) {
+        Ok(response) => Ok(serde_json::from_slice::<Vec<Value>>(&response.body).map_err(|error| {
+            ForgeError::UnexpectedResponse { host: client.host.clone(), detail: format!("draft notes: {error}") }
+        })?),
+        Err(ForgeError::NotFound { .. } | ForgeError::Forbidden { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, ForgeError> {
     let me = client.viewer()?;
     let data = run(
@@ -376,7 +393,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         commit_count: opt_u32(node, "/commitCount"),
         timeline: timeline(&array_at(node, "/notes/nodes")),
         timeline_truncated: has_previous_page(node, "/notes"),
-        draft: None,
+        draft: mapping::gitlab_draft(&draft_notes(client, number)?),
         revisions: revisions(
             opt_str(node, "/diffRefs/baseSha"),
             opt_str(node, "/diffRefs/headSha"),
@@ -654,7 +671,8 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
 /// newer fields.
 pub(crate) fn review_threads(client: &ForgeClient, number: u64) -> Result<Listing<ReviewThread>, ForgeError> {
     let mut text = THREADS;
-    paged(|after| {
+    let mut head: Option<String> = None;
+    let mut listing = paged(|after| {
         let variables = json!({ "fullPath": client.project, "iid": number.to_string(), "after": after });
         let data = match execute(client, "MergeRequestThreads", text, variables.clone()) {
             Err(ForgeError::UnknownField { .. }) if text == THREADS => {
@@ -664,14 +682,19 @@ pub(crate) fn review_threads(client: &ForgeClient, number: u64) -> Result<Listin
             answer => answer.map_err(no_unknown_field)?,
         };
         let merge_request = merge_request(client, &data)?;
-        let head = opt_str(merge_request, "/diffRefs/headSha");
+        if head.is_none() {
+            head = opt_str(merge_request, "/diffRefs/headSha").map(str::to_string);
+        }
         let can_note = bool_at(merge_request, "/userPermissions/createNote");
         let items = array_at(merge_request, "/discussions/nodes")
             .into_iter()
-            .filter_map(|discussion| gitlab_thread(discussion, head, can_note))
+            .filter_map(|discussion| gitlab_thread(discussion, head.as_deref(), can_note))
             .collect();
         Ok((items, next_cursor(merge_request, "/discussions")))
-    })
+    })?;
+    let me = client.viewer()?;
+    mapping::gitlab_drafts_into(&mut listing.items, &draft_notes(client, number)?, &me, head.as_deref());
+    Ok(listing)
 }
 
 fn gitlab_thread(discussion: &Value, head: Option<&str>, can_note: bool) -> Option<ReviewThread> {
@@ -810,6 +833,17 @@ fn approve(client: &ForgeClient, number: u64) -> Result<(), ForgeError> {
     execute_rest(client, &request).map(|_| ())
 }
 
+/// Requesting changes shares one call between the `Review` action and the
+/// review submit below.
+fn request_changes(client: &ForgeClient, iid: &str) -> Result<(), ForgeError> {
+    mutate(
+        client,
+        "MergeRequestRequestChanges",
+        REQUEST_CHANGES,
+        json!({ "projectPath": client.project, "iid": iid }),
+    )
+}
+
 /// `mergeRequestUpdate` with only the fields the action changes.
 fn update(client: &ForgeClient, number: u64, fields: Value) -> Result<(), ForgeError> {
     let mut input = json!({ "projectPath": client.project, "iid": number.to_string() });
@@ -844,12 +878,21 @@ pub(crate) fn act(
     action: &Action,
 ) -> Result<ActionOutcome, ForgeError> {
     let mut context = action_context(client, number)?;
-    if let Action::Reply { thread, .. } | Action::Resolve { thread, .. } = action {
+    if let Action::Reply { thread, .. }
+    | Action::Resolve { thread, .. }
+    | Action::ReviewAdd { target: ReviewTarget::Reply { thread }, .. } = action
+    {
         context.thread = Some(thread_facts(client, number, thread)?);
+    }
+    let mut drafts = Vec::new();
+    if matches!(action, Action::Review { .. } | Action::ReviewSubmit { .. } | Action::ReviewDiscard) {
+        drafts = draft_notes(client, number)?;
+        context.draft = mapping::gitlab_draft(&drafts);
     }
     check_action(&client.host, action, &context)?;
     let noteable = context.node_id.as_str();
     let iid = number.to_string();
+    let drafts_path = format!("projects/{}/merge_requests/{number}/draft_notes", percent_encode(&client.project, false));
     match action {
         Action::Comment { body }
         | Action::Review {
@@ -867,12 +910,7 @@ pub(crate) fn act(
             verdict: ReviewVerdict::RequestChanges,
             body,
         } => {
-            mutate(
-                client,
-                "MergeRequestRequestChanges",
-                REQUEST_CHANGES,
-                json!({ "projectPath": client.project, "iid": iid }),
-            )?;
+            request_changes(client, &iid)?;
             return Ok(then_comment(client, noteable, body, "Changes requested"));
         }
         Action::Close => update(client, number, json!({ "state": "CLOSED" }))?,
@@ -1009,14 +1047,66 @@ pub(crate) fn act(
             )
             .map(|_| ())?
         }
+        Action::EditComment { comment, body } if comment.kind == CommentKind::Draft => {
+            execute_rest(client, &RestRequest {
+                method: RestMethod::Put,
+                log: false,
+                path: format!("{drafts_path}/{}", comment.id),
+                body: Some(json!({ "note": body }).to_string().into_bytes()),
+            })
+            .map(|_| ())?
+        }
         Action::EditComment { comment, body } => mutate(
             client,
             "UpdateNote",
             UPDATE_NOTE,
             json!({ "id": comment.id, "body": body }),
         )?,
-        Action::ReviewAdd { .. } | Action::ReviewSubmit { .. } | Action::ReviewDiscard | Action::DraftDelete { .. } => {
-            return Err(ForgeError::Unsupported { host: client.host.clone(), what: "reviews".to_string() });
+        Action::ReviewAdd { target, body } => {
+            execute_rest(client, &RestRequest {
+                method: RestMethod::Post,
+                log: false,
+                path: drafts_path.clone(),
+                body: Some(mapping::gitlab_draft_note(target, body).to_string().into_bytes()),
+            })
+            .map(|_| ())?
+        }
+        // Two steps (spec §5): once the drafts are published, a verdict that
+        // fails is said as a warning, never as an error that would read as if
+        // nothing had been published.
+        Action::ReviewSubmit { verdict, body } => {
+            execute_rest(client, &RestRequest {
+                method: RestMethod::Post,
+                log: false,
+                path: format!("{drafts_path}/bulk_publish"),
+                body: None,
+            })?;
+            let published = "Your review was published";
+            let verdict_failed = |what: &str, error: ForgeError| ActionOutcome {
+                warning: Some(format!("{published}, but {what} failed: {error}")),
+            };
+            return Ok(match verdict {
+                ReviewVerdict::Comment => then_comment(client, noteable, body, published),
+                ReviewVerdict::Approve => match approve(client, number) {
+                    Ok(()) => then_comment(client, noteable, body, "Your review was published and approved"),
+                    Err(error) => verdict_failed("approving", error),
+                },
+                ReviewVerdict::RequestChanges => match request_changes(client, &iid) {
+                    Ok(()) => then_comment(client, noteable, body, "Your review was published with changes requested"),
+                    Err(error) => verdict_failed("requesting changes", error),
+                },
+            });
+        }
+        Action::ReviewDiscard => {
+            for note in &drafts {
+                if let Some(id) = note.get("id").and_then(Value::as_u64) {
+                    execute_rest(client, &RestRequest { method: RestMethod::Delete, log: false, path: format!("{drafts_path}/{id}"), body: None })?;
+                }
+            }
+        }
+        Action::DraftDelete { comment } => {
+            execute_rest(client, &RestRequest { method: RestMethod::Delete, log: false, path: format!("{drafts_path}/{}", comment.id), body: None })
+                .map(|_| ())?
         }
     }
     Ok(ActionOutcome::default())

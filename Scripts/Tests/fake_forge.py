@@ -57,12 +57,21 @@ normal -- so one server covers every error path of an action:
                  fails can be told apart
     autodeleted  the same DELETE answers 422 "Reference does not exist", as
                  GitHub does once its own delete-on-merge setting got there first
+    approvefails GitLab only: the REST approval answers 403, while every other
+                 write succeeds
 
 Merge (B2b): GitHub's branch deletion is REST `DELETE /api/v3/repos/<o>/<r>/
 git/refs/heads/<branch>` (204); GitLab's cancel of an auto-merge is REST
 `POST /api/v4/projects/<p>/merge_requests/<iid>/cancel_merge_when_pipeline_
 succeeds` (200). `ReviewerCandidates` and `LabelCandidates` answer their
 fixture with the rows whose words contain the `q` variable.
+
+Draft notes (B3c): GitLab's `GET .../merge_requests/<iid>/draft_notes`
+lists the draft notes `POST /__drafts` seeded, empty until a stage posts
+some; `POST` adds one (a reply names `in_reply_to_discussion_id`, a line
+comment a text `position`), `PUT .../draft_notes/<id>` edits one,
+`DELETE .../draft_notes/<id>` deletes one, and `POST .../bulk_publish`
+publishes them all.
 
 A write that succeeded is remembered, and a read then serves
 `<Operation>.after.<Mutation>.json` when it exists (the newest write that has
@@ -78,6 +87,8 @@ until the next `/__reset`.
 
 `POST /__slowlog?seconds=N` answers every GitLab trace N seconds late, and
 `GET /__stats` says how many traces were ever answered at once.
+`POST /__drafts` seeds the draft notes `GET …/draft_notes` lists, empty
+until a stage posts some.
 `POST /__ratelimit?seconds=N` rate limits every read with a reset N seconds
 ahead; `POST /__throttle` answers 429 with Retry-After and no reset until
 `/__reset`. That reset also clears both limits. `ChangeRequestSearch` keeps
@@ -127,6 +138,8 @@ NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary"
 # Mutations an older GitLab lacks: the `old` credential answers them as such a
 # server would, with a schema error naming the field.
 NEWER_GITLAB_MUTATIONS = {"mergeRequestSetReviewers", "mergeRequestSetLabels"}
+
+DRAFTS = r"/api/v4/projects/[^/]+/merge_requests/\d+/draft_notes"
 # The newer fields a query can name, and the type an older GitLab would say lacks them.
 NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"), ("truncatedDiffLines", "Discussion"))
 
@@ -244,6 +257,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     fixture_files = {}
     applied = []
     applied_lock = threading.Lock()
+    drafts = []
+    draft_seq = [100]
+    drafts_lock = threading.Lock()
     limit_until = 0.0
     throttled = False
     expired = False
@@ -377,6 +393,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def rest_write(self, path, raw):
         """GitLab REST writes: approvals, cancellations and diff notes."""
         self.record("POST", path, None, None, json.loads(raw or b"{}"))
+        if self.flavor == "gitlab" and re.fullmatch(DRAFTS + "/bulk_publish", path):
+            if self.credential() == "readonly":
+                return self.answer(403, {"message": "403 Forbidden"})
+            with self.drafts_lock:
+                Handler.drafts = []
+            self.remember("bulk-publish")
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.flavor == "gitlab" and re.fullmatch(DRAFTS, path):
+            body = json.loads(raw or b"{}")
+            if self.credential() == "readonly":
+                return self.answer(403, {"message": "403 Forbidden"})
+            position = body.get("position")
+            if not (isinstance(body.get("note"), str) and body["note"].strip()) or not (
+                isinstance(body.get("in_reply_to_discussion_id"), str)
+                or (isinstance(position, dict) and position.get("position_type") == "text"
+                    and all(position.get(key) for key in ("base_sha", "start_sha", "head_sha", "old_path", "new_path")))
+            ):
+                return self.answer(400, {"message": "400 Bad request - note is missing, or the position is not valid"})
+            with self.drafts_lock:
+                note = {"id": Handler.draft_seq[0], "author_id": 1, "merge_request_id": 201,
+                        "resolve_discussion": False, "discussion_id": body.get("in_reply_to_discussion_id"),
+                        "note": body["note"], "commit_id": None, "line_code": None,
+                        "position": position if isinstance(position, dict) else None}
+                Handler.draft_seq[0] += 1
+                Handler.drafts.append(note)
+            self.remember("draft-note")
+            return self.answer(201, note)
         if self.flavor == "gitlab" and re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/discussions", path):
             body = json.loads(raw or b"{}")
             if self.credential() == "readonly":
@@ -420,6 +466,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if credential == "scopeless":
             return self.answer(403, {"error": "insufficient_scope", "scope": "api",
                                      "error_description": "The request requires higher privileges than provided by the access token."})
+        if credential == "approvefails":
+            return self.answer(403, {"message": "403 Forbidden - You cannot approve this merge request"})
         if credential == "rejected":
             return self.answer(409, {"message": "SHA does not match HEAD of source branch"})
         if credential == "slow":
@@ -489,6 +537,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.flavor == "github":
                 return self.answer(200, {"installed_version": "3.17.0"})
             return self.answer(404, {"message": "404 Not Found"})
+        if self.flavor == "gitlab" and re.fullmatch(DRAFTS, path):
+            return self.answer(200, Handler.drafts)
         job = re.fullmatch(r"(?:/api/v3)?/repos/[^/]+/[^/]+/actions/jobs/(\d+)(/logs)?", path)
         if self.flavor == "github" and job:
             error = self.scenario_error()
@@ -549,11 +599,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         scopes = {"readonly": "read:org", "finegrained": None}.get(self.credential(), "repo, read:org")
         return self.answer(200, who, [("X-OAuth-Scopes", scopes)] if scopes is not None else [])
 
+    def do_PUT(self):
+        path = self.plain_path()
+        raw = self.body()
+        body = json.loads(raw or b"{}")
+        self.record("PUT", path, None, None, body)
+        found = re.fullmatch(DRAFTS + r"/(\d+)", path)
+        if self.flavor != "gitlab" or not found:
+            return self.answer(404, {"message": "404 Not Found"})
+        with self.drafts_lock:
+            note = next((note for note in Handler.drafts if note["id"] == int(found.group(1))), None)
+            if note is None:
+                return self.answer(404, {"message": "404 Draft Note Not Found"})
+            if "note" in body:
+                note["note"] = body["note"]
+        self.remember("draft-edit")
+        return self.answer(200, note)
+
     def do_DELETE(self):
-        """GitHub's branch deletion after a merge: the only DELETE Sirio sends."""
+        """GitHub's branch deletion after a merge, and GitLab's deletion of
+        one draft note: the only DELETEs Sirio sends."""
         path = self.plain_path()
         self.body()
         self.record("DELETE", path, None, None, None)
+        found = re.fullmatch(DRAFTS + r"/(\d+)", path)
+        if self.flavor == "gitlab" and found:
+            with self.drafts_lock:
+                before = len(Handler.drafts)
+                Handler.drafts = [note for note in Handler.drafts if note["id"] != int(found.group(1))]
+                gone = len(Handler.drafts) < before
+            if not gone:
+                return self.answer(404, {"message": "404 Draft Note Not Found"})
+            self.remember("draft-delete")
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.flavor != "github" or not re.fullmatch(r"(/api/v3)?/repos/[^/]+/[^/]+/git/refs/heads/.+", path):
             return self.answer(404, {"message": "Not Found"})
         error = self.scenario_error()
@@ -602,7 +683,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Handler.expired = False
             Handler.slow_log = 0.0
             Handler.traces_at_once_max = 0
+            Handler.drafts = []
             return self.answer(200, {"reset": True})
+        if path == "/__drafts":
+            seeded = json.loads(raw or b"[]")
+            with self.drafts_lock:
+                Handler.drafts = seeded
+                Handler.draft_seq[0] = max([100] + [note["id"] for note in seeded]) + 1
+            return self.answer(200, {"drafts": len(seeded)})
         if self.flavor == "github" and re.fullmatch(r"(/api/v3)?/repos/[^/]+/[^/]+/pulls/\d+/comments", path):
             return self.github_review_comment(path, raw)
         if self.flavor != "none" and path.startswith("/api/v4/"):
