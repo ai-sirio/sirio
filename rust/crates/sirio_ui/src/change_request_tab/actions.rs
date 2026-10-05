@@ -236,6 +236,8 @@ impl ChangeRequestTab {
                 };
             }
         }
+        self.sync_writes(cx);
+        self.push_annotations(cx);
         cx.notify();
     }
 
@@ -251,6 +253,7 @@ impl ChangeRequestTab {
     /// the composer by mistake.
     fn action_succeeded(&mut self, kind: &'static str, warned: bool, cx: &mut Context<Self>) {
         match kind {
+            "line-comment" => self.line_composer = None,
             "edit" => self.actions.edit = None,
             "edit-comment" => self.actions.comment_edit = None,
             "merge" | "auto-merge" => self.actions.merge.dialog = None,

@@ -177,7 +177,7 @@ fn comment_blocks(thread: &ReviewThread, docs: &[markdown::Doc], theme: &Theme) 
         .collect()
 }
 
-fn card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+pub(super) fn card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .mx(px(12.0))
@@ -256,7 +256,7 @@ impl ThreadView {
 
 /// The owner reads every card's revision, this one included, so it is told
 /// after this card's update has ended.
-fn push_from<T>(owner: WeakEntity<ChangeRequestTab>, cx: &mut Context<T>) {
+pub(super) fn push_from<T>(owner: WeakEntity<ChangeRequestTab>, cx: &mut Context<T>) {
     cx.defer(move |cx| {
         let _ = owner.update(cx, |tab, cx| tab.push_annotations(cx));
     });
@@ -503,7 +503,9 @@ impl ChangeRequestTab {
         let count = |predicate: fn(&ReviewThread) -> bool| published.iter().filter(|thread| predicate(thread)).count().to_string();
         let rows = match &self.range {
             RangeState::Ready { changes, .. } => changes.read(cx).report().annotations.into_iter().filter_map(|row| {
-                if let Some(view) = self.outdated_views.get(&row.path.to_string_lossy().into_owned())
+                if row.key == compose::COMPOSER_KEY {
+                    Some(format!("composer:{}", row.placed))
+                } else if let Some(view) = self.outdated_views.get(&row.path.to_string_lossy().into_owned())
                     .filter(|_| row.key == outdated_key(&row.path.to_string_lossy()))
                 {
                     let section = view.read(cx);
@@ -670,34 +672,45 @@ impl ChangeRequestTab {
     }
 
     fn annotations_for(&self, cx: &App) -> Vec<Annotation> {
-        let Some(listing) = self.threads.value() else {
-            return Vec::new();
-        };
-        let mut annotations: Vec<Annotation> = drawn_in_diff(&listing.items)
-            .into_iter()
-            .filter(|thread| !thread.outdated)
-            .map(|thread| {
-                let key = thread_key(&thread.id);
-                Annotation {
-                    key,
-                    path: PathBuf::from(&thread.path),
-                    side: annotation_side(thread.side),
-                    line: thread.line,
-                    start_line: thread.start_line,
-                    kind: AnnotationKind::Thread { open: !thread.resolved },
-                    revision: self.thread_views.get(&key).map_or(0, |view| view.read(cx).revision),
-                }
-            })
-            .collect();
-        annotations.extend(section_counts(&listing.items).into_iter().map(|(path, count)| Annotation {
-            key: outdated_key(&path),
-            revision: self.outdated_views.get(&path).map_or(0, |view| view.read(cx).revision),
-            path: PathBuf::from(path),
-            side: AnnotationSide::New,
-            line: None,
-            start_line: None,
-            kind: AnnotationKind::Outdated { count },
-        }));
+        let mut annotations = Vec::new();
+        if let Some(listing) = self.threads.value() {
+            annotations = drawn_in_diff(&listing.items)
+                .into_iter()
+                .filter(|thread| !thread.outdated)
+                .map(|thread| {
+                    let key = thread_key(&thread.id);
+                    Annotation {
+                        key,
+                        path: PathBuf::from(&thread.path),
+                        side: annotation_side(thread.side),
+                        line: thread.line,
+                        start_line: thread.start_line,
+                        kind: AnnotationKind::Thread { open: !thread.resolved },
+                        revision: self.thread_views.get(&key).map_or(0, |view| view.read(cx).revision),
+                    }
+                })
+                .collect();
+            annotations.extend(section_counts(&listing.items).into_iter().map(|(path, count)| Annotation {
+                key: outdated_key(&path),
+                revision: self.outdated_views.get(&path).map_or(0, |view| view.read(cx).revision),
+                path: PathBuf::from(path),
+                side: AnnotationSide::New,
+                line: None,
+                start_line: None,
+                kind: AnnotationKind::Outdated { count },
+            }));
+        }
+        if let Some(open) = &self.line_composer {
+            annotations.push(Annotation {
+                key: compose::COMPOSER_KEY,
+                path: open.anchor.path.clone(),
+                side: open.anchor.side,
+                line: Some(open.anchor.last()),
+                start_line: open.anchor.start.map(|_| open.anchor.first()),
+                kind: AnnotationKind::Composer,
+                revision: open.view.read(cx).revision,
+            });
+        }
         annotations
     }
 
@@ -712,6 +725,9 @@ impl ChangeRequestTab {
         let mut views: HashMap<u64, gpui::AnyView> =
             self.thread_views.iter().map(|(key, view)| (*key, view.clone().into())).collect();
         views.extend(self.outdated_views.iter().map(|(path, view)| (outdated_key(path), view.clone().into())));
+        if let Some(open) = &self.line_composer {
+            views.insert(compose::COMPOSER_KEY, open.view.clone().into());
+        }
         changes.update(cx, |changes, cx| changes.set_annotations(annotations, views, cx));
     }
 }

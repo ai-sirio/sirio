@@ -21,6 +21,7 @@ use sirio_forge::{
 use sirio_theme::Theme;
 
 mod actions;
+mod compose;
 mod composer;
 mod edit;
 mod merge;
@@ -230,6 +231,8 @@ pub struct ChangeRequestTab {
     /// The cards the diff draws, by annotation key; outdated sections by path.
     thread_views: HashMap<u64, Entity<threads::ThreadView>>,
     outdated_views: HashMap<String, Entity<threads::OutdatedView>>,
+    line_composer: Option<compose::LineComposer>,
+    pub(crate) write_target: Option<compose::WriteTarget>,
     check_folds: HashMap<String, bool>,
     generation: u64,
     /// A rate limit's reset: no request before it (spec §9).
@@ -299,6 +302,8 @@ impl ChangeRequestTab {
             threads_task: None,
             thread_views: HashMap::new(),
             outdated_views: HashMap::new(),
+            line_composer: None,
+            write_target: None,
             check_folds: HashMap::new(),
             generation: 0,
             paused_until: None,
@@ -501,8 +506,15 @@ impl ChangeRequestTab {
             // end the polling while the header we still show says CI runs.
             self.schedule_refresh(self.header.value().and_then(refresh_wait), cx);
         }
+        let succeeded = result.is_ok();
         self.header.finish(result);
         self.ensure_range(cx);
+        if succeeded {
+            if let RangeState::Ready { changes, .. } = &self.range {
+                let (changes, commentable) = (changes.clone(), self.commentable(cx));
+                changes.update(cx, |changes, cx| changes.set_commentable(commentable, cx));
+            }
+        }
         cx.notify();
     }
 
@@ -749,7 +761,16 @@ impl ChangeRequestTab {
                                 .to_path_buf();
                             let _ = tab.open_file(relative, None, cx);
                         }
-                        ChangesTabEvent::CommentOn(_) | ChangesTabEvent::CommentRefused(_) => {}
+                        ChangesTabEvent::CommentOn(anchor) => tab.open_composer(anchor.clone(), cx),
+                        ChangesTabEvent::CommentRefused(reason) => {
+                            if !tab.action_busy() {
+                                tab.actions.state = actions::ActionState::Failed {
+                                    kind: "line-comment",
+                                    message: reason.clone(),
+                                };
+                                cx.notify();
+                            }
+                        }
                     },
                 ));
                 self.updated_notice = was_ready
@@ -759,6 +780,8 @@ impl ChangeRequestTab {
                     changes: changes.clone(),
                 };
                 self.push_annotations(cx);
+                let commentable = self.commentable(cx);
+                changes.update(cx, |changes, cx| changes.set_commentable(commentable, cx));
                 // A new head moves the lines threads sit on; the CI timer that
                 // noticed it reads no threads, so they are read for it here.
                 if was_ready {
@@ -1036,6 +1059,33 @@ impl ChangeRequestTab {
                     .unwrap_or_default(),
             ),
             ("caps".to_string(), self.caps_words()),
+            (
+                "line_composer".to_string(),
+                self.line_composer
+                    .as_ref()
+                    .map(|open| open.anchor.spec())
+                    .unwrap_or_default(),
+            ),
+            (
+                "line_composer_len".to_string(),
+                self.line_composer
+                    .as_ref()
+                    .map_or(0, |open| open.view.read(cx).text(cx).chars().count())
+                    .to_string(),
+            ),
+            (
+                "line_composer_error".to_string(),
+                match (&self.actions.state, &self.write_target) {
+                    (actions::ActionState::Failed { message, .. }, Some(compose::WriteTarget::Composer)) => {
+                        message.clone()
+                    }
+                    _ => String::new(),
+                },
+            ),
+            (
+                "commentable".to_string(),
+                if self.commentable(cx) { "yes" } else { "no" }.to_string(),
+            ),
             (
                 "composer_len".to_string(),
                 self.actions
@@ -3030,6 +3080,155 @@ mod tests {
         pump_until(cx, || {
             tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:folded")
         });
+    }
+
+    /// The action context `act` reads before writing: the pull request's id,
+    /// its head and the permission to comment.
+    fn action_context_json(head: &str) -> String {
+        serde_json::json!({"data": {"repository": {
+            "viewerPermission": "WRITE", "mergeCommitAllowed": true, "squashMergeAllowed": true,
+            "rebaseMergeAllowed": false, "autoMergeAllowed": false, "deleteBranchOnMerge": false,
+            "pullRequest": {
+                "id": "PR_1", "state": "OPEN", "isDraft": false, "locked": false,
+                "headRefOid": head, "headRefName": "feat", "isCrossRepository": false,
+                "viewerCanUpdate": true, "viewerCanClose": true, "viewerCanReopen": false,
+                "viewerDidAuthor": false, "viewerCanEnableAutoMerge": false,
+                "mergeStateStatus": "CLEAN", "reviewDecision": null, "autoMergeRequest": null,
+                "commits": {"nodes": []}, "reviewRequests": {"nodes": []}
+            }}}}).to_string()
+    }
+
+    const COMMENTS: &str = "POST repos/acme/widgets/pulls/101/comments";
+
+    async fn composing(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ChangeRequestTab>, Arc<CannedForge>, RepoDir, String) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![]));
+        forge.answer("ChangeRequestActionContext", action_context_json(&head));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff"
+                    && report_value(tab, cx, "commentable") == "yes"
+            })
+        });
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |changes, cx| changes.focus_path(Path::new("a.txt"), cx));
+        pump_until(cx, || changes.read_with(cx, |changes, _| {
+            changes.comment_anchor(Path::new("a.txt"), AnnotationSide::New, 43, None).is_ok()
+        }));
+        (tab, forge, repo, head)
+    }
+
+    #[gpui::test]
+    async fn a_line_comment_is_sent_at_its_line_and_the_threads_are_read_again(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "thread_rows").contains("composer:line")
+            })
+        });
+        let reads = forge.count("ChangeRequestThreads");
+        forge.answer_rest(COMMENTS, 201, r#"{"id":1}"#);
+        tab.update(cx, |tab, cx| tab.composer_set_text("Is this \"ok\"? naïve ☕\n- yes", cx));
+        tab.update(cx, |tab, cx| tab.send_line_comment(cx)).expect("sent");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "action") == "idle"
+                    && report_value(tab, cx, "line_composer").is_empty()
+            })
+        });
+        let sent = forge.rest_body(COMMENTS).expect("the comment reached the forge");
+        assert_eq!(forge.rest_count(COMMENTS), 1);
+        assert_eq!(
+            sent,
+            serde_json::json!({
+                "body": "Is this \"ok\"? naïve ☕\n- yes",
+                "commit_id": head,
+                "path": "a.txt",
+                "line": 43,
+                "side": "RIGHT"
+            })
+        );
+        pump_until(cx, || forge.count("ChangeRequestThreads") > reads);
+    }
+
+    #[gpui::test]
+    async fn a_refused_position_keeps_the_text_and_says_why(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        forge.answer_rest(COMMENTS, 422, r#"{"message":"pull_request_review_thread.line must be part of the diff"}"#);
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Range", cx));
+        tab.update(cx, |tab, cx| tab.send_line_comment(cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed"));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer"), "a.txt:new:41-43");
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "5");
+            assert_eq!(
+                report_value(tab, cx, "line_composer_error"),
+                "pull_request_review_thread.line must be part of the diff"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn the_open_composer_keeps_its_text_when_the_threads_are_read_again(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, _head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:old:42", cx)).expect("the removed line");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Kept", cx));
+        let reads = forge.count("ChangeRequestThreads");
+        tab.update(cx, |tab, cx| tab.load_threads(cx));
+        pump_until(cx, || {
+            forge.count("ChangeRequestThreads") > reads
+                && tab.read_with(cx, |tab, cx| report_value(tab, cx, "threads_notice").is_empty())
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer"), "a.txt:old:42");
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "4");
+            assert!(report_value(tab, cx, "thread_rows").contains("composer:line"));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_gutter_pick_opens_the_composer_and_a_refusal_says_why(cx: &mut TestAppContext) {
+        let (tab, _forge, _repo, _head) = composing(cx).await;
+        let changes = ready_changes(&tab, cx);
+        let anchor = changes
+            .read_with(cx, |changes, _| {
+                changes.comment_anchor(Path::new("a.txt"), AnnotationSide::New, 44, None)
+            })
+            .expect("a line near the change");
+        changes.update(cx, |_, cx| cx.emit(ChangesTabEvent::CommentOn(anchor)));
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "line_composer") == "a.txt:new:44"));
+        changes.update(cx, |_, cx| {
+            cx.emit(ChangesTabEvent::CommentRefused(
+                "A range stays on one side of the diff.".into(),
+            ))
+        });
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "action_message") == "A range stays on one side of the diff."
+            })
+        });
+        tab.update(cx, |tab, cx| tab.cancel_composer(cx));
+        assert!(tab.read_with(cx, |tab, cx| report_value(tab, cx, "line_composer").is_empty()));
+    }
+
+    #[gpui::test]
+    async fn a_line_too_far_from_the_change_is_refused_at_compose(cx: &mut TestAppContext) {
+        let (tab, _forge, _repo, _head) = composing(cx).await;
+        assert_eq!(
+            tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:30", cx)),
+            Err("That line cannot take a comment.".to_string())
+        );
+        assert_eq!(
+            tab.update(cx, |tab, cx| tab.compose_at("a.txt:sideways:3", cx)),
+            Err("compose needs PATH:old|new:LINE or PATH:old|new:FIRST-LAST".to_string())
+        );
     }
 
     #[gpui::test]
