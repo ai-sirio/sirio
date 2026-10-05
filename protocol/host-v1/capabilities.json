@@ -1,0 +1,13 @@
+{
+  "protocol": "sirio-host",
+  "major": 1,
+  "rules": "docs/superpowers/specs/2026-10-05-host-foundation-design.md §6.4",
+  "capabilities": [
+    {
+      "name": "host.v1",
+      "since_minor": 0,
+      "methods": ["host.hello", "host.ping", "host.info", "host.shutdown", "host.subscribe"],
+      "topics": ["host.state"]
+    }
+  ]
+}
