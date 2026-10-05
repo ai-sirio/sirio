@@ -293,6 +293,22 @@ impl ChangeRequestTab {
                 _ => self.actions.comment_edit = None,
             },
             "resolve" | "unresolve" => {}
+            "review-add" if !warned => match self.write_target.clone() {
+                Some(super::compose::WriteTarget::Composer) => {
+                    self.line_composer = None;
+                    if self.write_refusal.as_ref().is_some_and(|(target, _)| target == &super::compose::WriteTarget::Composer) {
+                        self.write_refusal = None;
+                    }
+                }
+                Some(super::compose::WriteTarget::Reply(thread)) => {
+                    if let Some(view) = self.thread_views.get(&super::threads::thread_key(&thread)).cloned() {
+                        view.update(cx, |view, cx| view.close_reply(cx));
+                    }
+                }
+                _ => {}
+            },
+            "review-add" => {}
+            "draft-delete" => {}
             "merge" | "auto-merge" => self.actions.merge.dialog = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();

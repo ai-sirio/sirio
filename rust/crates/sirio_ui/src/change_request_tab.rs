@@ -3032,8 +3032,95 @@ mod tests {
         forge.answer("ReviewThreadContext", facts_json(true, true, true));
         let source = FakeSource::ready(testing::github_client(forge.clone()), None);
         let tab = open_tab(cx, source, &repo, InnerTab::Files);
-        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "threads_open") == "1"));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.threads.value().is_some()));
         (tab, forge, repo)
+    }
+
+    /// A thread node whose last comment is part of the viewer's pending review.
+    fn with_pending_comment(mut node: serde_json::Value, id: &str, body: &str) -> serde_json::Value {
+        node["comments"]["nodes"].as_array_mut().expect("comments").push(serde_json::json!({
+            "id": id,
+            "author": { "login": "fake-user" },
+            "body": body,
+            "createdAt": "2026-10-05T10:00:00Z",
+            "viewerCanUpdate": true,
+            "diffHunk": "@@ -1 +1 @@\n line",
+            "pullRequestReview": { "id": "PRR_1", "state": "PENDING" },
+        }));
+        node
+    }
+
+    /// A pull request answer (header or action context) with the viewer's
+    /// pending review in it.
+    fn with_pending_review(answer: String, id: &str, comments: u32) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(&answer).expect("JSON");
+        value["data"]["repository"]["pullRequest"]["pendingReview"] =
+            serde_json::json!({ "nodes": [ { "id": id, "comments": { "totalCount": comments } } ] });
+        value.to_string()
+    }
+
+    /// The id `thread_node` gives its comment.
+    fn first_comment_id() -> String {
+        "PRRT_1-c".to_string()
+    }
+
+    /// The full head SHA the tab's diff was built from.
+    fn report_head(tab: &Entity<ChangeRequestTab>, cx: &TestAppContext) -> String {
+        tab.read_with(cx, |tab, _| match &tab.range {
+            RangeState::Ready { revisions, .. } => revisions.head_sha.clone(),
+            _ => panic!("the diff is not ready"),
+        })
+    }
+
+    #[gpui::test]
+    async fn a_pending_comment_is_drawn_and_can_be_deleted(cx: &mut TestAppContext) {
+        let node = with_pending_comment(thread_node("PRRT_1", 42), "PRRC_9", "Not sent yet.");
+        let (tab, forge, _repo) = a_thread(cx, node).await;
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "threads_pending"), "1");
+            assert_eq!(report_value(tab, cx, "threads_open"), "1", "the open count stays published-only");
+        });
+        forge.answer("DeletePullRequestReviewComment", ok_mutation("deletePullRequestReviewComment"));
+        tab.update(cx, |tab, cx| tab.delete_draft_comment("PRRC_9", cx)).expect("a pending comment");
+        pump_until(cx, || forge.count("DeletePullRequestReviewComment") == 1);
+        assert_eq!(forge.sent("DeletePullRequestReviewComment").expect("sent")["input"], serde_json::json!({ "id": "PRRC_9" }));
+        let published = tab.update(cx, |tab, cx| tab.delete_draft_comment(&first_comment_id(), cx));
+        assert!(published.is_err(), "a published comment is not deleted");
+    }
+
+    #[gpui::test]
+    async fn a_thread_with_only_pending_comments_is_drawn_and_offers_no_reply(cx: &mut TestAppContext) {
+        let mut node = with_pending_comment(thread_node("PRRT_2", 42), "PRRC_9", "Mine.");
+        node["comments"]["nodes"].as_array_mut().unwrap().remove(0);
+        let (tab, _forge, _repo) = a_thread(cx, node).await;
+        // The card needs the diff as well as the threads; the file starts
+        // folded, so open it before asking where the card sits.
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "files_mode") == "diff"));
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |changes, cx| changes.focus_path(Path::new("a.txt"), cx));
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows").contains("PRRT_2:line:")));
+        tab.read_with(cx, |tab, cx| {
+            assert!(report_value(tab, cx, "thread_rows").contains("PRRT_2:line:"), "drawn in the diff");
+            assert_eq!(report_value(tab, cx, "conversation_threads"), "0", "not in the Conversation");
+        });
+        let refused = tab.update(cx, |tab, cx| tab.open_reply("PRRT_2", cx));
+        assert_eq!(refused, Err("That thread is part of your review in progress.".to_string()));
+    }
+
+    #[gpui::test]
+    async fn a_reply_added_to_the_review_in_progress_joins_it(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        let head = report_head(&tab, cx);
+        forge.answer("ChangeRequestActionContext", with_pending_review(action_context_json(&head), "PRR_1", 1));
+        forge.answer("AddPullRequestReviewThreadReply", ok_mutation("addPullRequestReviewThreadReply"));
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "In the review.", cx)).expect("an open reply");
+        tab.update(cx, |tab, cx| tab.send_reply_to_review("PRRT_1", cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_replying").is_empty()));
+        let input = &forge.sent("AddPullRequestReviewThreadReply").expect("sent")["input"];
+        assert_eq!(input["pullRequestReviewId"], "PRR_1");
+        assert_eq!(input["body"], "In the review.");
+        assert_eq!(forge.count("AddPullRequestReview"), 0, "the review in progress is reused");
     }
 
     fn ok_mutation(field: &str) -> String {

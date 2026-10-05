@@ -10,7 +10,7 @@ use ely_gpui_component::data_display::{Avatar, Tag};
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use ely_gpui_component::theme::AvatarSize;
 use gpui::WeakEntity;
-use sirio_forge::{CommentRef, ReviewThread, Side, ThreadComment};
+use sirio_forge::{CommentKind, CommentRef, ReviewTarget, ReviewThread, Side, ThreadComment};
 
 use crate::diff_annotations::{Annotation, AnnotationKind, AnnotationSide};
 use super::*;
@@ -77,9 +77,9 @@ fn first_published(thread: &ReviewThread) -> Option<&ThreadComment> {
 pub(crate) fn drawn_in_diff(threads: &[ReviewThread]) -> Vec<&ReviewThread> {
     let mut drawn: Vec<&ReviewThread> = threads
         .iter()
-        .filter(|thread| !thread.file_level && thread.line.is_some() && first_published(thread).is_some())
+        .filter(|thread| !thread.file_level && thread.line.is_some() && !thread.comments.is_empty())
         .collect();
-    let at = |thread: &ReviewThread| first_published(thread).and_then(|comment| comment.at);
+    let at = |thread: &ReviewThread| first_published(thread).or(thread.comments.first()).and_then(|comment| comment.at);
     drawn.sort_by(|a, b| at(a).cmp(&at(b)).then_with(|| a.id.cmp(&b.id)));
     drawn
 }
@@ -116,12 +116,11 @@ fn annotation_side(side: Side) -> AnnotationSide {
     }
 }
 
-/// Each published comment's body as Markdown, aligned with them.
+/// Each comment's body as Markdown, aligned with them.
 fn comment_docs(thread: &ReviewThread, theme: &Theme) -> Vec<markdown::Doc> {
     thread
         .comments
         .iter()
-        .filter(|comment| !comment.pending)
         .map(|comment| markdown_doc(&comment.body, theme))
         .collect()
 }
@@ -138,13 +137,12 @@ fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// The published comments of a thread, one block each.
+/// The comments of a thread, one block each.
 fn comment_blocks(thread: &ReviewThread, docs: &[markdown::Doc], theme: &Theme) -> Vec<AnyElement> {
     let now = style::now();
     thread
         .comments
         .iter()
-        .filter(|comment| !comment.pending)
         .zip(docs)
         .enumerate()
         .map(|(index, (comment, doc))| {
@@ -243,6 +241,11 @@ impl ThreadView {
     /// Only the header is drawn.
     pub(crate) fn folded(&self) -> bool {
         !self.expanded
+    }
+
+    /// A thread only the viewer can see takes no reply and no resolve.
+    fn published(&self) -> usize {
+        self.thread.comments.iter().filter(|comment| !comment.pending).count()
     }
 
     pub(crate) fn open_reply(&mut self, cx: &mut Context<Self>) {
@@ -384,7 +387,6 @@ impl ThreadView {
     fn render_comments(&mut self, window: &mut Window, cx: &mut Context<Self>, theme: &Theme) -> Vec<AnyElement> {
         let now = style::now();
         let comments: Vec<(usize, (ThreadComment, markdown::Doc))> = self.thread.comments.iter()
-            .filter(|comment| !comment.pending)
             .cloned()
             .zip(self.docs.iter().cloned())
             .enumerate()
@@ -408,6 +410,13 @@ impl ThreadView {
                         .text_color(theme.ely.fg_subtle)
                         .child(selectable_text(style::age(now, comment.at))),
                 );
+            if comment.pending {
+                metadata = metadata.child(
+                    div()
+                        .flex_none()
+                        .child(Tag::new(("change-request-thread-pending", index), "Pending").tone(Tone::Warning)),
+                );
+            }
             if comment.edit.is_some() && !editing {
                 let owner = self.owner.clone();
                 let comment_id = comment.id.clone();
@@ -424,6 +433,27 @@ impl ThreadView {
                                     let comment_id = comment_id.clone();
                                     let _ = owner.update(cx, |tab, cx| {
                                         let _ = tab.start_thread_comment_edit(&comment_id, cx);
+                                    });
+                                }),
+                        ),
+                );
+            }
+            if comment.edit.as_ref().is_some_and(|edit| edit.kind == CommentKind::Draft) && !editing {
+                let owner = self.owner.clone();
+                let comment_id = comment.id.clone();
+                metadata = metadata.child(
+                    div()
+                        .id(("change-request-thread-comment-delete", index))
+                        .debug_selector(|| "change-request-thread-comment-delete".into())
+                        .flex_none()
+                        .child(
+                            Button::new(("change-request-thread-comment-delete-button", index), "Delete")
+                                .variant(ButtonVariant::Ghost)
+                                .disabled(self.write.busy)
+                                .on_click(move |_, _, cx| {
+                                    let comment_id = comment_id.clone();
+                                    let _ = owner.update(cx, |tab, cx| {
+                                        let _ = tab.delete_draft_comment(&comment_id, cx);
                                     });
                                 }),
                         ),
@@ -515,6 +545,7 @@ impl Render for ThreadView {
         let theme = *Theme::get(cx);
         let thread = &self.thread;
         let published = thread.comments.iter().filter(|comment| !comment.pending).count();
+        let pending = thread.comments.len() - published;
         let folded = self.folded();
         let summary = if folded && thread.resolved {
             let who = thread
@@ -531,8 +562,8 @@ impl Render for ThreadView {
         };
         let (thread_id, can_resolve, can_reply, resolved, write) = (
             thread.id.clone(),
-            thread.can_resolve,
-            thread.can_reply,
+            thread.can_resolve && published > 0,
+            thread.can_reply && published > 0,
             thread.resolved,
             self.write.clone(),
         );
@@ -573,6 +604,14 @@ impl Render for ThreadView {
                     .text_color(theme.ely.fg_subtle)
                     .child(plural(published, "comment", "comments")),
             )
+            .when(pending > 0, |this| {
+                this.child(
+                    div().flex_none().child(
+                        Tag::new(("change-request-thread-pending-count", self.key), format!("{pending} pending"))
+                            .tone(Tone::Warning),
+                    ),
+                )
+            })
             .when(can_resolve, |this| {
                 let owner = self.owner.clone();
                 let id = thread_id.clone();
@@ -606,8 +645,10 @@ impl Render for ThreadView {
                     let text = self.reply_text(cx).unwrap_or_default();
                     let owner = self.owner.clone();
                     let send_owner = owner.clone();
+                    let review_owner = owner.clone();
                     let cancel_id = thread_id.clone();
                     let send_id = thread_id.clone();
+                    let review_id = thread_id.clone();
                     card = card.child(Input::new(&input)).child(
                         div()
                             .flex()
@@ -621,6 +662,18 @@ impl Render for ThreadView {
                                 move |_, cx| {
                                     let id = cancel_id.clone();
                                     let _ = owner.update(cx, |tab, cx| tab.cancel_thread_reply(&id, cx));
+                                },
+                            ))
+                            .child(actions::action_button(
+                                "change-request-thread-reply-review",
+                                if write.in_review { "Add to review" } else { "Start a review" },
+                                &theme,
+                                !write.busy && !text.trim().is_empty(),
+                                move |_, cx| {
+                                    let id = review_id.clone();
+                                    let _ = review_owner.update(cx, |tab, cx| {
+                                        let _ = tab.send_reply_to_review(&id, cx);
+                                    });
                                 },
                             ))
                             .child(actions::action_button(
@@ -787,6 +840,9 @@ impl ChangeRequestTab {
 
     pub(crate) fn open_reply(&mut self, thread: &str, cx: &mut Context<Self>) -> Result<(), String> {
         let view = self.thread_view(thread)?;
+        if view.read(cx).published() == 0 {
+            return Err("That thread is part of your review in progress.".to_string());
+        }
         view.update(cx, |view, cx| view.open_reply(cx));
         Ok(())
     }
@@ -817,6 +873,31 @@ impl ChangeRequestTab {
         self.start_write(
             compose::WriteTarget::Reply(thread.to_string()),
             Action::Reply { thread: thread.to_string(), body },
+            cx,
+        )
+    }
+
+    pub(crate) fn send_reply_to_review(&mut self, thread: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let view = self.thread_view(thread)?;
+        let body = view.read(cx).reply_text(cx).ok_or("no reply is being written")?;
+        self.start_write(
+            compose::WriteTarget::Reply(thread.to_string()),
+            Action::ReviewAdd { target: ReviewTarget::Reply { thread: thread.to_string() }, body },
+            cx,
+        )
+    }
+
+    pub(crate) fn delete_draft_comment(&mut self, comment: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let draft = self
+            .threads
+            .value()
+            .and_then(|listing| listing.items.iter().flat_map(|thread| thread.comments.iter()).find(|item| item.id == comment))
+            .and_then(|item| item.edit.clone())
+            .filter(|edit| edit.kind == CommentKind::Draft)
+            .ok_or("Only a comment of your review in progress can be deleted.")?;
+        self.start_write(
+            compose::WriteTarget::EditComment(comment.to_string()),
+            Action::DraftDelete { comment: draft },
             cx,
         )
     }
@@ -1015,6 +1096,7 @@ impl ChangeRequestTab {
             ("threads_resolved".to_string(), count(|thread| thread.resolved)),
             ("threads_outdated".to_string(), count(|thread| thread.outdated)),
             ("threads_file".to_string(), count(|thread| thread.file_level)),
+            ("threads_pending".to_string(), self.threads.value().map(|listing| listing.items.iter().flat_map(|thread| thread.comments.iter()).filter(|comment| comment.pending).count().to_string()).unwrap_or_else(|| "0".to_string())),
             ("thread_rows".to_string(), rows),
             ("conversation_threads".to_string(), conversation.to_string()),
             ("threads_notice".to_string(), self.threads_notice().map(|(_, text, _)| text).unwrap_or_default()),
@@ -1259,7 +1341,9 @@ mod tests {
         let draft = ReviewThread { comments: vec![comment("d", Some(12), true)], ..thread("draft", "a.rs", Some(5), None) };
         let lineless = thread("lineless", "a.rs", None, Some(13));
         let all = [normal, file, draft, lineless];
-        assert_eq!(ids(&drawn_in_diff(&all)), vec!["normal"]);
+        // Revision (g): a draft-only thread is drawn (it offers no reply and
+        // no resolve); the Conversation and the open counts stay published-only.
+        assert_eq!(ids(&drawn_in_diff(&all)), vec!["normal", "draft"]);
     }
 
     #[test]
@@ -1351,7 +1435,8 @@ mod tests {
         cx.run_until_parked();
         tab.read_with(cx, |tab, cx| {
             let report: HashMap<_, _> = tab.report(cx).into_iter().collect();
-            assert_eq!(report["thread_rows"], "r:hidden:folded|outdated:a.rs:1:folded");
+            // Revision (g): the draft-only thread is drawn too, open by default.
+            assert_eq!(report["thread_rows"], "r:hidden:folded|d:hidden:open|outdated:a.rs:1:folded");
             assert_eq!(tab.annotations_for(cx)[0].revision, 2);
         });
     }

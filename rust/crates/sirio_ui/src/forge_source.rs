@@ -179,6 +179,7 @@ pub(crate) mod testing {
     pub(crate) struct CannedForge {
         answers: Mutex<HashMap<String, (u16, Vec<(String, String)>, String)>>,
         seen: Mutex<Vec<String>>,
+        sent: Mutex<HashMap<String, Value>>,
         rest: Mutex<HashMap<String, (u16, String)>>,
         rest_seen: Mutex<Vec<(String, Option<Value>)>>,
     }
@@ -218,6 +219,11 @@ pub(crate) mod testing {
                 .count()
         }
 
+        /// The variables of the last request named `operation`.
+        pub(crate) fn sent(&self, operation: &str) -> Option<Value> {
+            self.sent.lock().unwrap().get(operation).cloned()
+        }
+
         pub(crate) fn answer_rest(&self, key: &str, status: u16, body: &str) {
             self.rest
                 .lock()
@@ -255,6 +261,7 @@ pub(crate) mod testing {
                 .unwrap_or_default()
                 .to_string();
             self.0.seen.lock().unwrap().push(operation.clone());
+            self.0.sent.lock().unwrap().insert(operation.clone(), request["variables"].clone());
             let (status, headers, body) = self
                 .0
                 .answers

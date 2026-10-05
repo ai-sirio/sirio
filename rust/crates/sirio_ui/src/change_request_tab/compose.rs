@@ -25,6 +25,7 @@ pub(crate) enum WriteTarget {
 pub(crate) struct WriteStatus {
     pub busy: bool,
     pub error: Option<String>,
+    pub in_review: bool,
 }
 
 pub(crate) struct LineComposer {
@@ -355,6 +356,7 @@ impl ChangeRequestTab {
     /// field that sent it).
     pub(crate) fn sync_writes(&mut self, cx: &mut Context<Self>) {
         let busy = self.action_busy();
+        let in_review = self.header.value().is_some_and(|header| header.draft.is_some());
         let failed = match &self.actions.state {
             actions::ActionState::Failed { message, .. } => Some(message.clone()),
             _ => None,
@@ -368,6 +370,7 @@ impl ChangeRequestTab {
                 .filter(|(owner, _)| owner == target)
                 .map(|(_, message)| message.clone())
                 .or_else(|| failed.clone().filter(|_| write_target.as_ref() == Some(target))),
+            in_review,
         };
         if let Some(open) = &self.line_composer {
             let status = status_for(&WriteTarget::Composer);
@@ -394,7 +397,7 @@ impl ChangeRequestTab {
                     })
                 });
             view.update(cx, |view, cx| {
-                view.set_write(WriteStatus { busy, error }, cx);
+                view.set_write(WriteStatus { busy, error, in_review }, cx);
             });
         }
     }
