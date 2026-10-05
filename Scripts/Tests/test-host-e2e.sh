@@ -30,8 +30,9 @@ set -eEuo pipefail
 #    6. no-steal          a second host on a held lock exits 3 and the first
 #                         keeps serving
 #    7. drain             a v2 host starts beside a v1 host with a live
-#                         session; v1 drains by itself when its session ends;
-#                         an older app gets a v1 host beside the v2 one
+#                         session; both outlive the idle grace on their
+#                         sessions alone; v1 drains by itself when its session
+#                         ends; an older app gets a v1 host beside the v2 one
 #    8. conformance       protocol/host-v1/conformance/ against the live host
 #    9. sessions-live     host.shutdown refuses while a session is live, and
 #                         `force` ends it
@@ -332,6 +333,9 @@ shutdown_hosts_in() { # ROOT [cleanup]
 }
 
 # Keeps a root's logs and state files (not the staged binary) under --out-dir.
+# Called before a root's hosts are shut down (a host that leaves removes its
+# state file) and again after (the logs then hold its last lines); a copy
+# never deletes, so the second call adds to the first.
 archive_root() { # ROOT
   [ -n "$OUT_DIR" ] || return 0
   local root="$1" dest f
@@ -352,6 +356,7 @@ end_case() {
   done
   HELPERS=()
   for root in ${CASE_ROOTS[@]+"${CASE_ROOTS[@]}"}; do
+    archive_root "$root"
     shutdown_hosts_in "$root"
     archive_root "$root"
     rm -rf "$root"
@@ -380,6 +385,7 @@ cleanup() {
   if [ -n "$ROOT_BASE" ] && [ -d "$ROOT_BASE" ]; then
     for root in "$ROOT_BASE"/*/; do
       [ -d "$root" ] || continue
+      archive_root "${root%/}"
       shutdown_hosts_in "${root%/}" cleanup
       archive_root "${root%/}"
     done
@@ -397,7 +403,7 @@ trap 'exit 143' TERM
 # ---------------------------------------------------------------- build
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/rust/target}"
-( cd "$REPO_ROOT/rust" && cargo build -q -p sirio_host -p sirio_host_client --examples )
+( cd "$REPO_ROOT/rust" && cargo build -q -p sirio_host -p sirio_host_client --bins --examples )
 HOST_BIN="$TARGET_DIR/debug/sirio-host$EXE"
 PROBE="$TARGET_DIR/debug/examples/host_probe$EXE"
 [ -x "$HOST_BIN" ] || { echo "FAIL: $HOST_BIN was not built" >&2; exit 1; }
@@ -476,9 +482,9 @@ case_client_killed() {
   HELPERS+=("$client")
   wait_until 20 has_line "$out" '^pid=' || fail "the holding client never printed a pid: $(cat "$out" "$ROOT_BASE/hold.err" 2>/dev/null | head -c 600)"
   host_pid="$(sed -n 's/^pid=//p' "$out" | head -n 1)"
-  # A live session, so that an idle exit cannot be mistaken for the kill
-  # having taken the host down (the grace is not what is being tested).
-  probe hold on
+  # No session is held: this is the force-quit of an app with nothing running
+  # in the host. The grace (20 s) is far longer than this case, so a host that
+  # is gone a second after the kill is one the kill took down.
   kill_hard "$client"
   wait "$client" 2>/dev/null || true
   sleep 1
@@ -492,6 +498,7 @@ case_client_killed() {
   # scope ends -- its whole cgroup -- which is what closing a terminal does.
   if user_manager_available; then
     local unit="she-$$-$N" out2="$ROOT_BASE/scope.out" scoped host2
+    archive_root "$ROOT"
     shutdown_hosts_in "$ROOT"
     use_root "$ROOT_BASE/c${N}b"
     systemd-run --user --scope --quiet --collect --unit="$unit" -- "$PROBE" ensure --hold >"$out2" 2>"$ROOT_BASE/scope.err" &
@@ -499,7 +506,6 @@ case_client_killed() {
     HELPERS+=("$scoped")
     wait_until 20 has_line "$out2" '^pid=' || fail "the client in scope $unit never printed a pid: $(cat "$out2" "$ROOT_BASE/scope.err" 2>/dev/null | head -c 600)"
     host2="$(sed -n 's/^pid=//p' "$out2" | head -n 1)"
-    probe hold on
     grep -q "$unit" "/proc/$scoped/cgroup" || fail "the client is not in the scope $unit: $(cat "/proc/$scoped/cgroup")"
     if grep -q "$unit" "/proc/$host2/cgroup"; then fail "the host $host2 is in the client's scope $unit, so stopping it would stop the host"; fi
     systemctl --user stop "$unit.scope" || fail "could not stop the scope $unit"
@@ -510,7 +516,7 @@ case_client_killed() {
     wait_until 5 info_has_one_client || fail "the host still counts the client of the stopped scope"
     NOTE="sigkill and systemd scope stop"
   else
-    NOTE="sigkill; systemd scope arm skipped: no user manager"
+    NOTE="sigkill; scope arm SKIPPED: no systemd user manager"
   fi
   pass
 }
@@ -524,7 +530,7 @@ user_manager_available() {
 }
 info_has_one_client() {
   run_probe info
-  [ "$RC" -eq 0 ] && [ "$(getf clients)" = 1 ] && [ "$(getf sessions)" = 1 ]
+  [ "$RC" -eq 0 ] && [ "$(getf clients)" = 1 ]
 }
 
 case_idle_exit() {
@@ -634,6 +640,20 @@ case_drain() {
   [ -f "$ROOT/host-v1.json" ] && [ -f "$ROOT/host-v2.json" ] || fail "step 2: expected host-v1.json and host-v2.json"
   [ "$(state_pid 1)" = "$v1" ] || fail "step 2: host-v1.json names $(state_pid 1), not $v1"
   [ "$(state_pid 2)" = "$v2" ] || fail "step 2: host-v2.json names $(state_pid 2), not $v2"
+  # 2b. a held session keeps its host past the idle grace (spec §9.2 item 9):
+  # both hosts hold one, nothing connects for longer than the 2 s grace, and
+  # neither leaves. Without this a host that ignored its sessions when it
+  # decided to idle out would pass every other step.
+  sleep 3.5
+  [ -f "$ROOT/host-v1.json" ] && [ -f "$ROOT/host-v2.json" ] || fail "step 2b: a host with a held session left within 3.5 s of its last activity (grace 2 s)"
+  alive "$v1" || fail "step 2b: the v1 host died although it holds a session"
+  alive "$v2" || fail "step 2b: the v2 host died although it holds a session"
+  [ "$(count_event 1 stop.idle)" = 0 ] || fail "step 2b: the v1 host idled out although a session is held"
+  [ "$(count_event 2 stop.idle)" = 0 ] || fail "step 2b: the v2 host idled out although a session is held"
+  probe_ok_as 1 info
+  [ "$(getf sessions)" = 1 ] || fail "step 2b: the v1 host reports $(getf sessions) sessions, not 1"
+  probe_ok_as 2 info
+  [ "$(getf sessions)" = 1 ] || fail "step 2b: the v2 host reports $(getf sessions) sessions, not 1"
   # 3. the v1 session ends: v1 drains by itself, nobody stops it
   probe_ok_as 1 hold off
   wait_until 10 absent "$ROOT/host-v1.json" || fail "step 3: the v1 host did not drain within 10 s of its last session ending"
