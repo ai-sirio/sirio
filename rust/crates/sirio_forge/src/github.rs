@@ -23,7 +23,7 @@ use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
     Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, Log, CiState, CommentKind,
     CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
-    PageCursor, ReviewOutcome, Reviewer, TimelineItem,
+    PageCursor, ReviewOutcome, ReviewThread, Reviewer, Side, ThreadComment, TimelineItem,
 };
 
 macro_rules! with_summary {
@@ -46,6 +46,7 @@ const HEADER: &str = with_summary!("queries/github/header.graphql");
 const COMMITS: &str = include_str!("queries/github/commits.graphql");
 const CHECKS: &str = include_str!("queries/github/checks.graphql");
 const FILES: &str = include_str!("queries/github/files.graphql");
+const THREADS: &str = include_str!("queries/github/threads.graphql");
 const ACTION_CONTEXT: &str = include_str!("queries/github/action_context.graphql");
 const ADD_COMMENT: &str = include_str!("queries/github/add_comment.graphql");
 const ADD_REVIEW: &str = include_str!("queries/github/add_review.graphql");
@@ -696,6 +697,70 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
             })
             .collect();
         Ok((items, next_cursor(&data, connection)))
+    })
+}
+
+pub(crate) fn review_threads(client: &ForgeClient, number: u64) -> Result<Listing<ReviewThread>, ForgeError> {
+    let (owner, name) = owner_and_name(client)?;
+    paged(|after| {
+        let data = run(
+            client,
+            "ChangeRequestThreads",
+            THREADS,
+            json!({ "owner": owner, "name": name, "number": number, "after": after }),
+        )?;
+        let connection = "/repository/pullRequest/reviewThreads";
+        let items = array_at(&data, &format!("{connection}/nodes"))
+            .into_iter()
+            .filter_map(review_thread)
+            .collect();
+        Ok((items, next_cursor(&data, connection)))
+    })
+}
+
+fn review_thread(node: &Value) -> Option<ReviewThread> {
+    let resolved = bool_at(node, "/isResolved");
+    let comments: Vec<ThreadComment> = array_at(node, "/comments/nodes")
+        .into_iter()
+        .filter_map(|comment| {
+            Some(ThreadComment {
+                id: opt_str(comment, "/id")?.to_string(),
+                author: login_or_ghost(comment, "/author/login"),
+                body: str_at(comment, "/body"),
+                at: time_at(comment, "/createdAt"),
+                edit: None,
+                pending: opt_str(comment, "/pullRequestReview/state") == Some("PENDING"),
+            })
+        })
+        .collect();
+    let diff_hunk = array_at(node, "/comments/nodes")
+        .first()
+        .and_then(|comment| opt_str(comment, "/diffHunk"))
+        .filter(|hunk| !hunk.is_empty())
+        .map(str::to_string);
+    Some(ReviewThread {
+        id: opt_str(node, "/id")?.to_string(),
+        path: opt_str(node, "/path")?.to_string(),
+        side: match opt_str(node, "/diffSide") {
+            Some("LEFT") => Side::Old,
+            _ => Side::New,
+        },
+        line: opt_u32(node, "/line").or_else(|| opt_u32(node, "/originalLine")),
+        start_line: opt_u32(node, "/startLine").or_else(|| {
+            opt_u32(node, "/line").is_none().then(|| opt_u32(node, "/originalStartLine")).flatten()
+        }),
+        outdated: bool_at(node, "/isOutdated"),
+        resolved,
+        resolved_by: opt_str(node, "/resolvedBy/login").map(str::to_string),
+        diff_hunk,
+        can_reply: bool_at(node, "/viewerCanReply"),
+        can_resolve: if resolved {
+            bool_at(node, "/viewerCanUnresolve")
+        } else {
+            bool_at(node, "/viewerCanResolve")
+        },
+        file_level: opt_str(node, "/subjectType") == Some("FILE"),
+        comments,
     })
 }
 

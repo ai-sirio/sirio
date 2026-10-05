@@ -1091,6 +1091,11 @@ enum ControlAction {
     ReadChangeRequest {
         reply: ControlReply,
     },
+    ChangeRequestThread {
+        id: String,
+        reveal: bool,
+        reply: ControlReply,
+    },
     RevealChangeRequestFile {
         path: String,
         line: Option<u32>,
@@ -2105,6 +2110,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.ci_log.read",
                     "surface.ci_log.view",
                     "surface.change_request.reveal",
+                    "surface.change_request.thread",
                     "surface.change_request.open_file",
                     "surface.change_request.open_commit",
                     "surface.tabs.read",
@@ -2423,6 +2429,14 @@ impl ControlHandler for AppControlHandler {
                 };
                 let line = request.params.get("line").and_then(|value| value.parse::<u32>().ok());
                 self.queue_action(request, move |reply| ControlAction::RevealChangeRequestFile { path, line, reply })
+            }
+            "surface.change_request.thread" => {
+                let (id, reveal) = match (request.params.get("reveal"), request.params.get("toggle")) {
+                    (Some(id), None) if !id.trim().is_empty() => (id.clone(), true),
+                    (None, Some(id)) if !id.trim().is_empty() => (id.clone(), false),
+                    _ => return ControlResponse::failure(&request.id, "surface.change_request.thread requires exactly one of reveal or toggle"),
+                };
+                self.queue_action(request, move |reply| ControlAction::ChangeRequestThread { id, reveal, reply })
             }
             "surface.change_request.open_file" => {
                 let Some(path) = request.params.get("path").cloned() else {
@@ -5325,6 +5339,11 @@ impl SirioWorkspace {
                                     let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
                                         tab.reveal(PathBuf::from(&path), line, cx);
                                         Ok(())
+                                    }));
+                                }
+                                ControlAction::ChangeRequestThread { id, reveal, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
+                                        if reveal { tab.reveal_thread(&id, cx) } else { tab.toggle_thread(&id, cx) }
                                     }));
                                 }
                                 ControlAction::OpenChangeRequestFile { path, line, reply } => {
@@ -37154,6 +37173,7 @@ done
             | ControlAction::CiLogOpen { reply, .. }
             | ControlAction::CiLogRead { reply }
             | ControlAction::CiLogView { reply, .. }
+            | ControlAction::ChangeRequestThread { reply, .. }
             | ControlAction::RevealChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestCommit { reply, .. }
@@ -37290,6 +37310,7 @@ done
             "surface.ci_log.read" => request::ci_log_read(),
             "surface.ci_log.view" => request::ci_log_view(None, true, false, None),
             "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
+            "surface.change_request.thread" => request::change_request_thread(Some("PRRT_1"), None),
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
@@ -37338,6 +37359,7 @@ done
             loading: false,
             error: None,
             dialog: None,
+            annotations: Vec::new(),
         };
         let pairs = changes_report_pairs(1, &report).expect("a Changes section is accepted");
         let staged = pairs.iter().find(|(key, _)| key == "stagedCount").map(|(_, value)| value.as_str());
@@ -37374,6 +37396,7 @@ done
             loading: false,
             error: None,
             dialog: None,
+            annotations: Vec::new(),
         };
         ControlResponse::success(
             id,

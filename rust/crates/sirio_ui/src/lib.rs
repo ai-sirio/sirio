@@ -21,6 +21,7 @@ pub(crate) mod ely_ui;
 pub mod changes;
 pub mod chat;
 pub mod controls;
+pub mod diff_annotations;
 pub mod editor;
 pub mod ely;
 pub mod file_context_menu;

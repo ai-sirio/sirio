@@ -16,7 +16,7 @@ use gpui::{
 use sirio_forge::{
     Action, ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
     FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
-    RerunTarget, TimelineItem,
+    ReviewThread, RerunTarget, TimelineItem,
 };
 use sirio_theme::Theme;
 
@@ -25,6 +25,7 @@ mod composer;
 mod edit;
 mod merge;
 mod people;
+mod threads;
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -36,6 +37,8 @@ use ely_gpui_component::{
 };
 use crate::ely_ui::{self, ButtonState};
 use crate::changes::{ChangesTab, ChangesTabEvent, ForgeFiles};
+use crate::diff_annotations::AnnotationSide;
+use threads::{ConversationEntry, merge_threads};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::forge_source::{self, Connection, RevisionError};
 use crate::text_selection::selectable_text;
@@ -213,9 +216,20 @@ pub struct ChangeRequestTab {
     pub(crate) description: Option<markdown::Doc>,
     /// The Markdown of each timeline entry that has a body, aligned with it.
     bodies: Vec<Option<markdown::Doc>>,
+    /// First published thread bodies for the Conversation, cached by forge id.
+    thread_bodies: HashMap<String, markdown::Doc>,
+    thread_ids: HashMap<u64, String>,
     pub(crate) commits: Slot<Listing<CommitSummary>>,
     pub(crate) checks: Slot<Listing<Check>>,
     pub(crate) files: Slot<Listing<FileChange>>,
+    /// Review threads (spec §4): read with *Files* and on every refresh but
+    /// the CI timer's.
+    pub(crate) threads: Slot<Listing<ReviewThread>>,
+    threads_generation: u64,
+    threads_task: Option<Task<()>>,
+    /// The cards the diff draws, by annotation key; outdated sections by path.
+    thread_views: HashMap<u64, Entity<threads::ThreadView>>,
+    outdated_views: HashMap<String, Entity<threads::OutdatedView>>,
     check_folds: HashMap<String, bool>,
     generation: u64,
     /// A rate limit's reset: no request before it (spec §9).
@@ -238,7 +252,7 @@ pub struct ChangeRequestTab {
     /// "Updated to head …" once a new head rebuilt the diff.
     updated_notice: Option<String>,
     /// A `reveal` asked before the diff existed.
-    pending_reveal: Option<(PathBuf, Option<u32>)>,
+    pending_reveal: Option<(PathBuf, AnnotationSide, Option<u32>, Option<u64>)>,
     /// A commit whose revisions could not be made local, with its forge URL.
     commit_error: Option<(RevisionError, String)>,
     commit_task: Option<Task<()>>,
@@ -275,9 +289,16 @@ impl ChangeRequestTab {
             header: Slot::Idle,
             description: None,
             bodies: Vec::new(),
+            thread_bodies: HashMap::new(),
+            thread_ids: HashMap::new(),
             commits: Slot::Idle,
             checks: Slot::Idle,
             files: Slot::Idle,
+            threads: Slot::Idle,
+            threads_generation: 0,
+            threads_task: None,
+            thread_views: HashMap::new(),
+            outdated_views: HashMap::new(),
             check_folds: HashMap::new(),
             generation: 0,
             paused_until: None,
@@ -413,7 +434,16 @@ impl ChangeRequestTab {
         }
     }
 
+    /// Everything the tab shows, threads included: a manual refresh, a retry,
+    /// the re-read after a write.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_header(cx);
+        self.load_threads(cx);
+    }
+
+    /// The header and the inner tab shown, without the threads: what the CI
+    /// timer asks for.
+    fn refresh_header(&mut self, cx: &mut Context<Self>) {
         if self.rate_paused() {
             // Stay armed: the pause ends by itself, and a running CI is still
             // worth looking at once it does.
@@ -492,7 +522,7 @@ impl ChangeRequestTab {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |tab, cx| {
                     tab.ci_timer = None;
-                    tab.refresh(cx);
+                    tab.refresh_header(cx);
                 });
             }),
         ));
@@ -510,6 +540,9 @@ impl ChangeRequestTab {
             self.load_inner(inner, cx);
         }
         if inner == InnerTab::Files {
+            if matches!(self.threads, Slot::Idle) {
+                self.load_threads(cx);
+            }
             self.ensure_range(cx);
         }
         cx.notify();
@@ -724,11 +757,14 @@ impl ChangeRequestTab {
                     revisions,
                     changes: changes.clone(),
                 };
-                if let Some((path, line)) = self.pending_reveal.take() {
-                    changes.update(cx, |changes, cx| match line {
-                        Some(line) => changes.focus_line(&path, line as usize, cx),
-                        None => changes.focus_path(&path, cx),
-                    });
+                self.push_annotations(cx);
+                // A new head moves the lines threads sit on; the CI timer that
+                // noticed it reads no threads, so they are read for it here.
+                if was_ready {
+                    self.load_threads(cx);
+                }
+                if let Some((path, side, line, key)) = self.pending_reveal.take() {
+                    changes.update(cx, |changes, cx| changes.focus_anchor(&path, side, line, key, cx));
                 }
             }
             Err(error) => {
@@ -764,7 +800,7 @@ impl ChangeRequestTab {
                     None => changes.focus_path(&path, cx),
                 });
             }
-            _ => self.pending_reveal = Some((path, line)),
+            _ => self.pending_reveal = Some((path, AnnotationSide::New, line, None)),
         }
     }
 
@@ -853,7 +889,9 @@ impl ChangeRequestTab {
             match self.inner {
                 InnerTab::Conversation => (
                     slot_state(&self.header),
-                    rows(self.header.value().map(|h| h.timeline.len())),
+                    rows(self.header.value().map(|header| self.threads.value().map_or(
+                        header.timeline.len(), |threads| merge_threads(&header.timeline, &threads.items).len(),
+                    ))),
                 ),
                 InnerTab::Commits => (
                     slot_state(&self.commits),
@@ -957,7 +995,7 @@ impl ChangeRequestTab {
                 row_words.push(word);
             }
         }
-        vec![
+        let mut report = vec![
             ("label".to_string(), self.reference.label()),
             ("title".to_string(), self.title.clone()),
             ("inner".to_string(), self.inner.as_str().to_string()),
@@ -1056,7 +1094,9 @@ impl ChangeRequestTab {
                 "merge_dialog_message".to_string(),
                 self.merge_dialog_status().map(|(_, text)| text).unwrap_or_default(),
             ),
-        ]
+        ];
+        report.extend(self.thread_report(cx));
+        report
     }
 }
 
@@ -1460,8 +1500,17 @@ impl ChangeRequestTab {
                     );
                 }
                 let mut rail = Timeline::new();
-                for (index, item) in header.timeline.iter().enumerate() {
-                    rail = rail.item(self.render_timeline_item(index, item, theme, entity));
+                if let Some(threads) = self.threads.value() {
+                    for entry in merge_threads(&header.timeline, &threads.items) {
+                        rail = rail.item(match entry {
+                            ConversationEntry::Item(index) => self.render_timeline_item(index, &header.timeline[index], theme, entity),
+                            ConversationEntry::Thread(index) => self.render_thread_entry(index, &threads.items[index], theme, entity),
+                        });
+                    }
+                } else {
+                    for (index, item) in header.timeline.iter().enumerate() {
+                        rail = rail.item(self.render_timeline_item(index, item, theme, entity));
+                    }
                 }
                 column = column.child(rail);
                 if let Some(composer) = self.render_composer(theme, entity) {
@@ -1556,7 +1605,7 @@ impl ChangeRequestTab {
                     .icon(icon)
                     .tone(tone)
                     .children(body)
-                    .children(line_comments.iter().enumerate().map(|(position, comment)| {
+                    .children(line_comments.iter().filter(|_| self.threads.value().is_none()).enumerate().map(|(position, comment)| {
                         div()
                             .id(("change-request-line-comment-row", index * 1000 + position))
                             .flex()
@@ -2033,6 +2082,7 @@ impl ChangeRequestTab {
                             this.child(div().text_color(theme.ely.fg_subtle).child(notice))
                         }),
                 )
+                .children(self.render_threads_notice(theme, entity))
                 .child(div().flex_1().min_h(px(0.0)).child(changes.clone()))
                 .into_any_element(),
             RangeState::Fetching => div()
@@ -2871,6 +2921,113 @@ mod tests {
                 RangeState::Ready { changes, .. } => changes.read(cx).expanded_paths() == opened,
                 _ => false,
             })
+        });
+    }
+
+    fn threads_json(nodes: Vec<serde_json::Value>) -> String {
+        serde_json::json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes
+        }}}}})
+        .to_string()
+    }
+
+    /// One unresolved thread on new-side `line` of a.txt, with one comment.
+    fn thread_node(id: &str, line: u32) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "isResolved": false, "isOutdated": false, "path": "a.txt",
+            "line": line, "startLine": null, "originalLine": line, "originalStartLine": null,
+            "diffSide": "RIGHT", "startDiffSide": null, "subjectType": "LINE",
+            "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+            "resolvedBy": null,
+            "comments": {"nodes": [{
+                "id": format!("{id}-c"), "author": {"login": "bob"}, "body": "Handle it.",
+                "createdAt": "2026-09-20T10:00:00Z", "diffHunk": "",
+                "pullRequestReview": {"state": "COMMENTED"}
+            }]}
+        })
+    }
+
+    /// The CI timer's refresh reads no threads, but a new head it brings
+    /// rebuilds the diff: the threads are read again for that head, or the
+    /// cards keep the old head's lines.
+    #[gpui::test]
+    async fn a_new_head_from_the_ci_timer_reads_the_threads_again(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff" && report_value(tab, cx, "threads_open") == "1"
+            })
+        });
+        let reads = forge.count("ChangeRequestThreads");
+        let newer = push_another(&repo.0);
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &newer),
+        );
+        tab.update(cx, |tab, cx| tab.refresh_header(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "head") == newer[..7] && report_value(tab, cx, "files_mode") == "diff"
+            })
+        });
+        pump_until(cx, || forge.count("ChangeRequestThreads") > reads);
+    }
+
+    /// A thread read that fails says so in Files, and its Retry reads again;
+    /// the diff is not left without cards and without a reason.
+    #[gpui::test]
+    async fn a_failed_thread_read_says_so_and_retry_reads_again(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.fail("ChangeRequestThreads", 500);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff" && !report_value(tab, cx, "threads_notice").is_empty()
+            })
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert!(
+                report_value(tab, cx, "threads_notice").starts_with("Review threads could not be read"),
+                "{}",
+                report_value(tab, cx, "threads_notice")
+            );
+        });
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        tab.update(cx, |tab, cx| tab.retry_threads(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "threads_notice").is_empty() && report_value(tab, cx, "threads_open") == "1"
+            })
+        });
+    }
+
+    /// An unresolved card folds from its header like a resolved one: a header
+    /// that takes the click and changes nothing would be a dead control.
+    #[gpui::test]
+    async fn an_open_thread_folds_from_its_header(cx: &mut TestAppContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        let source = FakeSource::ready(testing::github_client(forge), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff" && report_value(tab, cx, "threads_open") == "1"
+            })
+        });
+        tab.update(cx, |tab, cx| tab.reveal_thread("PRRT_1", cx)).expect("a loaded thread");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:open")
+        });
+        tab.update(cx, |tab, cx| tab.toggle_thread("PRRT_1", cx)).expect("a loaded thread");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:folded")
         });
     }
 

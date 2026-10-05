@@ -1,0 +1,15 @@
+query ChangeRequestThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line startLine originalLine originalStartLine
+          diffSide startDiffSide subjectType viewerCanReply viewerCanResolve viewerCanUnresolve
+          resolvedBy { login }
+          comments(first: 100) { nodes { id author { login } body createdAt diffHunk pullRequestReview { state } } }
+        }
+      }
+    }
+  }
+}

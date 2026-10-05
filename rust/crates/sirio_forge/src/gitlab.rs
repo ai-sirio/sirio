@@ -29,7 +29,7 @@ use crate::mapping::{self, SystemNote};
 use crate::model::{
     Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, Log, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
-    ReviewOutcome, Reviewer, TimelineItem,
+    ReviewOutcome, ReviewThread, Reviewer, ThreadComment, TimelineItem,
 };
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
@@ -91,6 +91,8 @@ const COUNT: &str = include_str!("queries/gitlab/count.graphql");
 const COMMITS: &str = include_str!("queries/gitlab/commits.graphql");
 const CHECKS: &str = include_str!("queries/gitlab/checks.graphql");
 const FILES: &str = include_str!("queries/gitlab/files.graphql");
+const THREADS: &str = include_str!("queries/gitlab/threads.graphql");
+const THREADS_BASELINE: &str = include_str!("queries/gitlab/threads_baseline.graphql");
 
 /// The full query, or its baseline once this server has rejected a newer
 /// field; after the first rejection every later call goes straight to the
@@ -641,6 +643,79 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
     Ok(Listing {
         items,
         truncated: false,
+    })
+}
+
+/// Diff discussions as threads (spec §4). A server without
+/// `truncatedDiffLines` gets the query without it, for this read only: the
+/// client's shared baseline flag is left alone, so the header keeps its own
+/// newer fields.
+pub(crate) fn review_threads(client: &ForgeClient, number: u64) -> Result<Listing<ReviewThread>, ForgeError> {
+    let mut text = THREADS;
+    paged(|after| {
+        let variables = json!({ "fullPath": client.project, "iid": number.to_string(), "after": after });
+        let data = match execute(client, "MergeRequestThreads", text, variables.clone()) {
+            Err(ForgeError::UnknownField { .. }) if text == THREADS => {
+                text = THREADS_BASELINE;
+                plain(client, "MergeRequestThreads", text, variables)?
+            }
+            answer => answer.map_err(no_unknown_field)?,
+        };
+        let merge_request = merge_request(client, &data)?;
+        let head = opt_str(merge_request, "/diffRefs/headSha");
+        let can_note = bool_at(merge_request, "/userPermissions/createNote");
+        let items = array_at(merge_request, "/discussions/nodes")
+            .into_iter()
+            .filter_map(|discussion| gitlab_thread(discussion, head, can_note))
+            .collect();
+        Ok((items, next_cursor(merge_request, "/discussions")))
+    })
+}
+
+fn gitlab_thread(discussion: &Value, head: Option<&str>, can_note: bool) -> Option<ReviewThread> {
+    let notes = array_at(discussion, "/notes/nodes");
+    let first = notes.first()?;
+    // A system note or a note with no position is not a diff thread.
+    if bool_at(first, "/system") {
+        return None;
+    }
+    let path = opt_str(first, "/position/filePath")?.to_string();
+    let (side, line) = mapping::gitlab_anchor(
+        opt_u32(first, "/position/newLine"),
+        opt_u32(first, "/position/oldLine"),
+    );
+    let quoted: Vec<&str> = array_at(discussion, "/truncatedDiffLines")
+        .into_iter()
+        .filter_map(|line| opt_str(line, "/text"))
+        .collect();
+    let resolved = bool_at(discussion, "/resolved");
+    Some(ReviewThread {
+        id: opt_str(discussion, "/id")?.to_string(),
+        path,
+        side,
+        line,
+        start_line: None,
+        outdated: mapping::gitlab_thread_outdated(opt_str(first, "/position/diffRefs/headSha"), head),
+        resolved,
+        resolved_by: opt_str(discussion, "/resolvedBy/username").map(str::to_string),
+        diff_hunk: (!quoted.is_empty()).then(|| quoted.join("\n")),
+        can_reply: can_note,
+        can_resolve: bool_at(discussion, "/resolvable") && bool_at(discussion, "/userPermissions/resolveNote"),
+        file_level: matches!(opt_str(first, "/position/positionType"), Some("file" | "image")),
+        comments: notes
+            .iter()
+            .filter(|note| !bool_at(note, "/system"))
+            .filter_map(|note| {
+                Some(ThreadComment {
+                    id: opt_str(note, "/id")?.to_string(),
+                    author: opt_str(note, "/author/username").unwrap_or("ghost").to_string(),
+                    body: str_at(note, "/body"),
+                    at: time_at(note, "/createdAt"),
+                    edit: None,
+                    pending: false,
+                })
+            })
+            .collect(),
     })
 }
 

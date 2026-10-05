@@ -432,3 +432,80 @@ Both appearances ran to `FORGE ACTIONS E2E OK` on `:96` (1600x1500), with
   Its harness now waits for the initial sign-in/unknown-forge state, like
   the visible UI; production handling of overlapping socket calls is
   outside this B2c proof.
+
+
+## B3a: review threads in the diff
+
+The `github-threads` and `gitlab-threads` scenarios of
+`Scripts/Tests/test-forge-diff-e2e.sh` check one Conversation entry per
+published thread, current/old/range anchors, resolved folds, outdated
+sections, draft exclusion and cards after the Files range is restored.
+Standalone Changes sets the global Split mode before the scenario returns
+to the change request and checks the same line anchors.
+
+### Run and capture
+
+From the repository root, choose a free X display and software Vulkan:
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :96 -screen 0 1600x1500x24 -nolisten tcp -noreset > "$TMPDIR/b3a-xvfb.log" 2>&1 &
+B3A_XVFB_PID=$!
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+Scripts/Tests/test-forge-diff-e2e.sh --display :96 --out-dir "$TMPDIR/b3a-framed-dark"
+kill "$B3A_XVFB_PID"
+```
+
+This script has no `--appearance` flag, so the controller's framed run will
+cover only the app's default dark appearance. The controller runs the command
+above and reads its PID-matched frames. The B3a implementation run uses
+`--state-only`, with artifacts under `$TMPDIR/b3a-t7*`, and takes no frames.
+
+The new frames cover each forge's Conversation, unified and split thread
+cards, and an opened resolved thread. The state assertions also check the
+folded outdated section and the rebuilt diff after a graceful relaunch.
+
+### What was seen
+
+Framed run of 2026-10-05, dark, Xvfb `:96` at 1600×1500 with lavapipe, after
+the review's fix pass (`FORGE DIFF E2E OK`; frames under
+`~/.cache/st/b3a-framed/frames/*-threads-*.png`). Both forges read the same:
+
+- **Conversation.** One compact entry per thread with a published comment,
+  in time order among the activity: author, "commented", the age, a footnote
+  `on src/login.rs:<line> · <n> replies` with `· Outdated` / `· Resolved`
+  where so, and the first comment's body. The draft-only GitHub thread has no
+  entry.
+- **Unified, after `thread --reveal` of the open thread.** The view starts at
+  the revealed thread's line (`42 + edited 42`) with its card open under it —
+  both comments, avatars, ages, bodies. Below it the GitHub range thread sits
+  under line 45 as "lines 44–45", with 44 and 45 drawn out of what was a
+  band, then "15 hidden lines". The first framed run, before the fix pass,
+  showed the top of the file here with the card below the fold: the reveal
+  ran in the same rebuild that spliced the list, when no row was measured,
+  and `scroll_to_reveal_item` read the target as already in view.
+- **The file row** carries a comment icon and the number of open threads
+  drawn in the diff (3 on GitHub, 2 on GitLab). Right under it, "› 1 outdated
+  thread", folded. The context band before line 40 shows "22 hidden lines",
+  then line 40 and the resolved card folded to one line ("Resolved · alice ·
+  0 replies", "1 comment"). The old-side thread sits under the deleted
+  `42 - line 42` with an `old` tag.
+- **Split.** The same cards under the same rows: the resolved card under
+  line 40, the open thread under the zipped `42 - line 42 | 42 + edited 42`
+  row. Switching the mode rebuilds the list, so the view is at the top.
+- **Resolved opened** (`thread --toggle`): the header gains a green
+  "Resolved" tag and the comment shows below it.
+
+Not right yet, recorded as deferred minors in the B3a ledger: card text is
+drawn larger than the diff and the Conversation; a thread entry says
+"0 replies"; an old-side thread's Conversation entry does not say "old".
+
+### Not seen
+
+- `glab` transport or detection: it is not installed on this machine.
+- Live forges: these proofs use loopback fakes; nextest's live tests use
+  isolated credentials and print `SKIP:`.
+- macOS, Windows or Wayland, or a light appearance for this diff harness.
+- A GitLab range: GraphQL reports only its final line.
+- Visual appearance during the implementation run; it uses `--state-only`.

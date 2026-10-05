@@ -4,7 +4,7 @@
 
 use crate::model::{
     BlockReason, Capabilities, MergeCapability, MergeMethod, MergeMethods, MergeVerdict, ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress,
-    ReviewOutcome, ReviewState,
+    ReviewOutcome, ReviewState, Side,
 };
 
 pub(crate) fn github_change_state(state: &str, is_draft: bool) -> ChangeState {
@@ -22,6 +22,24 @@ pub(crate) fn gitlab_change_state(state: &str, draft: bool) -> ChangeState {
         "closed" | "locked" => ChangeState::Closed,
         _ if draft => ChangeState::Draft,
         _ => ChangeState::Open,
+    }
+}
+
+/// GitLab moves a discussion's position forward on every push it can; one
+/// it could not move still names an older head (verified on gitlab.com,
+/// 2026-10-05). Without both shas nothing is known, and the thread is drawn
+/// as current.
+pub(crate) fn gitlab_thread_outdated(position_head: Option<&str>, current_head: Option<&str>) -> bool {
+    matches!((position_head, current_head), (Some(position), Some(current)) if position != current)
+}
+
+/// A position names a new line, an old line, or both (a context line, read
+/// on the new side).
+pub(crate) fn gitlab_anchor(new_line: Option<u32>, old_line: Option<u32>) -> (Side, Option<u32>) {
+    match (new_line, old_line) {
+        (Some(line), _) => (Side::New, Some(line)),
+        (None, Some(line)) => (Side::Old, Some(line)),
+        (None, None) => (Side::New, None),
     }
 }
 
@@ -515,6 +533,24 @@ pub(crate) fn file_change_kind(change_type: &str) -> Option<FileChangeKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gitlab_thread_is_outdated_only_when_its_head_is_known_and_not_the_current_one() {
+        assert!(!gitlab_thread_outdated(Some("abc"), Some("abc")));
+        assert!(gitlab_thread_outdated(Some("old"), Some("abc")));
+        // Without either sha nothing can be said: drawn as current.
+        assert!(!gitlab_thread_outdated(None, Some("abc")));
+        assert!(!gitlab_thread_outdated(Some("abc"), None));
+    }
+
+    #[test]
+    fn a_gitlab_position_anchors_on_its_new_line_else_its_old_one() {
+        assert_eq!(gitlab_anchor(Some(12), None), (Side::New, Some(12)));
+        // A context line has both: it is read on the new side.
+        assert_eq!(gitlab_anchor(Some(12), Some(10)), (Side::New, Some(12)));
+        assert_eq!(gitlab_anchor(None, Some(7)), (Side::Old, Some(7)));
+        assert_eq!(gitlab_anchor(None, None), (Side::New, None));
+    }
 
     fn counts<'a>(pairs: &[(&'a str, u32)]) -> Vec<StateCount<'a>> {
         pairs

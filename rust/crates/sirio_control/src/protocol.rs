@@ -598,6 +598,18 @@ pub mod request {
         request("surface.change_request.reveal", params)
     }
 
+    /// Reveals or folds a review thread on the active change request.
+    pub fn change_request_thread(reveal: Option<&str>, toggle: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if let Some(id) = reveal {
+            params.insert("reveal".to_string(), id.to_string());
+        }
+        if let Some(id) = toggle {
+            params.insert("toggle".to_string(), id.to_string());
+        }
+        request("surface.change_request.thread", params)
+    }
+
     /// *Open in editor* on a file of the active change request's diff.
     pub fn change_request_open_file(path: &str, line: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::from([("path".to_string(), path.to_string())]);

@@ -7,7 +7,7 @@ use crate::action::{Action, ActionOutcome};
 use crate::error::ForgeError;
 use crate::model::{
     Candidate, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob, Log, CommitSummary,
-    FileChange, Forge, ListQuery, Listing, PageCursor,
+    FileChange, Forge, ListQuery, Listing, PageCursor, ReviewThread,
 };
 use crate::scopes::TokenScopes;
 use crate::target::ForgeTarget;
@@ -157,6 +157,16 @@ impl ForgeClient {
         match self.forge {
             Forge::GitHub => github::files(self, number),
             Forge::GitLab => gitlab::files(self, number),
+        }
+    }
+
+    /// Every review thread of the change request, paged (spec §4). Read when
+    /// *Files* opens and on a manual refresh, never polled.
+    pub fn review_threads(&self, number: u64) -> Result<Listing<ReviewThread>, ForgeError> {
+        let _perf = sirio_perf::span("forge.review_threads", 0);
+        match self.forge {
+            Forge::GitHub => github::review_threads(self, number),
+            Forge::GitLab => gitlab::review_threads(self, number),
         }
     }
 

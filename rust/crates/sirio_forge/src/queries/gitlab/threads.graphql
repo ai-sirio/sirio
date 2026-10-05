@@ -1,0 +1,17 @@
+query MergeRequestThreads($fullPath: ID!, $iid: String!, $after: String) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) {
+      diffRefs { headSha }
+      userPermissions { createNote }
+      discussions(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id resolvable resolved resolvedBy { username }
+          userPermissions { resolveNote }
+          truncatedDiffLines { text }
+          notes(first: 100) { nodes { id system author { username } body createdAt position { positionType filePath newLine oldLine diffRefs { headSha } } } }
+        }
+      }
+    }
+  }
+}

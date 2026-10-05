@@ -13,7 +13,8 @@ set -euo pipefail
 # along or a base fetched by the wrong ref would show. Each success path also
 # quits Sirio gracefully halfway and relaunches it on the same database: the
 # snapshot tabs come back with the same text, and the startup sweep keeps
-# their refs.
+# their refs. B3a adds review-thread counts and reveals, unified/split
+# anchors, resolved folds, outdated sections and cards after a relaunch.
 #
 # The artifact: --out-dir DIR (default artifacts/forge-diff-e2e-<stamp>-<pid>)
 # keeps transcript.log, one app log per launch and one fake-forge request log
@@ -309,6 +310,25 @@ else:
         if note.get("position"):
             note["position"]["filePath"], note["position"]["newLine"] = "src/login.rs", 42
     save("gitlab/MergeRequestHeader.json", data)
+    data = load("gitlab/MergeRequestThreads.json")
+    node = data["data"]["project"]["mergeRequest"]
+    node["diffRefs"]["headSha"] = head
+    lines = {
+        "open12": (42, None), "resolved10": (40, 40),
+        "old7": (None, 42), "outdated": (30, None),
+    }
+    for discussion in node["discussions"]["nodes"]:
+        kind = discussion["id"].rsplit("/", 1)[-1]
+        for note in discussion["notes"]["nodes"]:
+            position = note.get("position")
+            if not position:
+                continue
+            position["filePath"] = "src/login.rs"
+            if kind != "outdated":
+                position["diffRefs"]["headSha"] = head
+            if kind in lines:
+                position["newLine"], position["oldLine"] = lines[kind]
+    save("gitlab/MergeRequestThreads.json", data)
     data = load("gitlab/MergeRequestCommits.json")
     for entry, sha in zip(data["data"]["project"]["mergeRequest"]["commits"]["nodes"], (c1, head)):
         entry["sha"], entry["shortId"] = sha, sha[:7]
@@ -680,10 +700,86 @@ scenario_failure() { # name fetch-url expected-text bound-seconds
   stop_forge
 }
 
+scenario_threads() { # flavour host forge number remote-url
+  SCENARIO="$1-threads"
+  echo "=== $SCENARIO"
+  build_forge_git "$1"
+  render_fixtures "$1"
+  start_forge "$1"
+  WT="$RUN_DIR/worktree-$SCENARIO"
+  make_worktree "$WT" "$5" "$BARE"
+  launch_app "$2"
+  connect_and_open "$2" "$3" "$4"
+  # The Conversation first: one entry per thread with a published comment.
+  wait_for state loaded surface change-request read
+  if [ "$1" = github ]; then
+    wait_for threads_open 5 surface change-request read      # open42, outdated, range, old42, file; no draft
+    wait_for threads_resolved 1 surface change-request read
+    wait_for threads_outdated 1 surface change-request read
+    wait_for threads_file 1 surface change-request read
+    wait_for conversation_threads 6 surface change-request read
+  else
+    wait_for threads_open 4 surface change-request read      # open12, outdated, old7, file
+    wait_for threads_resolved 1 surface change-request read
+    wait_for threads_outdated 1 surface change-request read
+    wait_for threads_file 1 surface change-request read
+    wait_for conversation_threads 5 surface change-request read
+  fi
+  capture "$1-threads-conversation"
+  # Reveal the open thread on the edited line from the Conversation.
+  local open_id
+  if [ "$1" = github ]; then open_id=PRRT_open42; else open_id=gid://gitlab/Discussion/open12; fi
+  ctl surface change-request thread --reveal "$open_id"
+  wait_for files_mode diff surface change-request read
+  assert_contains thread_rows "$open_id:line:open" surface change-request read
+  assert_contains thread_rows "outdated:src/login.rs:1:folded" surface change-request read
+  local resolved_id
+  if [ "$1" = github ]; then resolved_id=PRRT_resolved40; else resolved_id=gid://gitlab/Discussion/resolved10; fi
+  assert_contains thread_rows "$resolved_id:line:folded" surface change-request read
+  if [ "$1" = github ]; then
+    assert_contains thread_rows "PRRT_range:line:open" surface change-request read
+    assert_contains thread_rows "PRRT_old42:line:open" surface change-request read
+    ! read_field thread_rows surface change-request read | grep -q PRRT_draft || fail "a draft-only thread was drawn"
+  fi
+  capture "$1-threads-unified"
+  # The mode is global; this verb targets standalone Changes tabs only.
+  ctl surface changes open
+  ctl surface changes view --mode split
+  wait_for mode split surface changes read
+  select_kind change_request
+  assert_contains thread_rows "$open_id:line:open" surface change-request read
+  assert_contains thread_rows "$resolved_id:line:folded" surface change-request read
+  if [ "$1" = github ]; then
+    assert_contains thread_rows "PRRT_range:line:open" surface change-request read
+    assert_contains thread_rows "PRRT_old42:line:open" surface change-request read
+  else
+    assert_contains thread_rows "gid://gitlab/Discussion/old7:line:open" surface change-request read
+  fi
+  capture "$1-threads-split"
+  ctl surface change-request thread --toggle "$resolved_id"
+  assert_contains thread_rows "$resolved_id:line:open" surface change-request read
+  capture "$1-threads-resolved-open"
+  # A restored Files tab builds a new range and must receive the cards again.
+  quit_app
+  launch_app "$2" "$SCENARIO-relaunch-app"
+  wait_tab_count change_request no 1
+  select_kind change_request
+  wait_for threads_file 1 surface change-request read
+  ctl surface change-request thread --reveal "$open_id"
+  wait_for files_mode diff surface change-request read
+  assert_contains thread_rows "$open_id:line:open" surface change-request read
+  assert_contains thread_rows "outdated:src/login.rs:1:folded" surface change-request read
+  stop_app
+  stop_forge
+}
+
 scenario_success github ghe.test github 101 '#101' https://ghe.test/acme/widgets.git commit-first
 scenario_failure 401 'http://127.0.0.1:@PORT@/acme/widgets.git' 'terminal prompts disabled' 15
 scenario_failure hang 'ssh://hang.invalid/acme/widgets.git' 'did not answer' 25
 scenario_success gitlab gitlab.test gitlab 201 '!201' https://gitlab.test/team/app.git files-first
+
+scenario_threads github ghe.test github 101 https://ghe.test/acme/widgets.git
+scenario_threads gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git
 
 echo "artifact: $OUT_DIR"
 echo "FORGE DIFF E2E OK"
