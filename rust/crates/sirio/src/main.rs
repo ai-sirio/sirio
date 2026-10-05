@@ -11590,6 +11590,7 @@ impl SirioWorkspace {
             tab,
             |workspace, _, event: &ChangesTabEvent, cx| match event {
                 ChangesTabEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                ChangesTabEvent::CommentOn(_) | ChangesTabEvent::CommentRefused(_) => {}
             },
         )
         .detach();

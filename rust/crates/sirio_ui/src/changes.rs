@@ -41,7 +41,7 @@
 
 use gpui::{
     AnyElement, AnyView, App, AppContext, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight,
-    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
+    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, MouseButton, Pixels,
     HighlightStyle, Hsla, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
 use sirio_git::{
@@ -71,7 +71,10 @@ use ely_gpui_component::{
     theme::{ControlSize, IconSize as EIconSize},
 };
 use crate::horizontal_scroll::{self, HorizontalBarState};
-use crate::diff_annotations::{Annotation, AnnotationKind, AnnotationSide, anchored_lines, band_pieces, matches_row};
+use crate::diff_annotations::{
+    Annotation, AnnotationKind, AnnotationSide, CommentAnchor, COMMENT_CONTEXT, anchor_in,
+    anchored_lines, band_pieces, commentable, locate, matches_row,
+};
 use crate::text_selection::{SelectableText, selectable_text};
 
 #[cfg(test)]
@@ -234,6 +237,10 @@ impl DiffViewMode {
 pub enum ChangesTabEvent {
     /// Open a file from the diff's per-file action row in a new tab.
     OpenFile(PathBuf),
+    /// The user picked a line or a range in the gutter (B3b).
+    CommentOn(CommentAnchor),
+    /// The pick cannot take a comment; the reason in the user's words.
+    CommentRefused(String),
 }
 
 /// Actions that need a host-owned surface beyond the existing file-open door.
@@ -249,6 +256,13 @@ pub enum ChangesTabActionEvent {
 /// The terminal crate consumes this same structural payload without a
 /// dependency back on the UI crate.
 type DiffPayload = (PathBuf, String);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GutterPoint {
+    path: PathBuf,
+    side: AnnotationSide,
+    line: u32,
+}
 
 /// The file-level facts the Changes surface displays for one status bucket.
 /// This is intentionally UI-owned data: the control socket reads this report
@@ -594,6 +608,10 @@ pub struct ChangesTab {
     annotation_views: Rc<HashMap<u64, AnyView>>,
     open_threads: Rc<HashMap<PathBuf, usize>>,
     reveal_annotation: Option<u64>,
+    /// Draws the gutter "+": only a change request's diff, asked by its owner.
+    commentable: bool,
+    gutter_press: Option<GutterPoint>,
+    last_pick: Option<GutterPoint>,
     stats: HashMap<PathBuf, DiffStat>,
     /// Expanded file rows, keyed by (section, path): a path that appears in
     /// Staged and Changed at once expands independently in each.
@@ -755,6 +773,99 @@ impl ChangesTab {
         }
     }
 
+    pub fn set_commentable(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.commentable != on {
+            self.commentable = on;
+            self.gutter_press = None;
+            self.last_pick = None;
+            cx.notify();
+        }
+    }
+
+    /// The anchor for a comment on `line` (and from `start`) on `side`, as
+    /// the gutter would pick it.
+    pub fn comment_anchor(
+        &self,
+        path: &Path,
+        side: AnnotationSide,
+        line: u32,
+        start: Option<u32>,
+    ) -> Result<CommentAnchor, String> {
+        let diff = self
+            .diffs
+            .get(path)
+            .ok_or_else(|| "That file's diff is not loaded.".to_string())?;
+        let missing = || "That line is not in the diff.".to_string();
+        let (hunk, last) = locate(diff, side, line).ok_or_else(missing)?;
+        let first = match start {
+            None => last,
+            Some(start) => {
+                let (other, first) = locate(diff, side, start).ok_or_else(missing)?;
+                if other != hunk {
+                    return Err("A range stays within one hunk.".to_string());
+                }
+                first
+            }
+        };
+        anchor_in(path, side, &diff.hunks[hunk], first, last).map_err(str::to_string)
+    }
+
+    fn pick(&mut self, from: GutterPoint, to: GutterPoint, cx: &mut Context<Self>) {
+        if from.path != to.path || from.side != to.side {
+            cx.emit(ChangesTabEvent::CommentRefused(
+                "A range stays on one side of the diff.".to_string(),
+            ));
+            return;
+        }
+        let (first, last) = (from.line.min(to.line), from.line.max(to.line));
+        match self.comment_anchor(&to.path, to.side, last, (first != last).then_some(first)) {
+            Ok(anchor) => {
+                self.last_pick = Some(to);
+                cx.emit(ChangesTabEvent::CommentOn(anchor));
+            }
+            Err(reason) => cx.emit(ChangesTabEvent::CommentRefused(reason)),
+        }
+    }
+
+    fn gutter_down(&mut self, point: GutterPoint, shift: bool, cx: &mut Context<Self>) {
+        match self.last_pick.clone() {
+            Some(from) if shift => self.pick(from, point, cx),
+            _ => self.gutter_press = Some(point),
+        }
+    }
+
+    fn gutter_up(&mut self, point: GutterPoint, cx: &mut Context<Self>) {
+        if let Some(from) = self.gutter_press.take() {
+            self.pick(from, point, cx);
+        }
+    }
+
+    /// Every drawn line a comment may start on, by side.
+    fn commentable_lines(&self) -> HashSet<(PathBuf, AnnotationSide, u32)> {
+        let mut open = HashSet::new();
+        for (path, diff) in &self.diffs {
+            for hunk in &diff.hunks {
+                let origins: Vec<DiffOrigin> = hunk.lines.iter().map(|line| line.origin).collect();
+                for (line, takes) in hunk
+                    .lines
+                    .iter()
+                    .zip(commentable(&origins, COMMENT_CONTEXT))
+                {
+                    if !takes {
+                        continue;
+                    }
+                    if let Some(old) = line.old_line_number.and_then(|n| u32::try_from(n).ok()) {
+                        open.insert((path.clone(), AnnotationSide::Old, old));
+                    }
+                    if let Some(new) = line.new_line_number.and_then(|n| u32::try_from(n).ok()) {
+                        open.insert((path.clone(), AnnotationSide::New, new));
+                    }
+                }
+            }
+        }
+        open
+    }
+
     /// Every path with an expanded row — what a rebuilt surface reopens.
     pub fn expanded_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = self.expanded_changes.iter().map(|(_, path)| path.clone()).collect();
@@ -845,6 +956,9 @@ impl ChangesTab {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            commentable: false,
+            gutter_press: None,
+            last_pick: None,
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -1970,6 +2084,7 @@ impl ChangesTab {
         forge: Option<Rc<ForgeFiles>>,
         annotation_view: Option<AnyView>,
         open_threads: usize,
+        open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -2057,7 +2172,7 @@ impl ChangesTab {
                 path,
                 line,
                 words,
-            } => Self::render_diff_line(section, path, line, words, unified_x, theme)
+            } => Self::render_diff_line(section, path, line, words, unified_x, open_lines, entity, theme)
                 .into_any_element(),
             ChangeRow::SplitLine {
                 section,
@@ -2073,6 +2188,8 @@ impl ChangesTab {
                 words,
                 split_left_x,
                 split_right_x,
+                open_lines,
+                entity,
                 theme,
             )
             .into_any_element(),
@@ -2472,11 +2589,16 @@ impl ChangesTab {
         words: (Option<Range<usize>>, Option<Range<usize>>),
         left_x: Pixels,
         right_x: Pixels,
+        open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+        entity: gpui::Entity<ChangesTab>,
         theme: Theme,
     ) -> impl IntoElement {
         let shape = split_row_shape(&row);
+        let row_id = format!("split-{}-{}-{key}", section.slug(), path.display());
+        let left_group = SharedString::from(format!("diff-row-{row_id}-old"));
+        let right_group = SharedString::from(format!("diff-row-{row_id}-new"));
         div()
-            .id(format!("split-{}-{}-{key}", section.slug(), path.display()))
+            .id(row_id)
             // The selector names the row's *shape*, so the four cases the
             // clause enumerates — paired context, a zipped replacement, a
             // deletion run with nothing opposite it, an addition run with
@@ -2491,7 +2613,18 @@ impl ChangesTab {
             .font_family(theme.typography.code_family)
             .text_size(theme.typography.scaled(12.0))
             .child(
-                split_cell(row.left, words.0, true, left_x, theme)
+                split_cell(
+                    row.left,
+                    words.0,
+                    true,
+                    left_x,
+                    path.clone(),
+                    AnnotationSide::Old,
+                    open_lines.clone(),
+                    left_group,
+                    entity.clone(),
+                    theme,
+                )
                     .debug_selector(|| "changes-split-left".into()),
             )
             .child(
@@ -2501,7 +2634,18 @@ impl ChangesTab {
                     .bg(theme.ely.border),
             )
             .child(
-                split_cell(row.right, words.1, false, right_x, theme)
+                split_cell(
+                    row.right,
+                    words.1,
+                    false,
+                    right_x,
+                    path,
+                    AnnotationSide::New,
+                    open_lines,
+                    right_group,
+                    entity,
+                    theme,
+                )
                     .debug_selector(|| "changes-split-right".into()),
             )
     }
@@ -2512,8 +2656,38 @@ impl ChangesTab {
         line: DiffLine,
         words: Option<Range<usize>>,
         unified_x: Pixels,
+        open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+        entity: gpui::Entity<ChangesTab>,
         theme: Theme,
     ) -> impl IntoElement {
+        let row_id = format!(
+            "line-{}-{}-{}-{}",
+            section.slug(),
+            path.display(),
+            line.old_line_number.unwrap_or(0),
+            line.new_line_number.unwrap_or(0)
+        );
+        let group = SharedString::from(format!("diff-row-{row_id}"));
+        let point = if let Some(number) = line.new_line_number {
+            u32::try_from(number).ok().map(|line| GutterPoint {
+                path: path.clone(),
+                side: AnnotationSide::New,
+                line,
+            })
+        } else {
+            line.old_line_number
+                .and_then(|number| u32::try_from(number).ok())
+                .map(|line| GutterPoint {
+                    path: path.clone(),
+                    side: AnnotationSide::Old,
+                    line,
+                })
+        };
+        let plus = point
+            .filter(|point| open_lines.contains(&(point.path.clone(), point.side, point.line)))
+            .map(|point| {
+                comment_plus(point, group.clone(), entity, theme.clone()).into_any_element()
+            });
         let colors = &theme.ely;
         let (background, marker_color, marker, text_color, word_wash) = match line.origin {
             DiffOrigin::Context => (colors.bg, colors.fg_subtle, " ", colors.fg_muted, None),
@@ -2533,14 +2707,10 @@ impl ChangesTab {
             ),
         };
         div()
-            .id(format!(
-                "line-{}-{}-{}-{}",
-                section.slug(),
-                path.display(),
-                line.old_line_number.unwrap_or(0),
-                line.new_line_number.unwrap_or(0)
-            ))
+            .id(row_id)
             .debug_selector(|| "changes-diff-line".into())
+            .relative()
+            .group(group.clone())
             .h(px(DIFF_LINE_HEIGHT))
             .w_full()
             .flex_none()
@@ -2553,6 +2723,7 @@ impl ChangesTab {
             .text_size(theme.typography.scaled(12.0))
             .line_height(px(18.0))
             .bg(background)
+            .children(plus)
             .child(
                 div()
                     .debug_selector(|| "changes-diff-old-number".into())
@@ -2875,6 +3046,49 @@ fn split_row_shape(row: &DiffSideBySideRow) -> &'static str {
     }
 }
 
+/// The gutter's "+": invisible until its row is hovered, and live even
+/// then, so a press always lands (gpui paints no listener for an
+/// `invisible()` element).
+fn comment_plus(
+    point: GutterPoint,
+    group: SharedString,
+    entity: gpui::Entity<ChangesTab>,
+    theme: Theme,
+) -> impl IntoElement {
+    let side = match point.side {
+        AnnotationSide::Old => "old",
+        AnnotationSide::New => "new",
+    };
+    let selector = format!("changes-comment-plus-{side}-{}", point.line);
+    let (down, up) = (point.clone(), point);
+    let (down_entity, up_entity) = (entity.clone(), entity);
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .left(px(0.0))
+        .top(px(1.0))
+        .size(px(16.0))
+        .rounded(px(3.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.ely.accent)
+        .text_color(theme.ely.on_accent)
+        .text_size(theme.typography.scaled(12.0))
+        .opacity(0.0)
+        .group_hover(group, |style| style.opacity(1.0))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            cx.stop_propagation();
+            down_entity.update(cx, |tab, cx| tab.gutter_down(down.clone(), event.modifiers.shift, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            up_entity.update(cx, |tab, cx| tab.gutter_up(up.clone(), cx));
+        })
+        .child("+")
+}
+
 /// One half of a side-by-side row: the file's own line number, then the
 /// line. `old` selects which of the two line numbers this side shows — the
 /// left column is the old file, the right column the new one — which is
@@ -2885,6 +3099,11 @@ fn split_cell(
     words: Option<Range<usize>>,
     old: bool,
     side_x: Pixels,
+    path: PathBuf,
+    side: AnnotationSide,
+    open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>>,
+    group: SharedString,
+    entity: gpui::Entity<ChangesTab>,
     theme: Theme,
 ) -> gpui::Div {
     // `relative` + `overflow_hidden` with an absolutely positioned interior is
@@ -2912,6 +3131,7 @@ fn split_cell(
         .min_w(px(0.0))
         .h_full()
         .relative()
+        .group(group.clone())
         .overflow_hidden();
     let Some(line) = line else {
         // No content on this side of the zip: the deletion run and the
@@ -2948,7 +3168,13 @@ fn split_cell(
     } else {
         line.new_line_number
     };
-    cell.bg(background).child(
+    let point = number
+        .and_then(|number| u32::try_from(number).ok())
+        .map(|line| GutterPoint { path, side, line });
+    let plus = point
+        .filter(|point| open_lines.contains(&(point.path.clone(), point.side, point.line)))
+        .map(|point| comment_plus(point, group, entity, theme.clone()).into_any_element());
+    cell.bg(background).children(plus).child(
         div()
             .absolute()
             .inset_0()
@@ -3203,6 +3429,11 @@ impl ChangesTab {
         }
         let rows = self.sync_list_rows(sections);
         let row_entity = entity.clone();
+        let open_lines: Rc<HashSet<(PathBuf, AnnotationSide, u32)>> = Rc::new(if self.commentable {
+            self.commentable_lines()
+        } else {
+            HashSet::new()
+        });
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
@@ -3282,6 +3513,7 @@ impl ChangesTab {
                                 ChangeRow::File { entry, .. } => open_threads.get(&entry.path).copied().unwrap_or(0),
                                 _ => 0,
                             },
+                            open_lines.clone(),
                             row_entity.clone(),
                             theme,
                         ),
@@ -4088,9 +4320,10 @@ fn band_key_containing_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
     use sirio_git::StatusKind;
     use sirio_git::{DiffLine, DiffOrigin, FileDiff, Hunk};
+    use std::{cell::RefCell, rc::Rc};
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     fn thread_at(key: u64, path: &str, side: AnnotationSide, line: u32) -> Annotation {
@@ -4175,6 +4408,163 @@ mod tests {
         assert!(matches!(&rows[keys[0].0 - 1], ChangeRow::Line { line, .. }
             if line.new_line_number == Some(20) && line.old_line_number.is_none()));
         assert_eq!(tab.report().annotations[0].placed, "line");
+    }
+
+    fn commenting_window(
+        cx: &mut TestAppContext,
+    ) -> (
+        VisualTestContext,
+        gpui::Entity<ChangesTab>,
+        Rc<RefCell<Vec<ChangesTabEvent>>>,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_, _| {
+            let mut tab = range_tab_with_one_diff(true);
+            tab.commentable = true;
+            tab
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&tab, move |_, event: &ChangesTabEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        (cx, tab, events)
+    }
+
+    fn press(cx: &mut VisualTestContext, selector: &'static str, shift: bool) {
+        let at = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no {selector} drawn"))
+            .center();
+        let modifiers = Modifiers { shift, ..Modifiers::none() };
+        cx.simulate_mouse_down(at, MouseButton::Left, modifiers);
+        cx.run_until_parked();
+    }
+
+    fn release(cx: &mut VisualTestContext, selector: &'static str) {
+        let at = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no {selector} drawn"))
+            .center();
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn picked(events: &Rc<RefCell<Vec<ChangesTabEvent>>>) -> Vec<String> {
+        events
+            .borrow()
+            .iter()
+            .map(|event| match event {
+                ChangesTabEvent::CommentOn(anchor) => anchor.spec(),
+                ChangesTabEvent::CommentRefused(reason) => format!("refused: {reason}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn a_click_on_a_line_s_plus_asks_for_a_comment_there(cx: &mut TestAppContext) {
+        let (mut cx, _tab, events) = commenting_window(cx);
+        press(&mut cx, "changes-comment-plus-new-4", false);
+        release(&mut cx, "changes-comment-plus-new-4");
+        assert_eq!(picked(&events), vec!["x.rs:new:4".to_string()]);
+    }
+
+    #[gpui::test]
+    async fn a_drag_between_two_pluses_asks_for_the_range(cx: &mut TestAppContext) {
+        let (mut cx, _tab, events) = commenting_window(cx);
+        press(&mut cx, "changes-comment-plus-new-4", false);
+        release(&mut cx, "changes-comment-plus-new-1");
+        assert_eq!(picked(&events), vec!["x.rs:new:1-4".to_string()]);
+    }
+
+    #[gpui::test]
+    async fn shift_on_a_second_plus_extends_the_last_pick(cx: &mut TestAppContext) {
+        let (mut cx, _tab, events) = commenting_window(cx);
+        press(&mut cx, "changes-comment-plus-new-1", false);
+        release(&mut cx, "changes-comment-plus-new-1");
+        press(&mut cx, "changes-comment-plus-new-3", true);
+        assert_eq!(
+            picked(&events),
+            vec!["x.rs:new:1".to_string(), "x.rs:new:1-3".to_string()]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_range_across_sides_is_refused(cx: &mut TestAppContext) {
+        let (mut cx, _tab, events) = commenting_window(cx);
+        press(&mut cx, "changes-comment-plus-old-3", false);
+        release(&mut cx, "changes-comment-plus-new-4");
+        assert_eq!(
+            picked(&events),
+            vec!["refused: A range stays on one side of the diff.".to_string()]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_surface_not_asked_for_comments_draws_no_plus(cx: &mut TestAppContext) {
+        let (mut cx, tab, _events) = commenting_window(cx);
+        tab.update(&mut cx, |tab, cx| tab.set_commentable(false, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("changes-comment-plus-new-4").is_none());
+    }
+
+    #[gpui::test]
+    async fn the_split_view_s_halves_pick_their_own_side(cx: &mut TestAppContext) {
+        let (mut cx, tab, events) = commenting_window(cx);
+        tab.update(&mut cx, |tab, cx| tab.set_view_mode(DiffViewMode::Split, cx));
+        cx.run_until_parked();
+        press(&mut cx, "changes-comment-plus-old-2", false);
+        release(&mut cx, "changes-comment-plus-old-2");
+        assert_eq!(picked(&events), vec!["x.rs:old:2".to_string()]);
+    }
+
+    #[test]
+    fn the_socket_s_anchor_is_refused_where_the_mouse_s_would_be() {
+        let tab = range_tab_with_one_diff(true);
+        let x = Path::new("x.rs");
+        assert_eq!(
+            tab.comment_anchor(x, AnnotationSide::New, 4, Some(1)).map(|a| a.spec()),
+            Ok("x.rs:new:1-4".to_string())
+        );
+        assert_eq!(
+            tab.comment_anchor(x, AnnotationSide::New, 9, None),
+            Err("That line is not in the diff.".to_string())
+        );
+        assert_eq!(
+            tab.comment_anchor(Path::new("y.rs"), AnnotationSide::New, 1, None),
+            Err("That file's diff is not loaded.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_composer_row_follows_its_line() {
+        let composer = Annotation {
+            key: 7,
+            path: PathBuf::from("a.rs"),
+            side: AnnotationSide::New,
+            line: Some(22),
+            start_line: None,
+            kind: AnnotationKind::Composer,
+            revision: 0,
+        };
+        let tab = sample_tab(vec![composer]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        let keys = annotation_keys(&rows);
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(&rows[keys[0].0 - 1], ChangeRow::Line { line, .. } if line.new_line_number == Some(22)));
     }
 
     #[test]
@@ -4713,6 +5103,9 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            commentable: false,
+            gutter_press: None,
+            last_pick: None,
         }
     }
 
@@ -6656,6 +7049,9 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            commentable: false,
+            gutter_press: None,
+            last_pick: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -6746,6 +7142,9 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            commentable: false,
+            gutter_press: None,
+            last_pick: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -7030,6 +7429,9 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            commentable: false,
+            gutter_press: None,
+            last_pick: None,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -7501,6 +7903,9 @@ mod tests {
                 annotation_views: Rc::default(),
                 open_threads: Rc::default(),
                 reveal_annotation: None,
+                commentable: false,
+                gutter_press: None,
+                last_pick: None,
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -7966,6 +8371,9 @@ mod tests {
             annotation_views: Rc::default(),
             open_threads: Rc::default(),
             reveal_annotation: None,
+            commentable: false,
+            gutter_press: None,
+            last_pick: None,
         }
     }
 

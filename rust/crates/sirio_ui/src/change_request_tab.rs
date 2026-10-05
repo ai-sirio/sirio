@@ -749,6 +749,7 @@ impl ChangeRequestTab {
                                 .to_path_buf();
                             let _ = tab.open_file(relative, None, cx);
                         }
+                        ChangesTabEvent::CommentOn(_) | ChangesTabEvent::CommentRefused(_) => {}
                     },
                 ));
                 self.updated_notice = was_ready

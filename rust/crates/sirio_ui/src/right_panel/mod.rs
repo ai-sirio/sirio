@@ -622,6 +622,7 @@ impl RightPanel {
         self.changes_subscriptions = vec![
             cx.subscribe(&changes, |_, _, event: &ChangesTabEvent, cx| match event {
                 ChangesTabEvent::OpenFile(path) => cx.emit(RightPanelEvent::OpenFile(path.clone())),
+                ChangesTabEvent::CommentOn(_) | ChangesTabEvent::CommentRefused(_) => {}
             }),
             cx.subscribe(
                 &changes,
