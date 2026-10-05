@@ -1021,6 +1021,19 @@ impl ChangeRequestTab {
                 row_words.push(word);
             }
         }
+        let thread_replying = self.threads.value().and_then(|listing| {
+            listing.items.iter().find_map(|thread| {
+                let view = self.thread_views.get(&threads::thread_key(&thread.id))?;
+                view.read(cx).reply.is_some().then(|| thread.id.clone())
+            })
+        }).unwrap_or_default();
+        let thread_comment_editing = self.threads.value().and_then(|listing| {
+            listing.items.iter().find_map(|thread| {
+                self.thread_views.get(&threads::thread_key(&thread.id))?
+                    .read(cx)
+                    .editing_comment_id()
+            })
+        }).unwrap_or_default();
         let mut report = vec![
             ("label".to_string(), self.reference.label()),
             ("title".to_string(), self.title.clone()),
@@ -1068,6 +1081,8 @@ impl ChangeRequestTab {
                     .map(|open| open.anchor.spec())
                     .unwrap_or_default(),
             ),
+            ("thread_replying".to_string(), thread_replying),
+            ("thread_comment_editing".to_string(), thread_comment_editing),
             (
                 "line_composer_len".to_string(),
                 self.line_composer
@@ -2419,6 +2434,7 @@ mod tests {
     use sirio_theme::Theme;
 
     use super::*;
+    use super::actions::ActionState;
     use crate::changes::ChangesTabEvent;
     use crate::forge_source::testing::{self, CannedForge, FakeSource};
     use crate::forge_source::{self, Connection, RevisionError};
@@ -3001,9 +3017,104 @@ mod tests {
             "comments": {"nodes": [{
                 "id": format!("{id}-c"), "author": {"login": "bob"}, "body": "Handle it.",
                 "createdAt": "2026-09-20T10:00:00Z", "diffHunk": "",
+                "viewerCanUpdate": false,
                 "pullRequestReview": {"state": "COMMENTED"}
             }]}
         })
+    }
+
+    fn facts_json(reply: bool, resolve: bool, unresolve: bool) -> String {
+        serde_json::json!({"data": {"node": {"viewerCanReply": reply, "viewerCanResolve": resolve,
+            "viewerCanUnresolve": unresolve, "pullRequest": {"number": 101}}}}).to_string()
+    }
+
+    async fn a_thread(cx: &mut TestAppContext, node: serde_json::Value) -> (Entity<ChangeRequestTab>, Arc<CannedForge>, RepoDir) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer("ChangeRequestThreads", threads_json(vec![node]));
+        forge.answer("ChangeRequestActionContext", action_context_json(&head));
+        forge.answer("ReviewThreadContext", facts_json(true, true, true));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        let tab = open_tab(cx, source, &repo, InnerTab::Files);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "threads_open") == "1"));
+        (tab, forge, repo)
+    }
+
+    fn ok_mutation(field: &str) -> String {
+        serde_json::json!({"data": {field: {"clientMutationId": null}}}).to_string()
+    }
+
+    #[gpui::test]
+    async fn a_reply_goes_to_its_thread_and_its_field_closes_on_success(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        forge.answer("AddPullRequestReviewThreadReply", ok_mutation("addPullRequestReviewThreadReply"));
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Done in the next push.", cx)).expect("an open reply");
+        assert_eq!(tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_replying")), "PRRT_1");
+        let reads = forge.count("ChangeRequestThreads");
+        tab.update(cx, |tab, cx| tab.send_reply("PRRT_1", cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "idle" && report_value(tab, cx, "thread_replying").is_empty()));
+        assert_eq!(forge.count("AddPullRequestReviewThreadReply"), 1);
+        pump_until(cx, || forge.count("ChangeRequestThreads") > reads);
+    }
+
+    #[gpui::test]
+    async fn a_second_write_while_a_reply_is_in_flight_is_refused(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Wait for it", cx)).expect("an open reply");
+        tab.update(cx, |tab, _| tab.actions.state = ActionState::Working("reply"));
+        let refused = tab.update(cx, |tab, cx| tab.resolve_thread("PRRT_1", true, cx));
+        assert_eq!(refused, Err("an action is already in flight".to_string()));
+        cx.run_until_parked();
+        assert_eq!(forge.count("ResolveReviewThread"), 0);
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "thread_replying"), "PRRT_1");
+            assert_eq!(tab.reply_text("PRRT_1", cx).as_deref(), Some("Wait for it"));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_resolved_thread_folds_once_the_forge_says_so(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        forge.answer("ResolveReviewThread", ok_mutation("resolveReviewThread"));
+        tab.update(cx, |tab, cx| tab.reveal_thread("PRRT_1", cx)).expect("a loaded thread");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:open"));
+        let mut resolved = thread_node("PRRT_1", 42);
+        resolved["isResolved"] = true.into();
+        forge.answer("ChangeRequestThreads", threads_json(vec![resolved]));
+        tab.update(cx, |tab, cx| tab.resolve_thread("PRRT_1", true, cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows") == "PRRT_1:line:folded"));
+        assert_eq!(forge.count("ResolveReviewThread"), 1);
+    }
+
+    #[gpui::test]
+    async fn a_refused_reply_keeps_its_text_and_says_why_on_its_card(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        forge.answer("ReviewThreadContext", facts_json(false, false, false));
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Let me in", cx)).expect("an open reply");
+        tab.update(cx, |tab, cx| tab.send_reply("PRRT_1", cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed"));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.reply_text("PRRT_1", cx).as_deref(), Some("Let me in"));
+            assert_eq!(tab.thread_write_error("PRRT_1", cx).as_deref(), Some("You cannot reply to this thread."));
+        });
+        assert_eq!(forge.count("AddPullRequestReviewThreadReply"), 0);
+    }
+
+    #[gpui::test]
+    async fn one_s_own_thread_comment_is_edited_as_a_review_comment(cx: &mut TestAppContext) {
+        let mut node = thread_node("PRRT_1", 42);
+        node["comments"]["nodes"][0]["viewerCanUpdate"] = true.into();
+        let (tab, forge, _repo) = a_thread(cx, node).await;
+        forge.answer("UpdatePullRequestReviewComment", ok_mutation("updatePullRequestReviewComment"));
+        tab.update(cx, |tab, cx| tab.start_thread_comment_edit("PRRT_1-c", cx)).expect("an editable comment");
+        tab.update(cx, |tab, cx| tab.thread_comment_set_text("Handle it, please.", cx)).expect("an open editor");
+        tab.update(cx, |tab, cx| tab.save_thread_comment_edit(cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "idle" && report_value(tab, cx, "thread_comment_editing").is_empty()));
+        assert_eq!(forge.count("UpdatePullRequestReviewComment"), 1);
+        assert!(tab.update(cx, |tab, cx| tab.start_thread_comment_edit("nobody", cx)).is_err());
     }
 
     /// The CI timer's refresh reads no threads, but a new head it brings

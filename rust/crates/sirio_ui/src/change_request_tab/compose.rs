@@ -34,11 +34,58 @@ pub(crate) struct LineComposer {
 
 pub(crate) struct ComposerView {
     label: String,
-    input: Option<Entity<TextInput>>,
-    pending_text: String,
+    field: FieldState,
     write: WriteStatus,
     pub(crate) revision: u64,
     owner: WeakEntity<ChangeRequestTab>,
+}
+
+/// An Ely text field that can be created by render, when a window exists,
+/// while retaining text set before that first render.
+pub(super) struct FieldState {
+    input: Option<Entity<TextInput>>,
+    pending_text: String,
+}
+
+impl FieldState {
+    pub(super) fn new(pending_text: impl Into<String>) -> Self {
+        Self {
+            input: None,
+            pending_text: pending_text.into(),
+        }
+    }
+
+    /// Returns the input and whether this call created it.
+    pub(super) fn ensure<T: 'static>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<T>,
+        rows: Option<(usize, usize)>,
+        placeholder: &'static str,
+    ) -> (Entity<TextInput>, bool) {
+        if let Some(input) = &self.input {
+            return (input.clone(), false);
+        }
+        let input = new_input(window, cx, &self.pending_text, rows, placeholder);
+        self.pending_text.clear();
+        self.input = Some(input.clone());
+        (input, true)
+    }
+
+    pub(super) fn set_text(&mut self, text: &str, cx: &mut App) {
+        if let Some(input) = &self.input {
+            input.update(cx, |input, cx| input.set_text(text, cx));
+        } else {
+            self.pending_text = text.to_string();
+        }
+    }
+
+    pub(super) fn text(&self, cx: &App) -> String {
+        self.input
+            .as_ref()
+            .map(|input| input.read(cx).text().to_string())
+            .unwrap_or_else(|| self.pending_text.clone())
+    }
 }
 
 impl ComposerView {
@@ -55,8 +102,7 @@ impl ComposerView {
     pub(crate) fn new(anchor: &CommentAnchor, owner: WeakEntity<ChangeRequestTab>) -> Self {
         Self {
             label: Self::label(anchor),
-            input: None,
-            pending_text: String::new(),
+            field: FieldState::new(String::new()),
             write: WriteStatus::default(),
             revision: 0,
             owner,
@@ -68,17 +114,15 @@ impl ComposerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TextInput> {
-        if let Some(input) = &self.input {
-            return input.clone();
-        }
-        let input = new_input(
+        let (input, created) = self.field.ensure(
             window,
             cx,
-            &self.pending_text,
             Some((3, 12)),
             "Leave a comment…",
         );
-        self.pending_text.clear();
+        if !created {
+            return input;
+        }
         let owner = self.owner.clone();
         cx.subscribe(&input, move |_view, _input, event: &InputEvent, cx| match event {
             InputEvent::Submit => {
@@ -89,11 +133,14 @@ impl ComposerView {
                     });
                 });
             }
-            InputEvent::Changed => cx.notify(),
+            InputEvent::Changed => {
+                _view.revision += 1;
+                threads::push_from(_view.owner.clone(), cx);
+                cx.notify();
+            }
             InputEvent::Focus | InputEvent::Blur => {}
         })
         .detach();
-        self.input = Some(input.clone());
         input
     }
 
@@ -104,19 +151,12 @@ impl ComposerView {
     }
 
     pub(crate) fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if let Some(input) = &self.input {
-            input.update(cx, |input, cx| input.set_text(text, cx));
-        } else {
-            self.pending_text = text.to_string();
-            cx.notify();
-        }
+        self.field.set_text(text, cx);
+        cx.notify();
     }
 
     pub(crate) fn text(&self, cx: &App) -> String {
-        self.input
-            .as_ref()
-            .map(|input| input.read(cx).text().to_string())
-            .unwrap_or_else(|| self.pending_text.clone())
+        self.field.text(cx)
     }
 
     pub(crate) fn set_write(&mut self, status: WriteStatus, cx: &mut Context<Self>) {
@@ -325,7 +365,30 @@ impl ChangeRequestTab {
             let status = status_for(&WriteTarget::Composer);
             open.view.update(cx, |view, cx| view.set_write(status, cx));
         }
-        // Task 7 adds the thread cards here.
+        for view in self.thread_views.values() {
+            let thread_view = view.read(cx);
+            let thread_id = thread_view.thread.id.clone();
+            let comments = thread_view.thread.comments.clone();
+            let belongs_to_thread = |target: &WriteTarget| match target {
+                WriteTarget::Reply(id) | WriteTarget::Resolve(id) => id == &thread_id,
+                WriteTarget::EditComment(id) => comments.iter().any(|comment| {
+                    comment.id == *id || comment.edit.as_ref().is_some_and(|edit| edit.id == *id)
+                }),
+                WriteTarget::Composer => false,
+            };
+            let error = write_refusal
+                .as_ref()
+                .filter(|(target, _)| belongs_to_thread(target))
+                .map(|(_, message)| message.clone())
+                .or_else(|| {
+                    failed.clone().filter(|_| {
+                        write_target.as_ref().is_some_and(belongs_to_thread)
+                    })
+                });
+            view.update(cx, |view, cx| {
+                view.set_write(WriteStatus { busy, error }, cx);
+            });
+        }
     }
 
     /// Whether the gutter may offer a comment: the forge says the viewer may
