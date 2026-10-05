@@ -765,13 +765,7 @@ impl ChangeRequestTab {
                         }
                         ChangesTabEvent::CommentOn(anchor) => tab.open_composer(anchor.clone(), cx),
                         ChangesTabEvent::CommentRefused(reason) => {
-                            if !tab.action_busy() {
-                                tab.actions.state = actions::ActionState::Failed {
-                                    kind: "line-comment",
-                                    message: reason.clone(),
-                                };
-                                cx.notify();
-                            }
+                            let _ = tab.record_refusal("line-comment", Err(reason.clone()), cx);
                         }
                     },
                 ));
@@ -3242,6 +3236,31 @@ mod tests {
             assert_eq!(tab.thread_write_error("PRRT_1", cx).as_deref(), Some("You cannot reply to this thread."));
         });
         assert_eq!(forge.count("AddPullRequestReviewThreadReply"), 0);
+    }
+
+    #[gpui::test]
+    async fn a_gutter_refusal_does_not_keep_the_failed_reply_s_owner(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        forge.answer("ReviewThreadContext", facts_json(false, false, false));
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Keep this reply", cx)).expect("an open reply");
+        tab.update(cx, |tab, cx| tab.send_reply("PRRT_1", cx)).expect("the refusal arrives asynchronously");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed"));
+        assert_eq!(
+            tab.read_with(cx, |tab, _| tab.write_target.clone()),
+            Some(compose::WriteTarget::Reply("PRRT_1".to_string()))
+        );
+
+        let reason = "A range stays on one side of the diff.";
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |_, cx| cx.emit(ChangesTabEvent::CommentRefused(reason.to_string())));
+        tab.update(cx, |tab, cx| tab.sync_writes(cx));
+
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "action_kind"), "line-comment");
+            assert_eq!(report_value(tab, cx, "action_message"), reason);
+            assert_eq!(tab.thread_write_error("PRRT_1", cx), None);
+        });
     }
 
     #[gpui::test]

@@ -452,7 +452,7 @@ impl ChangeRequestTab {
     /// belongs to no earlier write, so the last write's target is cleared:
     /// otherwise the report would pair this `Failed` state with it and show
     /// the reason under the wrong field.
-    fn record_refusal(
+    pub(super) fn record_refusal(
         &mut self,
         kind: &'static str,
         outcome: Result<(), String>,
