@@ -829,7 +829,10 @@ impl ChangesTab {
 
     fn gutter_down(&mut self, point: GutterPoint, shift: bool, cx: &mut Context<Self>) {
         match self.last_pick.clone() {
-            Some(from) if shift => self.pick(from, point, cx),
+            Some(from) if shift => {
+                self.gutter_press = None;
+                self.pick(from, point, cx);
+            }
             _ => self.gutter_press = Some(point),
         }
     }
@@ -838,6 +841,10 @@ impl ChangesTab {
         if let Some(from) = self.gutter_press.take() {
             self.pick(from, point, cx);
         }
+    }
+
+    fn gutter_cancel(&mut self) {
+        self.gutter_press = None;
     }
 
     /// Every drawn line a comment may start on, by side.
@@ -3446,6 +3453,8 @@ impl ChangesTab {
         let split_right_x = self.split_right_x;
         let unified_viewport = self.unified_viewport;
         let horizontal_bar_state = self.unified_bar_state.clone();
+        let gutter_up_entity = entity.clone();
+        let gutter_up_out_entity = entity.clone();
         let viewport_entity = entity.clone();
         let bar_entity = entity.clone();
         let list_focus = self
@@ -3467,6 +3476,12 @@ impl ChangesTab {
             .debug_selector(|| "changes-list".into())
             .track_focus(&list_focus)
             .on_key_down(cx.listener(Self::on_change_key))
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                gutter_up_entity.update(cx, |tab, _| tab.gutter_cancel());
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                gutter_up_out_entity.update(cx, |tab, _| tab.gutter_cancel());
+            })
             .flex_1()
             .min_h(px(0.0))
             .min_w(px(0.0))
@@ -4496,6 +4511,26 @@ mod tests {
         press(&mut cx, "changes-comment-plus-new-1", false);
         release(&mut cx, "changes-comment-plus-new-1");
         press(&mut cx, "changes-comment-plus-new-3", true);
+        assert_eq!(
+            picked(&events),
+            vec!["x.rs:new:1".to_string(), "x.rs:new:1-3".to_string()]
+        );
+    }
+
+    #[gpui::test]
+    async fn cancelled_gutter_release_does_not_affect_completed_shift_click(cx: &mut TestAppContext) {
+        let (mut cx, _tab, events) = commenting_window(cx);
+        press(&mut cx, "changes-comment-plus-new-1", false);
+        release(&mut cx, "changes-comment-plus-new-1");
+        press(&mut cx, "changes-comment-plus-new-4", false);
+        let content = cx
+            .debug_bounds("changes-diff-content")
+            .unwrap_or_else(|| panic!("no changes-diff-content drawn"))
+            .center();
+        cx.simulate_mouse_up(content, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        press(&mut cx, "changes-comment-plus-new-3", true);
+        release(&mut cx, "changes-comment-plus-new-3");
         assert_eq!(
             picked(&events),
             vec!["x.rs:new:1".to_string(), "x.rs:new:1-3".to_string()]
