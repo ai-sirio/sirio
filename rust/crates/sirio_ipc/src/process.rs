@@ -27,15 +27,29 @@ pub fn start_time(pid: u32) -> Option<u64> {
     (read == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+/// Windows: the creation time as a `FILETIME` (100 ns ticks since 1601).
+///
+/// Liveness comes from `GetExitCodeProcess`, not from `GetProcessTimes`'s exit
+/// time, which is undefined while the process runs. A process that has exited
+/// but whose handle is still open elsewhere reads as dead here, since its exit
+/// code is not `STILL_ACTIVE`. The one blind spot: a process that exited with
+/// code 259 (`STILL_ACTIVE` itself) reads as alive. That only ever yields an
+/// unverifiable verdict for a pid whose start time still matches, never a
+/// signal sent to the wrong process.
 #[cfg(windows)]
 pub fn start_time(pid: u32) -> Option<u64> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
+            return None;
+        }
+        let mut exit_code: u32 = 0;
+        if GetExitCodeProcess(handle, &mut exit_code) == 0 || exit_code != STILL_ACTIVE as u32 {
+            CloseHandle(handle);
             return None;
         }
         let zero = FILETIME {
@@ -45,10 +59,7 @@ pub fn start_time(pid: u32) -> Option<u64> {
         let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
         let ok = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
         CloseHandle(handle);
-        // A process that has exited but whose handle is still open elsewhere
-        // still answers `GetProcessTimes`; a zero exit time says it is alive.
-        (ok != 0 && exited.dwLowDateTime == 0 && exited.dwHighDateTime == 0)
-            .then(|| ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+        (ok != 0).then(|| ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
     }
 }
 

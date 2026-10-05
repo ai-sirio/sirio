@@ -203,6 +203,10 @@ impl LocalListener {
     ///
     /// The listener polls rather than blocks, so shutdown is noticed within a
     /// few milliseconds without any wake-up mechanism.
+    ///
+    /// On macOS and the BSDs an accepted socket inherits the listener's
+    /// `O_NONBLOCK`, so the returned stream may be non-blocking; call
+    /// [`LocalStreamExt::restore_blocking`] before reading from it.
     #[cfg(unix)]
     pub fn accept(&mut self, shutdown: &AtomicBool) -> Option<LocalStream> {
         unix::accept(&self.inner, shutdown)
