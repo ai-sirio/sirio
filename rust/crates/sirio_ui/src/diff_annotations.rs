@@ -226,6 +226,9 @@ pub(crate) fn anchor_in(
     if !open.get(first).copied().unwrap_or(false) || !open.get(last).copied().unwrap_or(false) {
         return Err("That line cannot take a comment.");
     }
+    if !open[first..=last].iter().all(|open| *open) {
+        return Err("That line cannot take a comment.");
+    }
     if !on_side(first) || !on_side(last) {
         return Err("A range stays on one side of the diff.");
     }
@@ -392,6 +395,25 @@ mod tests {
         assert_eq!(anchor_in(path, AnnotationSide::Old, &hunk, 5, 5), Err("A range stays on one side of the diff."));
         let old = anchor_in(path, AnnotationSide::Old, &hunk, 4, 4).expect("the removed line, on the old side");
         assert_eq!(old.spec(), "src/login.rs:old:42");
+    }
+
+    #[test]
+    fn a_range_refuses_lines_outside_the_forges_commentable_hunk() {
+        let mut lines = vec![diff_line(DiffOrigin::Addition, None, Some(1))];
+        lines.extend((1..=19).map(|n| diff_line(DiffOrigin::Context, Some(n), Some(n + 1))));
+        lines.push(diff_line(DiffOrigin::Addition, None, Some(21)));
+        let hunk = Hunk {
+            header: "@@ -1,19 +1,21 @@".into(), old_start: 1, old_lines: 19, new_start: 1, new_lines: 21,
+            lines,
+        };
+        let open = commentable(&hunk.lines.iter().map(|line| line.origin).collect::<Vec<_>>(), COMMENT_CONTEXT);
+        assert!(open[3], "the first endpoint is within three lines of a change");
+        assert!(!open[10], "the middle is outside both changes' three-line context");
+        assert!(open[17], "the last endpoint is within three lines of a change");
+        assert_eq!(
+            anchor_in(Path::new("src/login.rs"), AnnotationSide::New, &hunk, 3, 17),
+            Err("That line cannot take a comment.")
+        );
     }
 
     #[test]
