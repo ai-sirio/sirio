@@ -1,11 +1,12 @@
 //! The one new line comment being written in a change request's diff
 //! (spec §7.2, B3b): its view under the line, and the tab's side of it.
 
+use super::suggestion;
 use super::*;
 
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::WeakEntity;
-use sirio_forge::{LineAnchor, Revisions, Side};
+use sirio_forge::{LineAnchor, ReviewTarget, Revisions, Side};
 
 use crate::diff_annotations::CommentAnchor;
 use crate::ely_ui::new_input;
@@ -36,6 +37,7 @@ pub(crate) struct LineComposer {
 
 pub(crate) struct ComposerView {
     label: String,
+    new_side: bool,
     field: FieldState,
     write: WriteStatus,
     pub(crate) revision: u64,
@@ -104,6 +106,7 @@ impl ComposerView {
     pub(crate) fn new(anchor: &CommentAnchor, owner: WeakEntity<ChangeRequestTab>) -> Self {
         Self {
             label: Self::label(anchor),
+            new_side: anchor.side == AnnotationSide::New,
             field: FieldState::new(String::new()),
             write: WriteStatus::default(),
             revision: 0,
@@ -148,6 +151,7 @@ impl ComposerView {
 
     pub(crate) fn set_anchor(&mut self, anchor: &CommentAnchor, cx: &mut Context<Self>) {
         self.label = Self::label(anchor);
+        self.new_side = anchor.side == AnnotationSide::New;
         self.revision += 1;
         cx.notify();
     }
@@ -195,6 +199,8 @@ impl Render for ComposerView {
                     .child(selectable_text(error)),
             );
         }
+        let (suggest_owner, review_owner) = (owner.clone(), owner.clone());
+        let can_send = !write.busy && !text.trim().is_empty();
         card.child(
             div()
                 .flex()
@@ -209,11 +215,35 @@ impl Render for ComposerView {
                         let _ = owner.update(cx, |tab, cx| tab.cancel_composer(cx));
                     },
                 ))
+                .when(self.new_side, |row| {
+                    row.child(actions::action_button(
+                        "change-request-line-composer-suggest",
+                        "Suggest",
+                        &theme,
+                        !write.busy,
+                        move |_, cx| {
+                            let _ = suggest_owner.update(cx, |tab, cx| {
+                                let _ = tab.insert_suggestion(cx);
+                            });
+                        },
+                    ))
+                })
+                .child(actions::action_button(
+                    "change-request-line-composer-review",
+                    if write.in_review { "Add to review" } else { "Start a review" },
+                    &theme,
+                    can_send,
+                    move |_, cx| {
+                        let _ = review_owner.update(cx, |tab, cx| {
+                            let _ = tab.send_line_to_review(cx);
+                        });
+                    },
+                ))
                 .child(actions::action_button(
                     "change-request-line-composer-send",
                     "Comment",
                     &theme,
-                    !write.busy && !text.trim().is_empty(),
+                    can_send,
                     move |_, cx| {
                         let _ = send_owner.update(cx, |tab, cx| {
                             let _ = tab.send_line_comment(cx);
@@ -329,6 +359,46 @@ impl ChangeRequestTab {
         let body = open.view.read(cx).text(cx);
         let action = Action::LineComment { anchor, revisions: open.revisions.clone(), body };
         self.start_write(WriteTarget::Composer, action, cx)
+    }
+
+    pub(crate) fn send_line_to_review(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let open = self
+            .line_composer
+            .as_ref()
+            .ok_or("No comment is being written.")?;
+        let anchor = to_line_anchor(&open.anchor);
+        let body = open.view.read(cx).text(cx);
+        let action = Action::ReviewAdd {
+            target: ReviewTarget::Line { anchor, revisions: open.revisions.clone() },
+            body,
+        };
+        self.start_write(WriteTarget::Composer, action, cx)
+    }
+
+    /// *Suggest*: the anchored lines, as the diff reads them now, in a
+    /// ```suggestion block after what is written (spec §7.3).
+    pub(crate) fn insert_suggestion(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let open = self
+            .line_composer
+            .as_ref()
+            .ok_or("No comment is being written.")?;
+        if open.anchor.side != AnnotationSide::New {
+            return Err("A suggestion replaces lines on the new side.".to_string());
+        }
+        let RangeState::Ready { changes, .. } = &self.range else {
+            return Err("The diff is not loaded.".to_string());
+        };
+        let lines = changes.read(cx).anchored_text(&open.anchor).ok_or("Those lines are not in the loaded diff.")?;
+        let written = open.view.read(cx).text(cx);
+        let block = suggestion::suggestion_block(&lines);
+        let text = if written.trim().is_empty() { block } else { format!("{}\n\n{block}", written.trim_end()) };
+        self.composer_set_text(&text, cx);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_text(&self, cx: &App) -> Option<String> {
+        self.line_composer.as_ref().map(|open| open.view.read(cx).text(cx))
     }
 
     /// Every thread write goes through here: `perform`, and the field it

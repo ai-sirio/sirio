@@ -3602,6 +3602,64 @@ mod tests {
         });
     }
 
+    /// The head's lines `first..=last` (1-based), as the diff reads them.
+    fn head_lines(repo: &Path, head: &str, first: usize, last: usize) -> Vec<String> {
+        let shown = std::process::Command::new("git")
+            .args(["show", &format!("{head}:a.txt")])
+            .current_dir(repo)
+            .output()
+            .expect("git show");
+        String::from_utf8(shown.stdout).expect("utf-8").lines().skip(first - 1).take(last - first + 1).map(str::to_string).collect()
+    }
+
+    #[gpui::test]
+    async fn a_line_added_to_a_review_starts_one_with_it(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, head) = composing(cx).await;
+        forge.answer("AddPullRequestReview", r#"{"data":{"addPullRequestReview":{"clientMutationId":null,"pullRequestReview":{"id":"PRR_1"}}}}"#.to_string());
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("First of many.", cx));
+        tab.update(cx, |tab, cx| tab.send_line_to_review(cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "line_composer").is_empty()));
+        let input = &forge.sent("AddPullRequestReview").expect("sent")["input"];
+        assert_eq!(input["commitOID"], head.as_str());
+        assert_eq!(input["threads"], serde_json::json!([{ "body": "First of many.", "path": "a.txt", "line": 43, "side": "RIGHT" }]));
+        assert!(input.get("event").is_none(), "no event: the review stays pending");
+        assert_eq!(forge.count("AddPullRequestReviewThread"), 0);
+    }
+
+    #[gpui::test]
+    async fn with_a_review_in_progress_a_line_comment_joins_it(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, head) = composing(cx).await;
+        forge.answer("ChangeRequestActionContext", with_pending_review(action_context_json(&head), "PRR_7", 2));
+        forge.answer("AddPullRequestReviewThread", ok_mutation("addPullRequestReviewThread"));
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Joins.", cx));
+        tab.update(cx, |tab, cx| tab.send_line_to_review(cx)).expect("sent");
+        pump_until(cx, || forge.count("AddPullRequestReviewThread") == 1);
+        let input = &forge.sent("AddPullRequestReviewThread").expect("sent")["input"];
+        assert_eq!(input["pullRequestReviewId"], "PRR_7");
+        assert_eq!((input["startLine"].clone(), input["line"].clone()), (serde_json::json!(41), serde_json::json!(43)));
+        assert_eq!(forge.count("AddPullRequestReview"), 0);
+    }
+
+    #[gpui::test]
+    async fn suggest_inserts_the_anchored_lines_as_they_read_now(cx: &mut TestAppContext) {
+        let (tab, _forge, repo, head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Try:", cx));
+        tab.update(cx, |tab, cx| tab.insert_suggestion(cx)).expect("new-side lines");
+        let expected = format!("Try:\n\n{}", suggestion::suggestion_block(&head_lines(&repo.0, &head, 41, 43)));
+        tab.read_with(cx, |tab, cx| assert_eq!(tab.composer_text(cx).as_deref(), Some(expected.as_str())));
+    }
+
+    #[gpui::test]
+    async fn an_old_side_line_offers_no_suggestion(cx: &mut TestAppContext) {
+        let (tab, _forge, _repo, _head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:old:42", cx)).expect("the removed line");
+        let refused = tab.update(cx, |tab, cx| tab.insert_suggestion(cx));
+        assert_eq!(refused, Err("A suggestion replaces lines on the new side.".to_string()));
+    }
+
     #[gpui::test]
     async fn a_rate_paused_send_shows_its_refusal_under_the_composer(cx: &mut TestAppContext) {
         let (tab, forge, _repo, _head) = composing(cx).await;

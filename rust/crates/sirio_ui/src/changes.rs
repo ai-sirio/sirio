@@ -814,6 +814,11 @@ impl ChangesTab {
         anchor_in(path, side, &diff.hunks[hunk], first, last).map_err(str::to_string)
     }
 
+    /// The lines a new-side anchor covers, as the loaded diff reads them.
+    pub fn anchored_text(&self, anchor: &CommentAnchor) -> Option<Vec<String>> {
+        crate::diff_annotations::anchored_text(self.diffs.get(&anchor.path)?, anchor)
+    }
+
     fn pick(&mut self, from: GutterPoint, to: GutterPoint, cx: &mut Context<Self>) {
         if from.path != to.path || from.side != to.side {
             cx.emit(ChangesTabEvent::CommentRefused(
