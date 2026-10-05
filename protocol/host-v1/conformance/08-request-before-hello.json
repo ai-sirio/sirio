@@ -1,0 +1,10 @@
+{
+  "name": "request-before-hello",
+  "major": 1,
+  "steps": [
+    {
+      "send": { "id": 1, "method": "host.ping" },
+      "expect": { "id": 1, "error": { "code": "handshake_required" } }
+    }
+  ]
+}

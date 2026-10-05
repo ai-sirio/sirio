@@ -79,6 +79,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "sirio.exe"; DestDir: "{app}"
 Source: "sirioctl.exe"; DestDir: "{app}"
+; sirio-host.exe is copied by the app to %LOCALAPPDATA%\Sirio\host\bin\<version>
+; before it runs -- never run from {app}, which Restart Manager closes during
+; an update (spec §4.3).
+Source: "sirio-host.exe"; DestDir: "{app}"
 
 [Icons]
 Name: "{group}\\${SIRIO_DISPLAY_NAME}"; Filename: "{app}\sirio.exe"

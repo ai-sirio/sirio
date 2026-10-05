@@ -23,6 +23,7 @@ members = [
     "crates/sirio_persistence",
     "crates/sirio_agents",
     "crates/sirio_control",
+    "crates/sirio_ipc",
     "crates/sirio_activity",
     "crates/sirio_markdown",
     "crates/sirio_diagram",
@@ -34,6 +35,9 @@ members = [
     "crates/sirio_apply",
     "crates/sirio_forge",
     "crates/sirio_privacy",
+    "crates/sirio_host_client",
+    "crates/sirio_host_protocol",
+    "crates/sirio_host",
 ]
 
 [workspace.package]

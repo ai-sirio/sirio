@@ -142,3 +142,9 @@ jobs:
         env:
           SIRIO_CI_PR_GATE: '1'
         run: Scripts/ci.sh
+
+      # The host foundation's lifecycle against real binaries (spec §9.3).
+      # Not part of Scripts/ci.sh: it starts detached processes and waits on
+      # idle grace periods, which the gate's nextest profiles do not model.
+      - name: Host E2E
+        run: Scripts/Tests/test-host-e2e.sh

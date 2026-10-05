@@ -44,6 +44,14 @@ grep -q "push:" "$PR_CODE" || fail "pr.yml must also check main itself"
 grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/ci\.sh[[:space:]]*$" "$PR_CODE" \
   || fail "pr.yml must run Scripts/ci.sh, the declared gate"
 
+# The host foundation's lifecycle E2E (spec §9.3) is deliberately not part of
+# Scripts/ci.sh -- it starts detached processes and waits on idle grace
+# periods, which the gate's nextest profiles do not model -- so this workflow
+# is the only place it runs on every pull request. Anchored to the `run:` line
+# for the reason the ci.sh assertion above is.
+grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-e2e\.sh[[:space:]]*$" "$PR_CODE" \
+  || fail "pr.yml must run the host E2E"
+
 # Scripts/ci.sh runs check-cycle-version.sh, which compares the workspace
 # version against the last released tag. A shallow clone carries no tags, so
 # the check would pass by knowing nothing -- the exact failure it exists to

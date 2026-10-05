@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bundles the already-compiled `sirio` and `sirioctl` binaries into a single
+# Bundles the already-compiled `sirio`, `sirioctl` and `sirio-host` binaries into a single
 # x86_64 AppImage that runs on a host with no GTK3 or webkit installed.
 #
 # Compiles nothing, like Scripts/build-app-bundle.sh beside it: it takes the
@@ -37,22 +37,23 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <sirio-binary> <sirioctl-binary> <version> <output.AppImage>" >&2
+  echo "Usage: $0 <sirio-binary> <sirioctl-binary> <sirio-host-binary> <version> <output.AppImage>" >&2
   exit 2
 }
 
-if [ $# -ne 4 ]; then
+if [ $# -ne 5 ]; then
   usage
 fi
 
 SIRIO_BIN="$1"
 SIRIOCTL_BIN="$2"
-VERSION="$3"
-OUTPUT="$4"
+HOST_BIN="$3"
+VERSION="$4"
+OUTPUT="$5"
 
-for arg in "$SIRIO_BIN" "$SIRIOCTL_BIN" "$VERSION" "$OUTPUT"; do
+for arg in "$SIRIO_BIN" "$SIRIOCTL_BIN" "$HOST_BIN" "$VERSION" "$OUTPUT"; do
   if [ -z "$arg" ]; then
-    echo "error: all four arguments are required" >&2
+    echo "error: all five arguments are required" >&2
     usage
   fi
 done
@@ -63,6 +64,10 @@ if [ ! -f "$SIRIO_BIN" ]; then
 fi
 if [ ! -f "$SIRIOCTL_BIN" ]; then
   echo "error: sirioctl binary not found at $SIRIOCTL_BIN" >&2
+  exit 1
+fi
+if [ ! -f "$HOST_BIN" ]; then
+  echo "error: sirio-host binary not found at $HOST_BIN" >&2
   exit 1
 fi
 
@@ -118,7 +123,11 @@ fi
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications"
 cp "$SIRIO_BIN" "$APPDIR/usr/bin/sirio"
 cp "$SIRIOCTL_BIN" "$APPDIR/usr/bin/sirioctl"
-chmod +x "$APPDIR/usr/bin/sirio" "$APPDIR/usr/bin/sirioctl"
+# The session host, beside sirio where `ensure_host` looks for it. The app
+# copies it out to <data root>/bin/<version>/ before running it (spec §4.3):
+# the AppImage's mount disappears with the app, and the host outlives it.
+cp "$HOST_BIN" "$APPDIR/usr/bin/sirio-host"
+chmod +x "$APPDIR/usr/bin/sirio" "$APPDIR/usr/bin/sirioctl" "$APPDIR/usr/bin/sirio-host"
 
 # The .desktop entry, generated from the identity source, not hand-written
 # (§8.3): Name is the display name on every platform, StartupWMClass carries

@@ -1,0 +1,19 @@
+[package]
+name = "sirio_host_client"
+version.workspace = true
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+sirio_ipc = { path = "../sirio_ipc" }
+sirio_host_protocol = { path = "../sirio_host_protocol" }
+serde_json = "1"
+sha2 = "0.10"
+
+# Win32_Security is needed by `CreateJobObjectW` and `CreateFileW` (both take a
+# SECURITY_ATTRIBUTES pointer), Win32_Storage_FileSystem by `CreateFileW`, which
+# opens the NUL handle a detached host inherits. Same
+# windows-sys version the workspace lockfile already carries.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects"] }
