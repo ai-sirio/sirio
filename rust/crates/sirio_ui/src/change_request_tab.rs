@@ -16,7 +16,7 @@ use gpui::{
 use sirio_forge::{
     Action, ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
     FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
-    RerunTarget, TimelineItem,
+    ReviewThread, RerunTarget, TimelineItem,
 };
 use sirio_theme::Theme;
 
@@ -25,6 +25,7 @@ mod composer;
 mod edit;
 mod merge;
 mod people;
+mod threads;
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -216,6 +217,14 @@ pub struct ChangeRequestTab {
     pub(crate) commits: Slot<Listing<CommitSummary>>,
     pub(crate) checks: Slot<Listing<Check>>,
     pub(crate) files: Slot<Listing<FileChange>>,
+    /// Review threads (spec §4): read with *Files* and on every refresh but
+    /// the CI timer's.
+    pub(crate) threads: Slot<Listing<ReviewThread>>,
+    threads_generation: u64,
+    threads_task: Option<Task<()>>,
+    /// The cards the diff draws, by annotation key; outdated sections by path.
+    thread_views: HashMap<u64, Entity<threads::ThreadView>>,
+    outdated_views: HashMap<String, Entity<threads::OutdatedView>>,
     check_folds: HashMap<String, bool>,
     generation: u64,
     /// A rate limit's reset: no request before it (spec §9).
@@ -278,6 +287,11 @@ impl ChangeRequestTab {
             commits: Slot::Idle,
             checks: Slot::Idle,
             files: Slot::Idle,
+            threads: Slot::Idle,
+            threads_generation: 0,
+            threads_task: None,
+            thread_views: HashMap::new(),
+            outdated_views: HashMap::new(),
             check_folds: HashMap::new(),
             generation: 0,
             paused_until: None,
@@ -413,7 +427,16 @@ impl ChangeRequestTab {
         }
     }
 
+    /// Everything the tab shows, threads included: a manual refresh, a retry,
+    /// the re-read after a write.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_header(cx);
+        self.load_threads(cx);
+    }
+
+    /// The header and the inner tab shown, without the threads: what the CI
+    /// timer asks for.
+    fn refresh_header(&mut self, cx: &mut Context<Self>) {
         if self.rate_paused() {
             // Stay armed: the pause ends by itself, and a running CI is still
             // worth looking at once it does.
@@ -492,7 +515,7 @@ impl ChangeRequestTab {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |tab, cx| {
                     tab.ci_timer = None;
-                    tab.refresh(cx);
+                    tab.refresh_header(cx);
                 });
             }),
         ));
@@ -510,6 +533,9 @@ impl ChangeRequestTab {
             self.load_inner(inner, cx);
         }
         if inner == InnerTab::Files {
+            if matches!(self.threads, Slot::Idle) {
+                self.load_threads(cx);
+            }
             self.ensure_range(cx);
         }
         cx.notify();
@@ -724,6 +750,7 @@ impl ChangeRequestTab {
                     revisions,
                     changes: changes.clone(),
                 };
+                self.push_annotations(cx);
                 if let Some((path, line)) = self.pending_reveal.take() {
                     changes.update(cx, |changes, cx| match line {
                         Some(line) => changes.focus_line(&path, line as usize, cx),
