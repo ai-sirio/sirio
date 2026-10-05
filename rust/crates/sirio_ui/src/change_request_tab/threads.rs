@@ -5,10 +5,12 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::data_display::{Avatar, Tag};
+use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use ely_gpui_component::theme::AvatarSize;
 use gpui::WeakEntity;
-use sirio_forge::{ReviewThread, Side, ThreadComment};
+use sirio_forge::{CommentRef, ReviewThread, Side, ThreadComment};
 
 use crate::diff_annotations::{Annotation, AnnotationKind, AnnotationSide};
 use super::*;
@@ -177,7 +179,7 @@ fn comment_blocks(thread: &ReviewThread, docs: &[markdown::Doc], theme: &Theme) 
         .collect()
 }
 
-fn card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+pub(super) fn card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .mx(px(12.0))
@@ -199,6 +201,9 @@ pub(crate) struct ThreadView {
     pub(crate) thread: ReviewThread,
     docs: Vec<markdown::Doc>,
     expanded: bool,
+    pub(super) reply: Option<compose::FieldState>,
+    pub(super) editing: Option<(CommentRef, compose::FieldState)>,
+    pub(super) write: compose::WriteStatus,
     /// Bumped whenever the card's height changes, so the diff measures its
     /// row again.
     pub(crate) revision: u64,
@@ -211,6 +216,9 @@ impl ThreadView {
             key: thread_key(&thread.id),
             docs: comment_docs(&thread, theme),
             expanded: !thread.resolved,
+            reply: None,
+            editing: None,
+            write: compose::WriteStatus::default(),
             thread,
             revision: 0,
             owner,
@@ -237,6 +245,245 @@ impl ThreadView {
         !self.expanded
     }
 
+    pub(crate) fn open_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply.is_none() {
+            self.reply = Some(compose::FieldState::new(String::new()));
+            self.revision += 1;
+            cx.notify();
+            push_from(self.owner.clone(), cx);
+        }
+    }
+
+    pub(crate) fn close_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply.take().is_some() {
+            self.revision += 1;
+            cx.notify();
+            push_from(self.owner.clone(), cx);
+        }
+    }
+
+    pub(crate) fn start_edit(&mut self, comment: CommentRef, body: &str, cx: &mut Context<Self>) {
+        if self.editing.as_ref().is_some_and(|(open, _)| open.id == comment.id) {
+            return;
+        }
+        self.editing = Some((comment, compose::FieldState::new(body.to_string())));
+        self.revision += 1;
+        cx.notify();
+        push_from(self.owner.clone(), cx);
+    }
+
+    pub(crate) fn close_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing.take().is_some() {
+            self.revision += 1;
+            cx.notify();
+            push_from(self.owner.clone(), cx);
+        }
+    }
+
+    pub(crate) fn set_write(&mut self, status: compose::WriteStatus, cx: &mut Context<Self>) {
+        if self.write == status {
+            return;
+        }
+        let error_changed = self.write.error != status.error;
+        self.write = status;
+        if error_changed {
+            self.revision += 1;
+            push_from(self.owner.clone(), cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn reply_text(&self, cx: &App) -> Option<String> {
+        self.reply.as_ref().map(|field| field.text(cx))
+    }
+
+    pub(crate) fn set_reply_text(&mut self, text: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        self.reply.as_mut().ok_or("no reply is being written")?.set_text(text, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub(crate) fn set_edit_text(&mut self, text: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some((_, field)) = &mut self.editing else {
+            return Err("no thread comment is being edited".to_string());
+        };
+        field.set_text(text, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub(crate) fn edit_value(&self, cx: &App) -> Option<(CommentRef, String)> {
+        self.editing
+            .as_ref()
+            .map(|(comment, field)| (comment.clone(), field.text(cx)))
+    }
+
+    pub(crate) fn editing_comment_id(&self) -> Option<String> {
+        self.editing.as_ref().map(|(comment, _)| comment.id.clone())
+    }
+
+    fn ensure_reply_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextInput> {
+        let (input, created) = self.reply.as_mut().expect("reply field is open").ensure(
+            window,
+            cx,
+            Some((3, 12)),
+            "Reply…",
+        );
+        if created {
+            let owner = self.owner.clone();
+            let thread = self.thread.id.clone();
+            cx.subscribe(&input, move |view, _input, event: &InputEvent, cx| match event {
+                InputEvent::Submit => {
+                    let (owner, thread) = (owner.clone(), thread.clone());
+                    cx.defer(move |cx| {
+                        let _ = owner.update(cx, |tab, cx| {
+                            let _ = tab.send_reply(&thread, cx);
+                        });
+                    });
+                }
+                InputEvent::Changed => {
+                    view.revision += 1;
+                    push_from(view.owner.clone(), cx);
+                    cx.notify();
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            }).detach();
+        }
+        input
+    }
+
+    fn ensure_edit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextInput> {
+        let (input, created) = self.editing.as_mut().expect("edit field is open").1.ensure(
+            window,
+            cx,
+            Some((3, 12)),
+            "Edit comment…",
+        );
+        if created {
+            let owner = self.owner.clone();
+            cx.subscribe(&input, move |view, _input, event: &InputEvent, cx| match event {
+                InputEvent::Submit => {
+                    let owner = owner.clone();
+                    cx.defer(move |cx| {
+                        let _ = owner.update(cx, |tab, cx| {
+                            let _ = tab.save_thread_comment_edit(cx);
+                        });
+                    });
+                }
+                InputEvent::Changed => {
+                    view.revision += 1;
+                    push_from(view.owner.clone(), cx);
+                    cx.notify();
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            }).detach();
+        }
+        input
+    }
+
+    fn render_comments(&mut self, window: &mut Window, cx: &mut Context<Self>, theme: &Theme) -> Vec<AnyElement> {
+        let now = style::now();
+        let comments: Vec<(usize, (ThreadComment, markdown::Doc))> = self.thread.comments.iter()
+            .filter(|comment| !comment.pending)
+            .cloned()
+            .zip(self.docs.iter().cloned())
+            .enumerate()
+            .collect();
+        comments.into_iter().map(|(index, (comment, doc))| {
+            let editing = self.editing.as_ref().is_some_and(|(editing, _)| editing.id == comment.id);
+            let mut metadata = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(Avatar::new(("change-request-thread-avatar", index), comment.author.clone()).size(AvatarSize::Xs))
+                .child(
+                    div()
+                        .id(("change-request-thread-author", index))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(selectable_text(comment.author.clone())),
+                )
+                .child(
+                    div()
+                        .id(("change-request-thread-time", index))
+                        .text_color(theme.ely.fg_subtle)
+                        .child(selectable_text(style::age(now, comment.at))),
+                );
+            if comment.edit.is_some() && !editing {
+                let owner = self.owner.clone();
+                let comment_id = comment.id.clone();
+                metadata = metadata.child(
+                    div()
+                        .id(("change-request-thread-comment-edit", index))
+                        .debug_selector(|| "change-request-thread-comment-edit".into())
+                        .flex_none()
+                        .child(
+                            Button::new(("change-request-thread-comment-edit-button", index), "Edit")
+                                .variant(ButtonVariant::Ghost)
+                                .disabled(self.write.busy)
+                                .on_click(move |_, _, cx| {
+                                    let comment_id = comment_id.clone();
+                                    let _ = owner.update(cx, |tab, cx| {
+                                        let _ = tab.start_thread_comment_edit(&comment_id, cx);
+                                    });
+                                }),
+                        ),
+                );
+            }
+            let body = if editing {
+                let input = self.ensure_edit_input(window, cx);
+                let owner = self.owner.clone();
+                div()
+                    .id(("change-request-thread-comment-editor", index))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(Input::new(&input))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.0))
+                            .child(actions::action_button(
+                                "change-request-thread-comment-edit-cancel",
+                                "Cancel",
+                                theme,
+                                true,
+                                {
+                                    let owner = owner.clone();
+                                    move |_, cx| {
+                                        let _ = owner.update(cx, |tab, cx| tab.cancel_thread_comment_edit(cx));
+                                    }
+                                },
+                            ))
+                            .child(actions::action_button(
+                                "change-request-thread-comment-edit-save",
+                                "Save",
+                                theme,
+                                !self.write.busy,
+                                move |_, cx| {
+                                    let _ = owner.update(cx, |tab, cx| {
+                                        let _ = tab.save_thread_comment_edit(cx);
+                                    });
+                                },
+                            )),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .id(("change-request-thread-body", index))
+                    .child(Chat::render_markdown_document_with_link_override(doc, theme, open_links()))
+                    .into_any_element()
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(metadata)
+                .child(body)
+                .into_any_element()
+        }).collect()
+    }
+
     pub fn open(&mut self, cx: &mut Context<Self>) {
         if !self.expanded {
             self.expanded = true;
@@ -256,14 +503,14 @@ impl ThreadView {
 
 /// The owner reads every card's revision, this one included, so it is told
 /// after this card's update has ended.
-fn push_from<T>(owner: WeakEntity<ChangeRequestTab>, cx: &mut Context<T>) {
+pub(super) fn push_from<T>(owner: WeakEntity<ChangeRequestTab>, cx: &mut Context<T>) {
     cx.defer(move |cx| {
         let _ = owner.update(cx, |tab, cx| tab.push_annotations(cx));
     });
 }
 
 impl Render for ThreadView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("change_request.thread_render", 0);
         let theme = *Theme::get(cx);
         let thread = &self.thread;
@@ -282,6 +529,13 @@ impl Render for ThreadView {
         } else {
             where_label(thread)
         };
+        let (thread_id, can_resolve, can_reply, resolved, write) = (
+            thread.id.clone(),
+            thread.can_resolve,
+            thread.can_reply,
+            thread.resolved,
+            self.write.clone(),
+        );
         let header = div()
             .id(("change-request-thread-header", self.key))
             .flex()
@@ -289,23 +543,127 @@ impl Render for ThreadView {
             .gap(px(6.0))
             .cursor_pointer()
             .child(EIcon::new(IconName::MessageSquare).size(EIconSize::Sm))
-            .child(div().text_color(theme.ely.fg_muted).child(summary))
-            .when(thread.side == Side::Old && !(folded && thread.resolved), |this| {
-                this.child(Tag::new(("change-request-thread-old", self.key), "old"))
-            })
-            .when(thread.resolved && !folded, |this| {
-                this.child(Tag::new(("change-request-thread-resolved", self.key), "Resolved").tone(Tone::Success))
-            })
-            .child(div().flex_1())
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .truncate()
+                    .text_color(theme.ely.fg_muted)
+                    .child(summary),
+            )
+            .when(thread.side == Side::Old && !(folded && thread.resolved), |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .child(Tag::new(("change-request-thread-old", self.key), "old")),
+                )
+            })
+            .when(thread.resolved && !folded, |this| {
+                this.child(
+                    div().flex_none().child(
+                        Tag::new(("change-request-thread-resolved", self.key), "Resolved")
+                            .tone(Tone::Success),
+                    ),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
                     .text_color(theme.ely.fg_subtle)
                     .child(plural(published, "comment", "comments")),
             )
+            .when(can_resolve, |this| {
+                let owner = self.owner.clone();
+                let id = thread_id.clone();
+                let label = if resolved { "Unresolve" } else { "Resolve" };
+                this.child(
+                    div()
+                        .id(("change-request-thread-resolve", self.key))
+                        .debug_selector(|| "change-request-thread-resolve".into())
+                        .flex_none()
+                        .child(
+                            Button::new(("change-request-thread-resolve-button", self.key), label)
+                                .variant(ButtonVariant::Ghost)
+                                .disabled(write.busy)
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    let id = id.clone();
+                                    let _ = owner.update(cx, |tab, cx| {
+                                        let _ = tab.resolve_thread(&id, !resolved, cx);
+                                    });
+                                }),
+                        ),
+                )
+            })
             .on_click(cx.listener(|view, _, _, cx| view.toggle(cx)));
-        card(("change-request-thread", self.key), &theme)
-            .child(header)
-            .when(!folded, |this| this.children(comment_blocks(thread, &self.docs, &theme)))
+        let mut card = card(("change-request-thread", self.key), &theme).child(header);
+        if !folded {
+            card = card.children(self.render_comments(window, cx, &theme));
+            if can_reply {
+                if self.reply.is_some() {
+                    let input = self.ensure_reply_input(window, cx);
+                    let text = self.reply_text(cx).unwrap_or_default();
+                    let owner = self.owner.clone();
+                    let send_owner = owner.clone();
+                    let cancel_id = thread_id.clone();
+                    let send_id = thread_id.clone();
+                    card = card.child(Input::new(&input)).child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.0))
+                            .child(actions::action_button(
+                                "change-request-thread-reply-cancel",
+                                "Cancel",
+                                &theme,
+                                true,
+                                move |_, cx| {
+                                    let id = cancel_id.clone();
+                                    let _ = owner.update(cx, |tab, cx| tab.cancel_thread_reply(&id, cx));
+                                },
+                            ))
+                            .child(actions::action_button(
+                                "change-request-thread-reply-send",
+                                "Comment",
+                                &theme,
+                                !write.busy && !text.trim().is_empty(),
+                                move |_, cx| {
+                                    let id = send_id.clone();
+                                    let _ = send_owner.update(cx, |tab, cx| {
+                                        let _ = tab.send_reply(&id, cx);
+                                    });
+                                },
+                            )),
+                    );
+                } else {
+                    let owner = self.owner.clone();
+                    let id = thread_id.clone();
+                    card = card.child(crate::ely_ui::text_button(
+                        "change-request-thread-reply-open",
+                        "Reply…",
+                        None,
+                        crate::ely_ui::ButtonState::IDLE,
+                        move |_, cx| {
+                            let id = id.clone();
+                            let _ = owner.update(cx, |tab, cx| {
+                                let _ = tab.open_reply(&id, cx);
+                            });
+                        },
+                    ));
+                }
+            }
+        }
+        if let Some(error) = write.error {
+            card = card.child(
+                div()
+                    .id("change-request-thread-write-error")
+                    .debug_selector(|| "change-request-thread-write-error".into())
+                    .text_color(theme.ely.danger)
+                    .child(selectable_text(error)),
+            );
+        }
+        card
     }
 }
 
@@ -423,6 +781,137 @@ impl Render for OutdatedView {
 }
 
 impl ChangeRequestTab {
+    fn thread_view(&self, id: &str) -> Result<Entity<ThreadView>, String> {
+        self.thread_views.get(&thread_key(id)).cloned().ok_or_else(|| format!("no thread {id}"))
+    }
+
+    pub(crate) fn open_reply(&mut self, thread: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let view = self.thread_view(thread)?;
+        view.update(cx, |view, cx| view.open_reply(cx));
+        Ok(())
+    }
+
+    pub(crate) fn cancel_thread_reply(&mut self, thread: &str, cx: &mut Context<Self>) {
+        if let Ok(view) = self.thread_view(thread) {
+            view.update(cx, |view, cx| view.close_reply(cx));
+        }
+        let target = compose::WriteTarget::Reply(thread.to_string());
+        if self.write_refusal.as_ref().is_some_and(|(owner, _)| owner == &target) {
+            self.write_refusal = None;
+        }
+        if self.write_target.as_ref() == Some(&target) && !self.action_busy() {
+            self.actions.state = actions::ActionState::Idle;
+        }
+        self.sync_writes(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn reply_set_text(&mut self, thread: &str, text: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let view = self.thread_view(thread)?;
+        view.update(cx, |view, cx| view.set_reply_text(text, cx))
+    }
+
+    pub(crate) fn send_reply(&mut self, thread: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let view = self.thread_view(thread)?;
+        let body = view.read(cx).reply_text(cx).ok_or("no reply is being written")?;
+        self.start_write(
+            compose::WriteTarget::Reply(thread.to_string()),
+            Action::Reply { thread: thread.to_string(), body },
+            cx,
+        )
+    }
+
+    pub(crate) fn resolve_thread(&mut self, thread: &str, resolved: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        self.thread_view(thread)?;
+        self.start_write(
+            compose::WriteTarget::Resolve(thread.to_string()),
+            Action::Resolve { thread: thread.to_string(), resolved },
+            cx,
+        )
+    }
+
+    pub(crate) fn start_thread_comment_edit(&mut self, comment_id: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let (thread_id, comment, body) = self.threads.value()
+            .and_then(|listing| listing.items.iter().find_map(|thread| {
+                thread.comments.iter().find(|comment| comment.id == comment_id && comment.edit.is_some())
+                    .map(|comment| (thread.id.clone(), comment.edit.clone().expect("checked"), comment.body.clone()))
+            }))
+            .ok_or("that comment cannot be edited")?;
+        let view = self.thread_view(&thread_id).map_err(|_| "that comment cannot be edited")?;
+        let other_editors: Vec<_> = self.thread_views.values()
+            .filter(|other| other.read(cx).editing_comment_id().is_some_and(|id| id != comment_id))
+            .cloned()
+            .collect();
+        for other in other_editors {
+            other.update(cx, |view, cx| view.close_edit(cx));
+        }
+        view.update(cx, |view, cx| view.start_edit(comment, &body, cx));
+        Ok(())
+    }
+
+    pub(crate) fn cancel_thread_comment_edit(&mut self, cx: &mut Context<Self>) {
+        let editor = self.thread_views.values()
+            .find(|view| view.read(cx).editing_comment_id().is_some())
+            .cloned();
+        let comment_id = editor.as_ref()
+            .and_then(|view| view.read(cx).editing_comment_id());
+        if let Some(view) = editor {
+            view.update(cx, |view, cx| view.close_edit(cx));
+        }
+        if let Some(comment_id) = comment_id {
+            let target = compose::WriteTarget::EditComment(comment_id);
+            if self.write_refusal.as_ref().is_some_and(|(owner, _)| owner == &target) {
+                self.write_refusal = None;
+            }
+            if self.write_target.as_ref() == Some(&target) && !self.action_busy() {
+                self.actions.state = actions::ActionState::Idle;
+            }
+        }
+        self.sync_writes(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn thread_comment_set_text(&mut self, text: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let view = self.thread_views.values()
+            .find(|view| view.read(cx).editing_comment_id().is_some())
+            .cloned()
+            .ok_or("no thread comment is being edited")?;
+        view.update(cx, |view, cx| view.set_edit_text(text, cx))
+    }
+
+    pub(crate) fn save_thread_comment_edit(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let view = self.thread_views.values()
+            .find(|view| view.read(cx).editing_comment_id().is_some())
+            .cloned()
+            .ok_or("no thread comment is being edited")?;
+        let (comment, body) = view.read(cx).edit_value(cx).ok_or("no thread comment is being edited")?;
+        let original = self.threads.value()
+            .and_then(|listing| listing.items.iter().flat_map(|thread| thread.comments.iter())
+                .find(|item| item.id == comment.id || item.edit.as_ref().is_some_and(|edit| edit.id == comment.id)))
+            .map(|item| item.body.clone())
+            .ok_or("that comment cannot be edited")?;
+        let body = crate::ely_ui::normalize(&body, true);
+        if body == crate::ely_ui::normalize(&original, true) {
+            self.cancel_thread_comment_edit(cx);
+            return Ok(());
+        }
+        self.start_write(
+            compose::WriteTarget::EditComment(comment.id.clone()),
+            Action::EditComment { comment, body },
+            cx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reply_text(&self, thread: &str, cx: &App) -> Option<String> {
+        self.thread_views.get(&thread_key(thread)).and_then(|view| view.read(cx).reply_text(cx))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_write_error(&self, thread: &str, cx: &App) -> Option<String> {
+        self.thread_views.get(&thread_key(thread)).and_then(|view| view.read(cx).write.error.clone())
+    }
+
     /// Selects Files and opens the thread's card or outdated section. Queued
     /// reveals retain the side and annotation key until the range is ready.
     pub fn reveal_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
@@ -503,7 +992,9 @@ impl ChangeRequestTab {
         let count = |predicate: fn(&ReviewThread) -> bool| published.iter().filter(|thread| predicate(thread)).count().to_string();
         let rows = match &self.range {
             RangeState::Ready { changes, .. } => changes.read(cx).report().annotations.into_iter().filter_map(|row| {
-                if let Some(view) = self.outdated_views.get(&row.path.to_string_lossy().into_owned())
+                if row.key == compose::COMPOSER_KEY {
+                    Some(format!("composer:{}", row.placed))
+                } else if let Some(view) = self.outdated_views.get(&row.path.to_string_lossy().into_owned())
                     .filter(|_| row.key == outdated_key(&row.path.to_string_lossy()))
                 {
                     let section = view.read(cx);
@@ -670,34 +1161,45 @@ impl ChangeRequestTab {
     }
 
     fn annotations_for(&self, cx: &App) -> Vec<Annotation> {
-        let Some(listing) = self.threads.value() else {
-            return Vec::new();
-        };
-        let mut annotations: Vec<Annotation> = drawn_in_diff(&listing.items)
-            .into_iter()
-            .filter(|thread| !thread.outdated)
-            .map(|thread| {
-                let key = thread_key(&thread.id);
-                Annotation {
-                    key,
-                    path: PathBuf::from(&thread.path),
-                    side: annotation_side(thread.side),
-                    line: thread.line,
-                    start_line: thread.start_line,
-                    kind: AnnotationKind::Thread { open: !thread.resolved },
-                    revision: self.thread_views.get(&key).map_or(0, |view| view.read(cx).revision),
-                }
-            })
-            .collect();
-        annotations.extend(section_counts(&listing.items).into_iter().map(|(path, count)| Annotation {
-            key: outdated_key(&path),
-            revision: self.outdated_views.get(&path).map_or(0, |view| view.read(cx).revision),
-            path: PathBuf::from(path),
-            side: AnnotationSide::New,
-            line: None,
-            start_line: None,
-            kind: AnnotationKind::Outdated { count },
-        }));
+        let mut annotations = Vec::new();
+        if let Some(listing) = self.threads.value() {
+            annotations = drawn_in_diff(&listing.items)
+                .into_iter()
+                .filter(|thread| !thread.outdated)
+                .map(|thread| {
+                    let key = thread_key(&thread.id);
+                    Annotation {
+                        key,
+                        path: PathBuf::from(&thread.path),
+                        side: annotation_side(thread.side),
+                        line: thread.line,
+                        start_line: thread.start_line,
+                        kind: AnnotationKind::Thread { open: !thread.resolved },
+                        revision: self.thread_views.get(&key).map_or(0, |view| view.read(cx).revision),
+                    }
+                })
+                .collect();
+            annotations.extend(section_counts(&listing.items).into_iter().map(|(path, count)| Annotation {
+                key: outdated_key(&path),
+                revision: self.outdated_views.get(&path).map_or(0, |view| view.read(cx).revision),
+                path: PathBuf::from(path),
+                side: AnnotationSide::New,
+                line: None,
+                start_line: None,
+                kind: AnnotationKind::Outdated { count },
+            }));
+        }
+        if let Some(open) = &self.line_composer {
+            annotations.push(Annotation {
+                key: compose::COMPOSER_KEY,
+                path: open.anchor.path.clone(),
+                side: open.anchor.side,
+                line: Some(open.anchor.last()),
+                start_line: open.anchor.start.map(|_| open.anchor.first()),
+                kind: AnnotationKind::Composer,
+                revision: open.view.read(cx).revision,
+            });
+        }
         annotations
     }
 
@@ -712,6 +1214,9 @@ impl ChangeRequestTab {
         let mut views: HashMap<u64, gpui::AnyView> =
             self.thread_views.iter().map(|(key, view)| (*key, view.clone().into())).collect();
         views.extend(self.outdated_views.iter().map(|(path, view)| (outdated_key(path), view.clone().into())));
+        if let Some(open) = &self.line_composer {
+            views.insert(compose::COMPOSER_KEY, open.view.clone().into());
+        }
         changes.update(cx, |changes, cx| changes.set_annotations(annotations, views, cx));
     }
 }

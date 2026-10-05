@@ -7435,6 +7435,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha1_smol",
  "sirio_perf",
  "thiserror 2.0.20",
  "ureq",

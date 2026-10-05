@@ -324,7 +324,7 @@ re-runs and log state; drawing and visible reload require its framed run.
 
 **Review threads** (B3) are read by `ForgeClient::review_threads` — GitHub
 `reviewThreads`, GitLab diff `discussions`, a GitLab thread outdated when its
-position names an older head — and drawn by the *Files* diff's own list:
+position names an older head — and drawn and written in the *Files* diff:
 `ChangesTab` takes forge-neutral `Annotation`s (`sirio_ui::diff_annotations`)
 and one view per key, splits a context band so an anchored line is never
 hidden, and puts a thread whose line is not drawn at the top of its file.
@@ -332,6 +332,18 @@ hidden, and puts a thread whose line is not drawn at the top of its file.
 line-comment footnotes with one entry per thread. Threads are read on first
 load, a manual refresh, entering *Files* when idle and after a write, never
 by the CI timer. The `threads` scenarios of `test-forge-diff-e2e.sh` prove it.
+B3b writes through the same door: `Reply`, `Resolve` and `LineComment`
+(GitHub REST review comments, which publish at once; GitLab REST
+`discussions`, a range with `line_range` and GitLab's `line_code`), each
+reply or resolve preceded by a fresh read of that thread's permissions.
+`ChangesTab` draws a gutter "+" only when its owner calls `set_commentable`,
+on the lines within 3 of a change (`diff_annotations::commentable`), and
+emits `CommentOn`; the change request tab owns the one composer and every
+thread card's fields.
+`surface change-request thread --compose / --cancel` serve every build; `act
+reply|resolve|unresolve|line-comment|edit-thread-comment` are debug-only. The
+`threads` stage of `test-forge-actions-e2e.sh` proves the wire and
+`scenario_thread_writes` of `test-forge-diff-e2e.sh` the UI.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and

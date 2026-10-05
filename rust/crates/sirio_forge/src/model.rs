@@ -255,6 +255,46 @@ pub struct ThreadComment {
     pub pending: bool,
 }
 
+/// What a drawn diff line is, for a new comment's position (spec §3 "Anchor").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineKind {
+    Added,
+    Removed,
+    Context,
+}
+
+/// One line of a new comment's anchor, in GitLab's diff counters: `old` and
+/// `new` are where the line is, and for a side the line is not on, where
+/// that side's next line would be (an added line's `old` is the next base
+/// line). GitHub reads only the number on the comment's side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorLine {
+    pub kind: LineKind,
+    pub old: u32,
+    pub new: u32,
+}
+
+impl AnchorLine {
+    /// The line's number on `side`, when the line exists there.
+    pub fn on(self, side: Side) -> Option<u32> {
+        match (side, self.kind) {
+            (Side::New, LineKind::Removed) | (Side::Old, LineKind::Added) => None,
+            (Side::New, _) => Some(self.new),
+            (Side::Old, _) => Some(self.old),
+        }
+    }
+}
+
+/// Where a new comment goes: one side, its last line and, for a range, its
+/// first. The path is the file's path at the head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineAnchor {
+    pub path: String,
+    pub side: Side,
+    pub line: AnchorLine,
+    pub start: Option<AnchorLine>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventKind {
     CommitsPushed {
@@ -279,6 +319,8 @@ pub enum EventKind {
 pub enum CommentKind {
     Comment,
     Review,
+    /// A comment in a review thread (GitHub's pull request review comment).
+    ReviewComment,
 }
 
 /// What an edit points at. A timeline entry carries one only where the

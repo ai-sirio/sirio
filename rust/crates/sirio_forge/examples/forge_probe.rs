@@ -25,10 +25,10 @@
 use std::process::ExitCode;
 
 use sirio_forge::{
-    Action, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
+    Action, AnchorLine, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
     CommentKind, CommentRef, EventKind, FileChangeKind, Filter, Forge, ForgeClient, ForgeError,
-    ForgeTarget, HostSetting, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
-    Resolution, RerunTarget, ReviewOutcome, ReviewState,
+    ForgeTarget, HostSetting, LineAnchor, LineKind, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
+    Resolution, RerunTarget, Revisions, ReviewOutcome, ReviewState, Side,
     ReviewVerdict, SystemProbes, TimelineItem, TokenTransport, Transport, resolve,
 };
 
@@ -336,6 +336,9 @@ fn run(args: &Args) -> Result<(), Failure> {
                 );
                 for comment in &thread.comments {
                     println!("TCOMMENT {} {}", comment.author, comment.body.lines().next().unwrap_or(""));
+                    if let Some(edit) = &comment.edit {
+                        println!("TEDIT {} {}", edit.id, kind_name(edit.kind));
+                    }
                 }
             }
             println!("TRUNCATED {}", yes_no(listing.truncated));
@@ -643,6 +646,7 @@ fn kind_name(kind: CommentKind) -> &'static str {
     match kind {
         CommentKind::Comment => "comment",
         CommentKind::Review => "review",
+        CommentKind::ReviewComment => "review-comment",
     }
 }
 
@@ -655,6 +659,31 @@ fn body_of(args: &Args) -> Result<String, Failure> {
     Ok(args.flag("body").unwrap_or_default().to_string())
 }
 
+fn anchor_line(value: Option<&str>) -> Result<AnchorLine, Failure> {
+    let invalid = || usage("line-comment needs KIND:OLD:NEW");
+    let mut parts = value.ok_or_else(invalid)?.split(':');
+    let kind = match parts.next() {
+        Some("added") => LineKind::Added,
+        Some("removed") => LineKind::Removed,
+        Some("context") => LineKind::Context,
+        _ => return Err(invalid()),
+    };
+    let old = parts.next().and_then(|part| part.parse().ok()).ok_or_else(invalid)?;
+    let new = parts.next().and_then(|part| part.parse().ok()).ok_or_else(invalid)?;
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(AnchorLine { kind, old, new })
+}
+
+fn side_of(args: &Args) -> Result<Side, Failure> {
+    match args.flag("side") {
+        Some("old") => Ok(Side::Old),
+        Some("new") => Ok(Side::New),
+        _ => Err(usage("line-comment needs --side old|new")),
+    }
+}
+
 /// `act N <action> ...` — one write, then what came of it.
 fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
     let number = number(args)?;
@@ -665,6 +694,28 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
         .as_str();
     let action = match name {
         "comment" => Action::Comment { body: body_of(args)? },
+        "reply" => Action::Reply {
+            thread: args.flag("thread").ok_or_else(|| usage("reply needs --thread"))?.to_string(),
+            body: body_of(args)?,
+        },
+        "resolve" | "unresolve" => Action::Resolve {
+            thread: args.flag("thread").ok_or_else(|| usage("resolve needs --thread"))?.to_string(),
+            resolved: name == "resolve",
+        },
+        "line-comment" => Action::LineComment {
+            anchor: LineAnchor {
+                path: args.flag("path").ok_or_else(|| usage("line-comment needs --path"))?.to_string(),
+                side: side_of(args)?,
+                line: anchor_line(args.flag("line"))?,
+                start: args.flag("start").map(|start| anchor_line(Some(start))).transpose()?,
+            },
+            revisions: Revisions {
+                base_sha: args.flag("base").ok_or_else(|| usage("line-comment needs --base"))?.to_string(),
+                head_sha: args.flag("head").ok_or_else(|| usage("line-comment needs --head"))?.to_string(),
+                start_sha: args.flag("start-sha").map(str::to_string),
+            },
+            body: body_of(args)?,
+        },
         "approve" => Action::Review { verdict: ReviewVerdict::Approve, body: body_of(args)? },
         "request-changes" => Action::Review { verdict: ReviewVerdict::RequestChanges, body: body_of(args)? },
         "review-comment" => Action::Review { verdict: ReviewVerdict::Comment, body: body_of(args)? },
@@ -687,6 +738,7 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
                 id: args.flag("id").ok_or_else(|| usage("edit-comment needs --id"))?.to_string(),
                 kind: match args.flag("kind") {
                     Some("review") => CommentKind::Review,
+                    Some("review-comment") => CommentKind::ReviewComment,
                     _ => CommentKind::Comment,
                 },
             },

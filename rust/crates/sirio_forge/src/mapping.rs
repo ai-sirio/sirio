@@ -3,9 +3,69 @@
 //! never make a list fail to draw.
 
 use crate::model::{
-    BlockReason, Capabilities, MergeCapability, MergeMethod, MergeMethods, MergeVerdict, ChangeState, CheckStatus, CiState, EventKind, FileChangeKind, Progress,
-    ReviewOutcome, ReviewState, Side,
+    AnchorLine, BlockReason, Capabilities, ChangeState, CheckStatus, CiState, EventKind,
+    FileChangeKind, LineAnchor, LineKind, MergeCapability, MergeMethod, MergeMethods, MergeVerdict,
+    Progress, ReviewOutcome, ReviewState, Revisions, Side,
 };
+use serde_json::{Value, json};
+
+/// GitLab's `line_code` for one line: the SHA-1 of the path, then the
+/// line's old and new diff counters.
+pub(crate) fn gitlab_line_code(path: &str, line: AnchorLine) -> String {
+    format!("{}_{}_{}", sha1_smol::Sha1::from(path).digest(), line.old, line.new)
+}
+
+/// The `position` of a GitLab diff discussion (REST `discussions`). A line
+/// names the sides it is on; a range adds `line_range`, each end typed `new`
+/// when it was added and `old` otherwise.
+pub(crate) fn gitlab_position(anchor: &LineAnchor, revisions: &Revisions) -> Value {
+    let point = |line: AnchorLine, into: &mut Value| {
+        if line.kind != LineKind::Added {
+            into["old_line"] = json!(line.old);
+        }
+        if line.kind != LineKind::Removed {
+            into["new_line"] = json!(line.new);
+        }
+    };
+    let mut position = json!({
+        "position_type": "text",
+        "base_sha": revisions.base_sha,
+        "start_sha": revisions.start_sha.as_deref().unwrap_or(&revisions.base_sha),
+        "head_sha": revisions.head_sha,
+        "old_path": anchor.path,
+        "new_path": anchor.path,
+    });
+    point(anchor.line, &mut position);
+    if let Some(start) = anchor.start {
+        let end_of = |line: AnchorLine| {
+            let mut end = json!({
+                "line_code": gitlab_line_code(&anchor.path, line),
+                "type": if line.kind == LineKind::Added { "new" } else { "old" },
+            });
+            point(line, &mut end);
+            end
+        };
+        position["line_range"] = json!({ "start": end_of(start), "end": end_of(anchor.line) });
+    }
+    position
+}
+
+/// The body of GitHub's REST review comment, published at once.
+pub(crate) fn github_line_comment(anchor: &LineAnchor, head: &str, body: &str) -> Value {
+    let side = match anchor.side {
+        Side::Old => "LEFT",
+        Side::New => "RIGHT",
+    };
+    let mut comment = json!({ "body": body, "commit_id": head, "path": anchor.path, "side": side });
+    if let Some(line) = anchor.line.on(anchor.side) {
+        comment["line"] = json!(line);
+    }
+    if let Some(start) = anchor.start.and_then(|start| start.on(anchor.side)) {
+        comment["start_line"] = json!(start);
+        comment["start_side"] = json!(side);
+    }
+    comment
+}
 
 pub(crate) fn github_change_state(state: &str, is_draft: bool) -> ChangeState {
     match state {
@@ -533,6 +593,7 @@ pub(crate) fn file_change_kind(change_type: &str) -> Option<FileChangeKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AnchorLine, LineAnchor, LineKind, Revisions, Side};
 
     #[test]
     fn a_gitlab_thread_is_outdated_only_when_its_head_is_known_and_not_the_current_one() {
@@ -1276,5 +1337,72 @@ mod tests {
     fn a_block_reason_reads_as_words() {
         assert_eq!(BlockReason::Other("SECURITY_POLICIES_VIOLATIONS".into()).text(), "security policies violations");
         assert_eq!(BlockReason::ReviewRequired.text(), "a review is required");
+    }
+
+    fn at(kind: LineKind, old: u32, new: u32) -> AnchorLine {
+        AnchorLine { kind, old, new }
+    }
+
+    fn anchor(side: Side, line: AnchorLine, start: Option<AnchorLine>) -> LineAnchor {
+        LineAnchor { path: "src/login.rs".into(), side, line, start }
+    }
+
+    fn revisions(start: Option<&str>) -> Revisions {
+        Revisions { base_sha: "b".repeat(40), head_sha: "h".repeat(40), start_sha: start.map(str::to_string) }
+    }
+
+    #[test]
+    fn gitlab_line_code_is_the_path_s_sha1_then_both_counters() {
+        assert_eq!(
+            gitlab_line_code("src/login.rs", at(LineKind::Added, 43, 42)),
+            "ba9dbdbb9be33e57e33422db0cc822780b0701cc_43_42"
+        );
+    }
+
+    #[test]
+    fn a_gitlab_position_names_the_lines_each_side_has() {
+        let context = gitlab_position(&anchor(Side::New, at(LineKind::Context, 43, 43), None), &revisions(Some("s")));
+        assert_eq!(context["position_type"], "text");
+        assert_eq!((context["old_line"].as_u64(), context["new_line"].as_u64()), (Some(43), Some(43)));
+        assert_eq!((context["old_path"].as_str(), context["new_path"].as_str()), (Some("src/login.rs"), Some("src/login.rs")));
+        assert_eq!(context["start_sha"], "s");
+        let added = gitlab_position(&anchor(Side::New, at(LineKind::Added, 43, 42), None), &revisions(None));
+        assert!(added.get("old_line").is_none(), "{added}");
+        assert_eq!(added["new_line"], 42);
+        assert_eq!(added["start_sha"], added["base_sha"], "no start sha: the base stands in");
+        let removed = gitlab_position(&anchor(Side::Old, at(LineKind::Removed, 42, 42), None), &revisions(None));
+        assert_eq!(removed["old_line"], 42);
+        assert!(removed.get("new_line").is_none(), "{removed}");
+        assert!(removed.get("line_range").is_none());
+    }
+
+    #[test]
+    fn a_gitlab_range_carries_both_ends_with_their_codes_and_types() {
+        let range = gitlab_position(
+            &anchor(Side::New, at(LineKind::Added, 43, 42), Some(at(LineKind::Context, 41, 41))),
+            &revisions(None),
+        );
+        let start = &range["line_range"]["start"];
+        let end = &range["line_range"]["end"];
+        assert_eq!(start["line_code"], "ba9dbdbb9be33e57e33422db0cc822780b0701cc_41_41");
+        assert_eq!(start["type"], "old", "an unchanged line is typed old");
+        assert_eq!((start["old_line"].as_u64(), start["new_line"].as_u64()), (Some(41), Some(41)));
+        assert_eq!(end["line_code"], "ba9dbdbb9be33e57e33422db0cc822780b0701cc_43_42");
+        assert_eq!(end["type"], "new");
+        assert!(end.get("old_line").is_none(), "{end}");
+        assert_eq!(range["new_line"], 42, "the position itself names the range's last line");
+    }
+
+    #[test]
+    fn a_github_comment_names_its_side_s_number_and_a_range_its_start() {
+        let one = github_line_comment(&anchor(Side::Old, at(LineKind::Removed, 42, 42), None), "h1", "x");
+        assert_eq!(one, serde_json::json!({"body": "x", "commit_id": "h1", "path": "src/login.rs", "line": 42, "side": "LEFT"}));
+        let range = github_line_comment(
+            &anchor(Side::New, at(LineKind::Context, 43, 43), Some(at(LineKind::Context, 41, 41))),
+            "h1",
+            "y",
+        );
+        assert_eq!(range["line"], 43);
+        assert_eq!((range["start_line"].as_u64(), range["start_side"].as_str()), (Some(41), Some("RIGHT")));
     }
 }

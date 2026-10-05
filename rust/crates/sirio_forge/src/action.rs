@@ -5,7 +5,9 @@
 //! [`ForgeClient::act`]: crate::ForgeClient::act
 
 use crate::error::ForgeError;
-use crate::model::{Capabilities, ChangeState, CommentRef, Forge, MergeMethod, MergeVerdict};
+use crate::model::{
+    Capabilities, ChangeState, CommentRef, Forge, LineAnchor, MergeMethod, MergeVerdict, Revisions,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewVerdict {
@@ -46,6 +48,24 @@ pub enum Action {
     },
     EditComment {
         comment: CommentRef,
+        body: String,
+    },
+    /// An answer published in a review thread.
+    Reply {
+        thread: String,
+        body: String,
+    },
+    /// Resolves the thread, or reopens it when `resolved` is false.
+    Resolve {
+        thread: String,
+        resolved: bool,
+    },
+    /// A new thread on a line or a range, published at once. `revisions`
+    /// are what the diff was drawn from: the forge refuses a position
+    /// against any other head.
+    LineComment {
+        anchor: LineAnchor,
+        revisions: Revisions,
         body: String,
     },
     /// `expected_head` is the head the user saw; the forge refuses the merge
@@ -96,6 +116,10 @@ impl Action {
             Self::ConvertToDraft => "draft",
             Self::Edit { .. } => "edit",
             Self::EditComment { .. } => "edit-comment",
+            Self::Reply { .. } => "reply",
+            Self::Resolve { resolved: true, .. } => "resolve",
+            Self::Resolve { resolved: false, .. } => "unresolve",
+            Self::LineComment { .. } => "line-comment",
             Self::Merge {
                 when_checks_pass: true,
                 ..
@@ -139,6 +163,16 @@ pub(crate) struct ActionContext {
     /// GitHub mannequin or enterprise team): a write that replaces the set
     /// would drop them.
     pub unsendable_requests: Vec<String>,
+    pub thread: Option<ThreadFacts>,
+}
+
+/// What the viewer may do to one review thread, read afresh before a reply
+/// or a resolve (spec §6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ThreadFacts {
+    pub can_reply: bool,
+    pub can_resolve: bool,
+    pub can_unresolve: bool,
 }
 
 fn blank(text: &str) -> bool {
@@ -234,6 +268,52 @@ pub(crate) fn check_action(
         Action::EditComment { body, .. } => {
             if blank(body) {
                 return refuse("A comment needs some text.");
+            }
+        }
+        Action::Reply { body, .. } => {
+            if !context.thread.unwrap_or_default().can_reply {
+                return refuse("You cannot reply to this thread.");
+            }
+            if blank(body) {
+                return refuse("A reply needs some text.");
+            }
+        }
+        Action::Resolve { resolved: true, .. } => {
+            if !context.thread.unwrap_or_default().can_resolve {
+                return refuse("You cannot resolve this thread.");
+            }
+        }
+        Action::Resolve { resolved: false, .. } => {
+            if !context.thread.unwrap_or_default().can_unresolve {
+                return refuse("You cannot reopen this thread.");
+            }
+        }
+        Action::LineComment { anchor, revisions, body } => {
+            // First, as for a merge: a position names the head it was drawn on.
+            if let Some(head) = &context.head_sha
+                && head != &revisions.head_sha
+            {
+                return Err(ForgeError::HeadMoved {
+                    host: host.to_string(),
+                });
+            }
+            if !caps.can_comment {
+                return refuse("You cannot comment on this change request.");
+            }
+            if blank(body) {
+                return refuse("A comment needs some text.");
+            }
+            let Some(last) = anchor.line.on(anchor.side) else {
+                return refuse("That line is not on the side the comment names.");
+            };
+            if let Some(start) = anchor.start {
+                match start.on(anchor.side) {
+                    None => return refuse("A range stays on one side of the diff."),
+                    Some(first) if first >= last => {
+                        return refuse("A range starts above the line it ends on.");
+                    }
+                    Some(_) => {}
+                }
             }
         }
         Action::Merge {
@@ -344,7 +424,10 @@ pub fn live_probes(forge: Forge) -> Vec<LiveProbe> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BlockReason, CommentKind, MergeCapability, MergeMethod, MergeMethods, MergeVerdict};
+    use crate::model::{
+        AnchorLine, BlockReason, CommentKind, LineAnchor, LineKind, MergeCapability, MergeMethod,
+        MergeMethods, Revisions, Side, MergeVerdict,
+    };
 
     fn everything() -> Capabilities {
         Capabilities {
@@ -402,6 +485,7 @@ mod tests {
             team_ids: Vec::new(),
             bot_ids: Vec::new(),
             unsendable_requests: Vec::new(),
+            thread: None,
         }
     }
 
@@ -529,6 +613,10 @@ mod tests {
             Action::ConvertToDraft,
             Action::Edit { title: None, body: None, target_branch: None },
             Action::EditComment { comment: CommentRef { id: "1".into(), kind: CommentKind::Review }, body: "x".into() },
+            Action::Reply { thread: "t".into(), body: "x".into() },
+            Action::Resolve { thread: "t".into(), resolved: true },
+            Action::Resolve { thread: "t".into(), resolved: false },
+            line_comment(Side::New, line(LineKind::Context, 1, 1), None, "x"),
             merge(MergeMethod::Merge, false),
             merge(MergeMethod::Merge, true),
             Action::CancelAutoMerge,
@@ -651,5 +739,102 @@ mod tests {
         assert!(matches!(refused, ForgeError::Rejected { .. }), "{refused:?}");
         let add = Action::SetReviewers { add: vec!["u2".into()], remove: vec![] };
         assert!(check_action("h", &add, &mannequin).is_ok(), "adding leaves every request alone");
+    }
+
+    fn facts(can_reply: bool, can_resolve: bool, can_unresolve: bool) -> ActionContext {
+        ActionContext {
+            thread: Some(ThreadFacts { can_reply, can_resolve, can_unresolve }),
+            ..context(ChangeState::Open, everything())
+        }
+    }
+
+    fn line(kind: LineKind, old: u32, new: u32) -> AnchorLine {
+        AnchorLine { kind, old, new }
+    }
+
+    fn revisions(head: &str) -> Revisions {
+        Revisions { base_sha: "base".into(), head_sha: head.into(), start_sha: None }
+    }
+
+    fn line_comment(side: Side, end: AnchorLine, start: Option<AnchorLine>, body: &str) -> Action {
+        Action::LineComment {
+            anchor: LineAnchor { path: "src/login.rs".into(), side, line: end, start },
+            revisions: revisions("abc123"),
+            body: body.into(),
+        }
+    }
+
+    fn refusal(result: Result<(), ForgeError>) -> String {
+        match result {
+            Err(ForgeError::Rejected { message, .. }) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reply_needs_words_and_the_thread_s_permission() {
+        let reply = |body: &str| Action::Reply { thread: "PRRT_1".into(), body: body.into() };
+        assert_eq!(refusal(check_action("h", &reply("ok"), &facts(false, true, true))), "You cannot reply to this thread.");
+        assert_eq!(refusal(check_action("h", &reply(" \n"), &facts(true, false, false))), "A reply needs some text.");
+        assert_eq!(check_action("h", &reply("ok"), &facts(true, false, false)), Ok(()));
+        let unread = context(ChangeState::Open, everything());
+        assert!(check_action("h", &reply("ok"), &unread).is_err(), "no facts read means nothing is allowed");
+    }
+
+    #[test]
+    fn resolving_and_reopening_each_need_their_own_permission() {
+        let resolve = |resolved| Action::Resolve { thread: "PRRT_1".into(), resolved };
+        assert_eq!(refusal(check_action("h", &resolve(true), &facts(true, false, true))), "You cannot resolve this thread.");
+        assert_eq!(refusal(check_action("h", &resolve(false), &facts(true, true, false))), "You cannot reopen this thread.");
+        assert_eq!(check_action("h", &resolve(true), &facts(false, true, false)), Ok(()));
+        assert_eq!(check_action("h", &resolve(false), &facts(false, false, true)), Ok(()));
+    }
+
+    #[test]
+    fn a_line_comment_needs_words_and_the_comment_permission() {
+        let ctx = with_head(Some("abc123"), everything());
+        let at = line(LineKind::Context, 43, 43);
+        assert_eq!(refusal(check_action("h", &line_comment(Side::New, at, None, "  "), &ctx)), "A comment needs some text.");
+        let mut caps = everything();
+        caps.can_comment = false;
+        let mute = with_head(Some("abc123"), caps);
+        assert_eq!(refusal(check_action("h", &line_comment(Side::New, at, None, "x"), &mute)), "You cannot comment on this change request.");
+        assert_eq!(check_action("h", &line_comment(Side::New, at, None, "x"), &ctx), Ok(()));
+    }
+
+    #[test]
+    fn a_line_comment_on_a_moved_head_is_refused_before_anything_else() {
+        let moved = with_head(Some("def456"), Capabilities::default());
+        let comment = line_comment(Side::New, line(LineKind::Context, 1, 1), None, "");
+        assert!(matches!(check_action("h", &comment, &moved), Err(ForgeError::HeadMoved { .. })));
+        let unknown = with_head(None, everything());
+        let comment = line_comment(Side::New, line(LineKind::Context, 1, 1), None, "x");
+        assert_eq!(check_action("h", &comment, &unknown), Ok(()), "a forge that does not report the head leaves it to its own check");
+    }
+
+    #[test]
+    fn a_line_comment_stays_on_its_side_and_a_range_runs_downward() {
+        let ctx = with_head(Some("abc123"), everything());
+        let go = |action: Action| check_action("h", &action, &ctx);
+        let added = line(LineKind::Added, 42, 42);
+        let removed = line(LineKind::Removed, 42, 42);
+        assert_eq!(refusal(go(line_comment(Side::Old, added, None, "x"))), "That line is not on the side the comment names.");
+        assert_eq!(refusal(go(line_comment(Side::New, removed, None, "x"))), "That line is not on the side the comment names.");
+        assert_eq!(refusal(go(line_comment(Side::New, added, Some(removed), "x"))), "A range stays on one side of the diff.");
+        let later = line(LineKind::Context, 45, 45);
+        assert_eq!(refusal(go(line_comment(Side::New, added, Some(later), "x"))), "A range starts above the line it ends on.");
+        let earlier = line(LineKind::Context, 41, 41);
+        assert_eq!(go(line_comment(Side::New, added, Some(earlier), "x")), Ok(()));
+        assert_eq!(go(line_comment(Side::Old, removed, Some(earlier), "x")), Ok(()));
+    }
+
+    #[test]
+    fn editing_a_review_comment_needs_words_only() {
+        let edit = |text: &str| Action::EditComment {
+            comment: CommentRef { id: "PRRC_1".into(), kind: CommentKind::ReviewComment },
+            body: text.into(),
+        };
+        assert!(check_action("h", &edit(""), &context(ChangeState::Merged, Capabilities::default())).is_err());
+        assert_eq!(check_action("h", &edit("fixed"), &context(ChangeState::Merged, Capabilities::default())), Ok(()));
     }
 }

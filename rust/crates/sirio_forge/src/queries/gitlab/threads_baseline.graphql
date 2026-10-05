@@ -8,7 +8,7 @@ query MergeRequestThreads($fullPath: ID!, $iid: String!, $after: String) {
         nodes {
           id resolvable resolved resolvedBy { username }
           userPermissions { resolveNote }
-          notes(first: 100) { nodes { id system author { username } body createdAt position { positionType filePath newLine oldLine diffRefs { headSha } } } }
+          notes(first: 100) { nodes { id system author { username } body createdAt userPermissions { adminNote } position { positionType filePath newLine oldLine diffRefs { headSha } } } }
         }
       }
     }

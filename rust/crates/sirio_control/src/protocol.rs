@@ -598,14 +598,33 @@ pub mod request {
         request("surface.change_request.reveal", params)
     }
 
-    /// Reveals or folds a review thread on the active change request.
-    pub fn change_request_thread(reveal: Option<&str>, toggle: Option<&str>) -> ControlRequest {
+    /// Which thread gesture `surface.change_request.thread` drives. Exactly
+    /// one is set per request: revealing, folding and composing write
+    /// nothing to a forge, so every build serves them.
+    pub enum ThreadOp<'a> {
+        Reveal(&'a str),
+        Toggle(&'a str),
+        Compose(&'a str),
+        Cancel,
+    }
+
+    /// Reveals or folds a review thread on the active change request, or
+    /// opens (`Compose`) and closes (`Cancel`) the one line composer.
+    pub fn change_request_thread(op: ThreadOp<'_>) -> ControlRequest {
         let mut params = BTreeMap::new();
-        if let Some(id) = reveal {
-            params.insert("reveal".to_string(), id.to_string());
-        }
-        if let Some(id) = toggle {
-            params.insert("toggle".to_string(), id.to_string());
+        match op {
+            ThreadOp::Reveal(id) => {
+                params.insert("reveal".to_string(), id.to_string());
+            }
+            ThreadOp::Toggle(id) => {
+                params.insert("toggle".to_string(), id.to_string());
+            }
+            ThreadOp::Compose(spec) => {
+                params.insert("compose".to_string(), spec.to_string());
+            }
+            ThreadOp::Cancel => {
+                params.insert("cancel".to_string(), "yes".to_string());
+            }
         }
         request("surface.change_request.thread", params)
     }
@@ -629,8 +648,9 @@ pub mod request {
 
     /// Runs one write on the active change request's tab: the buttons' own
     /// handlers, by name (`close`, `reopen`, `ready`, `draft`, `compose`,
-    /// `send`, `edit`, `edit-comment`, `rerun-job`, `rerun-failed`), with their
-    /// text in `params`. A debug
+    /// `send`, `edit`, `edit-comment`, `reply`, `resolve`, `unresolve`,
+    /// `line-comment`, `edit-thread-comment`, `rerun-job`, `rerun-failed`),
+    /// with their text in `params`. A debug
     /// build of Sirio answers it; a release build answers "unknown method", so
     /// nothing that can write to a forge is reachable over the socket
     /// (spec §10).

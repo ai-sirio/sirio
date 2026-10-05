@@ -192,6 +192,8 @@ impl ChangeRequestTab {
         };
         let kind = action.kind();
         let number = self.reference.number;
+        self.write_target = None;
+        self.write_refusal = None;
         self.actions.state = ActionState::Working(kind);
         self.actions.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -210,6 +212,7 @@ impl ChangeRequestTab {
         cx: &mut Context<Self>,
     ) {
         self.actions.task = None;
+        self.write_refusal = None;
         match result {
             Ok(outcome) => {
                 let warned = outcome.warning.is_some();
@@ -225,17 +228,24 @@ impl ChangeRequestTab {
             }
             Err(error) => {
                 self.note_rate_limited(&error);
-                if matches!(error, ForgeError::HeadMoved { .. }) {
+                let head_moved = matches!(error, ForgeError::HeadMoved { .. });
+                if head_moved {
                     // What was being confirmed is not what is there now.
                     self.actions.merge.dialog = None;
-                    self.refresh(cx);
                 }
                 self.actions.state = ActionState::Failed {
                     kind,
                     message: action_error_text(&error, self.reference.forge, kind),
                 };
+                if head_moved {
+                    self.refresh(cx);
+                } else {
+                    self.reread_after_write(cx);
+                }
             }
         }
+        self.sync_writes(cx);
+        self.push_annotations(cx);
         cx.notify();
     }
 
@@ -251,8 +261,38 @@ impl ChangeRequestTab {
     /// the composer by mistake.
     fn action_succeeded(&mut self, kind: &'static str, warned: bool, cx: &mut Context<Self>) {
         match kind {
+            "line-comment" => {
+                self.line_composer = None;
+                if self
+                    .write_refusal
+                    .as_ref()
+                    .is_some_and(|(target, _)| target == &super::compose::WriteTarget::Composer)
+                {
+                    self.write_refusal = None;
+                }
+            }
             "edit" => self.actions.edit = None,
-            "edit-comment" => self.actions.comment_edit = None,
+            "reply" => {
+                if let Some(super::compose::WriteTarget::Reply(thread)) = self.write_target.clone() {
+                    if let Some(view) = self.thread_views.get(&super::threads::thread_key(&thread)).cloned() {
+                        view.update(cx, |view, cx| view.close_reply(cx));
+                    }
+                }
+            }
+            "edit-comment" => match self.write_target.clone() {
+                Some(super::compose::WriteTarget::EditComment(comment)) => {
+                    let view = self.thread_views.values().find(|view| {
+                        view.read(cx).thread.comments.iter().any(|item| {
+                            item.id == comment || item.edit.as_ref().is_some_and(|edit| edit.id == comment)
+                        })
+                    }).cloned();
+                    if let Some(view) = view {
+                        view.update(cx, |view, cx| view.close_edit(cx));
+                    }
+                }
+                _ => self.actions.comment_edit = None,
+            },
+            "resolve" | "unresolve" => {}
             "merge" | "auto-merge" => self.actions.merge.dialog = None,
             "comment" | "approve" | "request-changes" => {
                 let sent = self.actions.sent.take();
@@ -404,6 +444,31 @@ impl ChangeRequestTab {
         }
     }
 
+    /// Records a synchronous socket-write refusal for the report, so the E2E
+    /// reads it from `action_message`. The people.rs pattern, except a refusal
+    /// while another write is in flight leaves that write — its Working state,
+    /// task and target — alone: the reason already shows under the field that
+    /// sent it through `write_refusal`. With nothing in flight the refusal
+    /// belongs to no earlier write, so the last write's target is cleared:
+    /// otherwise the report would pair this `Failed` state with it and show
+    /// the reason under the wrong field.
+    pub(super) fn record_refusal(
+        &mut self,
+        kind: &'static str,
+        outcome: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Err(message) = outcome.as_ref() {
+            if !self.action_busy() {
+                self.actions.state = ActionState::Failed { kind, message: message.clone() };
+                self.write_target = None;
+                self.sync_writes(cx);
+                cx.notify();
+            }
+        }
+        outcome
+    }
+
     /// The control socket's test hook: the buttons' own handlers, by name.
     /// The host serves it in debug builds only, so a release binary has no
     /// way to write to a forge over the socket (spec §10).
@@ -476,6 +541,45 @@ impl ChangeRequestTab {
             }
             "merge-open" | "merge-confirm" | "merge-close" | "cancel-auto-merge" => {
                 self.control_merge(name, params, window, cx)
+            }
+            "reply" => {
+                let outcome = (|| {
+                    let thread = text("thread").ok_or("reply needs thread")?;
+                    let words = text("text").ok_or("reply needs text")?;
+                    self.open_reply(&thread, cx)?;
+                    self.reply_set_text(&thread, &words, cx)?;
+                    self.send_reply(&thread, cx)
+                })();
+                self.record_refusal("reply", outcome, cx)
+            }
+            "resolve" | "unresolve" => {
+                let kind = if name == "resolve" { "resolve" } else { "unresolve" };
+                let outcome = (|| {
+                    let thread = text("thread").ok_or("resolve needs thread")?;
+                    self.resolve_thread(&thread, name == "resolve", cx)
+                })();
+                self.record_refusal(kind, outcome, cx)
+            }
+            "line-comment" => {
+                let outcome = (|| {
+                    let words = text("text").ok_or("line-comment needs text")?;
+                    if self.line_composer.is_none() {
+                        return Err("No comment is being written; open one with thread --compose.".to_string());
+                    }
+                    self.composer_set_text(&words, cx);
+                    self.send_line_comment(cx)
+                })();
+                self.record_refusal("line-comment", outcome, cx)
+            }
+            "edit-thread-comment" => {
+                let outcome = (|| {
+                    let comment = text("comment").ok_or("edit-thread-comment needs comment")?;
+                    let words = text("text").ok_or("edit-thread-comment needs text")?;
+                    self.start_thread_comment_edit(&comment, cx)?;
+                    self.thread_comment_set_text(&words, cx)?;
+                    self.save_thread_comment_edit(cx)
+                })();
+                self.record_refusal("edit-comment", outcome, cx)
             }
             "picker-open" | "picker-type" | "picker-pick" | "picker-close" => {
                 self.control_picker(name, params, window, cx)

@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, ThreadFacts, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -81,6 +81,7 @@ const SET_REVIEWERS: &str = include_str!("queries/gitlab/set_reviewers.graphql")
 const REVIEWER_CANDIDATES: &str = include_str!("queries/gitlab/reviewer_candidates.graphql");
 const LABEL_CANDIDATES: &str = include_str!("queries/gitlab/label_candidates.graphql");
 const CREATE_NOTE: &str = include_str!("queries/gitlab/create_note.graphql");
+const TOGGLE_RESOLVE: &str = include_str!("queries/gitlab/toggle_resolve.graphql");
 const UPDATE_NOTE: &str = include_str!("queries/gitlab/update_note.graphql");
 const UPDATE: &str = include_str!("queries/gitlab/update.graphql");
 const SET_DRAFT: &str = include_str!("queries/gitlab/set_draft.graphql");
@@ -711,7 +712,7 @@ fn gitlab_thread(discussion: &Value, head: Option<&str>, can_note: bool) -> Opti
                     author: opt_str(note, "/author/username").unwrap_or("ghost").to_string(),
                     body: str_at(note, "/body"),
                     at: time_at(note, "/createdAt"),
-                    edit: None,
+                    edit: note_edit(note),
                     pending: false,
                 })
             })
@@ -752,6 +753,7 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
         bot_ids: Vec::new(),
         unsendable_requests: Vec::new(),
         capabilities: capabilities(client, node),
+        thread: None,
     })
 }
 
@@ -762,6 +764,24 @@ fn mutate(
     input: Value,
 ) -> Result<(), ForgeError> {
     execute_mutation(client, operation, document, json!({ "input": input })).map(|_| ())
+}
+
+/// One discussion's permissions, read afresh from the discussions list:
+/// GitLab's GraphQL has no discussion by id. A reply needs the merge
+/// request's `createNote`; resolving and reopening need `resolveNote` on a
+/// resolvable discussion.
+fn thread_facts(client: &ForgeClient, number: u64, id: &str) -> Result<ThreadFacts, ForgeError> {
+    let listing = review_threads(client, number)?;
+    let thread = listing
+        .items
+        .iter()
+        .find(|thread| thread.id == id)
+        .ok_or_else(|| ForgeError::NotFound { host: client.host.clone() })?;
+    Ok(ThreadFacts {
+        can_reply: thread.can_reply,
+        can_resolve: thread.can_resolve,
+        can_unresolve: thread.can_resolve,
+    })
 }
 
 fn create_note(client: &ForgeClient, noteable: &str, body: &str) -> Result<(), ForgeError> {
@@ -821,7 +841,10 @@ pub(crate) fn act(
     number: u64,
     action: &Action,
 ) -> Result<ActionOutcome, ForgeError> {
-    let context = action_context(client, number)?;
+    let mut context = action_context(client, number)?;
+    if let Action::Reply { thread, .. } | Action::Resolve { thread, .. } = action {
+        context.thread = Some(thread_facts(client, number, thread)?);
+    }
     check_action(&client.host, action, &context)?;
     let noteable = context.node_id.as_str();
     let iid = number.to_string();
@@ -952,6 +975,37 @@ pub(crate) fn act(
                 RerunTarget::Job(job) => ("JobRetry", JOB_RETRY, format!("gid://gitlab/Ci::Build/{job}")),
             };
             mutate(client, operation, document, json!({ "id": id }))?;
+        }
+        Action::Reply { thread, body } => mutate(
+            client,
+            "CreateNote",
+            CREATE_NOTE,
+            json!({ "noteableId": noteable, "discussionId": thread, "body": body }),
+        )?,
+        Action::Resolve { thread, resolved } => mutate(
+            client,
+            "DiscussionToggleResolve",
+            TOGGLE_RESOLVE,
+            json!({ "id": thread, "resolve": resolved }),
+        )?,
+        // GraphQL's `DiffPositionInput` has no line range (checked against
+        // gitlab.com on 2026-10-05): every line comment takes REST, one
+        // path for a line and a range.
+        Action::LineComment { anchor, revisions, body } => {
+            let position = mapping::gitlab_position(anchor, revisions);
+            execute_rest(
+                client,
+                &RestRequest {
+                    method: RestMethod::Post,
+                    log: false,
+                    path: format!(
+                        "projects/{}/merge_requests/{number}/discussions",
+                        percent_encode(&client.project, false)
+                    ),
+                    body: Some(json!({ "body": body, "position": position }).to_string().into_bytes()),
+                },
+            )
+            .map(|_| ())?
         }
         Action::EditComment { comment, body } => mutate(
             client,
@@ -1099,7 +1153,12 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
         write(
             "CreateNote",
             CREATE_NOTE,
-            json!({ "noteableId": "gid://gitlab/MergeRequest/0", "body": "x" }),
+            json!({ "noteableId": "gid://gitlab/MergeRequest/0", "discussionId": "gid://gitlab/Discussion/0", "body": "x" }),
+        ),
+        write(
+            "DiscussionToggleResolve",
+            TOGGLE_RESOLVE,
+            json!({ "id": "gid://gitlab/Discussion/0", "resolve": true }),
         ),
         write(
             "UpdateNote",
