@@ -35,7 +35,13 @@ pub fn verdict(handshake: Handshake, lock: LockState, process: ProcessObservatio
         (Handshake::Failed, LockState::Free, ProcessObservation::SameStart) => {
             Verdict::Unverifiable
         }
-        (Handshake::Failed, LockState::Free, _) => Verdict::Absent,
+        (
+            Handshake::Failed,
+            LockState::Free,
+            ProcessObservation::NoRecord
+            | ProcessObservation::Gone
+            | ProcessObservation::DifferentStart,
+        ) => Verdict::Absent,
     }
 }
 
