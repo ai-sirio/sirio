@@ -22247,14 +22247,17 @@ fn ensure_windows_console() {
 struct HostConnection(#[allow(dead_code)] Option<sirio_host_client::HostHandle>);
 impl gpui::Global for HostConnection {}
 
-/// Finds, starts or adopts the session host off the UI thread — `ensure_host`
-/// can wait up to ~15 s on a host that will not answer — and hands its
-/// diagnostic line to Settings. When there is no host the app runs exactly
-/// as it did without one: the row says why, and nothing else changes.
+/// Finds, starts or adopts the session host on a thread of its own —
+/// `ensure_host` blocks, up to ~15 s on a host that will not answer, and a
+/// background-executor worker held that long starves every other task queued
+/// behind it — and hands its diagnostic line to Settings. When there is no
+/// host the app runs exactly as it did without one: the row says why, and
+/// nothing else changes.
 fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
     let environment: BTreeMap<String, String> = std::env::vars().collect();
     let current_exe = std::env::current_exe().unwrap_or_default();
-    let task = cx.background_spawn(async move {
+    let (sender, outcome) = futures::channel::oneshot::channel();
+    let ensure = move || {
         let Some(paths) = sirio_host_protocol::paths::HostPaths::from_environment(&environment)
         else {
             return Err(sirio_host_client::EnsureError::NoDataRoot);
@@ -22281,9 +22284,22 @@ fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
         // (spec §5.6).
         handle.previous = None;
         Ok((handle, line))
-    });
+    };
+    let spawned = std::thread::Builder::new()
+        .name("sirio-host-ensure".into())
+        .spawn(move || {
+            // The receiver is gone only if the app is: nothing to tell.
+            let _ = sender.send(ensure());
+        });
     cx.spawn(async move |cx| {
-        let outcome = task.await;
+        let outcome = match spawned {
+            Ok(_) => outcome.await.unwrap_or_else(|_| {
+                Err(sirio_host_client::EnsureError::Io(std::io::Error::other(
+                    "the host check ended without an answer",
+                )))
+            }),
+            Err(error) => Err(sirio_host_client::EnsureError::Io(error)),
+        };
         cx.update(|cx| {
             let line = match outcome {
                 Ok((handle, line)) => {

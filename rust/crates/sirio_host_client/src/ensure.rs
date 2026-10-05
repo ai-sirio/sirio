@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sirio_host_protocol::liveness::Verdict;
-use sirio_host_protocol::messages::{HelloReply, HostInfo, Welcome, method};
+use sirio_host_protocol::messages::{HelloReply, HostInfo, HostMode, Welcome, method};
 use sirio_host_protocol::paths::HostPaths;
 use sirio_host_protocol::version::majors_spoken;
 
@@ -271,17 +271,49 @@ impl HostHandle {
             .call(method::INFO, serde_json::json!({}), None)
             .ok()
             .and_then(|v| serde_json::from_value::<HostInfo>(v).ok());
-        let mut line = match info {
-            Some(i) => format!(
-                "Live · v{} · pid {} · {:?} · protocol {}.{}",
-                i.version, i.pid, i.mode, i.protocol.major, i.protocol.minor
-            ),
-            None => format!("Live · v{}", self.primary.welcome.host_version),
-        };
-        if let Some(prev) = &self.previous {
-            line.push_str(&format!(" · draining v{} host", prev.major));
-        }
-        line
+        compose_status(
+            info.as_ref(),
+            &self.primary.welcome.host_version,
+            self.previous.as_ref().map(|prev| prev.major),
+            self.method,
+        )
+    }
+}
+
+/// The row itself. A start that could not leave the app's job is named:
+/// that host dies with the app, which is what the host exists to prevent.
+fn compose_status(
+    info: Option<&HostInfo>,
+    welcomed_version: &str,
+    previous_major: Option<u32>,
+    method: Option<DetachMethod>,
+) -> String {
+    let mut line = match info {
+        Some(i) => format!(
+            "Live · v{} · pid {} · {} · protocol {}.{}",
+            i.version,
+            i.pid,
+            mode_name(&i.mode),
+            i.protocol.major,
+            i.protocol.minor
+        ),
+        None => format!("Live · v{welcomed_version}"),
+    };
+    if let Some(major) = previous_major {
+        line.push_str(&format!(" · draining v{major} host"));
+    }
+    if method == Some(DetachMethod::WindowsNoBreakaway) {
+        line.push_str(" — will not survive the app (no job breakaway)");
+    }
+    line
+}
+
+/// The mode as `sirio-host --mode` and the spec spell it.
+fn mode_name(mode: &HostMode) -> &'static str {
+    match mode {
+        HostMode::OnDemand => "on-demand",
+        HostMode::Service => "service",
+        HostMode::Other => "unknown mode",
     }
 }
 
@@ -352,5 +384,48 @@ mod tests {
             Ok(_) => panic!("an over-long endpoint was accepted"),
         }
         assert!(!root.exists());
+    }
+
+    fn info(mode: sirio_host_protocol::messages::HostMode) -> HostInfo {
+        HostInfo {
+            version: "0.31.0".into(),
+            pid: 42,
+            mode,
+            sessions: 0,
+            clients: 1,
+            uptime_s: 3,
+            generation: "g".into(),
+            protocol: sirio_host_protocol::messages::ProtocolVersion { major: 1, minor: 0 },
+        }
+    }
+
+    #[test]
+    fn a_host_started_without_job_breakaway_is_said_not_to_survive_the_app() {
+        use sirio_host_protocol::messages::HostMode;
+        let degraded = compose_status(
+            Some(&info(HostMode::OnDemand)),
+            "0.31.0",
+            None,
+            Some(DetachMethod::WindowsNoBreakaway),
+        );
+        assert!(degraded.contains("will not survive the app"), "{degraded}");
+        for method in [
+            None,
+            Some(DetachMethod::WindowsBreakaway),
+            Some(DetachMethod::Setsid),
+            Some(DetachMethod::SystemdScope),
+            Some(DetachMethod::Launchd),
+        ] {
+            let line = compose_status(Some(&info(HostMode::OnDemand)), "0.31.0", None, method);
+            assert!(!line.contains("will not survive"), "{method:?}: {line}");
+        }
+    }
+
+    #[test]
+    fn the_mode_is_named_as_the_host_is_started_with_it() {
+        use sirio_host_protocol::messages::HostMode;
+        let line = compose_status(Some(&info(HostMode::OnDemand)), "0.31.0", None, None);
+        assert!(line.contains("on-demand"), "{line}");
+        assert!(!line.contains("OnDemand"), "{line}");
     }
 }
