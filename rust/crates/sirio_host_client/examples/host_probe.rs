@@ -9,6 +9,8 @@
 //!   host_probe subscribe <n>             print n host.state events
 //!   host_probe conformance <dir>         run every case in <dir>; print `case=<name> PASS|FAIL <why>`
 //!   host_probe raw-ndjson                write one NDJSON line to the endpoint; print what came back
+//!   host_probe alive <pid>               exit 0 while the process runs, 1 otherwise (the check the
+//!                                        client's verdict uses; needs no data root)
 //!
 //! `ensure` failing prints `error=<Debug of EnsureError>` (the variant name
 //! first) and exits 1.
@@ -29,6 +31,11 @@ use sirio_host_protocol::version::{effective_major, majors_spoken};
 use sirio_ipc::LocalStreamExt;
 
 fn main() {
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("alive") {
+        let pid: u32 = argv.next().and_then(|p| p.parse().ok()).expect("alive <pid>");
+        std::process::exit(if sirio_ipc::process::exists(pid) { 0 } else { 1 });
+    }
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let paths = HostPaths::from_environment(&env).expect("SIRIO_HOST_HOME");
     let major = effective_major(env.get("SIRIO_HOST_PROTOCOL_MAJOR").map(String::as_str));

@@ -5,6 +5,7 @@
 //!   detach_probe parent <dir>   detach a child, print `child-method=<m>`, then sleep forever
 //!   detach_probe child <dir>    write <dir>/heartbeat (a counter) every 200 ms for 120 s
 //!   detach_probe job <dir>      Windows only: run `parent` inside a kill-on-close job, then close the job
+//!   detach_probe alive <pid>    exit 0 while the process runs, 1 otherwise
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,13 @@ fn main() {
         .next()
         .and_then(|r| r.into_string().ok())
         .unwrap_or_default();
+    if role == "alive" {
+        let pid: u32 = args
+            .next()
+            .and_then(|p| p.into_string().ok()?.parse().ok())
+            .expect("alive <pid>");
+        std::process::exit(if sirio_ipc::process::exists(pid) { 0 } else { 1 });
+    }
     let dir = PathBuf::from(args.next().expect("dir"));
     std::fs::create_dir_all(&dir).expect("dir");
     match role.as_str() {

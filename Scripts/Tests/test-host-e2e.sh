@@ -148,7 +148,9 @@ skip() {
 # probe's answers). A zombie is not alive.
 alive() {
   if [ "$OS" = windows ]; then
-    tasklist //FI "PID eq $1" //NH 2>/dev/null | grep -qw "$1"
+    # Native, the same check the client's verdict uses: tasklist piped into
+    # grep read every live host as gone on the hosted runner.
+    "$PROBE" alive "$1"
     return
   fi
   kill -0 "$1" 2>/dev/null || return 1
@@ -184,7 +186,10 @@ kill_hard() {
 is_a_host() {
   local comm
   if [ "$OS" = windows ]; then
-    tasklist //FI "PID eq $1" //FI "IMAGENAME eq sirio-host.exe" //NH 2>/dev/null | grep -qi sirio-host
+    "$PROBE" alive "$1" || return 1
+    powershell.exe -NoProfile -NonInteractive -Command \
+      "exit [int]((Get-Process -Id $1 -ErrorAction SilentlyContinue).ProcessName -ne 'sirio-host')" \
+      >/dev/null 2>&1
     return
   fi
   if [ -r "/proc/$1/comm" ]; then comm="$(cat "/proc/$1/comm" 2>/dev/null)"

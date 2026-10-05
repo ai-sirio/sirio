@@ -20,7 +20,7 @@ FAILED=0
 
 pid_alive() { # pid -> 0 while the process exists and is not a zombie
   if [ "$OS" = windows ]; then
-    tasklist //FI "PID eq $1" //NH 2>/dev/null | grep -Eq "^[^ ]+[[:space:]]+$1[[:space:]]"
+    "$PROBE" alive "$1" # native; tasklist piped into grep misread live pids on the runner
   else
     kill -0 "$1" 2>/dev/null && [ "$(ps -o stat= -p "$1" 2>/dev/null | cut -c1)" != Z ]
   fi
