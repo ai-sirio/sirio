@@ -23,6 +23,7 @@ members = [
     "crates/sirio_persistence",
     "crates/sirio_agents",
     "crates/sirio_control",
+    "crates/sirio_ipc",
     "crates/sirio_activity",
     "crates/sirio_markdown",
     "crates/sirio_diagram",

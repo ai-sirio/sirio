@@ -117,33 +117,13 @@ pub fn format_version_json(cli_version: &str, app_version: Option<&str>) -> Stri
 }
 
 /// Returns the address users can act on for the control transport.
-pub fn display_endpoint(path: &std::path::Path) -> String {
-    #[cfg(windows)]
-    {
-        display_endpoint_from(path, windows_pipe::pipe_name_for_path(path))
-    }
-
-    #[cfg(not(windows))]
-    {
-        path.display().to_string()
-    }
-}
-
-#[cfg(windows)]
-fn display_endpoint_from(path: &std::path::Path, endpoint: Result<String, String>) -> String {
-    endpoint.unwrap_or_else(|_| path.display().to_string())
-}
+pub use sirio_ipc::display_endpoint;
 
 pub mod client;
 pub mod extract;
 pub mod panel;
 pub mod protocol;
 pub mod server;
-
-// The Windows named-pipe transport. Compiled only on Windows; on unix the
-// crate never sees it, keeping the unix build byte-identical.
-#[cfg(windows)]
-pub mod windows_pipe;
 
 pub use client::{ClientError, round_trip};
 pub use extract::{session_ref_from_json, session_ref_from_payload_arguments};
