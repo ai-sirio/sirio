@@ -56,6 +56,14 @@ fn child(dir: PathBuf) {
     }
 }
 
+/// A Win32 call that returned failure: the probe has no way to carry on, and
+/// a row built on a job that was never set up would prove nothing.
+#[cfg(windows)]
+fn win32_failed(call: &str) -> ! {
+    // `last_os_error` is `GetLastError()` on Windows.
+    panic!("{call} failed: {}", std::io::Error::last_os_error());
+}
+
 #[cfg(windows)]
 fn job(dir: PathBuf) {
     use std::os::windows::io::AsRawHandle;
@@ -63,24 +71,35 @@ fn job(dir: PathBuf) {
     use windows_sys::Win32::System::JobObjects::*;
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            win32_failed("CreateJobObjectW");
+        }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         info.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-        SetInformationJobObject(
+        if SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
             &info as *const _ as *const _,
             std::mem::size_of_val(&info) as u32,
-        );
+        ) == 0
+        {
+            win32_failed("SetInformationJobObject");
+        }
         let parent = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("parent")
             .arg(&dir)
             .env("SIRIO_PROBE_DELAY", "1")
             .spawn()
             .expect("parent");
-        AssignProcessToJobObject(job, parent.as_raw_handle() as _);
+        if AssignProcessToJobObject(job, parent.as_raw_handle() as _) == 0 {
+            win32_failed("AssignProcessToJobObject");
+        }
         std::thread::sleep(std::time::Duration::from_secs(3));
-        CloseHandle(job); // kill-on-close: the parent dies here
+        // kill-on-close: the parent dies here
+        if CloseHandle(job) == 0 {
+            win32_failed("CloseHandle");
+        }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
