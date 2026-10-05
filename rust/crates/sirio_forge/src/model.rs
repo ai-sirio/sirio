@@ -321,6 +321,9 @@ pub enum CommentKind {
     Review,
     /// A comment in a review thread (GitHub's pull request review comment).
     ReviewComment,
+    /// A comment of the viewer's unsubmitted review: a GitHub pending review
+    /// comment, or a GitLab draft note (its REST id).
+    Draft,
 }
 
 /// What an edit points at. A timeline entry carries one only where the
@@ -510,6 +513,14 @@ pub struct Capabilities {
     pub merge: MergeCapability,
 }
 
+/// The viewer's unsubmitted review (spec §3 "Draft"): GitHub's pending
+/// review, or GitLab's draft notes, which have no review id of their own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Draft {
+    pub id: Option<String>,
+    pub comments: u32,
+}
+
 /// The detail tab's header and Conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeHeader {
@@ -531,6 +542,8 @@ pub struct ChangeHeader {
     /// `None` where the forge did not report them, or reported them
     /// malformed: *Files* then stays on the forge's list (spec §7.1).
     pub revisions: Option<Revisions>,
+    /// The viewer's own review in progress, read with the header (B3c).
+    pub draft: Option<Draft>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

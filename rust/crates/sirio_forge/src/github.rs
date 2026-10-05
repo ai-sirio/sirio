@@ -341,6 +341,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         timeline_truncated: has_previous_page(node, "/timelineItems"),
         timeline,
         revisions: revisions(opt_str(node, "/baseRefOid"), opt_str(node, "/headRefOid"), None),
+        draft: None,
     })
 }
 
@@ -824,6 +825,7 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
             .collect(),
         capabilities: capabilities(node, repository),
         thread: None,
+        draft: None,
     })
 }
 
@@ -1087,13 +1089,16 @@ pub(crate) fn act(
                 UPDATE_REVIEW,
                 json!({ "pullRequestReviewId": comment.id, "body": body }),
             )?,
-            CommentKind::ReviewComment => mutate(
+            CommentKind::ReviewComment | CommentKind::Draft => mutate(
                 client,
                 "UpdatePullRequestReviewComment",
                 UPDATE_REVIEW_COMMENT,
                 json!({ "pullRequestReviewCommentId": comment.id, "body": body }),
             )?,
         },
+        Action::ReviewAdd { .. } | Action::ReviewSubmit { .. } | Action::ReviewDiscard | Action::DraftDelete { .. } => {
+            return Err(ForgeError::Unsupported { host: client.host.clone(), what: "reviews".to_string() });
+        }
     }
     Ok(ActionOutcome::default())
 }

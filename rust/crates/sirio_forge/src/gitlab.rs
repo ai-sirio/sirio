@@ -376,6 +376,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         commit_count: opt_u32(node, "/commitCount"),
         timeline: timeline(&array_at(node, "/notes/nodes")),
         timeline_truncated: has_previous_page(node, "/notes"),
+        draft: None,
         revisions: revisions(
             opt_str(node, "/diffRefs/baseSha"),
             opt_str(node, "/diffRefs/headSha"),
@@ -754,6 +755,7 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
         unsendable_requests: Vec::new(),
         capabilities: capabilities(client, node),
         thread: None,
+        draft: None,
     })
 }
 
@@ -1013,6 +1015,9 @@ pub(crate) fn act(
             UPDATE_NOTE,
             json!({ "id": comment.id, "body": body }),
         )?,
+        Action::ReviewAdd { .. } | Action::ReviewSubmit { .. } | Action::ReviewDiscard | Action::DraftDelete { .. } => {
+            return Err(ForgeError::Unsupported { host: client.host.clone(), what: "reviews".to_string() });
+        }
     }
     Ok(ActionOutcome::default())
 }

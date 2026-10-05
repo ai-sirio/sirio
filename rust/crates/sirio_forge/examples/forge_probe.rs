@@ -647,6 +647,7 @@ fn kind_name(kind: CommentKind) -> &'static str {
         CommentKind::Comment => "comment",
         CommentKind::Review => "review",
         CommentKind::ReviewComment => "review-comment",
+        CommentKind::Draft => "draft",
     }
 }
 
