@@ -3,8 +3,6 @@
 //! request line in, one response line out, with a receive timeout.
 
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
@@ -64,7 +62,7 @@ pub fn round_trip(
         });
     }
 
-    let mut stream = UnixStream::connect(socket_path).map_err(|error| ClientError::Connect {
+    let mut stream = sirio_ipc::connect(socket_path).map_err(|error| ClientError::Connect {
         detail: error.to_string(),
     })?;
     stream
@@ -117,51 +115,26 @@ pub fn round_trip(
 /// A raw client-side control stream: the exact surface a real client (and
 /// the integration tests, which hold idle connections open, half-write
 /// requests and so on) needs. Connect it with [`connect_raw`].
-#[cfg(unix)]
-pub type RawStream = std::os::unix::net::UnixStream;
-#[cfg(windows)]
-pub type RawStream = crate::windows_pipe::PipeStream;
+pub use sirio_ipc::LocalStream as RawStream;
 
 /// Connects a raw client stream to the control endpoint — the same call
-/// [`round_trip`] makes internally.
-#[cfg(unix)]
-pub fn connect_raw(socket_path: &Path) -> std::io::Result<RawStream> {
-    UnixStream::connect(socket_path)
-}
-
-/// The Windows twin keeps the unix signature by flattening the richer
-/// connect error. `open_client` distinguishes a refused foreign-owned pipe
-/// from ordinary connect noise, but this helper exists to mirror
-/// `UnixStream::connect` for callers and tests, and unix has no such
-/// distinction to mirror. A refusal is reported as `PermissionDenied` —
-/// which is what it is, a decision about who owns the endpoint rather than
-/// an I/O failure — and the message carries the owner so the reason is not
-/// lost on the way through.
-#[cfg(windows)]
-pub fn connect_raw(socket_path: &Path) -> std::io::Result<RawStream> {
-    use crate::windows_pipe::ClientConnectError;
-    crate::windows_pipe::open_client(socket_path).map_err(|error| match error {
-        ClientConnectError::Io(error) => error,
-        refused @ ClientConnectError::ForeignOwner { .. } => {
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, refused.to_string())
-        }
-    })
-}
+/// [`round_trip`] makes internally. On Windows a pipe owned by another user
+/// is refused as `PermissionDenied`, with the owner in the message.
+pub use sirio_ipc::connect as connect_raw;
 
 /// Named-pipe client transport. No path-length check here, unlike the unix
 /// twin above: `sun_path`'s 104-byte cap has no Windows counterpart — the
 /// derived pipe name is length-bounded by construction (see
-/// [`crate::windows_pipe::pipe_name_for_path`]).
+/// `sirio_ipc::windows_pipe::pipe_name_for_path`).
 #[cfg(windows)]
 pub fn round_trip(
     socket_path: &Path,
     request: &ControlRequest,
     timeout: Duration,
 ) -> Result<ControlResponse, ClientError> {
-    let mut stream =
-        crate::windows_pipe::open_client(socket_path).map_err(|error| ClientError::Connect {
-            detail: error.to_string(),
-        })?;
+    let mut stream = sirio_ipc::connect(socket_path).map_err(|error| ClientError::Connect {
+        detail: error.to_string(),
+    })?;
     stream
         .set_read_timeout(Some(timeout))
         .map_err(|error| ClientError::Io {

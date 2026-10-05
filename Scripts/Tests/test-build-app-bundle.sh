@@ -11,25 +11,29 @@ trap 'rm -rf "$FIXTURE"' EXIT
 # real keychain. The stub records its arguments so the assertions can check the
 # hardened runtime is requested — the flag notarization refuses submissions
 # without, and the one whose absence would only surface at the Apple round-trip.
+# One line per call, in order: nested code must be signed before the bundle.
 mkdir -p "$FIXTURE/bin"
 cat > "$FIXTURE/bin/codesign" <<'EOF'
 #!/bin/bash
-printf '%s\n' "$*" > "$CODESIGN_ARGS"
+printf '%s\n' "$*" >> "$CODESIGN_ARGS"
 exit 0
 EOF
 chmod +x "$FIXTURE/bin/codesign"
 
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/sirio"
 chmod +x "$FIXTURE/sirio"
+printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/sirio-host"
+chmod +x "$FIXTURE/sirio-host"
 
 CODESIGN_ARGS="$FIXTURE/codesign.args" \
 CODESIGN_IDENTITY="Developer ID Application: Test" \
 PATH="$FIXTURE/bin:$PATH" \
-  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Sirio.app" >/dev/null
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Sirio.app" "$FIXTURE/sirio-host" >/dev/null
 
 for path in \
   "$FIXTURE/Sirio.app/Contents/Info.plist" \
   "$FIXTURE/Sirio.app/Contents/MacOS/sirio" \
+  "$FIXTURE/Sirio.app/Contents/MacOS/sirio-host" \
   "$FIXTURE/Sirio.app/Contents/Resources/icon.icns"
 do
   if [ ! -f "$path" ]; then
@@ -38,10 +42,12 @@ do
   fi
 done
 
-if [ ! -x "$FIXTURE/Sirio.app/Contents/MacOS/sirio" ]; then
-  echo "FAIL: the bundled binary must be executable" >&2
-  exit 1
-fi
+for binary in sirio sirio-host; do
+  if [ ! -x "$FIXTURE/Sirio.app/Contents/MacOS/$binary" ]; then
+    echo "FAIL: the bundled $binary must be executable" >&2
+    exit 1
+  fi
+done
 
 PLIST="$FIXTURE/Sirio.app/Contents/Info.plist"
 
@@ -81,7 +87,7 @@ fi
 CODESIGN_ARGS="$FIXTURE/codesign-nightly.args" \
 CODESIGN_IDENTITY="Developer ID Application: Test" \
 PATH="$FIXTURE/bin:$PATH" \
-  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0-nightly.202609072133" "$FIXTURE/Nightly.app" >/dev/null
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0-nightly.202609072133" "$FIXTURE/Nightly.app" "$FIXTURE/sirio-host" >/dev/null
 NIGHTLY_PLIST="$FIXTURE/Nightly.app/Contents/Info.plist"
 if ! grep -A1 'CFBundleShortVersionString' "$NIGHTLY_PLIST" | grep -q '<string>0.6.0-nightly.202609072133</string>'; then
   echo "FAIL: CFBundleShortVersionString must carry the full nightly version" >&2
@@ -94,11 +100,39 @@ if ! grep -A1 '<key>CFBundleVersion</key>' "$NIGHTLY_PLIST" | grep -q '<string>0
   exit 1
 fi
 
-if ! grep -q -- "--options runtime" "$FIXTURE/codesign.args"; then
-  echo "FAIL: codesign must request the hardened runtime" >&2
+# Two calls: sirio-host first, then the bundle that seals it. Signing the
+# bundle signs only its main executable; a second, unsigned Mach-O in
+# Contents/MacOS makes notarization refuse the submission.
+if [ "$(wc -l < "$FIXTURE/codesign.args")" -ne 2 ]; then
+  echo "FAIL: expected two codesign calls (sirio-host, then the bundle)" >&2
   cat "$FIXTURE/codesign.args" >&2
   exit 1
 fi
+case "$(sed -n 1p "$FIXTURE/codesign.args")" in
+  *" $FIXTURE/Sirio.app/Contents/MacOS/sirio-host") ;;
+  *)
+    echo "FAIL: sirio-host must be signed first, before the bundle" >&2
+    cat "$FIXTURE/codesign.args" >&2
+    exit 1
+    ;;
+esac
+case "$(sed -n 2p "$FIXTURE/codesign.args")" in
+  *" $FIXTURE/Sirio.app") ;;
+  *)
+    echo "FAIL: the bundle must be signed last" >&2
+    cat "$FIXTURE/codesign.args" >&2
+    exit 1
+    ;;
+esac
+while IFS= read -r call; do
+  case "$call" in
+    *"--options runtime"*) ;;
+    *)
+      echo "FAIL: every codesign call must request the hardened runtime: $call" >&2
+      exit 1
+      ;;
+  esac
+done < "$FIXTURE/codesign.args"
 
 # A pane's tools run inside Sirio's TCC envelope, and macOS asks on Sirio's
 # behalf only if Sirio says why. Without a usage string an Apple Event, or a
@@ -117,7 +151,7 @@ done
 # row, and every agent script that drives another app, would be dead in the
 # signed build and alive in the ad-hoc dev build — a difference nothing on a
 # developer's machine shows.
-ENTITLEMENTS=$(sed -n 's/.*--entitlements \([^ ]*\).*/\1/p' "$FIXTURE/codesign.args")
+ENTITLEMENTS=$(sed -n '$s/.*--entitlements \([^ ]*\).*/\1/p' "$FIXTURE/codesign.args")
 if [ -z "$ENTITLEMENTS" ] || [ ! -f "$ENTITLEMENTS" ]; then
   echo "FAIL: codesign must be given an entitlements file" >&2
   cat "$FIXTURE/codesign.args" >&2
@@ -129,17 +163,27 @@ if ! grep -A1 '<key>com.apple.security.automation.apple-events</key>' "$ENTITLEM
   exit 1
 fi
 
-if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" >/dev/null 2>&1; then
+if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" "$FIXTURE/sirio-host" >/dev/null 2>&1; then
   echo "FAIL: a missing binary must exit non-zero" >&2
   exit 1
 fi
+
+ERR=$(CODESIGN_IDENTITY="Developer ID Application: Test" \
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Z.app" "$FIXTURE/missing-host" 2>&1 >/dev/null || true)
+case "$ERR" in
+  *"sirio-host binary not found"*) ;;
+  *)
+    echo "FAIL: a missing sirio-host binary must be rejected by name, got: $ERR" >&2
+    exit 1
+    ;;
+esac
 
 # Asserted by the error message rather than just a non-zero exit, because every
 # later guard in the script would also reject this invocation — the point is
 # that the *version* is what gets named. An empty version otherwise substitutes
 # into `<string></string>` in both version keys and yields a bundle that signs,
 # notarizes and launches with no version anywhere a user or Sparkle can read one.
-ERR=$("$BUNDLE_SCRIPT" "$FIXTURE/sirio" "" "$FIXTURE/Y.app" 2>&1 >/dev/null || true)
+ERR=$("$BUNDLE_SCRIPT" "$FIXTURE/sirio" "" "$FIXTURE/Y.app" "$FIXTURE/sirio-host" 2>&1 >/dev/null || true)
 case "$ERR" in
   *"version must not be empty"*) ;;
   *)

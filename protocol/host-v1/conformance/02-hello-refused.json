@@ -1,0 +1,10 @@
+{
+  "name": "hello-refused",
+  "major": 1,
+  "steps": [
+    {
+      "send": { "id": 1, "method": "host.hello", "params": { "client_version": "conformance", "majors": [7], "minor": 0 } },
+      "expect": { "id": 1, "result": { "type": "refused", "reason": "no_common_major", "host_major": 1 } }
+    }
+  ]
+}

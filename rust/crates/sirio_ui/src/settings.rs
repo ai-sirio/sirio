@@ -852,6 +852,10 @@ pub struct Settings {
     /// the button in place of the in-flight line. `None` until the host
     /// answers; cleared by the next click.
     hooks_install_report: Option<String>,
+    /// The host's diagnostic line (spec §7), set by
+    /// [`Settings::set_host_status`]. `None` until `ensure_host` answers,
+    /// which renders as "Starting…".
+    host_status: Option<String>,
     /// The resolved launch source per adapter id (Task 9). The Agents
     /// screen's pill, version and Install/Update buttons render from this —
     /// a resolved fact — instead of the compiled claim they replaced.
@@ -1072,6 +1076,7 @@ impl Settings {
             on_install_hooks: None,
             hooks_install_launched: false,
             hooks_install_report: None,
+            host_status: None,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
             transport_notes: BTreeMap::new(),
@@ -1410,6 +1415,14 @@ impl Settings {
     pub fn set_hooks_install_report(&mut self, report: Option<String>, cx: &mut Context<Self>) {
         self.hooks_install_report = report;
         self.hooks_install_launched = false;
+        cx.notify();
+    }
+
+    /// The host's diagnostic line (spec §7): version, pid, mode and verdict,
+    /// or why there is no host. Runtime state, not a setting — the app
+    /// fills it once `ensure_host` answers.
+    pub fn set_host_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
+        self.host_status = status;
         cx.notify();
     }
 
@@ -3588,6 +3601,33 @@ impl Settings {
                     .text_color(theme.ely.fg_muted)
                     .child(selectable_text(format!("{socket_kind}: {}", self.socket_path))),
             );
+        // The host's diagnostic line (spec §7) sits under its title, like the
+        // socket path above: a "not available" line carries the paths it
+        // looked in, and only the label column wraps — as a row's control it
+        // would squeeze the title to nothing and run past the card.
+        let host_label = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .text_size(theme.typography.headline)
+            .text_color(theme.ely.fg)
+            .child(selectable_text("Host").id("settings-host-title"))
+            .child(
+                div()
+                    .debug_selector(|| "settings-host-status".into())
+                    .mt(px(2.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(
+                        selectable_text(
+                            self.host_status
+                                .clone()
+                                .unwrap_or_else(|| "Starting…".into()),
+                        )
+                        .id("settings-host-status-text"),
+                    ),
+            );
         // The sirioctl card shows the bundled binary's name. "Copy install
         // command" is not offered: no install mechanism exists on this
         // platform (F-CTRL-CLI-02 is its own absent row), so there is no
@@ -3608,7 +3648,9 @@ impl Settings {
                     .text_color(theme.ely.fg_muted)
                     .child(selectable_text("sirioctl")),
                 theme,
-            ));
+            ))
+            .child(controls::separator(theme))
+            .child(controls::row_view(host_label, div(), theme));
         // F-SET-09: the provisioner (`agent_skill_install_command`) is
         // built and tested; this button's job is only to reach it and hand
         // the resulting command to whoever the host wires as

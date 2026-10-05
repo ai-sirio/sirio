@@ -1,0 +1,898 @@
+//! Starting a process that nothing the app belongs to can take down
+//! (spec §5.4). Each arm names what it protects against; the probe in
+//! `examples/detach_probe.rs` is what proves it.
+
+use std::ffi::OsString;
+use std::io;
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
+
+pub struct DetachedSpawn {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub cwd: PathBuf,
+    /// Unit / job label, unique per protocol major (`sirio-host-v1`).
+    pub label: String,
+    /// Where the macOS plist is written, `<data root>/launchd`; the launchd
+    /// job label carries a hash of it, so each data root has its own job.
+    /// Ignored elsewhere.
+    pub launchd_dir: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetachMethod {
+    SystemdScope,
+    Setsid,
+    Launchd,
+    WindowsBreakaway,
+    WindowsNoBreakaway,
+}
+
+/// Starts `spec.program` so that it outlives the caller, its process group,
+/// its systemd scope, its macOS coalition and its Windows job.
+///
+/// The child inherits the caller's full environment on every platform. On
+/// macOS that means the environment is written into the plist, because
+/// launchd starts a job with its own, not the caller's; the plist is private
+/// to the user and is deleted as soon as launchd has loaded it. A variable
+/// whose name or value a plist cannot carry (not UTF-8, or a character XML
+/// 1.0 forbids) is left out of the host's environment on macOS only.
+///
+/// `Ok` means the platform's mechanism accepted the process: on Linux
+/// `SystemdScope` additionally means `systemd-run` did not fail within
+/// 300 ms (it then falls back to `Setsid`), and a program that exits non-zero
+/// that fast reads the same as a scope that could not be created. It does
+/// **not** mean the program is serving. The caller must still treat "the
+/// endpoint never appeared" as the real start failure.
+///
+/// On macOS a job already running under the label is another client's host
+/// that won a start race (two clients may both have seen no host): it is
+/// neither booted out nor started again, and the call returns `Ok(Launchd)`
+/// as if it had started it. The caller's wait for the endpoint adopts that
+/// host, which is why that wait is the only success test.
+pub fn spawn_detached(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
+    imp::spawn(spec)
+}
+
+/// The exit status of a reaped direct child, delivered once.
+#[cfg(target_os = "linux")]
+type Exits = std::sync::mpsc::Receiver<io::Result<std::process::ExitStatus>>;
+
+/// Reaps the direct child on a thread so it never lingers as a zombie while
+/// the caller lives; the child itself is not affected. The returned channel
+/// carries its exit status, for a caller that wants to know about an early
+/// exit; one that does not simply drops it.
+#[cfg(target_os = "linux")]
+fn reap_in_background(mut child: std::process::Child) -> Exits {
+    let (sender, exits) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(child.wait());
+    });
+    exits
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// How long `systemd-run` gets to fail before it is taken to have exec'd
+    /// into the program. With `--scope` it registers itself in the new scope
+    /// and then replaces itself with the program, so a healthy one never
+    /// exits on its own account while the program runs.
+    const SYSTEMD_RUN_GRACE: Duration = Duration::from_millis(300);
+
+    pub fn spawn(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
+        if systemd_user_available() {
+            let mut command = Command::new("systemd-run");
+            command
+                .args(["--user", "--scope", "--quiet", "--collect"])
+                .arg(format!("--unit={}", unit_name(&spec.label)))
+                .arg("--")
+                .arg(&spec.program)
+                .args(&spec.args);
+            // Spawning `systemd-run` proves only that it was exec'd. A scope
+            // that cannot be created (no bus, a clash on the unit name) makes
+            // it exit non-zero straight away, and then nothing is running.
+            if let Ok(exits) = spawn_setsid(command, spec)
+                && !exited_unsuccessfully(&exits)
+            {
+                return Ok(DetachMethod::SystemdScope);
+            }
+        }
+        let mut command = Command::new(&spec.program);
+        command.args(&spec.args);
+        spawn_setsid(command, spec)?;
+        Ok(DetachMethod::Setsid)
+    }
+
+    /// Unique per call, not just per process: a process that starts a second
+    /// host while the first scope lives must not collide with it.
+    fn unit_name(label: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        format!("{label}-{}-{count}-{nanos:x}", std::process::id())
+    }
+
+    fn exited_unsuccessfully(exits: &Exits) -> bool {
+        matches!(exits.recv_timeout(SYSTEMD_RUN_GRACE), Ok(Ok(status)) if !status.success())
+    }
+
+    fn spawn_setsid(mut command: Command, spec: &DetachedSpawn) -> io::Result<Exits> {
+        command
+            .current_dir(&spec.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: setsid is async-signal-safe and touches no Rust state.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(reap_in_background(command.spawn()?))
+    }
+
+    fn systemd_user_available() -> bool {
+        let Ok(output) = Command::new("systemctl")
+            .args(["--user", "is-system-running"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return false;
+        };
+        // The manager's state is on stdout. `degraded` exits non-zero but the
+        // manager answers; a failed connection ("Failed to connect to bus",
+        // "System has not been booted with systemd") exits non-zero too but
+        // prints nothing on stdout, and `offline` / `unknown` mean none --
+        // judging by the exit code alone would pick `systemd-run` where it
+        // cannot work, and a spawn that never started would read as success.
+        matches!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "running" | "degraded" | "starting" | "initializing"
+        ) && std::env::var_os("XDG_RUNTIME_DIR").is_some()
+    }
+}
+
+/// What goes into a launchd plist, kept apart from the macOS arm so that its
+/// failure modes run on every platform's test suite.
+#[cfg(any(test, target_os = "macos"))]
+mod plist {
+    use super::DetachedSpawn;
+    use std::ffi::{OsStr, OsString};
+    use std::io;
+
+    /// Whether XML 1.0 allows the character at all. A plist is XML, and a
+    /// parser refuses the whole document at the first one it does not.
+    fn is_xml_char(c: char) -> bool {
+        matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && c != '\u{fffe}' && c != '\u{ffff}')
+    }
+
+    /// `text` as the content of a plist `<string>` / `<key>`, or `None` when
+    /// it is not valid UTF-8 or holds a character XML cannot carry. Nothing is
+    /// replaced or dropped silently: a caller either gets the exact text or
+    /// is told it cannot be had.
+    fn xml_text(text: &OsStr) -> Option<String> {
+        let text = text.to_str()?;
+        if !text.chars().all(is_xml_char) {
+            return None;
+        }
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '&' => escaped.push_str("&amp;"),
+                '<' => escaped.push_str("&lt;"),
+                '>' => escaped.push_str("&gt;"),
+                '"' => escaped.push_str("&quot;"),
+                '\'' => escaped.push_str("&apos;"),
+                other => escaped.push(other),
+            }
+        }
+        Some(escaped)
+    }
+
+    fn required(text: &OsStr, what: &str) -> io::Result<String> {
+        xml_text(text).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the {what} cannot be written into a launchd plist"),
+            )
+        })
+    }
+
+    /// The `<key>`/`<string>` pairs of an environment. A variable whose name
+    /// or value the plist cannot carry is left out; its content is never
+    /// reported anywhere.
+    pub(super) fn environment_entries(
+        vars: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> String {
+        vars.into_iter()
+            .filter_map(|(name, value)| {
+                Some(format!(
+                    "<key>{}</key><string>{}</string>",
+                    xml_text(&name)?,
+                    xml_text(&value)?
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) fn plist_xml(
+        label: &str,
+        spec: &DetachedSpawn,
+        environment: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> io::Result<String> {
+        let mut arguments = format!(
+            "<string>{}</string>",
+            required(spec.program.as_os_str(), "program path")?
+        );
+        for arg in &spec.args {
+            arguments.push_str(&format!("<string>{}</string>", required(arg, "argument")?));
+        }
+        let cwd = required(spec.cwd.as_os_str(), "working directory")?;
+        let label = required(OsStr::new(label), "label")?;
+        let environment = environment_entries(environment);
+        Ok(format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{label}</string>
+<key>ProgramArguments</key><array>{arguments}</array>
+<key>WorkingDirectory</key><string>{cwd}</string>
+<key>EnvironmentVariables</key><dict>{environment}</dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><false/>
+<key>AbandonProcessGroup</key><true/>
+<key>ProcessType</key><string>Interactive</string>
+</dict></plist>
+"#
+        ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::ffi::OsString;
+
+        fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+                .collect()
+        }
+
+        fn spec(program: &str) -> crate::detach::DetachedSpawn {
+            crate::detach::DetachedSpawn {
+                program: program.into(),
+                args: vec!["--serve".into()],
+                cwd: "/work".into(),
+                label: "sirio-host-v1".into(),
+                launchd_dir: "/launchd".into(),
+            }
+        }
+
+        #[test]
+        fn an_ordinary_environment_reaches_the_plist_unchanged() {
+            let xml = environment_entries(env(&[
+                ("PATH", "/usr/bin:/bin"),
+                ("GREETING", "caff\u{e8}\tdue\nrighe"),
+            ]));
+            assert!(xml.contains("<key>PATH</key><string>/usr/bin:/bin</string>"));
+            assert!(xml.contains("<key>GREETING</key><string>caff\u{e8}\tdue\nrighe</string>"));
+        }
+
+        #[test]
+        fn markup_characters_in_a_value_are_escaped() {
+            let xml = environment_entries(env(&[("V", "a&b<c>\"d\"'e'")]));
+            assert!(xml.contains("<string>a&amp;b&lt;c&gt;&quot;d&quot;&apos;e&apos;</string>"));
+            assert!(!xml.contains("<c>"));
+        }
+
+        #[test]
+        fn a_value_with_an_escape_character_drops_that_variable_only() {
+            let xml = environment_entries(env(&[("SECRET", "tok\u{1b}en-9f3a"), ("KEEP", "yes")]));
+            assert!(xml.contains("<key>KEEP</key><string>yes</string>"));
+            assert!(!xml.contains("SECRET"));
+            assert!(
+                !xml.contains("9f3a"),
+                "a skipped value must not appear anywhere"
+            );
+            assert!(!xml.contains('\u{1b}'));
+        }
+
+        #[test]
+        fn a_name_with_a_control_character_drops_that_variable() {
+            let xml = environment_entries(env(&[("BAD\u{1}NAME", "x"), ("KEEP", "yes")]));
+            assert!(!xml.contains("BAD"));
+            assert!(xml.contains("<key>KEEP</key>"));
+        }
+
+        #[test]
+        fn xml_noncharacters_drop_the_variable() {
+            let xml = environment_entries(env(&[
+                ("A", "x\u{fffe}y"),
+                ("B", "x\u{ffff}y"),
+                ("KEEP", "yes"),
+            ]));
+            assert!(!xml.contains("<key>A</key>") && !xml.contains("<key>B</key>"));
+            assert!(xml.contains("<key>KEEP</key>"));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn names_and_values_that_are_not_utf8_drop_the_variable() {
+            use std::os::unix::ffi::OsStringExt;
+            let xml = environment_entries(vec![
+                (OsString::from_vec(b"BAD\xff".to_vec()), OsString::from("x")),
+                (OsString::from("VAL"), OsString::from_vec(b"v\xfe".to_vec())),
+                (OsString::from("KEEP"), OsString::from("yes")),
+            ]);
+            assert!(!xml.contains("BAD") && !xml.contains("VAL"));
+            assert!(xml.contains("<key>KEEP</key>"));
+        }
+
+        #[test]
+        fn a_program_that_cannot_be_written_is_refused_rather_than_mangled() {
+            let error = plist_xml("app.example.host.v1", &spec("/bin/ho\u{1b}st"), env(&[]))
+                .expect_err("a broken plist must not be produced");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+
+        #[test]
+        fn the_plist_names_the_job_the_program_and_the_environment() {
+            let xml = plist_xml(
+                "app.example.host.v1",
+                &spec("/bin/host"),
+                env(&[("K", "v")]),
+            )
+            .expect("plist");
+            assert!(xml.contains("<key>Label</key><string>app.example.host.v1</string>"));
+            assert!(xml.contains("<string>/bin/host</string><string>--serve</string>"));
+            assert!(xml.contains("<key>WorkingDirectory</key><string>/work</string>"));
+            assert!(xml.contains(
+                "<key>EnvironmentVariables</key><dict><key>K</key><string>v</string></dict>"
+            ));
+        }
+    }
+}
+
+/// The launchd job label of a host: one per protocol major **and data root**
+/// (spec §4.2), since launchd labels are per user and a second root's host
+/// must neither be taken for this one's nor collide with it.
+#[cfg(any(test, target_os = "macos"))]
+mod launchd_label {
+    use std::path::Path;
+
+    /// `app.sirioai.sirio.host.<major>.<hash>`: `spawn_label` without its
+    /// `sirio-host-` prefix (`v1`, or the probe's `probe`), then a hash of
+    /// `launchd_dir`, which is `<data root>/launchd` and so names the root.
+    /// ASCII and free of `/` whatever the root's path holds.
+    pub fn label(spawn_label: &str, launchd_dir: &Path) -> String {
+        format!(
+            "app.sirioai.sirio.host.{}.{:016x}",
+            spawn_label.trim_start_matches("sirio-host-"),
+            fnv1a_64(launchd_dir.as_os_str().as_encoded_bytes())
+        )
+    }
+
+    /// FNV-1a, 64 bits, as `sirio_ipc` derives its Windows pipe names: stable
+    /// across Rust releases, unlike `DefaultHasher`, so a newer app finds the
+    /// job an older one loaded.
+    fn fnv1a_64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::Path;
+
+        #[test]
+        fn two_data_roots_get_two_labels() {
+            let a = label(
+                "sirio-host-v1",
+                Path::new("/Users/u/Library/Sirio/host/launchd"),
+            );
+            let b = label("sirio-host-v1", Path::new("/Users/u/e2e/c1/launchd"));
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn one_data_root_always_gets_the_same_label() {
+            let dir = Path::new("/Users/u/Library/Sirio/host/launchd");
+            assert_eq!(label("sirio-host-v1", dir), label("sirio-host-v1", dir));
+        }
+
+        #[test]
+        fn the_major_and_the_probe_stay_distinct_within_one_root() {
+            let dir = Path::new("/Users/u/Library/Sirio/host/launchd");
+            let v1 = label("sirio-host-v1", dir);
+            let v2 = label("sirio-host-v2", dir);
+            let probe = label("sirio-host-probe", dir);
+            assert_ne!(v1, v2);
+            assert_ne!(v1, probe);
+            assert!(v1.starts_with("app.sirioai.sirio.host.v1."), "{v1}");
+        }
+
+        #[test]
+        fn a_root_with_any_characters_gives_a_plain_ascii_label() {
+            let label = label("sirio-host-v1", Path::new("/Users/ü s/da/ta:root/launchd"));
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+                "{label}"
+            );
+        }
+    }
+}
+
+/// What to do about a launchd job already under this label, decided from
+/// `launchctl print`, kept apart from the macOS arm so that it runs on every
+/// platform's test suite.
+#[cfg(any(test, target_os = "macos"))]
+mod launchd_plan {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Plan {
+        /// Nothing is loaded under the label.
+        Bootstrap,
+        /// A job is loaded but is not running: a leftover to remove first.
+        BootoutThenBootstrap,
+        /// The job is running: another client's host. Neither remove nor
+        /// start anything; the caller waits for its endpoint.
+        AlreadyRunning,
+    }
+
+    /// `print_succeeded` is whether `launchctl print` exited 0 (the job is
+    /// loaded), `stdout` what it printed. launchd prints a `pid = <n>` line
+    /// only while the job runs, so only a positive pid counts as running; a
+    /// misread toward "running" costs a start timeout, a misread toward "not
+    /// running" would boot out a live host.
+    pub fn decide(print_succeeded: bool, stdout: &str) -> Plan {
+        if !print_succeeded {
+            return Plan::Bootstrap;
+        }
+        if stdout.lines().any(prints_a_running_pid) {
+            Plan::AlreadyRunning
+        } else {
+            Plan::BootoutThenBootstrap
+        }
+    }
+
+    /// A line that is exactly the `pid` key (not `ppid`, not `parent pid`)
+    /// followed by a positive number, with whatever text may trail it ignored.
+    fn prints_a_running_pid(line: &str) -> bool {
+        let Some(value) = line.trim_start().strip_prefix("pid = ") else {
+            return false;
+        };
+        let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u64>().is_ok_and(|pid| pid > 0)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const RUNNING: &str = "gui/501/app.sirioai.sirio.host.v1 = {\n\tactive count = 1\n\tpath = /Users/u/launchd/app.sirioai.sirio.host.v1.plist\n\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = /Users/u/bin/sirio-host\n\tpid = 4242\n\timmediate reason = inefficient\n}\n";
+        const LOADED_IDLE: &str = "gui/501/app.sirioai.sirio.host.v1 = {\n\tactive count = 0\n\ttype = LaunchAgent\n\tstate = not running\n\n\tprogram = /Users/u/bin/sirio-host\n\tlast exit code = 0\n}\n";
+
+        #[test]
+        fn a_job_that_is_not_loaded_is_bootstrapped_without_a_bootout() {
+            assert_eq!(decide(false, ""), Plan::Bootstrap);
+            // Whatever a failed print wrote is not a description of a job.
+            assert_eq!(decide(false, RUNNING), Plan::Bootstrap);
+        }
+
+        #[test]
+        fn a_running_job_is_another_clients_host_and_is_left_alone() {
+            assert_eq!(decide(true, RUNNING), Plan::AlreadyRunning);
+            assert_eq!(decide(true, "\tpid = 7 (spawned)\n"), Plan::AlreadyRunning);
+        }
+
+        #[test]
+        fn a_loaded_job_with_no_pid_is_a_leftover_to_remove() {
+            assert_eq!(decide(true, LOADED_IDLE), Plan::BootoutThenBootstrap);
+            assert_eq!(decide(true, ""), Plan::BootoutThenBootstrap);
+        }
+
+        #[test]
+        fn only_a_positive_pid_counts_as_running() {
+            assert_eq!(decide(true, "\tpid = 0\n"), Plan::BootoutThenBootstrap);
+            assert_eq!(decide(true, "\tpid = \n"), Plan::BootoutThenBootstrap);
+            assert_eq!(decide(true, "\tpid = abc\n"), Plan::BootoutThenBootstrap);
+        }
+
+        #[test]
+        fn another_key_that_ends_in_pid_is_not_the_pid_line() {
+            assert_eq!(
+                decide(true, "\tparent pid = 99\n\tppid = 98\n"),
+                Plan::BootoutThenBootstrap
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::launchd_plan::{self, Plan};
+    use super::plist::plist_xml;
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    use std::path::Path;
+
+    pub fn spawn(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let label = super::launchd_label::label(&spec.label, &spec.launchd_dir);
+        let xml = plist_xml(&label, spec, std::env::vars_os())?;
+        let domain = format!("gui/{uid}");
+        let target = format!("{domain}/{label}");
+        // Two clients that both saw `Absent` both arrive here, so a job under
+        // this label may be the host the other one has just started: it is
+        // never booted out while it runs. (`print` to `bootout` is not
+        // atomic: a client that bootstraps in that gap still has its host
+        // booted out by this one, which then starts its own; the endpoint
+        // wait of whichever client survives adopts the host that is left.)
+        let plan = current_plan(&target);
+        if plan == Plan::AlreadyRunning {
+            return Ok(DetachMethod::Launchd);
+        }
+        private_dir(&spec.launchd_dir)?;
+        let plist = spec.launchd_dir.join(format!("{label}.plist"));
+        write_private(&plist, &xml)?;
+        if plan == Plan::BootoutThenBootstrap {
+            // Loaded but not running: a leftover of a host that is gone.
+            let _ = Command::new("launchctl")
+                .args(["bootout", &target])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let bootstrap = Command::new("launchctl")
+            .args(["bootstrap", &domain])
+            .arg(&plist)
+            .status();
+        // launchd has read the plist by the time `bootstrap` returns, and it
+        // carries the caller's whole environment (tokens included): it must
+        // not outlive the call, success or not.
+        let _ = std::fs::remove_file(&plist);
+        let status = bootstrap?;
+        if !status.success() {
+            // A bootstrap that fails because another client's just won is a
+            // lost race, not an error: a job is loaded under the label now,
+            // running or about to, and the caller's endpoint wait — the one
+            // real success test — adopts its host or times out. Only a
+            // failure that left nothing loaded is this call's own.
+            if current_plan(&target) != Plan::Bootstrap {
+                return Ok(DetachMethod::Launchd);
+            }
+            return Err(io::Error::other(format!(
+                "launchctl bootstrap exited {status}"
+            )));
+        }
+        Ok(DetachMethod::Launchd)
+    }
+
+    /// What `launchctl print <target>` says about the job under the label. A
+    /// `launchctl` that cannot be run reads as not loaded; the bootstrap that
+    /// follows then fails with its own error.
+    fn current_plan(target: &str) -> Plan {
+        let (loaded, report) = Command::new("launchctl")
+            .args(["print", target])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|out| {
+                (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                )
+            })
+            .unwrap_or((false, String::new()));
+        launchd_plan::decide(loaded, &report)
+    }
+
+    fn private_dir(dir: &Path) -> io::Result<()> {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        // A directory that already existed keeps the mode it had.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+
+    fn write_private(path: &Path, text: &str) -> io::Result<()> {
+        let written = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            // `mode` applies only to a file this call creates.
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            file.write_all(text.as_bytes())
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        written
+    }
+}
+
+/// A Windows command line, built by hand because the Windows arm calls
+/// `CreateProcessW` itself. Every argument must come back out of
+/// `CommandLineToArgvW` (the MSVC runtime's rules) exactly as it went in.
+#[cfg(any(test, windows))]
+mod command_line {
+    /// Appends `arg` as one argument, quoted only when it has to be.
+    pub fn append(out: &mut Vec<u16>, arg: &[u16]) {
+        const QUOTE: u16 = b'"' as u16;
+        const BACKSLASH: u16 = b'\\' as u16;
+        let needs_quotes = arg.is_empty()
+            || arg
+                .iter()
+                .any(|&c| c == b' ' as u16 || c == b'\t' as u16 || c == QUOTE);
+        if !needs_quotes {
+            out.extend_from_slice(arg);
+            return;
+        }
+        out.push(QUOTE);
+        // Backslashes are literal unless a quote follows them, so a run of
+        // them is only doubled before an embedded quote or the closing one.
+        let mut backslashes = 0;
+        for &c in arg {
+            if c == BACKSLASH {
+                backslashes += 1;
+                continue;
+            }
+            let run = if c == QUOTE { 2 * backslashes + 1 } else { backslashes };
+            out.extend(std::iter::repeat_n(BACKSLASH, run));
+            out.push(c);
+            backslashes = 0;
+        }
+        out.extend(std::iter::repeat_n(BACKSLASH, 2 * backslashes));
+        out.push(QUOTE);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::append;
+
+        fn line(args: &[&str]) -> String {
+            let mut out = Vec::new();
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push(u16::from(b' '));
+                }
+                append(&mut out, &arg.encode_utf16().collect::<Vec<_>>());
+            }
+            String::from_utf16(&out).unwrap()
+        }
+
+        #[test]
+        fn a_plain_argument_is_left_as_it_is() {
+            assert_eq!(line(&["--mode", "on-demand"]), "--mode on-demand");
+        }
+
+        #[test]
+        fn backslashes_outside_quotes_are_literal() {
+            assert_eq!(line(&[r"C:\Users\a\host"]), r"C:\Users\a\host");
+        }
+
+        #[test]
+        fn an_empty_argument_survives_as_a_pair_of_quotes() {
+            assert_eq!(line(&["", "x"]), r#""" x"#);
+        }
+
+        #[test]
+        fn a_space_or_a_tab_quotes_the_argument() {
+            assert_eq!(line(&[r"C:\Program Files\Sirio"]), r#""C:\Program Files\Sirio""#);
+            assert_eq!(line(&["a\tb"]), "\"a\tb\"");
+        }
+
+        #[test]
+        fn an_embedded_quote_is_escaped_with_its_backslashes_doubled() {
+            assert_eq!(line(&[r#"say "hi""#]), r#""say \"hi\"""#);
+            assert_eq!(line(&[r#"a\"b"#]), r#""a\\\"b""#);
+        }
+
+        #[test]
+        fn trailing_backslashes_are_doubled_before_the_closing_quote() {
+            // Undoubled, `C:\dir with space\` would escape the closing quote.
+            assert_eq!(line(&[r"C:\dir with space\"]), r#""C:\dir with space\\""#);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+    use std::{mem, ptr};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+    };
+
+    pub fn spawn(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
+        let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+        match start(spec, base | CREATE_BREAKAWAY_FROM_JOB) {
+            Ok(()) => Ok(DetachMethod::WindowsBreakaway),
+            // A job without JOB_OBJECT_LIMIT_BREAKAWAY_OK refuses breakaway
+            // with ERROR_ACCESS_DENIED; the host is then inside the job and
+            // the probe records that this row does not hold there.
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                start(spec, base)?;
+                Ok(DetachMethod::WindowsNoBreakaway)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `CreateProcessW` by hand, not `Command`: `Command` inherits every
+    /// inheritable handle of the caller, the caller's own stdout and stderr
+    /// among them when it was started with pipes, and a host holding the
+    /// launcher's pipe keeps whoever reads it waiting for the host's whole
+    /// life. `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` narrows what is inherited to
+    /// one handle on `NUL`, the host's stdin, stdout and stderr. The
+    /// environment is the caller's, as with `Command`.
+    fn start(spec: &DetachedSpawn, flags: u32) -> io::Result<()> {
+        let nul = Owned(open_nul()?);
+        let inherited = [nul.0];
+        let mut list = AttributeList::with_handles(&inherited)?;
+
+        let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
+        startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = nul.0;
+        startup.StartupInfo.hStdOutput = nul.0;
+        startup.StartupInfo.hStdError = nul.0;
+        startup.lpAttributeList = list.as_ptr();
+
+        let program = wide(spec.program.as_os_str());
+        let mut line = Vec::new();
+        command_line::append(&mut line, &program[..program.len() - 1]);
+        for arg in &spec.args {
+            line.push(u16::from(b' '));
+            command_line::append(&mut line, &arg.encode_wide().collect::<Vec<_>>());
+        }
+        line.push(0);
+        let cwd = wide(spec.cwd.as_os_str());
+
+        let mut info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+        let created = unsafe {
+            CreateProcessW(
+                program.as_ptr(),
+                line.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                1, // inherit, but only what the attribute list names
+                flags | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                ptr::null(),
+                cwd.as_ptr(),
+                &startup.StartupInfo,
+                &mut info,
+            )
+        };
+        if created == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe {
+            CloseHandle(info.hThread);
+            CloseHandle(info.hProcess);
+        }
+        Ok(())
+    }
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn open_nul() -> io::Result<HANDLE> {
+        let inheritable = SECURITY_ATTRIBUTES {
+            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let name = wide(std::ffi::OsStr::new("NUL"));
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &inheritable,
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(handle)
+    }
+
+    struct Owned(HANDLE);
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// A one-entry attribute list naming the only handles a child inherits.
+    /// It borrows the handle array, which must outlive the list.
+    struct AttributeList<'a> {
+        buffer: Vec<usize>,
+        _handles: std::marker::PhantomData<&'a [HANDLE]>,
+    }
+
+    impl<'a> AttributeList<'a> {
+        fn with_handles(handles: &'a [HANDLE]) -> io::Result<Self> {
+            let mut size = 0usize;
+            // The sizing call fails by design and reports the size it needs.
+            unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) };
+            let words = size.div_ceil(mem::size_of::<usize>());
+            let mut list = AttributeList {
+                buffer: vec![0usize; words],
+                _handles: std::marker::PhantomData,
+            };
+            if unsafe { InitializeProcThreadAttributeList(list.as_ptr(), 1, 0, &mut size) } == 0 {
+                // Never initialised: nothing for Drop to delete.
+                list.buffer = Vec::new();
+                return Err(io::Error::last_os_error());
+            }
+            let updated = unsafe {
+                UpdateProcThreadAttribute(
+                    list.as_ptr(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    handles.as_ptr().cast(),
+                    mem::size_of_val(handles),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            };
+            if updated == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(list)
+        }
+
+        fn as_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+            self.buffer.as_mut_ptr().cast()
+        }
+    }
+
+    impl Drop for AttributeList<'_> {
+        fn drop(&mut self) {
+            if !self.buffer.is_empty() {
+                unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+            }
+        }
+    }
+}

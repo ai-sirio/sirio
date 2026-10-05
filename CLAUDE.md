@@ -32,6 +32,13 @@ Scripts/ci-linux.sh
 # prints each stage the probe reported.
 Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 
+# The host foundation: a real sirio-host started detached, adopted, killed
+# around, idled out and drained across a protocol major; --out-dir DIR keeps
+# every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line.
+Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
+# Whether a detached process survives its parent's world, row by row.
+Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"
+
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
 # transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1
@@ -84,7 +91,7 @@ Scripts/build-dev.sh
 # Developer ID Application identity.
 Scripts/check-release-version.sh v0.6.0          # tag vs rust/Cargo.toml
 Scripts/set-workspace-version.sh <version>       # what the nightly job compiles in
-Scripts/build-app-bundle.sh <binary> <version> build/Sirio.app
+Scripts/build-app-bundle.sh <binary> <version> build/Sirio.app <sirio-host-binary>
 Scripts/build-dmg.sh build/Sirio.app Sirio build/Sirio-<version>.dmg
 ```
 
@@ -116,7 +123,7 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
-sirio_forge, sirio_privacy
+sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol
                                 (leaves — no local deps beyond sirio_perf;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
@@ -133,13 +140,22 @@ sirio_forge, sirio_privacy
                                  handed in by its caller;
                                  sirio_privacy is the macOS TCC permissions
                                  as a pure model plus the one probe that asks
-                                 macOS, on the objc2 0.6 family gpui links)
+                                 macOS, on the objc2 0.6 family gpui links;
+                                 sirio_ipc is the local transport — unix
+                                 socket or Windows named pipe, peer identity,
+                                 a process's start time — extracted from
+                                 sirio_control so the host shares it;
+                                 sirio_host_protocol is the host's wire as
+                                 types and pure functions — frames, version
+                                 negotiation, the liveness verdict — no I/O)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
 sirio_acp        (-> sirio_persistence, sirio_claude)
 sirio_terminal    (-> sirio_project, sirio_theme, and `bezel` directly for its scrollbar)
-sirio_control    (-> sirio_acp, sirio_persistence)
+sirio_control    (-> sirio_acp, sirio_persistence, sirio_ipc)
+sirio_host       (-> sirio_ipc, sirio_host_protocol; the `sirio-host` binary)
+sirio_host_client (-> sirio_ipc, sirio_host_protocol)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
@@ -148,9 +164,11 @@ sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_
                       sirio_project, sirio_registry, sirio_syntax, sirio_theme,
                       sirio_usage)
     ^
-sirio            (the app: main.rs — the only crate that depends on everything above,
-                    including sirio_terminal, sirio_control, and sirio_activity, which
-                    sirio_ui itself does not touch)
+sirio            (the app: main.rs — the only crate that depends on everything above
+                    except sirio_host, which it never links (the boundary of the host
+                    section below), including sirio_terminal, sirio_control,
+                    sirio_host_client and sirio_activity, which sirio_ui itself does
+                    not touch)
 ```
 
 `sirio_theme` holds Sirio's palette in Ely's vocabulary: `ThemeColors` is
@@ -465,6 +483,20 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 `SirioWorkspace` (`rust/crates/sirio/src/main.rs`, the `gpui::Render` root) holds the open tabs/panes and a `Vec` of workspace rows (project/worktree/branch/path, each with a `mounted` bool) — the Rust equivalent of Swift's `Project -> [Worktree]` plus `openWorktreeIds`. A worktree's `mounted` flag tracks whether its terminal hosts stay mounted (PTYs alive) across sidebar selection changes; this is a live contract other code depends on; see the `tab_has_live_foreground_process` comment in `main.rs` for a case where an activity-model shortcut nearly broke it. On app quit (`cx.on_app_quit`), `PaneRegistry::shutdown` tears every pane down; a plain window close only flushes session state (`cx.on_window_closed`) and does not call `shutdown` — closing the window is not wired to kill agent PTYs, matching the original app's behavior of quitting only ending everything.
 
+### A host behind the app (`sirio_host`, `sirio_host_client`)
+
+`sirio-host` is a detached process that is to own everything that runs, so that agents survive a crash, a Force Quit, a Quit or an update of the app. It is a programme of seven sub-projects and this is **SP1**, the foundation (`docs/superpowers/specs/2026-10-05-host-foundation-design.md`; the programme is its §2). SP1 hosts no sessions: it serves `host.ping`, `host.info`, `host.shutdown` and the `host.state` topic, and `protocol/host-v1/` holds the capability ledger, the generated schema and the conformance cases the E2E replays against a real host. The app shows the host's status in Settings → General and nothing else depends on it: without a host the app runs as it always did.
+
+The boundary is one dependency edge: `sirio` → `sirio_host_client`, **never** `sirio_host`. At startup `ensure_host` (off the GPUI thread) observes the host's state, adopts a live host or stages the packaged `sirio-host` into the data root and starts it from there, detached from the app's process group — a systemd scope or `setsid` on Linux, a launchd job on macOS, a breakaway process on Windows (`Scripts/Tests/probe-host-detach.sh` is how each arm is proven: its macOS and Windows rows run in CI and Force Quit by hand, and `docs/testing/host-detach-probe.md` records which rows are done). There is at most one host per protocol major per data root, and a client speaks majors N and N−1, so an older host drains instead of being replaced.
+
+The data root is `$SIRIO_HOST_HOME` if absolute, else `<XDG_DATA_HOME | ~/.local/share | %LOCALAPPDATA%>/Sirio/host` — **no temp-dir fallback**, a host on tmpfs loses its state. Per major N it holds `host-v<N>.sock` (a named pipe on Windows), `host-v<N>.lock` (held for the host's whole life), `host-v<N>.json` (pid, start time, version, generation), `log/host-v<N>.log` (4 MiB, two generations; names and ids, never session content, the `sirio_perf` rule), `bin/<version>/sirio-host`, and on macOS `launchd/`.
+
+**Nothing kills a host on the strength of a failed connection.** A host that holds its lock and does not answer reads `Unverifiable` and is waited for, never replaced or signalled; a recorded pid counts only with its start time. Only `host.shutdown` ends a host, and it refuses with `sessions_live` unless `force`. The idle exit (60 s with no client and no session, only in `on-demand` mode) is the host's own decision.
+
+The debug-only knobs — `SIRIO_HOST_PROTOCOL_MAJOR`, `SIRIO_HOST_IDLE_GRACE_MS`, `SIRIO_HOST_BIN` and the method `host.debug.hold_session` — are compiled out of release builds with `cfg!(debug_assertions)`, which is why `Scripts/Tests/test-host-e2e.sh` drives debug builds only. **Known SP1 limitation:** `SIRIO_HOST_HOME` is the one variable that isolates a host's data root. `SIRIO_DB` and `SIRIO_SOCKET` do not move it, and a debug build does not either, so a debug build or an isolated Sirio run without it adopts or starts a host in the user's real root.
+
+Quit is unchanged until SP2: `PaneRegistry::shutdown` still ends every pane (see Pane hierarchy), because there are no host sessions yet. SP2 turns Quit into detach.
+
 ## Conventions
 
 - **Testing is end to end.** A feature is proven against the real binaries, and every E2E run ends in an artifact anyone can re-run and check — the shape `Scripts/Tests/test-update-e2e.sh` (`UPDATE E2E OK`) and `Scripts/visual-sweep.sh` (a socket transcript plus PID-matched window captures under `--out-dir`) already have. The existing `#[test]` suite stays; these rules govern what gets added:
@@ -474,7 +506,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
   - `Scripts/ci-linux.sh`'s comment covers the two workspace-wide tests that must run per-crate rather than concurrently with every other test binary.
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
 - **The version names the next release, not the last commit.** `[workspace.package] version` in `rust/Cargo.toml` carries the next stable release's number and moves once per cycle, in the commit that opens it, right after a release is tagged (`v0.13.3` → `0.13.4`). Nothing else in the cycle touches it: only its first `feat:` moves it again, patch to minor (`0.14.0`), later `feat:`s leave it, and the release-notes commit writes only `docs/release-notes/<version>.md`. `Scripts/set-workspace-version.sh <version>` stays its only writer, `Scripts/check-release-version.sh` still compares the release tag against it, and `Scripts/check-cycle-version.sh` refuses a version that is not above the last released tag, the guard against a forgotten opening bump. A nightly is therefore always the prerelease of the stable actually coming.
-- `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the *local* run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead. `.github/workflows/pr.yml` runs `Scripts/ci.sh` on Linux for every pull request and every push to `main`. That is a backstop, not a substitute — it reports after the fact, and the macOS-only paths (the libproc walk in `sirio_activity`, `getpeereid` in `sirio_control`, the `NSStatusItem` tray in `sirio`, the TCC probe in `sirio_privacy`) are `cfg`-gated away on that runner. `.github/workflows/macos-check.yml` builds and links the app on `macos-15` for every pull request and runs `sirio_privacy`'s `permissions` example, which calls every TCC read for real; the test suite on macOS stays the release gate's business. `Scripts/Tests/test-pr-workflow.sh` guards the workflow's shape, the way its siblings guard `release.yml` and `nightly.yml`.
+- `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the *local* run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead. `.github/workflows/pr.yml` runs `Scripts/ci.sh` on Linux for every pull request and every push to `main`. That is a backstop, not a substitute — it reports after the fact, and the macOS-only paths (the libproc walk in `sirio_activity`, `getpeereid` in `sirio_control`, the `NSStatusItem` tray in `sirio`, the TCC probe in `sirio_privacy`) are `cfg`-gated away on that runner. `.github/workflows/macos-check.yml` builds and links the app on `macos-15` for every pull request and runs `sirio_privacy`'s `permissions` example, which calls every TCC read for real, then the host's detach probe and E2E; the test suite on macOS stays the release gate's business. `.github/workflows/windows-check.yml` is the only pre-merge Windows compile: it builds the host crates on `windows-latest` and runs their tests, the probe and the E2E (the app itself still builds on Windows only in the release job). `pr.yml` also runs the host E2E, which is deliberately not in `Scripts/ci.sh`. `Scripts/Tests/test-pr-workflow.sh` guards the workflow's shape, the way its siblings guard `release.yml` and `nightly.yml`.
 
 ## Agent skills
 

@@ -1,8 +1,9 @@
 //! The Windows counterpart of the unix-domain-socket transport: a named
-//! pipe (`CreateNamedPipeW`/`ConnectNamedPipe`) carrying the exact same
-//! line-delimited JSON protocol. Only this file knows which platform it is
-//! on; [`crate::server`] and [`crate::client`] call into these types behind
-//! their `#[cfg]` seams.
+//! pipe (`CreateNamedPipeW`/`ConnectNamedPipe`) carrying exactly the bytes
+//! the unix socket would, whatever protocol is framed on top. Only this file
+//! knows which platform it is on; `LocalListener`, `LocalStream` and
+//! `connect` in this crate's root call into these types behind their
+//! `#[cfg]` seams.
 //!
 //! # Why a named pipe is not a drop-in for `UnixListener`
 //!
@@ -23,7 +24,7 @@
 //!
 //! Callers hand us the same path they would on Linux/macOS: `$SIRIO_SOCKET`
 //! verbatim when the environment overrides it, otherwise the platform
-//! default from [`crate::protocol::default_socket_path`] (`%LOCALAPPDATA%`
+//! default from `sirio_control::default_socket_path` (`%LOCALAPPDATA%`
 //! on Windows, XDG runtime/state directories on Linux). Both are mapped
 //! deterministically onto the named-pipe namespace, because NT pipe names
 //! cannot be arbitrary filesystem paths:
@@ -94,6 +95,10 @@ use windows_sys::Win32::System::Threading::{
 /// the `\.\pipe\` prefix. Our derived names stay comfortably below it.
 const MAX_PIPE_NAME_CHARS: usize = 256;
 
+/// Size of the pipe's in and out buffers: the largest single request line the
+/// control protocol accepts (`sirio_control::server::MAX_BUFFER_BYTES`, 1 MiB).
+const PIPE_BUFFER_BYTES: u32 = 1 << 20;
+
 /// Prefix for derived pipe names — the Sirio directory name carried
 /// over from the unix default path (`$XDG_RUNTIME_DIR/Sirio/…`).
 const PIPE_NAMESPACE: &str = r"\\.\pipe\Sirio\";
@@ -128,7 +133,7 @@ fn last_error(context: &str) -> io::Error {
 
 /// Why [`PipeListener::bind`] refused to create the pipe.
 #[derive(Debug)]
-pub(crate) enum ListenerError {
+pub enum ListenerError {
     /// A live server owns this name — the probe connect succeeded, exactly
     /// mirroring the unix `prepare_path` refusal to steal a live socket.
     AlreadyRunning { name: String },
@@ -143,7 +148,7 @@ pub(crate) enum ListenerError {
 /// pipe created by someone else") and its own classification at bind time
 /// (loud hostile collision, never "another instance is already running").
 #[derive(Debug)]
-pub(crate) enum ClientConnectError {
+pub enum ClientConnectError {
     /// The pipe exists but was created by — is owned by — another user:
     /// a hostile squatter or another user's Sirio session. Never talk to
     /// it, whatever its DACL happens to grant us.
@@ -174,7 +179,7 @@ impl std::fmt::Display for ClientConnectError {
 /// when the process token cannot be read — refuse closed: a name derived
 /// without the user component would silently reintroduce the machine-global
 /// predictability the SID exists to prevent.
-pub(crate) fn pipe_name_for_path(path: &Path) -> Result<String, String> {
+pub fn pipe_name_for_path(path: &Path) -> Result<String, String> {
     let text = path.to_string_lossy().into_owned();
     if text.to_ascii_lowercase().starts_with(r"\\.\pipe\") {
         return Ok(text);
@@ -496,7 +501,7 @@ impl Drop for DescriptorLease {
 /// There is no comparable "did someone swap the object under us" exposure
 /// here — `FILE_FLAG_FIRST_PIPE_INSTANCE` guarantees we created this exact
 /// name — so that half has no Windows failure mode to detect.
-pub(crate) fn post_bind_sanity_check(pipe: HANDLE) -> Result<(), String> {
+pub fn post_bind_sanity_check(pipe: HANDLE) -> Result<(), String> {
     let user = current_user_sid_string()?;
 
     let mut needed = 0u32;
@@ -618,8 +623,8 @@ fn create_instance(
             open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            crate::server::MAX_BUFFER_BYTES as u32,
-            crate::server::MAX_BUFFER_BYTES as u32,
+            PIPE_BUFFER_BYTES,
+            PIPE_BUFFER_BYTES,
             0,
             security,
         )
@@ -631,7 +636,7 @@ fn create_instance(
 }
 
 /// The control pipe for `path`, holding the first spare instance.
-pub(crate) struct PipeListener {
+pub struct PipeListener {
     name_wide: Vec<u16>,
     security: SECURITY_ATTRIBUTES,
     _lease: DescriptorLease,
@@ -642,7 +647,7 @@ pub(crate) struct PipeListener {
 impl PipeListener {
     /// The handle of the first (spare) instance, for the post-bind DACL
     /// sanity check — the object the server will actually serve on.
-    pub(crate) fn instance_handle(&self) -> HANDLE {
+    pub fn instance_handle(&self) -> HANDLE {
         self.instance
     }
 
@@ -650,7 +655,7 @@ impl PipeListener {
     /// exclusivity, distinguishing a live sibling Sirio from a hostile
     /// name squatter exactly like the unix `prepare_path` does with its
     /// probe connect.
-    pub(crate) fn bind(path: &Path) -> Result<Self, ListenerError> {
+    pub fn bind(path: &Path) -> Result<Self, ListenerError> {
         let name = pipe_name_for_path(path).map_err(|detail| ListenerError::Bind { detail })?;
         let name_wide = wide(&name);
         let (security, descriptor) =
@@ -714,7 +719,7 @@ impl PipeListener {
     /// binds a fresh spare instance. Returns `None` when shut down (or
     /// when a fresh instance can no longer be created — the analogue of a
     /// unix listener whose descriptor went bad).
-    pub(crate) fn accept(&mut self, shutdown: &AtomicBool) -> Option<PipeStream> {
+    pub fn accept(&mut self, shutdown: &AtomicBool) -> Option<PipeStream> {
         loop {
             match self.wait_for_connection(shutdown) {
                 WaitOutcome::Connected(stream) => {
@@ -918,11 +923,10 @@ unsafe fn verify_impersonated_identity() -> bool {
 /// vouches for, so this is what turns "we connected" into "we connected to
 /// our own Sirio". No TOCTOU either: we hold a handle to that exact
 /// object, and its owner cannot change without SeTakeOwnershipPrivilege.
-// `pub(crate)` rather than `pub`: it returns [`ClientConnectError`], which is
-// crate-private because the ForeignOwner/Io distinction is an implementation
-// detail of this transport. `client.rs` is the only caller and it flattens
-// that distinction into `io::Error` for the outside world.
-pub(crate) fn open_client(path: &Path) -> Result<PipeStream, ClientConnectError> {
+// Public because `LocalListener::bind` (probing a squatted name) and `connect`
+// (which flattens the ForeignOwner/Io distinction into `io::Error` for the
+// outside world) both live in this crate's root, outside this module.
+pub fn open_client(path: &Path) -> Result<PipeStream, ClientConnectError> {
     let name = pipe_name_for_path(path)
         .map_err(|error| ClientConnectError::Io(io::Error::other(error)))?;
     let name_wide = wide(&name);

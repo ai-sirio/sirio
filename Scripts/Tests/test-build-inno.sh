@@ -17,6 +17,7 @@ fail() {
 # the test never compiles, because ISCC is Windows-only and not installed here.
 printf 'sirio.exe\n'   > "$FIXTURE/sirio.exe"
 printf 'sirioctl.exe\n' > "$FIXTURE/sirioctl.exe"
+printf 'sirio-host.exe\n' > "$FIXTURE/sirio-host.exe"
 
 "$GEN" "0.6.0" "$FIXTURE/Sirio.iss" >/dev/null
 
@@ -37,8 +38,9 @@ grep -Fq "DefaultDirName={localappdata}\\Programs\\$SIRIO_DISPLAY_NAME" "$ISS" \
 grep -q "^PrivilegesRequired=lowest$" "$ISS" \
   || fail ".iss must never require elevation"
 
-# The sibling rule (spec §1.4): both binaries land in one directory.
-for bin in sirio.exe sirioctl.exe; do
+# The sibling rule (spec §1.4): the binaries land in one directory -- the
+# host's too, where the app finds it to stage its copy (host spec §4.3).
+for bin in sirio.exe sirioctl.exe sirio-host.exe; do
   grep -Fq "Source: \"$bin\"; DestDir: \"{app}\"" "$ISS" \
     || fail ".iss must install $bin into {app}"
 done

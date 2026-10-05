@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wraps an already-compiled `sirio` binary in a signed Sirio.app.
+# Wraps already-compiled `sirio` and `sirio-host` binaries in a signed Sirio.app.
 #
 # Deliberately compiles nothing. Taking a binary rather than building one is
 # what makes this runnable by hand against a debug build in two seconds, which
@@ -12,17 +12,18 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <binary> <version> <output-app-path>" >&2
+  echo "Usage: $0 <binary> <version> <output-app-path> <sirio-host-binary>" >&2
   exit 2
 }
 
-if [ $# -lt 3 ]; then
+if [ $# -lt 4 ]; then
   usage
 fi
 
 BINARY="$1"
 VERSION="$2"
 APP_PATH="$3"
+HOST_BINARY="$4"
 
 if [ -z "$APP_PATH" ]; then
   echo "error: output app path must not be empty" >&2
@@ -48,6 +49,11 @@ if [ ! -f "$BINARY" ]; then
   exit 1
 fi
 
+if [ ! -f "$HOST_BINARY" ]; then
+  echo "error: sirio-host binary not found at $HOST_BINARY" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Identifier, display name and icon path come from the one identity source
@@ -70,6 +76,12 @@ mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 
 cp "$BINARY" "$APP_PATH/Contents/MacOS/sirio"
 chmod +x "$APP_PATH/Contents/MacOS/sirio"
+# The session host sits beside the app's executable, where `ensure_host`
+# looks for it. The app never runs it from here: it copies it to
+# <data root>/bin/<version>/ first (spec §4.3), so an update replacing the
+# bundle never pulls the binary out from under a running host.
+cp "$HOST_BINARY" "$APP_PATH/Contents/MacOS/sirio-host"
+chmod +x "$APP_PATH/Contents/MacOS/sirio-host"
 cp "$ICON" "$APP_PATH/Contents/Resources/icon.icns"
 
 # CFBundleVersion repeats CFBundleShortVersionString on purpose. They carry
@@ -126,6 +138,19 @@ EOF
 # another app was dead in the signed build while working in the ad-hoc dev
 # one. That is the only entry in sirio.entitlements; add another only for a
 # failure that names it, never pre-emptively.
+#
+# Signing the bundle signs only its main executable (CFBundleExecutable): a
+# second Mach-O in Contents/MacOS is nested code, which must be signed first,
+# inside-out, or the bundle's seal names an unsigned subcomponent and
+# notarization refuses it. So sirio-host is signed on its own, with the same
+# identity, runtime and entitlements, before the bundle that seals it. The
+# signature is embedded in the binary, so the staged copy the app runs
+# carries it too.
+codesign --force --options runtime --timestamp \
+  --entitlements "$SCRIPT_DIR/sirio.entitlements" \
+  --sign "$CODESIGN_IDENTITY" \
+  "$APP_PATH/Contents/MacOS/sirio-host"
+
 codesign --force --options runtime --timestamp \
   --entitlements "$SCRIPT_DIR/sirio.entitlements" \
   --sign "$CODESIGN_IDENTITY" \

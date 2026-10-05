@@ -7337,6 +7337,8 @@ dependencies = [
  "sirio_control",
  "sirio_forge",
  "sirio_git",
+ "sirio_host_client",
+ "sirio_host_protocol",
  "sirio_lsp",
  "sirio_perf",
  "sirio_persistence",
@@ -7411,8 +7413,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sirio_acp",
+ "sirio_ipc",
  "sirio_persistence",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7447,8 +7449,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_host"
+version = "0.31.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sirio_host_protocol",
+ "sirio_ipc",
+]
+
+[[package]]
+name = "sirio_host_client"
+version = "0.31.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "sirio_host_protocol",
+ "sirio_ipc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sirio_host_protocol"
+version = "0.31.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sirio_icons"
 version = "0.31.0"
+
+[[package]]
+name = "sirio_ipc"
+version = "0.31.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "sirio_lsp"
