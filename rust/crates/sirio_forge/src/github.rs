@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, ThreadFacts, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -47,6 +47,7 @@ const COMMITS: &str = include_str!("queries/github/commits.graphql");
 const CHECKS: &str = include_str!("queries/github/checks.graphql");
 const FILES: &str = include_str!("queries/github/files.graphql");
 const THREADS: &str = include_str!("queries/github/threads.graphql");
+const THREAD_CONTEXT: &str = include_str!("queries/github/thread_context.graphql");
 const ACTION_CONTEXT: &str = include_str!("queries/github/action_context.graphql");
 const ADD_COMMENT: &str = include_str!("queries/github/add_comment.graphql");
 const ADD_REVIEW: &str = include_str!("queries/github/add_review.graphql");
@@ -58,6 +59,9 @@ const UPDATE: &str = include_str!("queries/github/update.graphql");
 const UPDATE_COMMENT: &str = include_str!("queries/github/update_comment.graphql");
 const UPDATE_REVIEW: &str = include_str!("queries/github/update_review.graphql");
 const UPDATE_REVIEW_COMMENT: &str = include_str!("queries/github/update_review_comment.graphql");
+const REPLY: &str = include_str!("queries/github/reply.graphql");
+const RESOLVE_THREAD: &str = include_str!("queries/github/resolve_thread.graphql");
+const UNRESOLVE_THREAD: &str = include_str!("queries/github/unresolve_thread.graphql");
 const MERGE: &str = include_str!("queries/github/merge.graphql");
 const ENABLE_AUTO_MERGE: &str = include_str!("queries/github/enable_auto_merge.graphql");
 const DISABLE_AUTO_MERGE: &str = include_str!("queries/github/disable_auto_merge.graphql");
@@ -724,13 +728,18 @@ fn review_thread(node: &Value) -> Option<ReviewThread> {
     let comments: Vec<ThreadComment> = array_at(node, "/comments/nodes")
         .into_iter()
         .filter_map(|comment| {
+            let id = opt_str(comment, "/id")?.to_string();
+            let pending = opt_str(comment, "/pullRequestReview/state") == Some("PENDING");
             Some(ThreadComment {
-                id: opt_str(comment, "/id")?.to_string(),
+                id: id.clone(),
                 author: login_or_ghost(comment, "/author/login"),
                 body: str_at(comment, "/body"),
                 at: time_at(comment, "/createdAt"),
-                edit: None,
-                pending: opt_str(comment, "/pullRequestReview/state") == Some("PENDING"),
+                edit: (bool_at(comment, "/viewerCanUpdate") && !pending).then(|| CommentRef {
+                    id,
+                    kind: CommentKind::ReviewComment,
+                }),
+                pending,
             })
         })
         .collect();
@@ -818,6 +827,22 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
     })
 }
 
+/// One thread's permissions, read afresh before a reply or a resolve. A
+/// thread that is gone, or that belongs to another pull request, is
+/// `NotFound`.
+fn thread_facts(client: &ForgeClient, number: u64, id: &str) -> Result<ThreadFacts, ForgeError> {
+    let data = run(client, "ReviewThreadContext", THREAD_CONTEXT, json!({ "id": id }))?;
+    let node = data
+        .pointer("/node")
+        .filter(|node| node.pointer("/pullRequest/number").and_then(Value::as_u64) == Some(number))
+        .ok_or_else(|| ForgeError::NotFound { host: client.host.clone() })?;
+    Ok(ThreadFacts {
+        can_reply: bool_at(node, "/viewerCanReply"),
+        can_resolve: bool_at(node, "/viewerCanResolve"),
+        can_unresolve: bool_at(node, "/viewerCanUnresolve"),
+    })
+}
+
 /// One mutation. Every GitHub mutation takes a single `$input`.
 fn mutate(
     client: &ForgeClient,
@@ -833,7 +858,10 @@ pub(crate) fn act(
     number: u64,
     action: &Action,
 ) -> Result<ActionOutcome, ForgeError> {
-    let context = action_context(client, number)?;
+    let mut context = action_context(client, number)?;
+    if let Action::Reply { thread, .. } | Action::Resolve { thread, .. } = action {
+        context.thread = Some(thread_facts(client, number, thread)?);
+    }
     check_action(&client.host, action, &context)?;
     let id = context.node_id.as_str();
     match action {
@@ -1018,9 +1046,33 @@ pub(crate) fn act(
                 },
             )?;
         }
-        // Task 2:
-        Action::Reply { .. } | Action::Resolve { .. } | Action::LineComment { .. } => {
-            return Err(ForgeError::Unsupported { host: client.host.clone(), what: action.kind().to_string() });
+        Action::Reply { thread, body } => mutate(
+            client,
+            "AddPullRequestReviewThreadReply",
+            REPLY,
+            json!({ "pullRequestReviewThreadId": thread, "body": body }),
+        )?,
+        Action::Resolve { thread, resolved: true } => {
+            mutate(client, "ResolveReviewThread", RESOLVE_THREAD, json!({ "threadId": thread }))?
+        }
+        Action::Resolve { thread, resolved: false } => {
+            mutate(client, "UnresolveReviewThread", UNRESOLVE_THREAD, json!({ "threadId": thread }))?
+        }
+        // `addPullRequestReviewThread` only adds to a pending review
+        // (checked against github.com on 2026-10-05); the REST review
+        // comment publishes at once.
+        Action::LineComment { anchor, revisions, body } => {
+            let (owner, name) = owner_and_name(client)?;
+            let comment = mapping::github_line_comment(anchor, &revisions.head_sha, body);
+            execute_rest(
+                client,
+                &RestRequest {
+                    method: RestMethod::Post,
+                    log: false,
+                    path: format!("repos/{owner}/{name}/pulls/{number}/comments"),
+                    body: Some(comment.to_string().into_bytes()),
+                },
+            )?;
         }
         Action::EditComment { comment, body } => match comment.kind {
             CommentKind::Comment => mutate(
@@ -1168,6 +1220,23 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
             "UpdatePullRequestReview",
             UPDATE_REVIEW,
             json!({ "pullRequestReviewId": "PRR_sirio_live_check_0", "body": "x" }),
+        ),
+        LiveProbe {
+            operation: "ReviewThreadContext",
+            document: THREAD_CONTEXT,
+            variables: json!({ "id": "PRRT_sirio_live_check_0" }),
+        },
+        write(
+            "AddPullRequestReviewThreadReply",
+            REPLY,
+            json!({ "pullRequestReviewThreadId": "PRRT_sirio_live_check_0", "body": "x" }),
+        ),
+        write("ResolveReviewThread", RESOLVE_THREAD, json!({ "threadId": "PRRT_sirio_live_check_0" })),
+        write("UnresolveReviewThread", UNRESOLVE_THREAD, json!({ "threadId": "PRRT_sirio_live_check_0" })),
+        write(
+            "UpdatePullRequestReviewComment",
+            UPDATE_REVIEW_COMMENT,
+            json!({ "pullRequestReviewCommentId": "PRRC_sirio_live_check_0", "body": "x" }),
         ),
         write(
             "MergePullRequest",

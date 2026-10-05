@@ -247,6 +247,24 @@ expect_sent() { # flavour Operation how-many
 expect_rest() { # flavour "POST /path"
   grep -qF -- "$2 " "$WORK/$1-requests.log" || { cat "$WORK/$1-requests.log" >&2; fail "the $1 forge never saw: $2"; }
 }
+expect_rest_body() { # flavour "METHOD /path" json
+  local got
+  got=$(python3 - "$WORK/$1-requests.log" "$2" <<'PY'
+import json, re, sys
+log, want = sys.argv[1], sys.argv[2]
+method, path = want.split(" ", 1)
+last = None
+for line in open(log, encoding="utf-8"):
+    m = re.match(r"^(\S+) (\S+) - interaction=\w+ vars=(.*)$", line.rstrip("\n"))
+    if m and m.group(1) == method and m.group(2) == path:
+        last = json.loads(m.group(3))
+print(json.dumps(last, sort_keys=True) if last is not None else "")
+PY
+)
+  local want
+  want=$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True))' "$3")
+  [ "$got" = "$want" ] || fail "$2 sent $got, expected $want"
+}
 reset_forge() { # flavour port -- forget the writes it applied, and what it logged
   local port=$GH_PORT
   [ "$1" = gitlab ] && port=$GL_PORT
@@ -1501,6 +1519,68 @@ PY
 
 run_ui github ghe.test acme/widgets 101 https://ghe.test/acme/widgets.git 1 UpdateIssueComment
 run_ui gitlab gitlab.test team/app 201 https://gitlab.test/team/app.git 1 UpdateNote
+fi
+
+if wanted threads; then
+echo "stage threads: B3b's writes reach GitHub as the call each one means"
+GH_HEAD=b2c3d4e5f60718293a4b5c6d7e8f901234567890
+GH_COMMENTS="POST /api/v3/repos/acme/widgets/pulls/101/comments"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" threads 101
+expect_code 0 "github threads"
+expect_line "TEDIT PRRC_1 review-comment"
+
+probe "${GH[@]}" act 101 reply --thread PRRT_open42 --body-file "$BODY_FILE"
+expect_code 0 "a reply"
+expect_line "ACT ok"
+expect_body_is_file github AddPullRequestReviewThreadReply "$BODY_FILE"
+expect_sent github ReviewThreadContext 1
+probe "${GH[@]}" act 101 reply --thread PRRT_open42 --body "   "
+expect_code 20 "an empty reply"
+expect_line "MESSAGE A reply needs some text."
+expect_sent github AddPullRequestReviewThreadReply 1
+
+probe "${GH[@]}" act 101 resolve --thread PRRT_open42
+expect_code 0 "resolve"
+expect_input github ResolveReviewThread '{"threadId":"PRRT_open42"}'
+probe "${GH[@]}" act 101 unresolve --thread PRRT_resolved40
+expect_code 0 "unresolve"
+expect_input github UnresolveReviewThread '{"threadId":"PRRT_resolved40"}'
+
+probe "${GH[@]}" act 101 line-comment --path src/login.rs --side new --line context:43:43 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body "One line."
+expect_code 0 "a line comment"
+expect_rest_body github "$GH_COMMENTS" "{\"body\":\"One line.\",\"commit_id\":\"$GH_HEAD\",\"line\":43,\"path\":\"src/login.rs\",\"side\":\"RIGHT\"}"
+probe "${GH[@]}" act 101 line-comment --path src/login.rs --side new --line added:43:42 --start context:41:41 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body "A range."
+expect_rest_body github "$GH_COMMENTS" "{\"body\":\"A range.\",\"commit_id\":\"$GH_HEAD\",\"line\":42,\"path\":\"src/login.rs\",\"side\":\"RIGHT\",\"start_line\":41,\"start_side\":\"RIGHT\"}"
+probe "${GH[@]}" act 101 line-comment --path src/login.rs --side old --line removed:42:42 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body-file "$BODY_FILE"
+expect_code 0 "an old-side comment"
+python3 - "$WORK/github-requests.log" "$BODY_FILE" <<'PY' || fail "the old-side comment's body changed on the wire"
+import json, re, sys
+body = open(sys.argv[2], encoding="utf-8").read()
+sent = [json.loads(m.group(1)) for m in (re.match(r"^POST \S+/pulls/101/comments - interaction=\w+ vars=(.*)$", l.rstrip("\n")) for l in open(sys.argv[1], encoding="utf-8")) if m]
+assert sent[-1]["body"] == body and sent[-1]["side"] == "LEFT" and sent[-1]["line"] == 42, sent[-1]
+PY
+
+echo "  a moved head and a missing permission send nothing"
+before=$(grep -c "^$GH_COMMENTS " "$WORK/github-requests.log" || true)
+probe "${GH[@]}" act 101 line-comment --path src/login.rs --side new --line context:43:43 \
+  --base "$GH_HEAD" --head 0000000000000000000000000000000000000000 --body "Stale."
+expect_code 20 "a comment on a stale head"
+expect_line "ERR HeadMoved"
+[ "$(grep -c "^$GH_COMMENTS " "$WORK/github-requests.log" || true)" = "$before" ] || fail "a stale position reached the forge"
+probe "${GH_RO[@]}" act 101 reply --thread PRRT_open42 --body "No."
+expect_code 20 "a reply without permission"
+expect_line "MESSAGE You cannot reply to this thread."
+probe "${GH_RO[@]}" act 101 resolve --thread PRRT_open42
+expect_line "MESSAGE You cannot resolve this thread."
+expect_sent github ResolveReviewThread 1
+
+probe "${GH[@]}" act 101 edit-comment --id PRRC_1 --kind review-comment --body "Edited reply"
+expect_code 0 "a review comment edit"
+expect_input github UpdatePullRequestReviewComment '{"body":"Edited reply","pullRequestReviewCommentId":"PRRC_1"}'
 fi
 
 # Later stages are added above this line.

@@ -374,9 +374,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(1.5)
         return None
 
-    def rest_write(self, path):
+    def rest_write(self, path, raw):
         """GitLab's approval: the only REST write B2a sends."""
-        self.record("POST", path, None, None, None)
+        self.record("POST", path, None, None, json.loads(raw or b"{}"))
         if self.flavor == "gitlab" and re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/cancel_merge_when_pipeline_succeeds", path):
             error = self.scenario_error()
             if error:
@@ -402,9 +402,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.remember("approve")
         return self.answer(201, {"id": 201, "iid": 201, "approved_by": [{"user": {"username": "fake-user"}}]})
 
-    def github_rerun(self, path):
+    def github_rerun(self, path, raw):
         """GitHub's re-runs are REST: a job, or a run's failed jobs."""
-        self.record("POST", path, None, None, None)
+        self.record("POST", path, None, None, json.loads(raw or b"{}"))
         error = self.scenario_error()
         if error:
             return self.answer(error[0], error[1], error[2])
@@ -415,6 +415,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(1.5)
         self.remember("rerun")
         return self.answer(201, {})
+
+    def github_review_comment(self, path, raw):
+        """A published line comment, addressed by the diff position."""
+        body = json.loads(raw or b"{}")
+        self.record("POST", path, None, None, body)
+        if self.credential() == "readonly":
+            return self.answer(403, {"message": "Must have push access"})
+        if (
+            not all(key in body for key in ("body", "commit_id", "path", "line", "side"))
+            or not isinstance(body.get("commit_id"), str)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}", body["commit_id"])
+            or body.get("side") not in ("LEFT", "RIGHT")
+        ):
+            return self.answer(422, {"message": "pull_request_review_thread.line must be part of the diff"})
+        self.remember("line-comment")
+        return self.answer(201, {"id": 1})
 
     def do_GET(self):
         path = self.plain_path()
@@ -559,12 +575,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Handler.slow_log = 0.0
             Handler.traces_at_once_max = 0
             return self.answer(200, {"reset": True})
+        if self.flavor == "github" and re.fullmatch(r"(/api/v3)?/repos/[^/]+/[^/]+/pulls/\d+/comments", path):
+            return self.github_review_comment(path, raw)
         if self.flavor != "none" and path.startswith("/api/v4/"):
-            return self.rest_write(path)
+            return self.rest_write(path, raw)
         if self.flavor == "github" and re.fullmatch(
             r"(/api/v3)?/repos/[^/]+/[^/]+/actions/(runs/\d+/rerun-failed-jobs|jobs/\d+/rerun)", path
         ):
-            return self.github_rerun(path)
+            return self.github_rerun(path, raw)
         if self.flavor == "none" or path not in ("/graphql", "/api/graphql"):
             self.record("POST", path, None, None, None)
             return self.answer(404, {"message": "Not Found"})
