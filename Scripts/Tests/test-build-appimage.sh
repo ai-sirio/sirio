@@ -84,12 +84,13 @@ mkdir -p "$FIXTURE/bin"
 # (MSYS/NTFS); on the release runner these are real ELF binaries.
 printf '#!/bin/sh\nsirio\n' >"$FIXTURE/bin/sirio"
 printf '#!/bin/sh\nsirioctl\n' >"$FIXTURE/bin/sirioctl"
+printf '#!/bin/sh\nsirio-host\n' >"$FIXTURE/bin/sirio-host"
 
 OUTPUT="$FIXTURE/build/Sirio-0.6.0-x86_64.AppImage"
 
 # -- Run ---------------------------------------------------------------------
 SIRIO_TOOLS_DIR="$FAKE_TOOLS" SIRIO_WEBKIT_ROOT="$WEBKIT_ROOT" \
-  "$BUILD_SCRIPT" "$FIXTURE/bin/sirio" "$FIXTURE/bin/sirioctl" "0.6.0" "$OUTPUT" >/dev/null
+  "$BUILD_SCRIPT" "$FIXTURE/bin/sirio" "$FIXTURE/bin/sirioctl" "$FIXTURE/bin/sirio-host" "0.6.0" "$OUTPUT" >/dev/null
 
 # -- Artifact layout ---------------------------------------------------------
 # The produced file is a tarball-shaped fake of the type-2 AppImage; extract it
@@ -105,6 +106,11 @@ APPDIR="$EXTRACTED"
 # The sibling rule: both binaries in one directory.
 if [ ! -x "$APPDIR/usr/bin/sirio" ] || [ ! -x "$APPDIR/usr/bin/sirioctl" ]; then
   fail "usr/bin must hold both sirio and sirioctl"
+fi
+# The session host sits beside sirio, where the app looks for it to stage its
+# copy (host spec §4.3); an image without it runs with no host at all.
+if [ ! -x "$APPDIR/usr/bin/sirio-host" ]; then
+  fail "usr/bin must hold an executable sirio-host"
 fi
 
 # -- The .desktop entry reads the identity source -----------------------------
@@ -159,12 +165,17 @@ grep -q 'apprun-hooks' "$APPDIR/AppRun" || fail "AppRun must source the gtk plug
 
 # -- Failure modes ------------------------------------------------------------
 if SIRIO_TOOLS_DIR="$FAKE_TOOLS" SIRIO_WEBKIT_ROOT="$WEBKIT_ROOT" \
-  "$BUILD_SCRIPT" "$FIXTURE/bin/missing" "$FIXTURE/bin/sirioctl" "0.6.0" "$FIXTURE/x.AppImage" >/dev/null 2>&1; then
+  "$BUILD_SCRIPT" "$FIXTURE/bin/missing" "$FIXTURE/bin/sirioctl" "$FIXTURE/bin/sirio-host" "0.6.0" "$FIXTURE/x.AppImage" >/dev/null 2>&1; then
   fail "a missing sirio binary must exit non-zero"
 fi
 
+if SIRIO_TOOLS_DIR="$FAKE_TOOLS" SIRIO_WEBKIT_ROOT="$WEBKIT_ROOT" \
+  "$BUILD_SCRIPT" "$FIXTURE/bin/sirio" "$FIXTURE/bin/sirioctl" "$FIXTURE/bin/missing" "0.6.0" "$FIXTURE/x.AppImage" >/dev/null 2>&1; then
+  fail "a missing sirio-host binary must exit non-zero"
+fi
+
 if SIRIO_TOOLS_DIR="$FAKE_TOOLS" SIRIO_WEBKIT_ROOT="$FIXTURE/empty-root" \
-  "$BUILD_SCRIPT" "$FIXTURE/bin/sirio" "$FIXTURE/bin/sirioctl" "0.6.0" "$FIXTURE/x.AppImage" >/dev/null 2>&1; then
+  "$BUILD_SCRIPT" "$FIXTURE/bin/sirio" "$FIXTURE/bin/sirioctl" "$FIXTURE/bin/sirio-host" "0.6.0" "$FIXTURE/x.AppImage" >/dev/null 2>&1; then
   fail "a runner without the webkit2gtk-4.1 runtime must exit non-zero"
 fi
 

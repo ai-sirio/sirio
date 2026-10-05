@@ -42,6 +42,10 @@ sirio_privacy.workspace = true
 sirio_git.workspace = true
 sirio_forge.workspace = true
 sirio_usage.workspace = true
+# The app's side of the session host (spec §4.1): find it, start it
+# detached, adopt it. The app never depends on `sirio_host` itself.
+sirio_host_client = { path = "../sirio_host_client" }
+sirio_host_protocol = { path = "../sirio_host_protocol" }
 serde.workspace = true
 serde_json.workspace = true
 # The channel that carries a notification from whichever thread posts it to

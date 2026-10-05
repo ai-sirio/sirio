@@ -22239,6 +22239,68 @@ fn ensure_windows_console() {
     }
 }
 
+/// Keeps the app's connection to its host for the app's lifetime: the host
+/// counts this connection as a client, so it does not idle out under a
+/// running app (spec §5.5). Nothing functional depends on it in SP1 (spec
+/// §7) — it is held, and its status line is shown in Settings → General.
+// Held, never read in SP1: dropping it is what would end the connection.
+struct HostConnection(#[allow(dead_code)] Option<sirio_host_client::HostHandle>);
+impl gpui::Global for HostConnection {}
+
+/// Finds, starts or adopts the session host off the UI thread — `ensure_host`
+/// can wait up to ~15 s on a host that will not answer — and hands its
+/// diagnostic line to Settings. When there is no host the app runs exactly
+/// as it did without one: the row says why, and nothing else changes.
+fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
+    let environment: BTreeMap<String, String> = std::env::vars().collect();
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let task = cx.background_spawn(async move {
+        let Some(paths) = sirio_host_protocol::paths::HostPaths::from_environment(&environment)
+        else {
+            return Err(sirio_host_client::EnsureError::NoDataRoot);
+        };
+        let major = if cfg!(debug_assertions) {
+            sirio_host_protocol::version::effective_major(
+                environment
+                    .get("SIRIO_HOST_PROTOCOL_MAJOR")
+                    .map(String::as_str),
+            )
+        } else {
+            sirio_host_protocol::version::PROTOCOL_MAJOR
+        };
+        let mut handle = sirio_host_client::ensure_host(&sirio_host_client::EnsureOptions {
+            paths,
+            client_version: sirio_control::VERSION.to_string(),
+            current_exe,
+            environment,
+            major,
+        })?;
+        let line = handle.status_line();
+        // An N−1 host is named in the line and then let go: it has no
+        // sessions in SP1, and holding it would keep it from idling out
+        // (spec §5.6).
+        handle.previous = None;
+        Ok((handle, line))
+    });
+    cx.spawn(async move |cx| {
+        let outcome = task.await;
+        cx.update(|cx| {
+            let line = match outcome {
+                Ok((handle, line)) => {
+                    cx.set_global(HostConnection(Some(handle)));
+                    line
+                }
+                Err(error) => {
+                    eprintln!("[sirio] host unavailable: {error}");
+                    sirio_host_client::status_line_for_error(&error)
+                }
+            };
+            settings.update(cx, |settings, cx| settings.set_host_status(Some(line), cx));
+        });
+    })
+    .detach();
+}
+
 fn main() {
     // First statement in the process, and it has to stay first. `gpui`
     // decides X11 vs Wayland by reading the environment
@@ -22704,6 +22766,10 @@ fn main() {
                             }
                         })
                 });
+                // Once, for the process: this is the Settings entity the
+                // running shell keeps (`SirioWorkspace.settings`), so the
+                // host's row lands where Settings → General draws it.
+                ensure_host_in_background(settings.clone(), cx);
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);

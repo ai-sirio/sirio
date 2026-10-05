@@ -293,6 +293,8 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" ci.keychain
           rm -f cert.p12
 
+      # The whole workspace (no -p): sirio, sirioctl and sirio-host, the
+      # three binaries the package below ships.
       - name: Build the release binary
         working-directory: rust
         run: cargo build --release --target aarch64-apple-darwin
@@ -331,7 +333,8 @@ jobs:
           Scripts/build-app-bundle.sh \
             rust/target/aarch64-apple-darwin/release/sirio \
             "$VERSION" \
-            build/Sirio.app
+            build/Sirio.app \
+            rust/target/aarch64-apple-darwin/release/sirio-host
           echo "app=build/Sirio.app" >> "$GITHUB_OUTPUT"
 
       - name: Notarize and staple
@@ -474,6 +477,8 @@ jobs:
         with:
           workspaces: rust
 
+      # The whole workspace (no -p): sirio, sirioctl and sirio-host, the
+      # three binaries the package below ships.
       - name: Build
         working-directory: rust
         run: cargo build --release
@@ -491,6 +496,7 @@ jobs:
           Scripts/build-appimage.sh \
             rust/target/release/sirio \
             rust/target/release/sirioctl \
+            rust/target/release/sirio-host \
             "$VERSION" \
             "build/Sirio-${VERSION}-x86_64.AppImage"
           echo "path=build/Sirio-${VERSION}-x86_64.AppImage" >> "$GITHUB_OUTPUT"
@@ -542,6 +548,8 @@ jobs:
         with:
           workspaces: rust
 
+      # The whole workspace (no -p): sirio, sirioctl and sirio-host, the
+      # three binaries the package below ships.
       - name: Build
         working-directory: rust
         run: cargo build --release
@@ -560,8 +568,9 @@ jobs:
         run: |
           STAGING="build/windows"
           mkdir -p "$STAGING"
-          cp rust/target/release/sirio.exe    "$STAGING/"
-          cp rust/target/release/sirioctl.exe "$STAGING/"
+          cp rust/target/release/sirio.exe      "$STAGING/"
+          cp rust/target/release/sirioctl.exe   "$STAGING/"
+          cp rust/target/release/sirio-host.exe "$STAGING/"
           # The .iss is generated beside the binaries: ISCC resolves its
           # relative Source: paths against the script's own directory, and the
           # script's OutputBaseFilename lands SirioSetup-<version>.exe there

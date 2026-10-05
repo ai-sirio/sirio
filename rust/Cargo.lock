@@ -7337,6 +7337,8 @@ dependencies = [
  "sirio_control",
  "sirio_forge",
  "sirio_git",
+ "sirio_host_client",
+ "sirio_host_protocol",
  "sirio_lsp",
  "sirio_perf",
  "sirio_persistence",
