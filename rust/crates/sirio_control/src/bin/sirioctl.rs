@@ -143,7 +143,7 @@ fn usage() {
          \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 surface ci-log open --job N|read|view [--toggle N] [--jump-error] [--refresh] [--copy all|N]\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
-         \x20 surface change-request thread --reveal ID|--toggle ID\n\
+          \x20 surface change-request thread --reveal ID|--toggle ID|--compose PATH:SIDE:LINE[-LAST]|--cancel\n\
           \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|rerun-job|rerun-failed\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\

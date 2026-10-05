@@ -448,11 +448,22 @@ impl ChangeRequestTab {
     /// reads it from `action_message`. The people.rs pattern, except a refusal
     /// while another write is in flight leaves that write — its Working state,
     /// task and target — alone: the reason already shows under the field that
-    /// sent it through `write_refusal`.
-    fn record_refusal(&mut self, kind: &'static str, outcome: Result<(), String>) -> Result<(), String> {
+    /// sent it through `write_refusal`. With nothing in flight the refusal
+    /// belongs to no earlier write, so the last write's target is cleared:
+    /// otherwise the report would pair this `Failed` state with it and show
+    /// the reason under the wrong field.
+    fn record_refusal(
+        &mut self,
+        kind: &'static str,
+        outcome: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if let Err(message) = outcome.as_ref() {
             if !self.action_busy() {
                 self.actions.state = ActionState::Failed { kind, message: message.clone() };
+                self.write_target = None;
+                self.sync_writes(cx);
+                cx.notify();
             }
         }
         outcome
@@ -539,7 +550,7 @@ impl ChangeRequestTab {
                     self.reply_set_text(&thread, &words, cx)?;
                     self.send_reply(&thread, cx)
                 })();
-                self.record_refusal("reply", outcome)
+                self.record_refusal("reply", outcome, cx)
             }
             "resolve" | "unresolve" => {
                 let kind = if name == "resolve" { "resolve" } else { "unresolve" };
@@ -547,7 +558,7 @@ impl ChangeRequestTab {
                     let thread = text("thread").ok_or("resolve needs thread")?;
                     self.resolve_thread(&thread, name == "resolve", cx)
                 })();
-                self.record_refusal(kind, outcome)
+                self.record_refusal(kind, outcome, cx)
             }
             "line-comment" => {
                 let outcome = (|| {
@@ -558,7 +569,7 @@ impl ChangeRequestTab {
                     self.composer_set_text(&words, cx);
                     self.send_line_comment(cx)
                 })();
-                self.record_refusal("line-comment", outcome)
+                self.record_refusal("line-comment", outcome, cx)
             }
             "edit-thread-comment" => {
                 let outcome = (|| {
@@ -568,7 +579,7 @@ impl ChangeRequestTab {
                     self.thread_comment_set_text(&words, cx)?;
                     self.save_thread_comment_edit(cx)
                 })();
-                self.record_refusal("edit-comment", outcome)
+                self.record_refusal("edit-comment", outcome, cx)
             }
             "picker-open" | "picker-type" | "picker-pick" | "picker-close" => {
                 self.control_picker(name, params, window, cx)

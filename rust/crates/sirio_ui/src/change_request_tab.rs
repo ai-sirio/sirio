@@ -3170,6 +3170,51 @@ mod tests {
         assert_eq!(forge.rest_count(COMMENTS), 0);
     }
 
+    /// An idle socket refusal after a completed write belongs to no earlier
+    /// field: `line_composer_error` stays empty while `action_message`
+    /// carries the refusal.
+    #[gpui::test]
+    async fn an_idle_socket_refusal_after_a_completed_write_belongs_to_no_field(
+        cx: &mut TestAppContext,
+    ) {
+        let (tab, forge, _repo, mut vcx) = windowed_thread(cx).await;
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "files_mode") == "diff"
+                    && report_value(tab, cx, "commentable") == "yes"
+            })
+        });
+        let changes = ready_changes(&tab, cx);
+        changes.update(cx, |changes, cx| changes.focus_path(Path::new("a.txt"), cx));
+        pump_until(cx, || changes.read_with(cx, |changes, _| {
+            changes.comment_anchor(Path::new("a.txt"), AnnotationSide::New, 43, None).is_ok()
+        }));
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        forge.answer_rest(COMMENTS, 201, r#"{"id":1}"#);
+        tab.update(cx, |tab, cx| tab.composer_set_text("Looks right", cx));
+        tab.update(cx, |tab, cx| tab.send_line_comment(cx)).expect("sent");
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, cx| {
+                report_value(tab, cx, "action") == "idle"
+                    && report_value(tab, cx, "line_composer").is_empty()
+            })
+        });
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(tab.write_target, Some(compose::WriteTarget::Composer));
+        });
+        let params = BTreeMap::from([("thread".to_string(), "missing".to_string())]);
+        let refused =
+            tab.update_in(&mut vcx, |tab, window, cx| tab.control_act("resolve", &params, window, cx));
+        assert_eq!(refused, Err("no thread missing".to_string()));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "action"), "failed");
+            assert_eq!(report_value(tab, cx, "action_kind"), "resolve");
+            assert_eq!(report_value(tab, cx, "action_message"), "no thread missing");
+            assert_eq!(report_value(tab, cx, "line_composer_error"), "");
+        });
+        assert_eq!(forge.count("ResolveReviewThread"), 0);
+    }
+
     #[gpui::test]
     async fn a_resolved_thread_folds_once_the_forge_says_so(cx: &mut TestAppContext) {
         let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
