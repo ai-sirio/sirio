@@ -2278,7 +2278,7 @@ impl Sidebar {
                     title: tab.title,
                     icon: tab.agent.map_or_else(
                         || match kind {
-                            TabKind::Terminal => Icon::SquareTerminal,
+                            TabKind::Terminal | TabKind::CiLog => Icon::SquareTerminal,
                             TabKind::Editor
                             | TabKind::Diff
                             | TabKind::Browser

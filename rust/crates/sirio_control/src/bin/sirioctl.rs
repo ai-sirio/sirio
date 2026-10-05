@@ -140,8 +140,9 @@ fn usage() {
          \x20 surface change-requests search --text t\n\
          \x20 surface change-requests token --host h --forge github|gitlab --token t\n\
          \x20 surface change-request open <number>|tab <name>|read\n\
+         \x20 surface ci-log open --job N|read|view [--toggle N] [--jump-error] [--refresh] [--copy all|N]\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
-         \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment\n\
+         \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|rerun-job|rerun-failed\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
@@ -861,6 +862,17 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             let sha = parsed.positional.get(2).ok_or_else(|| "Missing commit sha".to_string())?;
             require_ok(socket, &sirio_control::protocol::request::change_request_open_commit(sha))
         }
+        ("ci-log", "open") => require_ok(socket, &sirio_control::protocol::request::ci_log_open(&parsed.require("job")?)),
+        ("ci-log", "read") => require_ok(socket, &sirio_control::protocol::request::ci_log_read()),
+        ("ci-log", "view") => require_ok(
+            socket,
+            &sirio_control::protocol::request::ci_log_view(
+                parsed.value("toggle"),
+                parsed.flag("jump-error"),
+                parsed.flag("refresh"),
+                parsed.value("copy"),
+            ),
+        ),
         ("tabs", "read") => require_ok(socket, &sirio_control::protocol::request::tabs_read()),
         ("tabs", "select" | "close") => {
             let position = parsed

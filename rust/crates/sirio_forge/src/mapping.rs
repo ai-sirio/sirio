@@ -150,6 +150,34 @@ pub(crate) fn gitlab_job(status: &str) -> CheckStatus {
     }
 }
 
+/// A GitLab job (REST status, lower case) whose log will not grow. Unknown
+/// is not settled: the tab keeps reloading rather than freeze a live log.
+pub(crate) fn gitlab_job_settled(status: &str) -> bool {
+    matches!(status, "success" | "failed" | "canceled" | "skipped")
+}
+
+/// The number at the end of a GitLab global id — `gid://gitlab/Ci::Build/42`
+/// is 42 — or `None` for anything else.
+pub(crate) fn gitlab_gid_number(gid: &str) -> Option<u64> {
+    let (prefix, number) = gid.rsplit_once('/')?;
+    if !prefix.starts_with("gid://") || number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    number.parse().ok()
+}
+
+/// GitHub lets whoever can write to the repository re-run its workflows.
+/// An unknown permission is read as no permission.
+pub(crate) fn github_can_rerun(permission: Option<&str>) -> bool {
+    matches!(permission, Some("ADMIN" | "MAINTAIN" | "WRITE"))
+}
+
+/// GitHub re-runs a job only once the workflow run it belongs to has
+/// finished; `suite_status` is its check suite's `status`.
+pub(crate) fn github_job_retryable(suite_status: Option<&str>) -> bool {
+    suite_status == Some("COMPLETED")
+}
+
 /// GitHub's own decision wins; without one (a repository with no review
 /// policy) approvals still show.
 pub(crate) fn github_review(decision: Option<&str>, approvals: u32) -> ReviewState {
@@ -278,6 +306,7 @@ pub(crate) struct GitHubFacts<'a> {
     pub viewer_can_update: bool,
     pub viewer_can_close: bool,
     pub viewer_can_reopen: bool,
+    pub viewer_permission: Option<&'a str>,
 }
 
 /// GitHub says what the viewer may do in `viewerCan…` fields; what a state
@@ -299,6 +328,7 @@ pub(crate) fn github_capabilities(facts: GitHubFacts<'_>) -> Capabilities {
         can_toggle_draft: open && facts.viewer_can_update,
         can_edit_reviewers: facts.viewer_can_update,
         can_edit_labels: facts.viewer_can_update,
+        can_rerun_checks: github_can_rerun(facts.viewer_permission),
         merge: MergeCapability::default(),
     }
 }
@@ -315,6 +345,7 @@ pub(crate) struct GitLabFacts<'a> {
     /// Reviewers carry a review state on this server — the same generation
     /// of GitLab that can request changes.
     pub reports_review_state: bool,
+    pub can_update_pipeline: Option<bool>,
 }
 
 pub(crate) fn gitlab_capabilities(facts: GitLabFacts<'_>) -> Capabilities {
@@ -330,6 +361,7 @@ pub(crate) fn gitlab_capabilities(facts: GitLabFacts<'_>) -> Capabilities {
         can_toggle_draft: can_update && opened,
         can_edit_reviewers: can_update,
         can_edit_labels: can_update,
+        can_rerun_checks: facts.can_update_pipeline == Some(true),
         merge: MergeCapability::default(),
     }
 }
@@ -799,6 +831,67 @@ mod tests {
         assert_eq!(file_change_kind("SOMETHING_NEW"), None);
     }
 
+    #[test]
+    fn a_gitlab_job_is_settled_only_in_a_final_state() {
+        for status in ["success", "failed", "canceled", "skipped"] {
+            assert!(gitlab_job_settled(status), "{status}");
+        }
+        for status in ["created", "pending", "running", "manual", "scheduled", "waiting_for_resource", "preparing", "canceling", "something_new"] {
+            assert!(!gitlab_job_settled(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn a_gitlab_global_id_gives_its_number_or_nothing() {
+        assert_eq!(gitlab_gid_number("gid://gitlab/Ci::Build/42"), Some(42));
+        assert_eq!(gitlab_gid_number("gid://gitlab/Ci::Pipeline/7"), Some(7));
+        assert_eq!(gitlab_gid_number("gid://gitlab/Ci::Build/"), None);
+        assert_eq!(gitlab_gid_number("gid://gitlab/Ci::Build/-1"), None);
+        assert_eq!(gitlab_gid_number("gid://gitlab/Ci::Build/4x"), None);
+        assert_eq!(gitlab_gid_number("42"), None);
+        assert_eq!(gitlab_gid_number(""), None);
+    }
+
+    #[test]
+    fn only_write_access_or_above_may_rerun_on_github() {
+        for permission in ["ADMIN", "MAINTAIN", "WRITE"] {
+            assert!(github_can_rerun(Some(permission)), "{permission}");
+        }
+        for permission in ["TRIAGE", "READ", "write", "SOMETHING_NEW"] {
+            assert!(!github_can_rerun(Some(permission)), "{permission}");
+        }
+        assert!(!github_can_rerun(None));
+    }
+
+    #[test]
+    fn a_github_job_is_retryable_only_once_its_run_has_finished() {
+        assert!(github_job_retryable(Some("COMPLETED")));
+        for status in ["IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"] {
+            assert!(!github_job_retryable(Some(status)), "{status}");
+        }
+        assert!(!github_job_retryable(None));
+    }
+
+    #[test]
+    fn rerunning_follows_the_forges_permission_and_nothing_else() {
+        let mut facts = github_facts("OPEN");
+        facts.viewer_permission = Some("WRITE");
+        assert!(github_capabilities(facts).can_rerun_checks);
+        facts.viewer_permission = Some("READ");
+        assert!(!github_capabilities(facts).can_rerun_checks);
+        facts.viewer_permission = None;
+        assert!(!github_capabilities(facts).can_rerun_checks);
+
+        let mut facts = gitlab_facts("opened");
+        facts.can_update_pipeline = Some(true);
+        assert!(gitlab_capabilities(facts).can_rerun_checks);
+        facts.can_update_pipeline = Some(false);
+        assert!(!gitlab_capabilities(facts).can_rerun_checks);
+        // A baseline answer does not report it: not offered (spec §6).
+        facts.can_update_pipeline = None;
+        assert!(!gitlab_capabilities(facts).can_rerun_checks);
+    }
+
     fn github_facts(state: &'static str) -> GitHubFacts<'static> {
         GitHubFacts {
             state,
@@ -807,6 +900,7 @@ mod tests {
             viewer_can_update: true,
             viewer_can_close: true,
             viewer_can_reopen: true,
+            viewer_permission: None,
         }
     }
 
@@ -892,6 +986,7 @@ mod tests {
             can_update: Some(true),
             can_approve: Some(true),
             reports_review_state: true,
+            can_update_pipeline: None,
         }
     }
 
@@ -904,6 +999,7 @@ mod tests {
             can_update: None,
             can_approve: None,
             reports_review_state: false,
+            can_update_pipeline: None,
         });
         assert_eq!(
             caps,

@@ -1,6 +1,7 @@
 query MergeRequestHeader($fullPath: ID!, $iid: String!) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
+      headPipeline { userPermissions { updatePipeline } }
       ...MergeRequestSummary
       id
       discussionLocked

@@ -572,6 +572,8 @@ pub(crate) enum PaneContent {
     /// A change request, read-only (spec 2026-09-27): a Secondary look-at
     /// surface like the ones above.
     ChangeRequest(Entity<sirio_ui::change_request_tab::ChangeRequestTab>),
+    /// A CI job log in a read-only Secondary tab.
+    CiLog(Entity<sirio_ui::ci_log_tab::CiLogTab>),
 }
 
 impl PaneContent {
@@ -583,7 +585,8 @@ impl PaneContent {
             | Self::Changes(_)
             | Self::Browser(_)
             | Self::ProjectSettings(_)
-            | Self::ChangeRequest(_) => None,
+            | Self::ChangeRequest(_)
+            | Self::CiLog(_) => None,
         }
     }
 }

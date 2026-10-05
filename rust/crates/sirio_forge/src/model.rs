@@ -416,6 +416,8 @@ pub struct Capabilities {
     pub can_toggle_draft: bool,
     pub can_edit_reviewers: bool,
     pub can_edit_labels: bool,
+    /// Re-run a failed job or a run's failed jobs (spec §15.1).
+    pub can_rerun_checks: bool,
     pub merge: MergeCapability,
 }
 
@@ -463,6 +465,35 @@ pub enum CheckStatus {
     Neutral,
 }
 
+/// What makes a check a CI job Sirio can read and re-run: a GitHub Actions
+/// job or a GitLab CI job (spec §7.3, §15.1). A third-party check run and a
+/// GitHub `StatusContext` have none, and keep opening their page.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CheckJob {
+    /// GitHub: the check run's `databaseId`, which is the Actions job id.
+    /// GitLab: the number of `gid://gitlab/Ci::Build/N`.
+    pub job_id: u64,
+    /// The GitHub workflow run, or the GitLab pipeline, it ran in.
+    pub run_id: Option<u64>,
+    /// The forge would take a re-run of it now: on GitHub its run has
+    /// finished, on GitLab the job says `retryable`.
+    pub retryable: bool,
+}
+
+/// The tail of a CI job's log, as the forge served it (spec §7.4, §15.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Log {
+    /// Escape sequences and all; at most `LOG_TAIL_BYTES`, starting at a line.
+    pub bytes: Vec<u8>,
+    /// Bytes dropped from the start to keep the tail; 0 when it is whole.
+    pub dropped: u64,
+    /// The job has finished: its log will not grow.
+    pub complete: bool,
+    /// The forge serves a log for it yet. A GitHub job's log appears when
+    /// the job ends; a manual GitLab job that never ran has none.
+    pub published: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
     pub name: String,
@@ -471,6 +502,8 @@ pub struct Check {
     pub group: Option<String>,
     pub duration_secs: Option<u64>,
     pub url: Option<String>,
+    /// `Some` for a GitHub Actions job and a GitLab CI job only.
+    pub job: Option<CheckJob>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

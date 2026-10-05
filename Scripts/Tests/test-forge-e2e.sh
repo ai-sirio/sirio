@@ -283,7 +283,7 @@ expect_line "TRUNCATED no"
 probe "${GH[@]}" checks 101
 expect_line "CHECK passed CI build 240"
 expect_line "CHECK failed CI test 600"
-expect_line "CHECK running CI lint -"
+expect_line "CHECK running Lint lint -"
 expect_line "CHECK running - deploy/preview -"
 probe "${GH[@]}" files 101
 expect_line "FILE modified +100 -6 src/login.rs"

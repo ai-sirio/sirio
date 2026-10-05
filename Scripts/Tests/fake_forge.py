@@ -76,6 +76,8 @@ reads then serve `<Operation>.after.push.json`; `POST /__checking` stands for
 the forge still working out whether it can merge (`.after.checking.json`)
 until the next `/__reset`.
 
+`POST /__slowlog?seconds=N` answers every GitLab trace N seconds late, and
+`GET /__stats` says how many traces were ever answered at once.
 `POST /__ratelimit?seconds=N` rate limits every read with a reset N seconds
 ahead; `POST /__throttle` answers 429 with Retry-After and no reset until
 `/__reset`. That reset also clears both limits. `ChangeRequestSearch` keeps
@@ -129,6 +131,71 @@ NEWER_GITLAB_MUTATIONS = {"mergeRequestSetReviewers", "mergeRequestSetLabels"}
 NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"))
 
 
+ESC = "\x1b"
+
+
+def github_log(job):
+    """A GitHub job log the way Actions writes one: a BOM, a time on every
+    line, groups, colours, a progress line and an error marker."""
+    lines = [
+        "##[group]Run actions/checkout@v4",
+        "with:",
+        "  repository: acme/widgets",
+        "##[endgroup]",
+        "##[group]Run cargo test",
+        f"{ESC}[36;1mcargo test --workspace{ESC}[0m",
+        "   Compiling widgets v0.1.0",
+        "Downloading 10%\rDownloading 55%\rDownloading 100%",
+        f"test parses ... {ESC}[32mok{ESC}[0m",
+        f"test renders ... {ESC}[1;31mFAILED{ESC}[0m",
+        f"{ESC}[38;5;208mwarning{ESC}[0m: unused {ESC}[38;2;10;20;30mvariable{ESC}[0m",
+        "##[endgroup]",
+        f"##[error]Process completed with exit code {100 + job}.",
+        "Post job cleanup.",
+    ]
+    stamped = [f"2026-09-27T10:00:{i:02d}.0000000Z {line}" for i, line in enumerate(lines)]
+    return ("﻿" + "\n".join(stamped) + "\n").encode()
+
+
+def gitlab_log(job):
+    """A GitLab trace: sections, colours, a progress line; job 3 is still
+    running (half a trace), job 4 is manual (none)."""
+    if job == 4:
+        return b""
+    lines = [
+        f"{ESC}[0KRunning with gitlab-runner 17.0.0",
+        f"section_start:1727431200:prepare_script[collapsed=true]\r{ESC}[0K{ESC}[0K{ESC}[36;1mPreparing environment{ESC}[0;m",
+        "Running on runner-abc...",
+        f"section_end:1727431201:prepare_script\r{ESC}[0K",
+        f"section_start:1727431202:step_script\r{ESC}[0K{ESC}[0K{ESC}[36;1mExecuting \"step_script\" stage of the job script{ESC}[0;m",
+        f"{ESC}[32;1m$ bundle exec rspec{ESC}[0;m",
+        "Progress: |====      |\rProgress: |==========|",
+        f"{ESC}[31mFailures:{ESC}[0m",
+        "  1) Widget renders",
+        f"section_end:1727431260:step_script\r{ESC}[0K",
+        f"{ESC}[31;1mERROR: Job failed: exit code 1{ESC}[0;m",
+    ]
+    if job == 3:
+        lines = lines[:7]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def huge_log():
+    """Beyond the bounded CLI stdout buffer as well as the download cap."""
+    return b"huge\n" * ((80 * 1024 * 1024) // 5 + 1)
+
+
+def oversize_log():
+    """Just over the 64 MiB download limit, with short lines."""
+    line = b"oversized\n"
+    return line * ((64 * 1024 * 1024) // len(line) + 1)
+
+
+def big_log():
+    """Over the 4 MiB tail: about 5.6 MB of numbered lines."""
+    return "".join(f"line {i:07d} " + "x" * 80 + "\n" for i in range(60000)).encode()
+
+
 def strip_newer(value, parent=None):
     """What an older GitLab would have answered: the newer fields removed."""
     if isinstance(value, dict):
@@ -179,6 +246,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     applied_lock = threading.Lock()
     limit_until = 0.0
     throttled = False
+    expired = False
+    # A GitLab trace answered this many seconds late, and how many traces
+    # were ever being answered at once.
+    slow_log = 0.0
+    traces_at_once = 0
+    traces_at_once_max = 0
+    traces_lock = threading.Lock()
 
     def credential(self):
         auth = self.headers.get("Authorization") or ""
@@ -218,6 +292,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def answer_text(self, status, data, headers=()):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         for name, value in headers:
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(data)))
@@ -319,9 +402,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.remember("approve")
         return self.answer(201, {"id": 201, "iid": 201, "approved_by": [{"user": {"username": "fake-user"}}]})
 
+    def github_rerun(self, path):
+        """GitHub's re-runs are REST: a job, or a run's failed jobs."""
+        self.record("POST", path, None, None, None)
+        error = self.scenario_error()
+        if error:
+            return self.answer(error[0], error[1], error[2])
+        credential = self.credential()
+        if credential == "readonly":
+            return self.answer(403, {"message": "Must have admin rights to Repository."})
+        if credential == "slow":
+            time.sleep(1.5)
+        self.remember("rerun")
+        return self.answer(201, {})
+
     def do_GET(self):
         path = self.plain_path()
         self.body()
+        if path == "/__stats":
+            return self.answer(200, {"traces_at_once_max": Handler.traces_at_once_max})
+        if path.startswith("/__blob/"):
+            # The signed-URL host: what reaches it must carry no credential.
+            carried = "present" if (self.headers.get("Authorization") or self.headers.get("PRIVATE-TOKEN")) else "none"
+            self.record("GET", path, None, None, {"authorization": carried})
+            name = path[len("/__blob/"):]
+            if name == "huge.log":
+                return self.answer_text(200, huge_log())
+            if name == "oversize.log":
+                return self.answer_text(200, oversize_log())
+            if name == "big.log":
+                return self.answer_text(200, big_log())
+            found = re.fullmatch(r"github-job-(\d+)\.log", name)
+            if not found:
+                return self.answer(404, {"message": "Not Found"})
+            return self.answer_text(200, github_log(int(found.group(1))))
         self.record("GET", path, None, None, None)
         if self.flavor == "none":
             return self.answer(404, {"message": "Not Found"})
@@ -331,6 +445,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.flavor == "github":
                 return self.answer(200, {"installed_version": "3.17.0"})
             return self.answer(404, {"message": "404 Not Found"})
+        job = re.fullmatch(r"(?:/api/v3)?/repos/[^/]+/[^/]+/actions/jobs/(\d+)(/logs)?", path)
+        if self.flavor == "github" and job:
+            error = self.scenario_error()
+            if error:
+                return self.answer(error[0], error[1], error[2])
+            number = int(job.group(1))
+            if Handler.expired or number == 404:
+                return self.answer(404, {"message": "Not Found"})
+            running = number == 3
+            if not job.group(2):
+                return self.answer(200, {"id": number, "status": "in_progress" if running else "completed"})
+            if running:
+                return self.answer(404, {"message": "Not Found"})
+            port = self.server.server_address[1]
+            blob = {"biglog": "big.log", "oversizelog": "oversize.log", "hugelog": "huge.log"}.get(self.credential(), f"github-job-{number}.log")
+            # Another host name for the same loopback server, as GitHub's
+            # signed URL names another host.
+            return self.answer(302, {}, [("Location", f"http://localhost:{port}/__blob/{blob}?sig=fake")])
+        job = re.fullmatch(r"/api/v4/projects/[^/]+/jobs/(\d+)(/trace)?", path)
+        if self.flavor == "gitlab" and job:
+            error = self.scenario_error()
+            if error:
+                return self.answer(error[0], error[1], error[2])
+            number = int(job.group(1))
+            if Handler.expired or number == 404:
+                return self.answer(404, {"message": "404 Not Found"})
+            if not job.group(2):
+                status = {1: "success", 2: "failed", 3: "running", 4: "manual"}.get(number, "failed")
+                return self.answer(200, {"id": number, "status": status})
+            with Handler.traces_lock:
+                Handler.traces_at_once += 1
+                Handler.traces_at_once_max = max(Handler.traces_at_once_max, Handler.traces_at_once)
+            try:
+                time.sleep(Handler.slow_log)
+                return self.answer_text(200, gitlab_log(number))
+            finally:
+                with Handler.traces_lock:
+                    Handler.traces_at_once -= 1
         signed_in = (self.flavor == "github" and path in ("/", "/user", "/api/v3/user")) or (
             self.flavor == "gitlab" and path == "/api/v4/user"
         )
@@ -374,6 +526,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.plain_path()
         raw = self.body()
+        if path == "/__expire":
+            Handler.expired = True
+            return self.answer(200, {"expired": True})
         if path == "/__push":
             # Someone pushed to the head branch: reads serve `.after.push`.
             self.remember("push")
@@ -387,6 +542,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             seconds = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "5"))
             Handler.limit_until = time.time() + seconds
             return self.answer(200, {"limited_until": int(Handler.limit_until)})
+        if path == "/__slowlog":
+            # Every GitLab trace is answered N seconds late.
+            Handler.slow_log = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "0"))
+            return self.answer(200, {"slow_log": Handler.slow_log})
         if path == "/__throttle":
             # Every request answers 429 with no reset time, until /__reset.
             Handler.throttled = True
@@ -396,9 +555,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 del self.applied[:]
             Handler.limit_until = 0.0
             Handler.throttled = False
+            Handler.expired = False
+            Handler.slow_log = 0.0
+            Handler.traces_at_once_max = 0
             return self.answer(200, {"reset": True})
         if self.flavor != "none" and path.startswith("/api/v4/"):
             return self.rest_write(path)
+        if self.flavor == "github" and re.fullmatch(
+            r"(/api/v3)?/repos/[^/]+/[^/]+/actions/(runs/\d+/rerun-failed-jobs|jobs/\d+/rerun)", path
+        ):
+            return self.github_rerun(path)
         if self.flavor == "none" or path not in ("/graphql", "/api/graphql"):
             self.record("POST", path, None, None, None)
             return self.answer(404, {"message": "Not Found"})

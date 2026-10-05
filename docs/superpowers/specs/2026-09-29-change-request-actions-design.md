@@ -591,3 +591,211 @@ built and run; §14.2 lists what was not.
 - The two `ActChangeRequest` enforcement arms in `sirio`'s `#[cfg(windows)]`
   test helpers were added by hand; they neither compile nor run on Linux, so
   they are checked only by the macOS/Windows CI.
+
+## §15 Slice B2c on Ely (2026-10-04)
+
+`docs/superpowers/specs/2026-10-03-change-requests-on-ely-design.md` moved
+every change-request surface to Ely and left B2c to its own brainstorm (its
+§11). Settled with the user on 2026-10-04; each item supersedes the sentence
+of this spec it names, and everything else in §4–§13 about B2c stands — the
+forge side (`CheckJob`, `Rerun`, `job_log`, the redirect carrying no
+credential, the tail), `TabKind::CiLog` and its persistence, and the proof.
+
+### §15.1 Checks (supersedes §7.2, §7.3)
+
+- **Checks are grouped by run**: a header per workflow (GitHub) or stage
+  (GitLab) — a disclosure chevron, the group's name, its count — with its jobs
+  under it, failed first, then running, queued and settled. A group with
+  nothing failed or running starts folded. Checks with no group (a GitHub
+  `StatusContext`, a third-party check run) sit together under *Other checks*.
+- ***Re-run failed*** is an `IconButton` on the header of a GitHub workflow
+  whose run has a failed or canceled job (`Rerun::FailedInRun`). GitLab retries
+  failed jobs per **pipeline**, not per stage, so there it sits once, on a row
+  above the stages naming the pipeline; its stages have none.
+- **Each job row**: a click opens its log in Sirio (§15.2) — the same job again
+  focuses its tab; a check with no `job` keeps opening its URL in the browser.
+  On the right, an `IconButton` *Re-run* on a failed or canceled job
+  (`Rerun::Job`) and an *Open in browser* when the check has a URL.
+- **Who may re-run**: `Capabilities.can_rerun_checks`, from the repository's
+  `viewerPermission` (write or above) on GitHub and the pipeline's
+  `userPermissions.updatePipeline` on GitLab; a job the forge says is not
+  retryable (`retryable` on GitLab, a run still in progress on GitHub) has no
+  button. A re-run is an action like the others (§5): no confirmation, one
+  write in flight per tab (§14.1 item 4), then the checks and the header are
+  re-read.
+
+### §15.2 The log tab (supersedes §7.4's drawing)
+
+- **Ely chrome**: a toolbar of `IconButton`s — *Refresh*, *Jump to first
+  error* (disabled when the log marks none), *Copy log*, *Open in browser* —
+  over the job's name and status; loading is a `Skeleton`; every failure is a
+  `Callout` with *Retry* (and *Close*, §8).
+- **The body is a gpui `uniform_list` of lines, never wrapped**: every row the
+  same height, a horizontal scroll for long lines, a line-number gutter. Ely's
+  only virtual list (`lists/long.rs`, upstream only) measures each row and is
+  not used for a log of a hundred thousand lines.
+- **Groups fold** with Ely's disclosure chevron on the group's first line; a
+  group's header carries a *Copy* `IconButton` for the group's text. An
+  unclosed group runs to the end of the log.
+- **Selection is per line** through `selectable_text`, each line with its own
+  `.id(..)`; copying more than a line goes through *Copy log* and a group's
+  *Copy*, which copy the text without escape sequences.
+- **Colours**: the sixteen SGR colours are the theme's `ely.ansi` palette, the
+  terminal's own; 256-colour and true-colour codes are drawn as given.
+- **The tail cap is 4 MiB**, cut at a line boundary; a cut log says how much it
+  kept and offers *Open in browser*.
+- **A running job's log reloads every 5 s**, only while the tab is visible,
+  and stops once the job is settled.
+
+### §15.3 Socket
+
+- Every build: `surface.ci_log.open` (by the check's index or job id in an open
+  change request tab) and `surface.ci_log.read` — the title, the job's status,
+  the line count, the folds, the first error's line, `truncated`, `complete`,
+  and whether the tab is reloading.
+- Debug builds only, through the existing `surface.change_request.act` door:
+  `rerun-job --job ID` and `rerun-failed --run ID`.
+
+### §15.4 Revised while building
+
+The B2c implementation and its proof made these changes to the plan. The
+controller's ruling on control strings supersedes the earlier multiline
+strategy; §15.1–§15.3 remain the drawing contract.
+
+**Forge and transport**
+
+- `RestRequest.log`, rather than a new `follow_redirects` field, identifies
+  log reads. The token transport disables their redirects; the signed URL
+  is fetched separately without a credential. `gh` follows the redirect
+  itself, and its request to the fake signed-log host carried no
+  `Authorization`. Its log call uses `--allow-escape-sequences`.
+- GitHub's job is retryable only when its check suite reports `COMPLETED`;
+  a failed job in a still-running suite has no *Re-run*. GitLab keeps its
+  `retryable` answer. Probe output adds `JOB` (job id, run id, retryable)
+  and `RERUN` (the viewer's permission).
+- Generated readonly headers explicitly set GitHub `viewerPermission` to
+  `READ` and GitLab `updatePipeline` to false. Inheriting the writable
+  fixture's permissions would falsely expose re-runs.
+- A log download is bounded at **64 MiB**, before the **4 MiB** retained
+  tail. Both token and CLI means reject a body above the download bound;
+  CLI stdout is bounded too, with room for HTTP framing. Non-log CLI reads
+  retain their existing behavior.
+- If the retained tail begins inside an overlong line, its cut advances
+  past a UTF-8 character or a partial CSI, control string or ordinary
+  escape. A fragment such as `31mred` must not become visible text.
+
+**Parsing**
+
+- GitLab's first error is the first rendered line starting `ERROR: `;
+  an `ERROR:` inside a line is not a marker. Leading `ESC[0K` is removed
+  before recognizing GitLab's section markers so those sections fold.
+- Control strings (OSC, DCS, SOS, PM, APC) and ordinary escape sequences
+  with multiple intermediates are consumed as whole sequences. A control
+  string ends at ST, at BEL for OSC, or at the end of its line, whichever
+  comes first. An unterminated introducer must leave later lines visible,
+  including a later `ERROR: ` that *Jump to first error* can find. This is
+  the controller's correction to the initial multiline consumption.
+- Carriage return clears overwritten text and spans while retaining the
+  current SGR style. Spans use UTF-8 byte ranges. The color assertion for
+  `42;103` was corrected: 103 supersedes 42 and selects bright yellow,
+  `Ansi(11)`, rather than green.
+
+**Log tab and host integration**
+
+- The log tab shares `Slot::begin` and `Slot::finish` at crate visibility.
+  Its retained vertical scrollbar is created lazily on first render,
+  because `ScrollbarState` needs `Painter::of(cx)` and the tab's constructor
+  has no context. An empty published log supplies no width-sample row.
+- The sidebar's exhaustive match had to gain the log arm before the UI
+  crate could build. The sidebar and host use the existing `SquareTerminal`
+  glyph; the tab remains in the Secondary half.
+- Ely's actual interfaces use `Severity::Danger`, a vector of text
+  highlights, and inherited foreground from a surrounding `div` for
+  selectable marker text. The CLI borrows its owned parsed job argument
+  for the `ci_log_open` request builder.
+- Refresh failure retains the last good log but reports `state=error`.
+  Unreachable, failed and stale states, including stale unpublished logs,
+  use an Ely `Callout` with selectable text, *Retry* and *Close*.
+- The socket's `top` report uses a pending `DeferredScrollToItem` index
+  before the painted scroll position. State-only E2E proves the logical
+  jump request; the actual viewport placement needs a framed run.
+
+**Checks and actions**
+
+- A queued-only group starts folded, as §15.1 requires; queued jobs still
+  sort ahead of settled jobs. Group keys have separate run and group
+  namespaces, so a bare workflow name `CI#1` cannot alias `CI` run 1, and
+  a stage named `other` cannot share *Other checks*' disclosure override.
+- A re-run's `Forbidden` message needs the action kind, now passed through
+  the error formatter. The existing candidate-read caller supplies its
+  own kind and retains its previous remedy. The control protocol comment
+  and CLI help include `rerun-job` and `rerun-failed`, as the plan's step
+  required despite omitting those files from its file list.
+- Refreshed groups are sorted afresh: after GitHub job 2 queues, running
+  *Lint* precedes *CI*. The E2E pins the complete refreshed row string;
+  replacing just `failed` with `queued` would preserve the wrong order.
+- The readonly UI assertion starts from a reset, failed job, so absence
+  of *Re-run* proves permission gating rather than a queued job's lack of
+  retryability. The raw action is refused locally and sends no re-run.
+  After restoring the good token, the harness reselects and loads *Checks*
+  before opening a log.
+
+**Proof and compatibility**
+
+- Permission tests use the existing state-taking builders on open change
+  requests. Existing action test literals gained `can_rerun_checks: false`;
+  adding that public field did not change those actions. Task 2 added one
+  library test and extended another, so its count rose from 125 to 126,
+  not by two. The grouping filter was widened to run all four named tests,
+  rather than just the one whose name starts with `check`.
+- The unknown-job E2E selects *Checks* before requesting job 999 and checks
+  the lookup error, avoiding a false pass on the active-tab type guard.
+  Both forges also prove fold toggling, restoration of visible lines and
+  nonempty group copy, which the original E2E snippet omitted.
+- Quit/restore waits for the owned app PID, removes that harness's old
+  socket inode, then launches again. It shows the right-panel list before
+  changing credentials or reopening a change request after restore.
+- Commands run in the implementation worktree with artifacts under the
+  exported cache `TMPDIR`; the diff harness's hardcoded `/tmp` template
+  was changed to honor it. The wire-only `test-forge-e2e.sh` has no
+  `--state-only` flag; the UI-bearing scripts use it. The required nextest
+  suite uses empty `gh`/`glab` configurations and unsets forge tokens, so
+  its live conformance bodies print `SKIP:` rather than touch real forges.
+  The first Task 1 suite was interrupted before any live test ran; its
+  cancellations were not product failures, and the isolated suite passed.
+- The diff harness waits for its initial unsigned host probe to settle
+  before the socket saves a token, matching the visible sign-in flow and
+  the forge UI E2E. Saving earlier allowed the old probe to cache an
+  unsigned resolution after the token save had invalidated it; the list
+  could load while the detail was unreachable. The full regression
+  exposed this twice, in its 401 and hanging-fetch scenarios.
+- The actions harness accepts `--appearance light|dark` and seeds each
+  isolated CI/UI database through `appearance_seed`. State-only proof
+  establishes re-runs, bounded log reads, parser output, folds, copy and
+  restoration. Drawing and the running-log timer's visible, hidden, slow
+  and rate-limited branches are proven by the framed run.
+- After the final review: a tick never starts a second read of a log while
+  one is in flight, and spends its drawn mark only on a read that starts,
+  so a rate-limited log resumes after the reset by itself. The signed URL
+  is fetched https-only at every hop in a release build. A restored tab
+  keeps its link only as `https://` on its change request's host, and its
+  name without control characters, capped at 120.
+
+### §15.5 Not verified
+
+- Selection inside a log line, dragging the scrollbars, and *Jump to first
+  error* in a log long enough to scroll. The dark and light frames, the
+  drawn jump in a log that fits, and the reload timer (visible, hidden,
+  slow, rate-limited and resuming after the reset) were seen on 2026-10-05
+  (testing document, *What was seen*).
+- The `glab` paths, including log reads and GitLab CLI writes: `glab` is
+  not installed on the implementation machine. Token means on both fake
+  forges and the installed `gh` means are exercised.
+- A live GitHub running job's log, or any live forge write. A fake running
+  GitHub job proves the unpublished-log state; live conformance is
+  deliberately skipped with isolated credentials.
+- macOS, Windows and Wayland. The `#[cfg(windows)]` test helpers were
+  updated for the log pane but neither compiled nor executed on Linux.
+- Overlapping a socket token save with initial host resolution. The diff
+  harness now follows the visible sign-in order; the production resolution
+  cache's handling of that overlapping socket sequence is unchanged.

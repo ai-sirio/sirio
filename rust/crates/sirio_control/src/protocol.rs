@@ -553,6 +553,37 @@ pub mod request {
         )
     }
 
+    /// Opens the log of a CI job of the active change request's checks.
+    /// Reads and navigates only, so every build serves it.
+    pub fn ci_log_open(job: &str) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        params.insert("job".to_string(), job.to_string());
+        request("surface.ci_log.open", params)
+    }
+
+    pub fn ci_log_read() -> ControlRequest {
+        request("surface.ci_log.read", BTreeMap::new())
+    }
+
+    /// The log tab's own buttons: fold a group, jump to the first error,
+    /// Refresh, Copy. Writes nothing to a forge.
+    pub fn ci_log_view(toggle: Option<&str>, jump_error: bool, refresh: bool, copy: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if let Some(toggle) = toggle {
+            params.insert("toggle".to_string(), toggle.to_string());
+        }
+        if jump_error {
+            params.insert("jump_error".to_string(), "true".to_string());
+        }
+        if refresh {
+            params.insert("refresh".to_string(), "true".to_string());
+        }
+        if let Some(copy) = copy {
+            params.insert("copy".to_string(), copy.to_string());
+        }
+        request("surface.ci_log.view", params)
+    }
+
     pub fn change_request_read() -> ControlRequest {
         request("surface.change_request.read", BTreeMap::new())
     }
@@ -586,7 +617,8 @@ pub mod request {
 
     /// Runs one write on the active change request's tab: the buttons' own
     /// handlers, by name (`close`, `reopen`, `ready`, `draft`, `compose`,
-    /// `send`, `edit`, `edit-comment`), with their text in `params`. A debug
+    /// `send`, `edit`, `edit-comment`, `rerun-job`, `rerun-failed`), with their
+    /// text in `params`. A debug
     /// build of Sirio answers it; a release build answers "unknown method", so
     /// nothing that can write to a forge is reachable over the socket
     /// (spec §10).

@@ -227,7 +227,7 @@ impl ChangeRequestTab {
                         picker.found = Some(found);
                         picker.error = None;
                     }
-                    Err(error) => picker.error = Some(actions::action_error_text(&error, forge)),
+                    Err(error) => picker.error = Some(actions::action_error_text(&error, forge, "candidates")),
                 }
                 cx.notify();
             });

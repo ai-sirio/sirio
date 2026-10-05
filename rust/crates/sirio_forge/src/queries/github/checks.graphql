@@ -10,7 +10,7 @@ query ChangeRequestChecks($owner: String!, $name: String!, $number: Int!, $after
                 pageInfo { hasNextPage endCursor }
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion startedAt completedAt detailsUrl checkSuite { workflowRun { workflow { name } } } }
+                  ... on CheckRun { databaseId name status conclusion startedAt completedAt detailsUrl checkSuite { status workflowRun { databaseId workflow { name } } } }
                   ... on StatusContext { context state targetUrl createdAt }
                 }
               }

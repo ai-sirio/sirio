@@ -1,6 +1,7 @@
 query MergeRequestActionContext($fullPath: ID!, $iid: String!) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
+      headPipeline { userPermissions { updatePipeline } }
       id state draft discussionLocked diffHeadSha
       detailedMergeStatus squashOnMerge squashReadOnly autoMergeEnabled availableAutoMergeStrategies shouldRemoveSourceBranch
       userPermissions { canApprove canMerge createNote updateMergeRequest }
