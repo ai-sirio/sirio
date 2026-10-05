@@ -7462,6 +7462,10 @@ name = "sirio_host_client"
 version = "0.31.0"
 dependencies = [
  "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "sirio_host_protocol",
+ "sirio_ipc",
  "windows-sys 0.61.2",
 ]
 

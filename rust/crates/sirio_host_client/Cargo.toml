@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+sirio_ipc = { path = "../sirio_ipc" }
+sirio_host_protocol = { path = "../sirio_host_protocol" }
+serde_json = "1"
+sha2 = "0.10"
 
 # Win32_Security is needed by `CreateJobObjectW` (its first parameter is a
 # SECURITY_ATTRIBUTES pointer); the probe's `job` role calls it. Same
