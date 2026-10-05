@@ -40,7 +40,7 @@
 //! human surface is the honest one.
 
 use gpui::{
-    AnyElement, App, AppContext, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight,
+    AnyElement, AnyView, App, AppContext, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, Pixels,
     HighlightStyle, Hsla, Render, SharedString, Task, Window, canvas, div, list, prelude::*, px,
 };
@@ -71,6 +71,7 @@ use ely_gpui_component::{
     theme::{ControlSize, IconSize as EIconSize},
 };
 use crate::horizontal_scroll::{self, HorizontalBarState};
+use crate::diff_annotations::{Annotation, AnnotationKind, AnnotationSide, anchored_lines, band_pieces, matches_row};
 use crate::text_selection::{SelectableText, selectable_text};
 
 #[cfg(test)]
@@ -268,11 +269,19 @@ pub struct ChangesSectionReport {
     pub files: Vec<ChangesFileReport>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotationReport {
+    pub key: u64,
+    pub path: PathBuf,
+    pub placed: &'static str,
+}
+
 /// The live state currently held by one mounted Changes surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangesReport {
     pub repo_root: PathBuf,
     pub sections: Vec<ChangesSectionReport>,
+    pub annotations: Vec<AnnotationReport>,
     pub loading: bool,
     pub error: Option<String>,
     /// The Discard confirmation open over the surface, if any:
@@ -363,6 +372,12 @@ struct SectionRows {
 /// Stage/Unstage action acts on the right side of the split.
 #[derive(Clone, Debug)]
 enum ChangeRow {
+    Annotation {
+        section: ChangeSection,
+        path: PathBuf,
+        key: u64,
+        revision: u64,
+    },
     File {
         section: ChangeSection,
         entry: StatusEntry,
@@ -511,6 +526,13 @@ impl ListRow {
                     section.hash(state);
                     path.hash(state);
                 }
+                ChangeRow::Annotation { section, path, key, revision } => {
+                    7u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    key.hash(state);
+                    revision.hash(state);
+                }
             },
         }
     }
@@ -568,6 +590,10 @@ pub struct ChangesTab {
     source: ChangesSource,
     entries: Vec<StatusEntry>,
     diffs: HashMap<PathBuf, FileDiff>,
+    annotations: Vec<Annotation>,
+    annotation_views: Rc<HashMap<u64, AnyView>>,
+    open_threads: Rc<HashMap<PathBuf, usize>>,
+    reveal_annotation: Option<u64>,
     stats: HashMap<PathBuf, DiffStat>,
     /// Expanded file rows, keyed by (section, path): a path that appears in
     /// Staged and Changed at once expands independently in each.
@@ -646,7 +672,7 @@ pub struct ChangesTab {
     last_focus: Option<PathBuf>,
     /// A `focus_line` request not yet drawn; consumed by the frame that can
     /// scroll to it.
-    reveal_line: Option<(PathBuf, usize)>,
+    reveal_line: Option<(PathBuf, AnnotationSide, Option<usize>)>,
     /// #325: the keyboard-selected file row, keyed like `expanded_changes`
     /// because one path can appear in two sections and Enter has to act on
     /// the one the user is actually on.
@@ -815,6 +841,10 @@ impl ChangesTab {
             split_viewport: px(0.0),
             split_left_bar_state: HorizontalBarState::default(),
             split_right_bar_state: HorizontalBarState::default(),
+            annotations: Vec::new(),
+            annotation_views: Rc::default(),
+            open_threads: Rc::default(),
+            reveal_annotation: None,
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -893,6 +923,7 @@ impl ChangesTab {
         ChangesReport {
             repo_root: self.repo_root.clone(),
             sections,
+            annotations: self.annotation_reports(),
             loading: self.git_task.is_some(),
             error: self.git_error.clone(),
             dialog: self.discard_ask.as_ref().map(|ask| match ask {
@@ -900,6 +931,49 @@ impl ChangesTab {
                 DiscardAsk::All(_) => "discard-all".to_string(),
             }),
         }
+    }
+
+    /// The diff's owner supplies the cards; this surface owns their rows.
+    pub fn set_annotations(
+        &mut self,
+        annotations: Vec<Annotation>,
+        views: HashMap<u64, AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut open_threads = HashMap::new();
+        for annotation in &annotations {
+            if matches!(annotation.kind, AnnotationKind::Thread { open: true }) {
+                *open_threads.entry(annotation.path.clone()).or_insert(0) += 1;
+            }
+        }
+        self.annotations = annotations;
+        self.annotation_views = Rc::new(views);
+        self.open_threads = Rc::new(open_threads);
+        self.unified_width_dirty = true;
+        cx.notify();
+    }
+
+    fn annotation_reports(&self) -> Vec<AnnotationReport> {
+        if self.annotations.is_empty() {
+            return Vec::new();
+        }
+        let rows: Vec<ChangeRow> = self.section_rows(self.unified_mode)
+            .into_iter().flat_map(|section| section.rows).collect();
+        self.annotations.iter().map(|annotation| {
+            let drawn = rows.iter().any(|row| matches!(row,
+                ChangeRow::Annotation { key, path, .. }
+                    if *key == annotation.key && path == &annotation.path));
+            let placed = if !drawn {
+                "hidden"
+            } else if matches!(annotation.kind, AnnotationKind::Outdated { .. }) {
+                "section"
+            } else if rows.iter().any(|row| annotation_matches_row(annotation, row)) {
+                "line"
+            } else {
+                "file"
+            };
+            AnnotationReport { key: annotation.key, path: annotation.path.clone(), placed }
+        }).collect()
     }
 
     fn apply_snapshot(&mut self, snapshot: GitSnapshot, cx: &mut Context<Self>) {
@@ -1377,7 +1451,23 @@ impl ChangesTab {
     /// line `line`, and scrolls that row into view once its diff has loaded.
     /// A line that is in no hunk (an outdated comment) reveals the file's row.
     pub fn focus_line(&mut self, path: &Path, line: usize, cx: &mut Context<Self>) {
-        self.reveal_line = Some((path.to_path_buf(), line));
+        self.reveal_annotation = None;
+        self.reveal_line = Some((path.to_path_buf(), AnnotationSide::New, Some(line)));
+        self.focus_path(path, cx);
+        self.resolve_reveal_line(cx);
+    }
+
+    /// Opens the file and reveals its annotation, or a line on either side.
+    pub fn focus_anchor(
+        &mut self,
+        path: &Path,
+        side: AnnotationSide,
+        line: Option<u32>,
+        key: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_annotation = key;
+        self.reveal_line = Some((path.to_path_buf(), side, line.map(|line| line as usize)));
         self.focus_path(path, cx);
         self.resolve_reveal_line(cx);
     }
@@ -1385,13 +1475,18 @@ impl ChangesTab {
     /// Runs when a diff lands and when a reveal is requested: opens the band
     /// that hides the pending line, so the next frame has a row to scroll to.
     fn resolve_reveal_line(&mut self, cx: &mut Context<Self>) {
-        let Some((path, line)) = self.reveal_line.clone() else {
+        let Some((path, side, Some(line))) = self.reveal_line.clone() else {
             return;
         };
         let Some(diff) = self.diffs.get(&path) else {
             return;
         };
-        if let Some(key) = band_key_containing(diff, line) {
+        let key = if self.annotations.is_empty() {
+            band_key_containing(diff, side, line)
+        } else {
+            band_key_containing_annotations(diff, &self.annotations, side, line)
+        };
+        if let Some(key) = key {
             for section in ChangeSection::ORDER {
                 if self.is_expanded(section, &path) {
                     self.expanded_bands.insert((section, path.clone(), key));
@@ -1518,7 +1613,7 @@ impl ChangesTab {
                 let path = entry.path.clone();
                 self.expanded_changes.insert((section, path.clone()));
                 if let Some(diff) = self.diffs.get(&path) {
-                    for (key, _) in context_band_keys(diff) {
+                    for (key, _) in context_band_keys(diff, &self.annotations) {
                         self.expanded_bands.insert((section, path.clone(), key));
                     }
                 }
@@ -1610,6 +1705,7 @@ impl ChangesTab {
         entry: &StatusEntry,
         mode: DiffViewMode,
     ) {
+        let file_start = rows.len();
         let Some(diff) = self.diffs.get(&entry.path) else {
             // The diff failed to load: say so explicitly. Rows that render
             // nothing here would make an expanded file look like "no
@@ -1623,6 +1719,7 @@ impl ChangesTab {
                     failed: true,
                 });
             }
+            self.splice_annotations(rows, file_start, section, &entry.path);
             return;
         };
         // F-CHG-15: a binary file has no text diff by definition -- git
@@ -1641,6 +1738,7 @@ impl ChangesTab {
                 message: "Binary diff unavailable".to_string(),
                 failed: false,
             });
+            self.splice_annotations(rows, file_start, section, &entry.path);
             return;
         }
         // A run of unchanged context lines collapses into one labelled band
@@ -1652,6 +1750,7 @@ impl ChangesTab {
         let mut line_index = 0usize;
         // Running index of the split rows this file emits, for element ids.
         let mut split_key = 0usize;
+        let (old, new) = anchored_lines(&self.annotations, &entry.path);
         for hunk in &diff.hunks {
             rows.push(ChangeRow::Hunk {
                 section,
@@ -1681,6 +1780,29 @@ impl ChangesTab {
                 }
                 let count = segment.len();
                 let key = line_index + start;
+                let indices = anchored_indices(segment, &old, &new);
+                if !indices.is_empty() {
+                    for piece in band_pieces(count, &indices, CONTEXT_BAND_MIN) {
+                        let piece_key = key + piece.start;
+                        let expanded = self.is_band_expanded(section, &entry.path, piece_key);
+                        if piece.band {
+                            rows.push(ChangeRow::ContextBand {
+                                section,
+                                path: entry.path.clone(),
+                                key: piece_key,
+                                count: piece.end - piece.start,
+                                expanded,
+                            });
+                        }
+                        if !piece.band || expanded {
+                            push_segment(
+                                rows, section, &entry.path, &segment[piece.start..piece.end],
+                                mode, &mut split_key,
+                            );
+                        }
+                    }
+                    continue;
+                }
                 let expanded = self.is_band_expanded(section, &entry.path, key);
                 if count >= CONTEXT_BAND_MIN {
                     rows.push(ChangeRow::ContextBand {
@@ -1698,6 +1820,44 @@ impl ChangesTab {
                 }
             }
             line_index += hunk.lines.len();
+        }
+        self.splice_annotations(rows, file_start, section, &entry.path);
+    }
+
+    fn splice_annotations(
+        &self,
+        rows: &mut Vec<ChangeRow>,
+        file_start: usize,
+        section: ChangeSection,
+        path: &Path,
+    ) {
+        let annotations: Vec<&Annotation> = self.annotations.iter()
+            .filter(|annotation| annotation.path == path).collect();
+        if annotations.is_empty() {
+            return;
+        }
+        let file_rows = rows.split_off(file_start);
+        let placed: HashSet<u64> = annotations.iter().filter(|annotation| {
+            file_rows.iter().any(|row| annotation_matches_row(annotation, row))
+        }).map(|annotation| annotation.key).collect();
+        let annotation_row = |annotation: &Annotation| ChangeRow::Annotation {
+            section,
+            path: path.to_path_buf(),
+            key: annotation.key,
+            revision: annotation.revision,
+        };
+        rows.extend(annotations.iter().filter(|annotation| {
+            matches!(annotation.kind, AnnotationKind::Outdated { .. })
+        }).map(|annotation| annotation_row(annotation)));
+        rows.extend(annotations.iter().filter(|annotation| {
+            matches!(annotation.kind, AnnotationKind::Thread { .. }) && !placed.contains(&annotation.key)
+        }).map(|annotation| annotation_row(annotation)));
+        for row in file_rows {
+            let following: Vec<ChangeRow> = annotations.iter()
+                .filter(|annotation| annotation_matches_row(annotation, &row))
+                .map(|annotation| annotation_row(annotation)).collect();
+            rows.push(row);
+            rows.extend(following);
         }
     }
 
@@ -1746,7 +1906,8 @@ impl ChangesTab {
                 }
             }
         }
-        if let Some((path, line)) = self.reveal_line.clone() {
+        let reveal = self.reveal_line.clone();
+        if let Some((path, side, line)) = reveal.clone() {
             // The line's row exists once the diff is here. A diff that
             // failed, or a path the surface does not list, will never bring
             // it: the reveal is spent on the file's row instead of being
@@ -1755,8 +1916,29 @@ impl ChangesTab {
             let settled = self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) || !listed;
             if settled {
                 self.reveal_line = None;
-                if let Some(index) = reveal_target(&rows, &path, line) {
-                    self.list_state.scroll_to_reveal_item(index);
+                if self.reveal_annotation.is_none() {
+                    let target = match (side, line) {
+                        (AnnotationSide::New, Some(line)) => reveal_target(&rows, &path, line),
+                        _ => reveal_anchor_target(&rows, &path, side, line),
+                    };
+                    if let Some(index) = target {
+                        self.list_state.scroll_to_reveal_item(index);
+                    }
+                }
+            }
+        }
+        if let Some(key) = self.reveal_annotation {
+            let path = reveal.as_ref().map(|(path, _, _)| path).or(self.last_focus.as_ref());
+            if let Some(path) = path {
+                let listed = self.entries.iter().any(|entry| &entry.path == path);
+                let settled = self.diffs.contains_key(path) || self.diff_errors.contains_key(path) || !listed;
+                if settled {
+                    self.reveal_annotation = None;
+                    let target = reveal_annotation(&rows, key)
+                        .or_else(|| reveal_anchor_target(&rows, path, AnnotationSide::New, None));
+                    if let Some(index) = target {
+                        self.list_state.scroll_to_reveal_item(index);
+                    }
                 }
             }
         }
@@ -1772,6 +1954,8 @@ impl ChangesTab {
         draws_open_diff: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
         forge: Option<Rc<ForgeFiles>>,
+        annotation_view: Option<AnyView>,
+        open_threads: usize,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -1796,6 +1980,7 @@ impl ChangesTab {
                         allows_staging,
                         draws_open_diff,
                         is_selected,
+                        open_threads,
                         entity,
                         theme,
                     ))
@@ -1910,6 +2095,15 @@ impl ChangesTab {
                     )
                     .into_any_element()
             }
+            ChangeRow::Annotation { .. } => match annotation_view {
+                Some(view) => div()
+                    .w_full()
+                    .pl(px(DIFF_ROW_PADDING))
+                    .py(px(4.0))
+                    .child(view)
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
         }
     }
 
@@ -2054,6 +2248,7 @@ impl ChangesTab {
         allows_staging: bool,
         draws_open_diff: bool,
         is_selected: bool,
+        open_threads: usize,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -2146,6 +2341,13 @@ impl ChangesTab {
                     EDiffStat::new(stat.additions, stat.deletions).into_any_element()
                 }
                 _ => div().text_color(theme.ely.fg_subtle).child("·").into_any_element(),
+            })
+            .when(open_threads > 0, |this| {
+                this.child(EIcon::new(IconName::MessageSquare).size(EIconSize::Sm))
+                    .child(CountBadge::new(
+                        format!("changes-threads-{}", entry.path.display()),
+                        open_threads,
+                    ))
             })
             .when(expanded, |this| {
                 this.child(
@@ -2526,19 +2728,52 @@ impl ChangesTab {
 impl EventEmitter<ChangesTabEvent> for ChangesTab {}
 impl EventEmitter<ChangesTabActionEvent> for ChangesTab {}
 
-/// The row a reveal of `path`:`line` scrolls to: the row showing that new
-/// line, or the file's own row when the line is in no hunk (an outdated
-/// comment).
+/// Whether a drawn code row carries this annotation's path and line.
+fn annotation_matches_row(annotation: &Annotation, row: &ChangeRow) -> bool {
+    let (path, old, new) = match row {
+        ChangeRow::Line { path, line, .. } => (path, line.old_line_number, line.new_line_number),
+        ChangeRow::SplitLine { path, row, .. } => (
+            path,
+            row.left.as_ref().and_then(|line| line.old_line_number),
+            row.right.as_ref().and_then(|line| line.new_line_number),
+        ),
+        _ => return false,
+    };
+    path == &annotation.path && matches_row(
+        annotation,
+        old.and_then(|number| u32::try_from(number).ok()),
+        new.and_then(|number| u32::try_from(number).ok()),
+    )
+}
+
+fn reveal_annotation(rows: &[ListRow], key: u64) -> Option<usize> {
+    rows.iter().position(|row| matches!(row,
+        ListRow::Change(ChangeRow::Annotation { key: row_key, .. }) if *row_key == key))
+}
+
+/// The new-side line's row, or the file header when the line is absent.
 fn reveal_target(rows: &[ListRow], path: &Path, line: usize) -> Option<usize> {
+    reveal_anchor_target(rows, path, AnnotationSide::New, Some(line))
+}
+
+fn reveal_anchor_target(
+    rows: &[ListRow], path: &Path, side: AnnotationSide, line: Option<usize>,
+) -> Option<usize> {
     rows.iter()
         .position(|row| match row {
             ListRow::Change(ChangeRow::Line { path: row_path, line: row_line, .. }) => {
-                row_path == path && row_line.new_line_number == Some(line)
+                let number = match side {
+                    AnnotationSide::Old => row_line.old_line_number,
+                    AnnotationSide::New => row_line.new_line_number,
+                };
+                row_path == path && line.is_some() && number == line
             }
-            // Split mode: the new line is on the row's right side.
             ListRow::Change(ChangeRow::SplitLine { path: row_path, row, .. }) => {
-                row_path == path
-                    && row.right.as_ref().and_then(|side| side.new_line_number) == Some(line)
+                let number = match side {
+                    AnnotationSide::Old => row.left.as_ref().and_then(|line| line.old_line_number),
+                    AnnotationSide::New => row.right.as_ref().and_then(|line| line.new_line_number),
+                };
+                row_path == path && line.is_some() && number == line
             }
             _ => false,
         })
@@ -2756,11 +2991,27 @@ fn split_cell(
     )
 }
 
+fn anchored_indices(lines: &[DiffLine], old: &HashSet<u32>, new: &HashSet<u32>) -> Vec<usize> {
+    if old.is_empty() && new.is_empty() {
+        return Vec::new();
+    }
+    lines.iter().enumerate().filter_map(|(index, line)| {
+        let anchored = line.old_line_number
+            .and_then(|number| u32::try_from(number).ok())
+            .is_some_and(|number| old.contains(&number))
+            || line.new_line_number
+                .and_then(|number| u32::try_from(number).ok())
+                .is_some_and(|number| new.contains(&number));
+        anchored.then_some(index)
+    }).collect()
+}
+
 /// The collapsed-context runs of one diff, as `(key, count)` pairs — the
 /// same walk `expand_diff` performs when rendering, so Expand All and the
 /// render can never disagree about which bands exist. `key` is the run's
 /// first line's position in the file's flattened line stream.
-fn context_band_keys(diff: &FileDiff) -> Vec<(usize, usize)> {
+fn context_band_keys(diff: &FileDiff, annotations: &[Annotation]) -> Vec<(usize, usize)> {
+    let (old, new) = anchored_lines(annotations, &diff.path);
     let mut keys = Vec::new();
     let mut line_index = 0usize;
     for hunk in &diff.hunks {
@@ -2771,9 +3022,11 @@ fn context_band_keys(diff: &FileDiff) -> Vec<(usize, usize)> {
                 while i < hunk.lines.len() && hunk.lines[i].origin == DiffOrigin::Context {
                     i += 1;
                 }
-                let count = i - start;
-                if count >= CONTEXT_BAND_MIN {
-                    keys.push((line_index + start, count));
+                let indices = anchored_indices(&hunk.lines[start..i], &old, &new);
+                for piece in band_pieces(i - start, &indices, CONTEXT_BAND_MIN) {
+                    if piece.band {
+                        keys.push((line_index + start + piece.start, piece.end - piece.start));
+                    }
                 }
             } else {
                 i += 1;
@@ -2940,6 +3193,8 @@ impl ChangesTab {
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
         let forge = self.forge_files.clone();
+        let views = self.annotation_views.clone();
+        let open_threads = self.open_threads.clone();
         let selected = self.selected_change.clone();
         let unified_x = self.unified_x;
         let split_left_x = self.split_left_x;
@@ -3005,6 +3260,14 @@ impl ChangesTab {
                             draws_open_diff,
                             selected.as_ref(),
                             forge.clone(),
+                            match row {
+                                ChangeRow::Annotation { key, .. } => views.get(key).cloned(),
+                                _ => None,
+                            },
+                            match row {
+                                ChangeRow::File { entry, .. } => open_threads.get(&entry.path).copied().unwrap_or(0),
+                                _ => 0,
+                            },
                             row_entity.clone(),
                             theme,
                         ),
@@ -3788,32 +4051,24 @@ fn load_expanded_diff(
     }
 }
 
-/// The key of the collapsed context band that hides new-side line `line` of
+/// The key of the collapsed context band that hides `line` on `side` of
 /// `diff`, if one does. Mirrors the walk in `expand_diff`: a run of context
 /// lines of at least `CONTEXT_BAND_MIN` is one band, keyed by the position of
 /// its first line in the file's flattened line stream.
-fn band_key_containing(diff: &FileDiff, line: usize) -> Option<usize> {
-    let mut line_index = 0usize;
-    for hunk in &diff.hunks {
-        let mut i = 0usize;
-        while i < hunk.lines.len() {
-            let is_context = hunk.lines[i].origin == DiffOrigin::Context;
-            let start = i;
-            while i < hunk.lines.len() && (hunk.lines[i].origin == DiffOrigin::Context) == is_context {
-                i += 1;
-            }
-            if is_context
-                && i - start >= CONTEXT_BAND_MIN
-                && hunk.lines[start..i]
-                    .iter()
-                    .any(|candidate| candidate.new_line_number == Some(line))
-            {
-                return Some(line_index + start);
-            }
-        }
-        line_index += hunk.lines.len();
-    }
-    None
+fn band_key_containing(diff: &FileDiff, side: AnnotationSide, line: usize) -> Option<usize> {
+    band_key_containing_annotations(diff, &[], side, line)
+}
+
+fn band_key_containing_annotations(
+    diff: &FileDiff, annotations: &[Annotation], side: AnnotationSide, line: usize,
+) -> Option<usize> {
+    let index = diff.hunks.iter().flat_map(|hunk| &hunk.lines).position(|candidate| match side {
+        AnnotationSide::Old => candidate.old_line_number == Some(line),
+        AnnotationSide::New => candidate.new_line_number == Some(line),
+    })?;
+    context_band_keys(diff, annotations).into_iter()
+        .find(|(key, count)| *key <= index && index - key < *count)
+        .map(|(key, _)| key)
 }
 
 #[cfg(test)]
@@ -3823,6 +4078,207 @@ mod tests {
     use sirio_git::StatusKind;
     use sirio_git::{DiffLine, DiffOrigin, FileDiff, Hunk};
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    fn thread_at(key: u64, path: &str, side: AnnotationSide, line: u32) -> Annotation {
+        Annotation {
+            key,
+            path: PathBuf::from(path),
+            side,
+            line: Some(line),
+            start_line: None,
+            kind: AnnotationKind::Thread { open: true },
+            revision: 0,
+        }
+    }
+
+    fn sample_tab(annotations: Vec<Annotation>) -> ChangesTab {
+        let path = PathBuf::from("a.rs");
+        let mut lines: Vec<DiffLine> = (10..=19).map(ctx_line).collect();
+        lines.extend([del_line(20), add_line(20)]);
+        lines.extend((21..=24).map(ctx_line));
+        let mut diff = diff_of(vec![lines]);
+        diff.path = path.clone();
+        let mut tab = settled_changes_tab_without_git(std::env::temp_dir());
+        tab.entries = vec![StatusEntry {
+            path: path.clone(),
+            original_path: None,
+            index_status: None,
+            worktree_status: Some(StatusKind::Modified),
+        }];
+        tab.diffs.insert(path.clone(), diff);
+        tab.expanded_changes.insert((ChangeSection::Changed, path));
+        tab.annotations = annotations;
+        tab
+    }
+
+    fn annotation_diff_rows(tab: &ChangesTab, mode: DiffViewMode) -> Vec<ChangeRow> {
+        let entry = &tab.entries[0];
+        let mut rows = vec![ChangeRow::File {
+            section: ChangeSection::Changed,
+            entry: entry.clone(),
+            stat: None,
+            drag_payload: None,
+            expanded: true,
+        }];
+        tab.expand_diff(&mut rows, ChangeSection::Changed, entry, mode);
+        rows
+    }
+
+    fn annotation_keys(rows: &[ChangeRow]) -> Vec<(usize, u64)> {
+        rows.iter().enumerate().filter_map(|(index, row)| match row {
+            ChangeRow::Annotation { key, .. } => Some((index, *key)),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn a_thread_follows_the_row_of_its_new_line() {
+        let tab = sample_tab(vec![thread_at(1, "a.rs", AnnotationSide::New, 20)]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        let keys = annotation_keys(&rows);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].1, 1);
+        assert!(matches!(&rows[keys[0].0 - 1], ChangeRow::Line { line, .. }
+            if line.new_line_number == Some(20) && line.old_line_number.is_none()));
+        assert_eq!(tab.report().annotations[0].placed, "line");
+    }
+
+    #[test]
+    fn an_old_side_thread_follows_the_deleted_line() {
+        let tab = sample_tab(vec![thread_at(1, "a.rs", AnnotationSide::Old, 20)]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        let keys = annotation_keys(&rows);
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(&rows[keys[0].0 - 1], ChangeRow::Line { line, .. }
+            if line.old_line_number == Some(20) && line.new_line_number.is_none()));
+    }
+
+    #[test]
+    fn two_threads_on_one_row_both_follow_it() {
+        let tab = sample_tab(vec![
+            thread_at(1, "a.rs", AnnotationSide::Old, 20),
+            thread_at(2, "a.rs", AnnotationSide::New, 20),
+        ]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Split);
+        let keys = annotation_keys(&rows);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].1, 1);
+        assert_eq!(keys[1], (keys[0].0 + 1, 2));
+        assert!(matches!(&rows[keys[0].0 - 1], ChangeRow::SplitLine { row, .. }
+            if row.left.as_ref().and_then(|line| line.old_line_number) == Some(20)
+                && row.right.as_ref().and_then(|line| line.new_line_number) == Some(20)));
+    }
+
+    #[test]
+    fn a_band_splits_around_an_anchored_line() {
+        let mut annotation = thread_at(1, "a.rs", AnnotationSide::New, 14);
+        for mode in [DiffViewMode::Unified, DiffViewMode::Split] {
+            let tab = sample_tab(vec![annotation.clone()]);
+            let rows = annotation_diff_rows(&tab, mode);
+            let index = annotation_keys(&rows)[0].0;
+            assert!(matches!(&rows[index - 2], ChangeRow::ContextBand { key: 0, count: 4, .. }));
+            assert!(matches!(&rows[index + 1], ChangeRow::ContextBand { key: 5, count: 5, .. }));
+            match &rows[index - 1] {
+                ChangeRow::Line { line, .. } => assert_eq!(line.new_line_number, Some(14)),
+                ChangeRow::SplitLine { row, .. } => {
+                    assert_eq!(row.right.as_ref().and_then(|line| line.new_line_number), Some(14));
+                }
+                _ => panic!("the anchored line must be visible"),
+            }
+        }
+        annotation.start_line = Some(13);
+        let tab = sample_tab(vec![annotation]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        for number in [13, 14] {
+            assert!(rows.iter().any(|row| matches!(row, ChangeRow::Line { line, .. }
+                if line.new_line_number == Some(number))));
+        }
+    }
+
+    #[test]
+    fn an_unplaced_thread_shows_at_the_top_of_its_file() {
+        let mut tab = sample_tab(vec![thread_at(1, "a.rs", AnnotationSide::New, 99)]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        assert_eq!(annotation_keys(&rows), vec![(1, 1)]);
+        assert!(matches!(&rows[0], ChangeRow::File { .. }));
+        assert!(matches!(&rows[2], ChangeRow::Hunk { .. }));
+        assert_eq!(tab.report().annotations[0].placed, "file");
+        tab.expanded_changes.clear();
+        assert_eq!(tab.report().annotations[0].placed, "hidden");
+    }
+
+    #[test]
+    fn an_outdated_section_sits_under_the_file_header() {
+        let section = Annotation {
+            kind: AnnotationKind::Outdated { count: 2 },
+            line: None,
+            ..thread_at(9, "a.rs", AnnotationSide::New, 1)
+        };
+        let mut tab = sample_tab(vec![section]);
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        assert_eq!(annotation_keys(&rows), vec![(1, 9)]);
+        assert!(matches!(&rows[0], ChangeRow::File { .. }));
+        assert!(matches!(&rows[2], ChangeRow::Hunk { .. }));
+        assert_eq!(tab.report().annotations[0].placed, "section");
+        let hash = |row: ChangeRow| {
+            let mut state = DefaultHasher::new();
+            ListRow::Change(row).hash_identity(&mut state);
+            state.finish()
+        };
+        let before = hash(rows[1].clone());
+        let list = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(list);
+        let fingerprint = tab.list_fingerprint;
+        let list = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(list);
+        assert_eq!(tab.list_fingerprint, fingerprint);
+        tab.annotations[0].revision += 1;
+        let rows = annotation_diff_rows(&tab, DiffViewMode::Unified);
+        assert_ne!(hash(rows[1].clone()), before);
+        let list = tab.section_rows(DiffViewMode::Unified);
+        tab.sync_list_rows(list);
+        assert_ne!(tab.list_fingerprint, fingerprint);
+    }
+
+    #[gpui::test]
+    async fn an_old_anchor_reveals_a_line_in_a_band_split_by_another_thread(cx: &mut TestAppContext) {
+        let tab = cx.new(|_| {
+            let mut tab = sample_tab(Vec::new());
+            for line in &mut tab.diffs.get_mut(Path::new("a.rs")).unwrap().hunks[0].lines {
+                line.old_line_number = line.old_line_number.map(|number| number + 100);
+            }
+            tab
+        });
+        tab.update(cx, |tab, cx| {
+            tab.set_annotations(vec![thread_at(1, "a.rs", AnnotationSide::New, 14)], HashMap::new(), cx);
+            assert_eq!(tab.open_threads.get(Path::new("a.rs")), Some(&1));
+            tab.expand_all(cx);
+            let rows = annotation_diff_rows(tab, DiffViewMode::Unified);
+            assert!(rows.iter().all(|row| !matches!(row,
+                ChangeRow::ContextBand { expanded: false, .. })),
+                "Expand All must open every piece of the split bands");
+            tab.expanded_bands.clear();
+            tab.focus_anchor(Path::new("a.rs"), AnnotationSide::Old, Some(116), None, cx);
+            for mode in [DiffViewMode::Unified, DiffViewMode::Split] {
+                let rows = annotation_diff_rows(tab, mode);
+                assert!(rows.iter().any(|row| match row {
+                    ChangeRow::Line { line, .. } => line.old_line_number == Some(116),
+                    ChangeRow::SplitLine { row, .. } => {
+                        row.left.as_ref().and_then(|line| line.old_line_number) == Some(116)
+                    }
+                    _ => false,
+                }), "the old-side reveal must open the piece containing its own line");
+            }
+            let rows = tab.section_rows(DiffViewMode::Split);
+            tab.sync_list_rows(rows);
+            assert!(tab.reveal_line.is_none());
+            tab.focus_anchor(Path::new("a.rs"), AnnotationSide::New, Some(14), Some(1), cx);
+            let rows = tab.section_rows(DiffViewMode::Unified);
+            let rows = tab.sync_list_rows(rows);
+            assert!(reveal_annotation(&rows, 1).is_some());
+            assert!(tab.reveal_annotation.is_none());
+        });
+    }
 
     struct TempDir(PathBuf);
 
@@ -4127,23 +4583,23 @@ mod tests {
         let mut tab = range_tab_with_one_diff(true);
         tab.diffs.clear();
         tab.diff_errors.insert(PathBuf::from("x.rs"), "fatal: bad object".to_string());
-        tab.reveal_line = Some((PathBuf::from("x.rs"), 3));
+        tab.reveal_line = Some((PathBuf::from("x.rs"), AnnotationSide::New, Some(3)));
         let rows = tab.section_rows(DiffViewMode::Unified);
         tab.sync_list_rows(rows);
         assert_eq!(tab.reveal_line, None, "a failed diff will not bring the line");
 
         let mut tab = range_tab_with_one_diff(false);
-        tab.reveal_line = Some((PathBuf::from("not-in-the-range.rs"), 1));
+        tab.reveal_line = Some((PathBuf::from("not-in-the-range.rs"), AnnotationSide::New, Some(1)));
         let rows = tab.section_rows(DiffViewMode::Unified);
         tab.sync_list_rows(rows);
         assert_eq!(tab.reveal_line, None, "a path outside the range has no row to wait for");
 
         let mut tab = range_tab_with_one_diff(false);
         tab.diffs.clear();
-        tab.reveal_line = Some((PathBuf::from("x.rs"), 3));
+        tab.reveal_line = Some((PathBuf::from("x.rs"), AnnotationSide::New, Some(3)));
         let rows = tab.section_rows(DiffViewMode::Unified);
         tab.sync_list_rows(rows);
-        assert_eq!(tab.reveal_line, Some((PathBuf::from("x.rs"), 3)), "a diff still loading keeps the reveal");
+        assert_eq!(tab.reveal_line, Some((PathBuf::from("x.rs"), AnnotationSide::New, Some(3))), "a diff still loading keeps the reveal");
     }
 
     fn settled_changes_tab(repo_root: PathBuf) -> ChangesTab {
@@ -4201,6 +4657,10 @@ mod tests {
             split_viewport: px(0.0),
             split_left_bar_state: HorizontalBarState::default(),
             split_right_bar_state: HorizontalBarState::default(),
+            annotations: Vec::new(),
+            annotation_views: Rc::default(),
+            open_threads: Rc::default(),
+            reveal_annotation: None,
         }
     }
 
@@ -6140,6 +6600,10 @@ mod tests {
             split_viewport: px(0.0),
             split_left_bar_state: HorizontalBarState::default(),
             split_right_bar_state: HorizontalBarState::default(),
+            annotations: Vec::new(),
+            annotation_views: Rc::default(),
+            open_threads: Rc::default(),
+            reveal_annotation: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -6226,6 +6690,10 @@ mod tests {
             split_viewport: px(0.0),
             split_left_bar_state: HorizontalBarState::default(),
             split_right_bar_state: HorizontalBarState::default(),
+            annotations: Vec::new(),
+            annotation_views: Rc::default(),
+            open_threads: Rc::default(),
+            reveal_annotation: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -6506,6 +6974,10 @@ mod tests {
             split_viewport: px(0.0),
             split_left_bar_state: HorizontalBarState::default(),
             split_right_bar_state: HorizontalBarState::default(),
+            annotations: Vec::new(),
+            annotation_views: Rc::default(),
+            open_threads: Rc::default(),
+            reveal_annotation: None,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -6973,6 +7445,10 @@ mod tests {
                 split_viewport: px(0.0),
                 split_left_bar_state: HorizontalBarState::default(),
                 split_right_bar_state: HorizontalBarState::default(),
+                annotations: Vec::new(),
+                annotation_views: Rc::default(),
+                open_threads: Rc::default(),
+                reveal_annotation: None,
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -7434,6 +7910,10 @@ mod tests {
             split_viewport: px(0.0),
             split_left_bar_state: HorizontalBarState::default(),
             split_right_bar_state: HorizontalBarState::default(),
+            annotations: Vec::new(),
+            annotation_views: Rc::default(),
+            open_threads: Rc::default(),
+            reveal_annotation: None,
         }
     }
 
@@ -7574,17 +8054,17 @@ mod tests {
         lines.extend((2..=7).map(ctx_line));
         lines.push(add_line(8));
         let diff = diff_of(vec![lines]);
-        assert_eq!(band_key_containing(&diff, 4), Some(1));
-        assert_eq!(band_key_containing(&diff, 2), Some(1), "the run's first line");
-        assert_eq!(band_key_containing(&diff, 7), Some(1), "and its last");
+        assert_eq!(band_key_containing(&diff, AnnotationSide::New, 4), Some(1));
+        assert_eq!(band_key_containing(&diff, AnnotationSide::New, 2), Some(1), "the run's first line");
+        assert_eq!(band_key_containing(&diff, AnnotationSide::New, 7), Some(1), "and its last");
     }
 
     #[test]
     fn a_run_shorter_than_a_band_is_no_band_and_four_lines_is() {
         let three = diff_of(vec![[vec![add_line(1)], (2..=4).map(ctx_line).collect::<Vec<_>>(), vec![add_line(5)]].concat()]);
-        assert_eq!(band_key_containing(&three, 3), None);
+        assert_eq!(band_key_containing(&three, AnnotationSide::New, 3), None);
         let four = diff_of(vec![[vec![add_line(1)], (2..=5).map(ctx_line).collect::<Vec<_>>(), vec![add_line(6)]].concat()]);
-        assert_eq!(band_key_containing(&four, 3), Some(1));
+        assert_eq!(band_key_containing(&four, AnnotationSide::New, 3), Some(1));
     }
 
     #[test]
@@ -7592,9 +8072,9 @@ mod tests {
         let mut lines = vec![add_line(1), del_line(2)];
         lines.extend((2..=8).map(ctx_line));
         let diff = diff_of(vec![lines]);
-        assert_eq!(band_key_containing(&diff, 1), None, "an added line is not context");
-        assert_eq!(band_key_containing(&diff, 999), None, "outside every hunk");
-        assert_eq!(band_key_containing(&diff_of(vec![]), 1), None, "no hunks at all");
+        assert_eq!(band_key_containing(&diff, AnnotationSide::New, 1), None, "an added line is not context");
+        assert_eq!(band_key_containing(&diff, AnnotationSide::New, 999), None, "outside every hunk");
+        assert_eq!(band_key_containing(&diff_of(vec![]), AnnotationSide::New, 1), None, "no hunks at all");
     }
 
     #[test]
@@ -7603,7 +8083,7 @@ mod tests {
         let mut second: Vec<DiffLine> = (20..=24).map(ctx_line).collect();
         second.push(add_line(25));
         let diff = diff_of(vec![first, second]);
-        assert_eq!(band_key_containing(&diff, 22), Some(5));
+        assert_eq!(band_key_containing(&diff, AnnotationSide::New, 22), Some(5));
     }
 
     /// `main` → `feat`: `a.txt` (200 lines) is edited at two lines close enough
@@ -7698,7 +8178,7 @@ mod tests {
                 let path = Path::new("a.txt");
                 tab.diffs
                     .get(path)
-                    .and_then(|diff| band_key_containing(diff, line))
+                    .and_then(|diff| band_key_containing(diff, AnnotationSide::New, line))
                     .is_some_and(|key| {
                         ChangeSection::ORDER
                             .iter()

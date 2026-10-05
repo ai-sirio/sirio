@@ -37338,6 +37338,7 @@ done
             loading: false,
             error: None,
             dialog: None,
+            annotations: Vec::new(),
         };
         let pairs = changes_report_pairs(1, &report).expect("a Changes section is accepted");
         let staged = pairs.iter().find(|(key, _)| key == "stagedCount").map(|(_, value)| value.as_str());
@@ -37374,6 +37375,7 @@ done
             loading: false,
             error: None,
             dialog: None,
+            annotations: Vec::new(),
         };
         ControlResponse::success(
             id,
