@@ -3418,6 +3418,44 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_line_composer_refuses_a_new_head_and_keeps_its_text(cx: &mut TestAppContext) {
+        let (tab, forge, repo, _head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.composer_set_text("Keep this comment", cx));
+
+        let newer = push_another(&repo.0);
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(
+                101,
+                "Fix the login redirect",
+                "## What",
+                &git(&repo.0, &["rev-parse", "main"]),
+                &newer,
+            ),
+        );
+        forge.answer("ChangeRequestActionContext", action_context_json(&newer));
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                matches!(&tab.range, RangeState::Ready { revisions, .. } if revisions.head_sha == newer)
+            })
+        });
+
+        tab.update(cx, |tab, cx| tab.send_line_comment(cx)).expect("the refusal arrives asynchronously");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed"));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "line_composer"), "a.txt:new:43");
+            assert_eq!(report_value(tab, cx, "line_composer_len"), "17");
+            assert_eq!(
+                report_value(tab, cx, "line_composer_error"),
+                "The branch changed since you opened this. Reload to review the new commits."
+            );
+        });
+        assert_eq!(forge.rest_count(COMMENTS), 0);
+    }
+
+    #[gpui::test]
     async fn a_refused_position_keeps_the_text_and_says_why(cx: &mut TestAppContext) {
         let (tab, forge, _repo, _head) = composing(cx).await;
         let header_reads = forge.count("ChangeRequestHeader");

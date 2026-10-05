@@ -5,7 +5,7 @@ use super::*;
 
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::WeakEntity;
-use sirio_forge::{LineAnchor, Side};
+use sirio_forge::{LineAnchor, Revisions, Side};
 
 use crate::diff_annotations::CommentAnchor;
 use crate::ely_ui::new_input;
@@ -29,6 +29,7 @@ pub(crate) struct WriteStatus {
 
 pub(crate) struct LineComposer {
     pub(crate) anchor: CommentAnchor,
+    pub(crate) revisions: Revisions,
     pub(crate) view: Entity<ComposerView>,
 }
 
@@ -230,15 +231,20 @@ impl ChangeRequestTab {
         anchor: CommentAnchor,
         cx: &mut Context<Self>,
     ) {
+        let revisions = match &self.range {
+            RangeState::Ready { revisions, .. } => revisions.clone(),
+            _ => return,
+        };
         match &mut self.line_composer {
             Some(open) => {
                 open.anchor = anchor.clone();
+                open.revisions = revisions.clone();
                 open.view.update(cx, |view, cx| view.set_anchor(&anchor, cx));
             }
             None => {
                 let owner = cx.entity().downgrade();
                 let view = cx.new(|_| ComposerView::new(&anchor, owner));
-                self.line_composer = Some(LineComposer { anchor: anchor.clone(), view });
+                self.line_composer = Some(LineComposer { anchor: anchor.clone(), revisions, view });
             }
         }
         self.push_annotations(cx);
@@ -315,12 +321,12 @@ impl ChangeRequestTab {
             .line_composer
             .as_ref()
             .ok_or("No comment is being written.")?;
-        let RangeState::Ready { revisions, .. } = &self.range else {
+        let RangeState::Ready { .. } = &self.range else {
             return Err("The diff is not loaded.".to_string());
         };
         let anchor = to_line_anchor(&open.anchor);
         let body = open.view.read(cx).text(cx);
-        let action = Action::LineComment { anchor, revisions: revisions.clone(), body };
+        let action = Action::LineComment { anchor, revisions: open.revisions.clone(), body };
         self.start_write(WriteTarget::Composer, action, cx)
     }
 
