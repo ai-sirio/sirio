@@ -509,3 +509,25 @@ drawn larger than the diff and the Conversation; a thread entry says
 - macOS, Windows or Wayland, or a light appearance for this diff harness.
 - A GitLab range: GraphQL reports only its final line.
 - Visual appearance during the implementation run; it uses `--state-only`.
+
+## B3b: writing in threads
+
+The `scenario_thread_writes` scenarios of
+`Scripts/Tests/test-forge-diff-e2e.sh` (GitHub and GitLab) drive the
+gutter composer, a unicode range comment, a reply, a resolve confirmed by
+the folded card, and a cancelled old-side composer, over the control
+socket in a real, isolated Sirio. The `threads` stage of
+`Scripts/Tests/test-forge-actions-e2e.sh` proves the same writes on the
+wire. State-only runs capture no frames; the controller's framed run
+reads them.
+
+Frames captured per flavour (`<flavour>` is `github` or `gitlab`):
+
+- `thread-writes-<flavour>-composer`: the open line composer on the
+  `41-43` new-side range, before the send.
+- `thread-writes-<flavour>-resolved`: the thread folded after the
+  resolve the forge confirmed.
+
+### What was seen
+
+(filled in by the controller after the framed run)
