@@ -120,15 +120,15 @@ def load_fixtures(root):
 
 
 # Operations that have a baseline variant, and the fields those variants omit.
-BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext"}
+BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext", "MergeRequestThreads"}
 NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove",
                        "canMerge", "detailedMergeStatus", "squashOnMerge", "squashReadOnly", "autoMergeEnabled",
-                       "availableAutoMergeStrategies", "shouldRemoveSourceBranch"}
+                       "availableAutoMergeStrategies", "shouldRemoveSourceBranch", "truncatedDiffLines"}
 # Mutations an older GitLab lacks: the `old` credential answers them as such a
 # server would, with a schema error naming the field.
 NEWER_GITLAB_MUTATIONS = {"mergeRequestSetReviewers", "mergeRequestSetLabels"}
 # The newer fields a query can name, and the type an older GitLab would say lacks them.
-NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"))
+NEWER_QUERY_FIELDS = (("mergeRequestInteraction", "MergeRequestReviewer"), ("canApprove", "MergeRequestPermissions"), ("truncatedDiffLines", "Discussion"))
 
 
 ESC = "\x1b"

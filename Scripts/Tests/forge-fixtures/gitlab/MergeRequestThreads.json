@@ -1,0 +1,78 @@
+{
+  "data": {
+    "project": {
+      "mergeRequest": {
+        "diffRefs": { "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2" },
+        "userPermissions": { "createNote": true },
+        "discussions": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "gid://gitlab/Discussion/open12", "resolvable": true, "resolved": false, "resolvedBy": null,
+              "userPermissions": { "resolveNote": true },
+              "truncatedDiffLines": [ { "text": " line 11" }, { "text": "+edited 12" } ],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/DiffNote/11", "system": false, "author": { "username": "carol" }, "body": "This should stream.", "createdAt": "2026-09-20T10:00:00Z",
+                  "position": { "positionType": "text", "filePath": "app/models/order.rb", "newLine": 12, "oldLine": null, "diffRefs": { "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2" } } },
+                { "id": "gid://gitlab/DiffNote/12", "system": false, "author": { "username": "alice" }, "body": "Agreed, next push.", "createdAt": "2026-09-20T11:00:00Z",
+                  "position": { "positionType": "text", "filePath": "app/models/order.rb", "newLine": 12, "oldLine": null, "diffRefs": { "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2" } } }
+              ] }
+            },
+            {
+              "id": "gid://gitlab/Discussion/resolved10", "resolvable": true, "resolved": true, "resolvedBy": { "username": "alice" },
+              "userPermissions": { "resolveNote": true },
+              "truncatedDiffLines": [ { "text": " line 10" } ],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/DiffNote/13", "system": false, "author": { "username": "carol" }, "body": "Nit.", "createdAt": "2026-09-19T10:00:00Z",
+                  "position": { "positionType": "text", "filePath": "app/models/order.rb", "newLine": 10, "oldLine": 10, "diffRefs": { "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2" } } }
+              ] }
+            },
+            {
+              "id": "gid://gitlab/Discussion/outdated", "resolvable": true, "resolved": false, "resolvedBy": null,
+              "userPermissions": { "resolveNote": true },
+              "truncatedDiffLines": [ { "text": "-old 5" }, { "text": "+new 5" } ],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/DiffNote/14", "system": false, "author": { "username": "dave" }, "body": "Why?", "createdAt": "2026-09-18T10:00:00Z",
+                  "position": { "positionType": "text", "filePath": "app/models/order.rb", "newLine": 5, "oldLine": null, "diffRefs": { "headSha": "0000000000000000000000000000000000000000" } } }
+              ] }
+            },
+            {
+              "id": "gid://gitlab/Discussion/old7", "resolvable": true, "resolved": false, "resolvedBy": null,
+              "userPermissions": { "resolveNote": false },
+              "truncatedDiffLines": [ { "text": "-removed 7" } ],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/DiffNote/15", "system": false, "author": { "username": "dave" }, "body": "Keep this?", "createdAt": "2026-09-21T10:00:00Z",
+                  "position": { "positionType": "text", "filePath": "app/models/order.rb", "newLine": null, "oldLine": 7, "diffRefs": { "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2" } } }
+              ] }
+            },
+            {
+              "id": "gid://gitlab/Discussion/file", "resolvable": true, "resolved": false, "resolvedBy": null,
+              "userPermissions": { "resolveNote": true },
+              "truncatedDiffLines": [],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/DiffNote/16", "system": false, "author": { "username": "carol" }, "body": "Whole file?", "createdAt": "2026-09-22T10:00:00Z",
+                  "position": { "positionType": "file", "filePath": "app/models/order.rb", "newLine": null, "oldLine": null, "diffRefs": { "headSha": "d4e5f60718293a4b5c6d7e8f901234567890a1b2" } } }
+              ] }
+            },
+            {
+              "id": "gid://gitlab/Discussion/plain", "resolvable": false, "resolved": false, "resolvedBy": null,
+              "userPermissions": { "resolveNote": false },
+              "truncatedDiffLines": [],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/Note/17", "system": false, "author": { "username": "bob" }, "body": "A plain comment, not a thread.", "createdAt": "2026-09-22T11:00:00Z", "position": null }
+              ] }
+            },
+            {
+              "id": "gid://gitlab/Discussion/system", "resolvable": false, "resolved": false, "resolvedBy": null,
+              "userPermissions": { "resolveNote": false },
+              "truncatedDiffLines": [],
+              "notes": { "nodes": [
+                { "id": "gid://gitlab/Note/18", "system": true, "author": { "username": "bob" }, "body": "approved this merge request", "createdAt": "2026-09-22T12:00:00Z", "position": null }
+              ] }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

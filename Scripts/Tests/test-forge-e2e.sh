@@ -365,6 +365,16 @@ expect_line "CHECK passed build build 240"
 expect_line "CHECK failed test rspec 600"
 expect_line "CHECK running test lint -"
 expect_line "CHECK neutral deploy deploy -"
+probe "${GL[@]}" threads 201
+expect_code 0 "gitlab threads"
+expect_line "THREAD app/models/order.rb new 12 - open outdated=no file=no reply=yes resolve=yes comments=2 pending=0 hunk=yes"
+expect_line "TCOMMENT carol This should stream."
+expect_line "THREAD app/models/order.rb new 10 - resolved outdated=no file=no reply=yes resolve=yes comments=1 pending=0 hunk=yes"
+expect_line "THREAD app/models/order.rb new 5 - open outdated=yes file=no reply=yes resolve=yes comments=1 pending=0 hunk=yes"
+expect_line "THREAD app/models/order.rb old 7 - open outdated=no file=no reply=yes resolve=no comments=1 pending=0 hunk=yes"
+expect_line "THREAD app/models/order.rb new - - open outdated=no file=yes reply=yes resolve=yes comments=1 pending=0 hunk=no"
+! echo "$PROBE_OUT" | grep -q '^TCOMMENT bob ' || { dump; fail "a plain discussion became a thread"; }
+expect_line "TRUNCATED no"
 probe "${GL[@]}" files 201
 expect_line "FILE - +30 -2 app/models/order.rb"
 expect_line "FILE - +10 -0 app/exports/csv.rb"
@@ -385,6 +395,9 @@ probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old header 201
 expect_line "HEADER !201 state=open additions=- deletions=- files=- commits=- truncated=yes"
 expect_line "REVIEWER carol requested"
 expect_line "REVISIONS base=c3d4e5f head=d4e5f60"
+probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old threads 201
+expect_code 0 "an older GitLab reads threads without the quoted code"
+expect_line "THREAD app/models/order.rb new 12 - open outdated=no file=no reply=yes resolve=yes comments=2 pending=0 hunk=no"
 if command -v glab >/dev/null; then
   probe GLAB_CONFIG_DIR="$WORK/glab-good" "$PROBE" "${GL_CLI_ARGS[@]}" list all-open
   expect_code 0 "gitlab reads through glab"
