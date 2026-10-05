@@ -375,8 +375,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return None
 
     def rest_write(self, path, raw):
-        """GitLab's approval: the only REST write B2a sends."""
+        """GitLab REST writes: approvals, cancellations and diff notes."""
         self.record("POST", path, None, None, json.loads(raw or b"{}"))
+        if self.flavor == "gitlab" and re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/discussions", path):
+            body = json.loads(raw or b"{}")
+            if self.credential() == "readonly":
+                return self.answer(403, {"message": "403 Forbidden"})
+            position = body.get("position")
+            valid = (
+                isinstance(body.get("body"), str)
+                and bool(body["body"].strip())
+                and isinstance(position, dict)
+                and position.get("position_type") == "text"
+                and all(position.get(key) for key in ("base_sha", "start_sha", "head_sha", "old_path", "new_path"))
+                and (position.get("old_line") is not None or position.get("new_line") is not None)
+            )
+            if valid and "line_range" in position:
+                line_range = position["line_range"]
+                valid = isinstance(line_range, dict) and all(
+                    isinstance(line_range.get(end), dict)
+                    and re.fullmatch(r"[0-9a-f]{40}_\d+_\d+", str(line_range[end].get("line_code", "")))
+                    and line_range[end].get("type") in ("old", "new")
+                    for end in ("start", "end")
+                )
+            if not valid:
+                return self.answer(400, {"message": '400 Bad request - Note {:line_code=>["must be a valid line code"]}'})
+            self.remember("line-comment")
+            return self.answer(201, {"id": "0"})
         if self.flavor == "gitlab" and re.fullmatch(r"/api/v4/projects/[^/]+/merge_requests/\d+/cancel_merge_when_pipeline_succeeds", path):
             error = self.scenario_error()
             if error:
@@ -638,7 +663,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(failure[0], failure[1], failure[2])
         given = (variables.get("input") or {}) if isinstance(variables.get("input"), dict) else {}
         key = operation
-        for discriminator in ("state", "draft", "strategy"):
+        for discriminator in ("state", "draft", "strategy", "resolve"):
             if discriminator in given:
                 key = f"{operation}.{str(given[discriminator]).lower() if isinstance(given[discriminator], bool) else given[discriminator]}"
         self.remember(key)
