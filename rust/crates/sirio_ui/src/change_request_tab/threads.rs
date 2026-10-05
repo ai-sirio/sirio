@@ -543,16 +543,33 @@ impl Render for ThreadView {
             .gap(px(6.0))
             .cursor_pointer()
             .child(EIcon::new(IconName::MessageSquare).size(EIconSize::Sm))
-            .child(div().text_color(theme.ely.fg_muted).child(summary))
-            .when(thread.side == Side::Old && !(folded && thread.resolved), |this| {
-                this.child(Tag::new(("change-request-thread-old", self.key), "old"))
-            })
-            .when(thread.resolved && !folded, |this| {
-                this.child(Tag::new(("change-request-thread-resolved", self.key), "Resolved").tone(Tone::Success))
-            })
-            .child(div().flex_1())
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .truncate()
+                    .text_color(theme.ely.fg_muted)
+                    .child(summary),
+            )
+            .when(thread.side == Side::Old && !(folded && thread.resolved), |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .child(Tag::new(("change-request-thread-old", self.key), "old")),
+                )
+            })
+            .when(thread.resolved && !folded, |this| {
+                this.child(
+                    div().flex_none().child(
+                        Tag::new(("change-request-thread-resolved", self.key), "Resolved")
+                            .tone(Tone::Success),
+                    ),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
                     .text_color(theme.ely.fg_subtle)
                     .child(plural(published, "comment", "comments")),
             )
