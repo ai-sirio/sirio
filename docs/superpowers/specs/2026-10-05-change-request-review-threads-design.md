@@ -386,3 +386,85 @@ Each is checked against the live schemas and APIs while planning, as B2c did:
   position lines no longer exist in the current diff.
 - **Ely's `ReviewComment`.** Fetched from upstream at the vendored revision
   and judged against Sirio's palette and selectable text.
+
+
+## §14 Revised while planning and building B3a (2026-10-05)
+
+### Facts verified while planning
+
+- GitHub `PullRequestReviewThread` exposes current and original line/range
+  anchors, `diffSide`/`startDiffSide` (`LEFT`/`RIGHT`), `subjectType`
+  (`LINE`/`FILE`), resolution, outdated state and reply/resolve permissions.
+  Its comments expose Markdown bodies, time, diff hunks and review state.
+  On zed-industries/zed#17271 an outdated thread had `line: null`,
+  `originalLine: 317`, `isOutdated: true`; the quoted hunk ended on that
+  original line. A non-collaborator could reply but could not resolve it.
+- GitLab's `Discussion` has resolution, notes, `userPermissions.resolveNote`
+  and `truncatedDiffLines { oldLine newLine text }`. `DiffPosition` carries
+  file paths, old/new lines and `diffRefs { baseSha headSha startSha }`.
+  GraphQL has no `lineRange`: a GitLab range is read as its last line.
+  Positions of type `file` or `image` stay in the Conversation.
+- On open GitLab MRs, positions normally name the current head; an older
+  `position.diffRefs.headSha` identifies a discussion GitLab could not move
+  forward. Merged MRs often retain older position heads, so this comparison
+  over-reports outdated threads there; that limitation is accepted.
+- GitLab's truncated hunk text already includes `+`, `-` or space prefixes.
+  A server without `truncatedDiffLines` is retried with the threads baseline
+  query, without changing the client's shared header/checks baseline flag.
+- Ely's upstream `git/review.rs` at the vendored revision `e17e31a6…` was
+  inspected during planning. Its `ReviewComment` draws plain `SharedString`
+  bodies, always includes a reply input and quotes one code line. It is not
+  vendored: B3a needs selectable Markdown and has no reply input. Sirio's
+  `ThreadView` follows its header/avatar/author/time/body layout using the
+  vendored Ely primitives and Sirio's Markdown path.
+
+### Reads, placement and proof
+
+Threads are read on the tab's first load, manual refresh, retry and after a
+write; entering Files starts an idle threads slot. The CI timer refreshes
+header/CI state without reading threads. Pending comments remain in the
+model; only published comments appear in B3a.
+
+A current thread whose line is outside the drawn diff appears at the top of
+its file. A file absent from the range keeps its thread in the Conversation.
+Resolved threads fold in place; outdated threads share one folded section
+under each file header. Old-side anchors and range lines remain visible in
+unified and split views. Published unresolved file-level threads contribute
+to `threads_open` as well as `threads_file`, but have no diff card.
+
+`Scripts/Tests/test-forge-e2e.sh` proves the wire reads and GitLab's optional
+hunk fallback against loopback forges. `Scripts/Tests/test-forge-diff-e2e.sh`
+proves the thread counts, Conversation entries, reveals, unified/split
+anchors, resolution folds, draft exclusion and annotation handoff to a range
+rebuilt after relaunch. Its mode change opens standalone Changes, sets the
+shared `DiffViewMode`, then returns to the change request. B3a's reads are
+proved here; `test-forge-actions-e2e.sh` remains the existing write regression
+and is where B3b will prove its new writes.
+
+State-only proofs do not establish visual appearance. The controller fills
+in the framed observations in `docs/testing/ely-change-request-tab.md`.
+
+### Rulings from the slice ledger
+
+- Task 1: Ruling: Step 2 names another worktree — run the same RED E2E command in the brief's assigned sdd-b3a-impl worktree — cost if wrong: validation would cover a different checkout.
+- Task 2: Ruling: Step 1 lists two positional cargo test filters, which cargo rejects — use the plan's own corrected single filter a_gitlab_ — cost if wrong: an intended test may not run; confirm both names on GREEN.
+- Task 2: Ruling: Step 5 requests a Side import unused by its parser — import ThreadComment only; gitlab_anchor already returns Side — cost if wrong: compilation would reveal a missing type import.
+- Task 3: Ruling: Step 2 marks push_stretch mutable although the closure is never reassigned and mutates no captured state — use let push_stretch to avoid an unused_mut warning — cost if wrong: compilation would reject a future mutable closure call.
+- Task 4: Ruling: DiffLine and DiffSideBySideLine carry usize line numbers, while annotation helpers take u32 — convert row numbers with u32::try_from before matching — cost if wrong: a line larger than u32::MAX would be treated as unplaced instead of truncating it.
+- Task 4: Ruling: focus_anchor promises old-side reveals, but its design keeps only New lines in reveal_line; band_key_containing also ignores the annotation-split pieces — preserve side in the pending reveal and open the actual containing piece; add one regression beyond the six prescribed tests (76 + 7 = 83) — cost if wrong: direct old-side reveals could scroll to a file instead of their line.
+- Task 4: Ruling: splitting context bands also changes the keys Expand All must open, which the plan does not update — share the annotation-aware band-key walk with Expand All and reveal; extend the same extra regression — cost if wrong: Expand All would leave part of an annotated band folded.
+- Task 5: Ruling: ThreadView/OutdatedView::toggle tell the owner through cx.defer — annotations_for reads every card's revision, the toggling card included, and reading an entity inside its own update panics — cost if wrong: one frame's delay before the row is measured again.
+- Task 5: Ruling: each card keeps its comments' Markdown docs, built when the thread arrives or changes, instead of parsing in render (the timeline's bodies do the same) — cost if wrong: a theme switch recolours card bodies only at the next change of that thread.
+- Task 5: Ruling: markdown_doc and open_links stay private — a child module already reaches them through `use super::*` — cost if wrong: none.
+- Task 5: Ruling: the quoted-code block uses theme.ely.sunken as its background (the plan names none) — cost if wrong: a colour.
+- Task 6: Ruling: the two prescribed test names do not contain the merge_threads filter — nest them in a merge_threads test module so the required command runs both — cost if wrong: test paths only.
+- Task 6: Ruling: the reveal_thread snippet drops side/key before the range exists — carry both in pending_reveal and replay focus_anchor; add a regression — cost if wrong: a pending reveal could open the wrong side or file row.
+- Task 6: Ruling: reveal_thread silently ignores unknown ids but the socket must return no thread {id} — return Result<(), String> from reveal_thread and let the handler propagate it — cost if wrong: a public signature change.
+- Task 6: Ruling: ChangesTab.report().annotations is in input order, but thread_rows requires drawn row order — update annotation_reports in changes.rs (one additional named-file exception) and add a unified/split regression; hidden annotations follow drawn ones — cost if wrong: existing consumers see a different report order.
+- Task 6: Ruling: the reveal snippet opens an outdated section for any thread sharing its path, contradicting the file-level fallback — only drawn diff threads can target a section; extend the fold/report regression with a file-level thread on the same path — cost if wrong: a file-level reveal would open an unrelated section.
+- Task 7: Ruling: surface.changes.view does not target an embedded ChangesTab — open standalone Changes, set the global Split mode, verify mode=split, return to the change request and assert the same anchors — cost if wrong: the split proof would cover the wrong surface.
+- Task 7: Ruling: the GitLab outdated fixture keeps app/models/order.rb while the required section targets src/login.rs — map its filePath too while retaining its old head — cost if wrong: the section would be absent from the test diff.
+- Task 7: Ruling: Review Focus 4 requires rows after reopening, but the scenario recipe never reopens — add a graceful quit/relaunch and reveal, then assert current and outdated annotations in the rebuilt range — cost if wrong: one extra launch per forge.
+- Task 7: Ruling: the expected unresolved counts omit published unresolved file-level threads, although Task 6 counts all published threads — expect GitHub 5 and GitLab 4; draft-only threads remain excluded — cost if wrong: a count assertion.
+- Task 7: Ruling: control_integration TempDir hard-codes /tmp on Linux despite the mandated TMPDIR; the full suite failed opening chat.sqlite there with SQLite disk I/O error — use std::env::temp_dir() on Linux, retain the short /tmp root on macOS for its socket limit; include this test-helper file in the task commit — cost if wrong: Linux callers with an unusually long TMPDIR could exceed the socket-path limit.
+- Task 7: Ruling: test-forge-ui-e2e.sh still expects 5 Conversation rows, but the loaded fixture now has 5 activity entries plus 6 published threads — wait for conversation_threads=6 and rows=11; include this harness file despite the task file list — cost if wrong: a Conversation count assertion.

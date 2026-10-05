@@ -44,7 +44,8 @@ Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
 
 # A change request's diff, the editor hand-off (local file or read-only
 # snapshot, across a quit and relaunch) and the fetch with its failures,
-# against a bare repository and the fake forge; same flags as above.
+# against a bare repository and the fake forge; includes unified/split review
+# threads, resolved folds and outdated sections; same flags as above.
 Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 
 # The Changes surface on Ely against a real repository: unified and split,
@@ -302,6 +303,17 @@ folding groups without a terminal; `CiLogTab` (`TabKind::CiLog`, `"ci_log"`)
 draws it in a `uniform_list` and reloads a running job's log every 5 s only
 while it is drawn. The `ci` stage of `test-forge-actions-e2e.sh` proves the
 re-runs and log state; drawing and visible reload require its framed run.
+
+**Review threads** (B3) are read by `ForgeClient::review_threads` — GitHub
+`reviewThreads`, GitLab diff `discussions`, a GitLab thread outdated when its
+position names an older head — and drawn by the *Files* diff's own list:
+`ChangesTab` takes forge-neutral `Annotation`s (`sirio_ui::diff_annotations`)
+and one view per key, splits a context band so an anchored line is never
+hidden, and puts a thread whose line is not drawn at the top of its file.
+`ChangeRequestTab` owns the `ThreadView`s and replaces the Conversation's
+line-comment footnotes with one entry per thread. Threads are read on first
+load, a manual refresh, entering *Files* when idle and after a write, never
+by the CI timer. The `threads` scenarios of `test-forge-diff-e2e.sh` prove it.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and
