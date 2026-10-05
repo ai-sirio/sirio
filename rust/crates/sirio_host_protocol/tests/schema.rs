@@ -49,3 +49,44 @@ fn every_ledger_capability_names_methods_the_protocol_defines() {
         }
     }
 }
+
+/// Every `$ref` in the document, wherever it sits.
+fn refs(node: &serde_json::Value, found: &mut Vec<String>) {
+    match node {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                match (key.as_str(), value) {
+                    ("$ref", serde_json::Value::String(target)) => found.push(target.clone()),
+                    _ => refs(value, found),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| refs(item, found)),
+        _ => {}
+    }
+}
+
+#[test]
+fn every_reference_in_the_committed_schema_resolves_inside_it() {
+    let committed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../protocol/host-v1/schema.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let defs = committed["$defs"].as_object().expect("a root $defs");
+    let mut found = Vec::new();
+    refs(&committed, &mut found);
+    assert!(!found.is_empty(), "the wire types reference one another");
+    for target in found {
+        let name = target
+            .strip_prefix("#/$defs/")
+            .unwrap_or_else(|| panic!("{target} is not a reference into the root $defs"));
+        assert!(
+            defs.contains_key(name),
+            "{target} dangles: the root $defs has no {name}"
+        );
+    }
+}

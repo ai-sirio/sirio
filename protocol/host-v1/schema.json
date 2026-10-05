@@ -1,7 +1,33 @@
 {
   "$defs": {
+    "ErrorBody": {
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "unknown_method",
+        "invalid_params",
+        "sessions_live",
+        "stale_generation",
+        "handshake_required",
+        "internal",
+        "other"
+      ],
+      "type": "string"
+    },
     "Event": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "payload": true,
         "seq": {
@@ -24,7 +50,6 @@
       "type": "object"
     },
     "Hello": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "client_version": {
           "type": "string"
@@ -52,82 +77,6 @@
       "type": "object"
     },
     "HelloReply": {
-      "$defs": {
-        "ProtocolVersion": {
-          "properties": {
-            "major": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "minor": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "major",
-            "minor"
-          ],
-          "type": "object"
-        },
-        "Refused": {
-          "properties": {
-            "host_major": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "reason": {
-              "$ref": "#/$defs/RefusedReason"
-            }
-          },
-          "required": [
-            "reason",
-            "host_major"
-          ],
-          "type": "object"
-        },
-        "RefusedReason": {
-          "enum": [
-            "no_common_major",
-            "other"
-          ],
-          "type": "string"
-        },
-        "Welcome": {
-          "properties": {
-            "capabilities": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "generation": {
-              "type": "string"
-            },
-            "host_id": {
-              "type": "string"
-            },
-            "host_version": {
-              "type": "string"
-            },
-            "protocol": {
-              "$ref": "#/$defs/ProtocolVersion"
-            }
-          },
-          "required": [
-            "host_version",
-            "protocol",
-            "capabilities",
-            "host_id",
-            "generation"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "The answer to `host.hello`, carried as the `result` of its Response. A new\nreply type is a new major, so this enum is closed.",
       "oneOf": [
         {
@@ -160,7 +109,6 @@
       "title": "HelloReply"
     },
     "HoldSessionParams": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "held": {
           "type": "boolean"
@@ -173,36 +121,6 @@
       "type": "object"
     },
     "HostInfo": {
-      "$defs": {
-        "HostMode": {
-          "enum": [
-            "on_demand",
-            "service",
-            "other"
-          ],
-          "type": "string"
-        },
-        "ProtocolVersion": {
-          "properties": {
-            "major": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "minor": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "major",
-            "minor"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "clients": {
           "format": "uint32",
@@ -250,18 +168,15 @@
       "title": "HostInfo",
       "type": "object"
     },
+    "HostMode": {
+      "enum": [
+        "on_demand",
+        "service",
+        "other"
+      ],
+      "type": "string"
+    },
     "HostStateEvent": {
-      "$defs": {
-        "HostMode": {
-          "enum": [
-            "on_demand",
-            "service",
-            "other"
-          ],
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "clients": {
           "format": "uint32",
@@ -290,36 +205,6 @@
       "type": "object"
     },
     "HostStateFile": {
-      "$defs": {
-        "HostMode": {
-          "enum": [
-            "on_demand",
-            "service",
-            "other"
-          ],
-          "type": "string"
-        },
-        "ProtocolVersion": {
-          "properties": {
-            "major": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "minor": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "major",
-            "minor"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "endpoint": {
           "type": "string"
@@ -359,8 +244,50 @@
       "title": "HostStateFile",
       "type": "object"
     },
+    "ProtocolVersion": {
+      "properties": {
+        "major": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "Refused": {
+      "properties": {
+        "host_major": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/RefusedReason"
+        }
+      },
+      "required": [
+        "reason",
+        "host_major"
+      ],
+      "type": "object"
+    },
+    "RefusedReason": {
+      "enum": [
+        "no_common_major",
+        "other"
+      ],
+      "type": "string"
+    },
     "Request": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "generation": {
           "type": [
@@ -388,36 +315,6 @@
       "type": "object"
     },
     "Response": {
-      "$defs": {
-        "ErrorBody": {
-          "properties": {
-            "code": {
-              "$ref": "#/$defs/ErrorCode"
-            },
-            "message": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "message"
-          ],
-          "type": "object"
-        },
-        "ErrorCode": {
-          "enum": [
-            "unknown_method",
-            "invalid_params",
-            "sessions_live",
-            "stale_generation",
-            "handshake_required",
-            "internal",
-            "other"
-          ],
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "error": {
           "anyOf": [
@@ -443,7 +340,6 @@
       "type": "object"
     },
     "ShutdownParams": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "force": {
           "default": false,
@@ -454,7 +350,6 @@
       "type": "object"
     },
     "SubscribeParams": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "topic": {
           "type": "string"
@@ -467,7 +362,6 @@
       "type": "object"
     },
     "Subscribed": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "subscription": {
           "format": "uint64",
@@ -480,8 +374,39 @@
       ],
       "title": "Subscribed",
       "type": "object"
+    },
+    "Welcome": {
+      "properties": {
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_version": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ProtocolVersion"
+        }
+      },
+      "required": [
+        "host_version",
+        "protocol",
+        "capabilities",
+        "host_id",
+        "generation"
+      ],
+      "type": "object"
     }
   },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "major": 1,
   "minor": 0,
   "protocol": "sirio-host"
