@@ -521,6 +521,11 @@ socket in a real, isolated Sirio. The `threads` stage of
 wire. State-only runs capture no frames; the controller's framed run
 reads them.
 
+### Known gaps
+
+- Outdated threads cannot be resolved, replied to or edited in B3b; users do those writes on the forge until B3c.
+- A re-read that outdates a thread drops its open reply or edit draft.
+
 Frames captured per flavour (`<flavour>` is `github` or `gitlab`); the
 script's `capture` prefixes each name with the scenario, so on disk they read
 `*thread-writes-thread-writes-<flavour>-composer.png` and
