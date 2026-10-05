@@ -38,7 +38,9 @@ set -eEuo pipefail
 #                         `force` ends it
 #   10. unverifiable      a stopped (silent) host holding its lock is never
 #                         replaced: Unverifiable after the wait, one host
-#   11. path-too-long     an endpoint path over sun_path is named in the log
+#   11. path-too-long     an endpoint path over sun_path is refused by the
+#                         client before it stages or starts anything; a host
+#                         started on that root by hand names it in its log
 #   12. foreign-client    the control socket's NDJSON is closed on, unanswered
 #
 # Cases 10 and 11 are unix-only and print SKIP on Windows. The systemd scope
@@ -746,7 +748,16 @@ case_path_too_long() {
   export SIRIO_HOST_IDLE_GRACE_MS=20000
   run_probe ensure
   [ "$RC" -eq 1 ] || fail "ensure on a root whose endpoint path is too long exited $RC, not 1"
-  case "$(getf error)" in ?*) ;; *) fail "ensure printed no error=: '$OUT'" ;; esac
+  case "$(getf error)" in
+    EndpointPathTooLong*) ;;
+    *) fail "ensure on a root whose endpoint path is too long answered '$OUT', not error=EndpointPathTooLong" ;;
+  esac
+  [ ! -e "$dir/bin" ] || fail "the client staged a host binary for a root it refuses"
+  [ ! -e "$dir/log/host-v1.log" ] || fail "the client started a host on a root it refuses: $(cat "$dir/log/host-v1.log")"
+  # The host's own refusal, for a start that does not go through ensure: on
+  # that root it exits 4 and names the kind of failure, never the path.
+  run_bounded 20 "$HOST_BIN"
+  [ "$RC" = 4 ] || fail "a host started by hand on a root whose endpoint path is too long exited $RC, not 4"
   has_line "$dir/log/host-v1.log" "$(printf 'start.bind_failed\tendpoint path too long')" \
     || fail "the log has no 'start.bind_failed<TAB>endpoint path too long': $(cat "$dir/log/host-v1.log" 2>&1)"
   [ "$(count_event 1 start.ready)" = 0 ] || fail "a host reported itself ready on an endpoint it cannot bind"

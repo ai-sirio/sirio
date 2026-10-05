@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sirio_host_protocol::liveness::Verdict;
@@ -57,6 +57,13 @@ pub enum EnsureError {
         client_majors: Vec<u32>,
     },
     StartTimeout,
+    /// The endpoint path does not fit a unix socket address (spec §8): the
+    /// host could never bind it, so none is started.
+    EndpointPathTooLong {
+        path: PathBuf,
+        /// The longest path this platform's socket address holds.
+        max: usize,
+    },
     Io(io::Error),
 }
 
@@ -91,6 +98,12 @@ impl std::fmt::Display for EnsureError {
                 "host speaks protocol v{host_major}, this app speaks {client_majors:?}"
             ),
             Self::StartTimeout => write!(f, "sirio-host started but never answered"),
+            Self::EndpointPathTooLong { path, max } => write!(
+                f,
+                "the host endpoint path is too long ({} bytes, at most {max}): {}",
+                path.as_os_str().as_encoded_bytes().len(),
+                path.display()
+            ),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -181,6 +194,9 @@ fn ensure_major(
 }
 
 fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureError> {
+    // Before anything is staged or spawned: a host on this root would exit
+    // at its bind, and the client would wait out START_WAIT for nothing.
+    endpoint_fits(&options.paths.endpoint(major))?;
     let source =
         locate_packaged_host(&options.current_exe, &options.environment).ok_or_else(|| {
             EnsureError::BinaryMissing {
@@ -206,6 +222,23 @@ fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureErro
         launchd_dir: options.paths.launchd_dir(),
     })
     .map_err(EnsureError::Spawn)
+}
+
+/// Whether the platform can bind `endpoint`. A unix socket path must fit
+/// `sun_path` together with its terminating NUL, so a path exactly as long
+/// as `sirio_ipc::MAX_SOCKET_PATH_LENGTH` is already too long. A named pipe's
+/// name is derived from the path and bounded by construction.
+fn endpoint_fits(endpoint: &Path) -> Result<(), EnsureError> {
+    #[cfg(unix)]
+    if endpoint.as_os_str().as_encoded_bytes().len() >= sirio_ipc::MAX_SOCKET_PATH_LENGTH {
+        return Err(EnsureError::EndpointPathTooLong {
+            path: endpoint.to_path_buf(),
+            max: sirio_ipc::MAX_SOCKET_PATH_LENGTH - 1,
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = endpoint;
+    Ok(())
 }
 
 fn connect(
@@ -254,4 +287,70 @@ impl HostHandle {
 
 pub fn status_line_for_error(error: &EnsureError) -> String {
     format!("Not available · {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn path_of_len(len: usize) -> PathBuf {
+        PathBuf::from(format!("/{}", "e".repeat(len - 1)))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_endpoint_exactly_at_the_socket_capacity_is_refused() {
+        // sun_path also holds the terminating NUL: a path as long as the
+        // capacity does not fit, and the host could never bind it.
+        let path = path_of_len(sirio_ipc::MAX_SOCKET_PATH_LENGTH);
+        match endpoint_fits(&path) {
+            Err(EnsureError::EndpointPathTooLong { path: named, .. }) => assert_eq!(named, path),
+            other => panic!("expected EndpointPathTooLong, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_endpoint_one_byte_shorter_than_the_capacity_is_accepted() {
+        let path = path_of_len(sirio_ipc::MAX_SOCKET_PATH_LENGTH - 1);
+        assert!(endpoint_fits(&path).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_named_pipe_endpoint_is_never_refused_on_length() {
+        let path = PathBuf::from(format!(
+            r"C:\{}\host-v1.sock",
+            "e".repeat(4 * sirio_ipc::MAX_SOCKET_PATH_LENGTH)
+        ));
+        assert!(endpoint_fits(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_over_long_endpoint_is_refused_before_anything_is_staged_or_created() {
+        // Neither the binary nor the root exists: a client that looked for
+        // the binary first would say BinaryMissing, one that created the
+        // root first would fail on it or leave it behind.
+        let root = Path::new("/nonexistent-sirio-ensure-test").join("r".repeat(120));
+        let options = EnsureOptions {
+            paths: HostPaths { root: root.clone() },
+            client_version: "0.0.0".into(),
+            current_exe: "/nonexistent-sirio-ensure-test/sirio".into(),
+            environment: BTreeMap::new(),
+            major: 1,
+        };
+        match ensure_host(&options) {
+            Err(EnsureError::EndpointPathTooLong { path, max }) => {
+                assert_eq!(path, options.paths.endpoint(1));
+                let text = EnsureError::EndpointPathTooLong { path, max }.to_string();
+                assert!(text.contains(&options.paths.endpoint(1).display().to_string()));
+                assert!(text.contains(&max.to_string()));
+            }
+            Err(other) => panic!("expected EndpointPathTooLong, got {other}"),
+            Ok(_) => panic!("an over-long endpoint was accepted"),
+        }
+        assert!(!root.exists());
+    }
 }

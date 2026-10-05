@@ -13,7 +13,9 @@ pub struct DetachedSpawn {
     pub cwd: PathBuf,
     /// Unit / job label, unique per protocol major (`sirio-host-v1`).
     pub label: String,
-    /// Where the macOS plist is written. Ignored elsewhere.
+    /// Where the macOS plist is written, `<data root>/launchd`; the launchd
+    /// job label carries a hash of it, so each data root has its own job.
+    /// Ignored elsewhere.
     pub launchd_dir: PathBuf,
 }
 
@@ -363,6 +365,79 @@ mod plist {
     }
 }
 
+/// The launchd job label of a host: one per protocol major **and data root**
+/// (spec §4.2), since launchd labels are per user and a second root's host
+/// must neither be taken for this one's nor collide with it.
+#[cfg(any(test, target_os = "macos"))]
+mod launchd_label {
+    use std::path::Path;
+
+    /// `app.sirioai.sirio.host.<major>.<hash>`: `spawn_label` without its
+    /// `sirio-host-` prefix (`v1`, or the probe's `probe`), then a hash of
+    /// `launchd_dir`, which is `<data root>/launchd` and so names the root.
+    /// ASCII and free of `/` whatever the root's path holds.
+    pub fn label(spawn_label: &str, launchd_dir: &Path) -> String {
+        format!(
+            "app.sirioai.sirio.host.{}.{:016x}",
+            spawn_label.trim_start_matches("sirio-host-"),
+            fnv1a_64(launchd_dir.as_os_str().as_encoded_bytes())
+        )
+    }
+
+    /// FNV-1a, 64 bits, as `sirio_ipc` derives its Windows pipe names: stable
+    /// across Rust releases, unlike `DefaultHasher`, so a newer app finds the
+    /// job an older one loaded.
+    fn fnv1a_64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::Path;
+
+        #[test]
+        fn two_data_roots_get_two_labels() {
+            let a = label(
+                "sirio-host-v1",
+                Path::new("/Users/u/Library/Sirio/host/launchd"),
+            );
+            let b = label("sirio-host-v1", Path::new("/Users/u/e2e/c1/launchd"));
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn one_data_root_always_gets_the_same_label() {
+            let dir = Path::new("/Users/u/Library/Sirio/host/launchd");
+            assert_eq!(label("sirio-host-v1", dir), label("sirio-host-v1", dir));
+        }
+
+        #[test]
+        fn the_major_and_the_probe_stay_distinct_within_one_root() {
+            let dir = Path::new("/Users/u/Library/Sirio/host/launchd");
+            let v1 = label("sirio-host-v1", dir);
+            let v2 = label("sirio-host-v2", dir);
+            let probe = label("sirio-host-probe", dir);
+            assert_ne!(v1, v2);
+            assert_ne!(v1, probe);
+            assert!(v1.starts_with("app.sirioai.sirio.host.v1."), "{v1}");
+        }
+
+        #[test]
+        fn a_root_with_any_characters_gives_a_plain_ascii_label() {
+            let label = label("sirio-host-v1", Path::new("/Users/ü s/da/ta:root/launchd"));
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+                "{label}"
+            );
+        }
+    }
+}
+
 /// What to do about a launchd job already under this label, decided from
 /// `launchctl print`, kept apart from the macOS arm so that it runs on every
 /// platform's test suite.
@@ -460,10 +535,7 @@ mod imp {
     pub fn spawn(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
         // SAFETY: getuid has no preconditions and cannot fail.
         let uid = unsafe { libc::getuid() };
-        let label = format!(
-            "app.sirioai.sirio.host.{}",
-            spec.label.trim_start_matches("sirio-host-")
-        );
+        let label = super::launchd_label::label(&spec.label, &spec.launchd_dir);
         let xml = plist_xml(&label, spec, std::env::vars_os())?;
         let domain = format!("gui/{uid}");
         let target = format!("{domain}/{label}");
@@ -499,8 +571,11 @@ mod imp {
         let status = bootstrap?;
         if !status.success() {
             // A bootstrap that fails because another client's just won is a
-            // lost race, not an error: the caller waits for that host.
-            if current_plan(&target) == Plan::AlreadyRunning {
+            // lost race, not an error: a job is loaded under the label now,
+            // running or about to, and the caller's endpoint wait — the one
+            // real success test — adopts its host or times out. Only a
+            // failure that left nothing loaded is this call's own.
+            if current_plan(&target) != Plan::Bootstrap {
                 return Ok(DetachMethod::Launchd);
             }
             return Err(io::Error::other(format!(
