@@ -137,46 +137,6 @@ fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// The comments of a thread, one block each.
-fn comment_blocks(thread: &ReviewThread, docs: &[markdown::Doc], theme: &Theme) -> Vec<AnyElement> {
-    let now = style::now();
-    thread
-        .comments
-        .iter()
-        .zip(docs)
-        .enumerate()
-        .map(|(index, (comment, doc))| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(Avatar::new(("change-request-thread-avatar", index), comment.author.clone()).size(AvatarSize::Xs))
-                        .child(
-                            div()
-                                .id(("change-request-thread-author", index))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(selectable_text(comment.author.clone())),
-                        )
-                        .child(
-                            div()
-                                .id(("change-request-thread-time", index))
-                                .text_color(theme.ely.fg_subtle)
-                                .child(selectable_text(style::age(now, comment.at))),
-                        ),
-                )
-                .child(div().id(("change-request-thread-body", index)).child(
-                    Chat::render_markdown_document_with_link_override(doc.clone(), theme, open_links()),
-                ))
-                .into_any_element()
-        })
-        .collect()
-}
-
 pub(super) fn card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -190,6 +150,10 @@ pub(super) fn card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::State
         .flex()
         .flex_col()
         .gap(px(8.0))
+}
+
+pub(super) fn nested_card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    card(id, theme).mx(px(0.0)).my(px(0.0))
 }
 
 /// One thread under its line: open while unresolved, folded to one line
@@ -560,12 +524,14 @@ impl Render for ThreadView {
         } else {
             where_label(thread)
         };
-        let (thread_id, can_resolve, can_reply, resolved, write) = (
+        let (thread_id, can_resolve, can_reply, resolved, write, outdated, diff_hunk) = (
             thread.id.clone(),
             thread.can_resolve && published > 0,
             thread.can_reply && published > 0,
             thread.resolved,
             self.write.clone(),
+            thread.outdated,
+            thread.diff_hunk.clone(),
         );
         let header = div()
             .id(("change-request-thread-header", self.key))
@@ -636,8 +602,17 @@ impl Render for ThreadView {
                 )
             })
             .on_click(cx.listener(|view, _, _, cx| view.toggle(cx)));
-        let mut card = card(("change-request-thread", self.key), &theme).child(header);
+        let mut card = if outdated {
+            nested_card(("change-request-thread", self.key), &theme).child(header)
+        } else {
+            card(("change-request-thread", self.key), &theme).child(header)
+        };
         if !folded {
+            if let Some(hunk) = diff_hunk.as_deref()
+                && outdated
+            {
+                card = card.child(quoted_code(hunk, &theme));
+            }
             card = card.children(self.render_comments(window, cx, &theme));
             if can_reply {
                 if self.reply.is_some() {
@@ -724,33 +699,30 @@ impl Render for ThreadView {
 /// the code each was written on no longer reads the same.
 pub(crate) struct OutdatedView {
     path: String,
-    threads: Vec<ReviewThread>,
-    docs: Vec<Vec<markdown::Doc>>,
+    threads: Vec<Entity<ThreadView>>,
     open: bool,
     pub(crate) revision: u64,
     owner: WeakEntity<ChangeRequestTab>,
 }
 
 impl OutdatedView {
-    fn new(path: String, threads: Vec<ReviewThread>, owner: WeakEntity<ChangeRequestTab>, theme: &Theme) -> Self {
-        Self {
-            docs: threads.iter().map(|thread| comment_docs(thread, theme)).collect(),
-            path,
-            threads,
-            open: false,
-            revision: 0,
-            owner,
-        }
+    fn new(path: String, threads: Vec<Entity<ThreadView>>, owner: WeakEntity<ChangeRequestTab>) -> Self {
+        Self { path, threads, open: false, revision: 0, owner }
     }
 
-    fn set_threads(&mut self, threads: Vec<ReviewThread>, theme: &Theme, cx: &mut Context<Self>) {
+    fn set_threads(&mut self, threads: Vec<Entity<ThreadView>>, cx: &mut Context<Self>) {
         if threads == self.threads {
             return;
         }
-        self.docs = threads.iter().map(|thread| comment_docs(thread, theme)).collect();
         self.threads = threads;
         self.revision += 1;
         cx.notify();
+    }
+
+    /// Its own revision and every card's: the list measures the section
+    /// again when any card in it changes height.
+    pub(crate) fn measured(&self, cx: &App) -> u64 {
+        self.revision + self.threads.iter().map(|view| view.read(cx).revision).sum::<u64>()
     }
 
     pub fn open(&mut self, cx: &mut Context<Self>) {
@@ -815,21 +787,7 @@ impl Render for OutdatedView {
             .on_click(cx.listener(|view, _, _, cx| view.toggle(cx)));
         card(("change-request-outdated", key), &theme)
             .child(header)
-            .when(self.open, |this| {
-                this.children(self.threads.iter().zip(&self.docs).enumerate().map(|(index, (thread, docs))| {
-                    div()
-                        .id(("change-request-outdated-thread", index))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .pt(px(6.0))
-                        .border_t_1()
-                        .border_color(theme.ely.border)
-                        .child(div().text_color(theme.ely.fg_muted).child(where_label(thread)))
-                        .children(thread.diff_hunk.as_deref().map(|hunk| quoted_code(hunk, &theme)))
-                        .children(comment_blocks(thread, docs, &theme))
-                }))
-            })
+            .when(self.open, |this| this.children(self.threads.iter().cloned()))
     }
 }
 
@@ -1004,7 +962,18 @@ impl ChangeRequestTab {
         let thread = self.threads.value().and_then(|listing| listing.items.iter().find(|thread| thread.id == id))
             .cloned().ok_or_else(|| format!("no thread {id}"))?;
         let key = thread_key(id);
-        let anchor = if let Some(view) = self.thread_views.get(&key) {
+        let outdated_drawn = thread.outdated && !drawn_in_diff(std::slice::from_ref(&thread)).is_empty();
+        let anchor = if outdated_drawn {
+            if let Some(view) = self.thread_views.get(&key) {
+                view.update(cx, |view, cx| view.open(cx));
+            }
+            if let Some(section) = self.outdated_views.get(&thread.path) {
+                section.update(cx, |section, cx| section.open(cx));
+                Some(outdated_key(&thread.path))
+            } else {
+                None
+            }
+        } else if let Some(view) = self.thread_views.get(&key) {
             view.update(cx, |view, cx| view.open(cx));
             Some(key)
         } else if drawn_in_diff(std::slice::from_ref(&thread)).is_empty() {
@@ -1032,7 +1001,11 @@ impl ChangeRequestTab {
     pub fn toggle_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
         let thread = self.threads.value().and_then(|listing| listing.items.iter().find(|thread| thread.id == id))
             .ok_or_else(|| format!("no thread {id}"))?;
-        if let Some(view) = self.thread_views.get(&thread_key(id)) {
+        if thread.outdated && !drawn_in_diff(std::slice::from_ref(thread)).is_empty() {
+            if let Some(section) = self.outdated_views.get(&thread.path) {
+                section.update(cx, |section, cx| section.toggle(cx));
+            }
+        } else if let Some(view) = self.thread_views.get(&thread_key(id)) {
             view.update(cx, |view, cx| view.toggle(cx));
         } else if !drawn_in_diff(std::slice::from_ref(thread)).is_empty() {
             if let Some(section) = self.outdated_views.get(&thread.path) {
@@ -1208,16 +1181,10 @@ impl ChangeRequestTab {
         let owner = cx.entity().downgrade();
         let theme = *Theme::get(cx);
         let mut thread_views = HashMap::new();
-        let mut outdated: Vec<(String, Vec<ReviewThread>)> = Vec::new();
+        let mut outdated: Vec<(String, Vec<Entity<ThreadView>>)> = Vec::new();
         for thread in drawn {
-            if thread.outdated {
-                match outdated.iter_mut().find(|(path, _)| *path == thread.path) {
-                    Some((_, threads)) => threads.push(thread),
-                    None => outdated.push((thread.path.clone(), vec![thread])),
-                }
-                continue;
-            }
             let key = thread_key(&thread.id);
+            let (path, is_outdated) = (thread.path.clone(), thread.outdated);
             let view = match self.thread_views.remove(&key) {
                 Some(view) => {
                     view.update(cx, |view, cx| view.set_thread(thread, &theme, cx));
@@ -1228,18 +1195,24 @@ impl ChangeRequestTab {
                     cx.new(|_| ThreadView::new(thread, owner, &theme))
                 }
             };
+            if is_outdated {
+                match outdated.iter_mut().find(|(at, _)| *at == path) {
+                    Some((_, views)) => views.push(view.clone()),
+                    None => outdated.push((path, vec![view.clone()])),
+                }
+            }
             thread_views.insert(key, view);
         }
         let mut outdated_views = HashMap::new();
-        for (path, threads) in outdated {
+        for (path, views) in outdated {
             let view = match self.outdated_views.remove(&path) {
                 Some(view) => {
-                    view.update(cx, |view, cx| view.set_threads(threads, &theme, cx));
+                    view.update(cx, |view, cx| view.set_threads(views, cx));
                     view
                 }
                 None => {
                     let (owner, path) = (owner.clone(), path.clone());
-                    cx.new(|_| OutdatedView::new(path, threads, owner, &theme))
+                    cx.new(|_| OutdatedView::new(path, views, owner))
                 }
             };
             outdated_views.insert(path, view);
@@ -1269,7 +1242,7 @@ impl ChangeRequestTab {
                 .collect();
             annotations.extend(section_counts(&listing.items).into_iter().map(|(path, count)| Annotation {
                 key: outdated_key(&path),
-                revision: self.outdated_views.get(&path).map_or(0, |view| view.read(cx).revision),
+                revision: self.outdated_views.get(&path).map_or(0, |view| view.read(cx).measured(cx)),
                 path: PathBuf::from(path),
                 side: AnnotationSide::New,
                 line: None,

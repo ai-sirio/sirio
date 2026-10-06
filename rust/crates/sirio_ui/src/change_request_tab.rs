@@ -3166,6 +3166,54 @@ mod tests {
         });
     }
 
+    fn outdated(mut node: serde_json::Value) -> serde_json::Value {
+        node["isOutdated"] = serde_json::json!(true);
+        node["line"] = serde_json::Value::Null;
+        node
+    }
+
+    #[gpui::test]
+    async fn an_outdated_thread_can_be_answered_and_resolved(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, outdated(thread_node("PRRT_1", 42))).await;
+        forge.answer("AddPullRequestReviewThreadReply", ok_mutation("addPullRequestReviewThreadReply"));
+        forge.answer("ResolveReviewThread", ok_mutation("resolveReviewThread"));
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("an outdated thread takes a reply");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Still true.", cx)).expect("open");
+        tab.update(cx, |tab, cx| tab.send_reply("PRRT_1", cx)).expect("sent");
+        pump_until(cx, || forge.count("AddPullRequestReviewThreadReply") == 1);
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "idle"));
+        tab.update(cx, |tab, cx| tab.resolve_thread("PRRT_1", true, cx)).expect("an outdated thread can be resolved");
+        pump_until(cx, || forge.count("ResolveReviewThread") == 1);
+    }
+
+    #[gpui::test]
+    async fn a_reply_being_written_survives_its_thread_going_outdated(cx: &mut TestAppContext) {
+        let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        tab.update(cx, |tab, cx| tab.open_reply("PRRT_1", cx)).expect("a loaded thread");
+        tab.update(cx, |tab, cx| tab.reply_set_text("PRRT_1", "Half a thought", cx)).expect("open");
+        forge.answer("ChangeRequestThreads", threads_json(vec![outdated(thread_node("PRRT_1", 42))]));
+        let reads = forge.count("ChangeRequestThreads");
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || {
+            forge.count("ChangeRequestThreads") > reads
+                && tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows").contains("outdated:a.txt:1"))
+        });
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "thread_replying"), "PRRT_1");
+            assert_eq!(tab.reply_text("PRRT_1", cx).as_deref(), Some("Half a thought"));
+        });
+    }
+
+    #[gpui::test]
+    async fn an_outdated_pending_comment_can_be_deleted(cx: &mut TestAppContext) {
+        let node = with_pending_comment(outdated(thread_node("PRRT_1", 42)), "PRRC_9", "Not sent yet.");
+        let (tab, forge, _repo) = a_thread(cx, node).await;
+        forge.answer("DeletePullRequestReviewComment", ok_mutation("deletePullRequestReviewComment"));
+        tab.update(cx, |tab, cx| tab.delete_draft_comment("PRRC_9", cx)).expect("an outdated pending comment is deletable");
+        pump_until(cx, || forge.count("DeletePullRequestReviewComment") == 1);
+        assert_eq!(forge.sent("DeletePullRequestReviewComment").expect("sent")["input"], serde_json::json!({ "id": "PRRC_9" }));
+    }
+
     /// Like `a_thread`, but the tab is built in a window, so the test can call
     /// the socket entry `control_act`, which needs one. The window context is
     /// cloned out of the borrow, so the caller keeps using `cx` afterwards.
