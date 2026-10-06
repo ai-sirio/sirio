@@ -1,11 +1,12 @@
 //! The one new line comment being written in a change request's diff
 //! (spec §7.2, B3b): its view under the line, and the tab's side of it.
 
+use super::suggestion;
 use super::*;
 
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::WeakEntity;
-use sirio_forge::{LineAnchor, Revisions, Side};
+use sirio_forge::{LineAnchor, ReviewTarget, Revisions, Side};
 
 use crate::diff_annotations::CommentAnchor;
 use crate::ely_ui::new_input;
@@ -19,22 +20,26 @@ pub(crate) enum WriteTarget {
     Reply(String),
     Resolve(String),
     EditComment(String),
+    Review,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WriteStatus {
     pub busy: bool,
     pub error: Option<String>,
+    pub in_review: bool,
 }
 
 pub(crate) struct LineComposer {
     pub(crate) anchor: CommentAnchor,
     pub(crate) revisions: Revisions,
     pub(crate) view: Entity<ComposerView>,
+    suggested: Option<String>,
 }
 
 pub(crate) struct ComposerView {
     label: String,
+    new_side: bool,
     field: FieldState,
     write: WriteStatus,
     pub(crate) revision: u64,
@@ -103,6 +108,7 @@ impl ComposerView {
     pub(crate) fn new(anchor: &CommentAnchor, owner: WeakEntity<ChangeRequestTab>) -> Self {
         Self {
             label: Self::label(anchor),
+            new_side: anchor.side == AnnotationSide::New,
             field: FieldState::new(String::new()),
             write: WriteStatus::default(),
             revision: 0,
@@ -147,6 +153,7 @@ impl ComposerView {
 
     pub(crate) fn set_anchor(&mut self, anchor: &CommentAnchor, cx: &mut Context<Self>) {
         self.label = Self::label(anchor);
+        self.new_side = anchor.side == AnnotationSide::New;
         self.revision += 1;
         cx.notify();
     }
@@ -194,6 +201,8 @@ impl Render for ComposerView {
                     .child(selectable_text(error)),
             );
         }
+        let (suggest_owner, review_owner) = (owner.clone(), owner.clone());
+        let can_send = !write.busy && !text.trim().is_empty();
         card.child(
             div()
                 .flex()
@@ -208,11 +217,35 @@ impl Render for ComposerView {
                         let _ = owner.update(cx, |tab, cx| tab.cancel_composer(cx));
                     },
                 ))
+                .when(self.new_side, |row| {
+                    row.child(actions::action_button(
+                        "change-request-line-composer-suggest",
+                        "Suggest",
+                        &theme,
+                        !write.busy,
+                        move |_, cx| {
+                            let _ = suggest_owner.update(cx, |tab, cx| {
+                                let _ = tab.insert_suggestion(cx);
+                            });
+                        },
+                    ))
+                })
+                .child(actions::action_button(
+                    "change-request-line-composer-review",
+                    if write.in_review { "Add to review" } else { "Start a review" },
+                    &theme,
+                    can_send,
+                    move |_, cx| {
+                        let _ = review_owner.update(cx, |tab, cx| {
+                            let _ = tab.send_line_to_review(cx);
+                        });
+                    },
+                ))
                 .child(actions::action_button(
                     "change-request-line-composer-send",
                     "Comment",
                     &theme,
-                    !write.busy && !text.trim().is_empty(),
+                    can_send,
                     move |_, cx| {
                         let _ = send_owner.update(cx, |tab, cx| {
                             let _ = tab.send_line_comment(cx);
@@ -235,17 +268,58 @@ impl ChangeRequestTab {
             RangeState::Ready { revisions, .. } => revisions.clone(),
             _ => return,
         };
+        let mut reanchor_suggestion = false;
+        let mut suggested_text = None;
+        let mut suggested = None;
+        let mut suggestion_error = None;
+        if let Some(open) = self.line_composer.as_ref() {
+            if let Some(previous) = open.suggested.as_ref() {
+                reanchor_suggestion = true;
+                let text = open.view.read(cx).text(cx);
+                if text.contains(previous) {
+                    match self.suggestion_block_for(&anchor, cx) {
+                        Ok(replacement) => {
+                            suggested_text = Some(text.replacen(previous, &replacement, 1));
+                            suggested = Some(replacement);
+                        }
+                        Err(error) => {
+                            suggested_text = Some(text.replacen(previous, "", 1).trim().to_string());
+                            suggestion_error = Some(error);
+                        }
+                    }
+                } else {
+                    suggested = Some(previous.clone());
+                    suggestion_error = Some(format!("The suggestion was written for {}.", open.anchor.spec()));
+                }
+            }
+        }
         match &mut self.line_composer {
             Some(open) => {
                 open.anchor = anchor.clone();
                 open.revisions = revisions.clone();
-                open.view.update(cx, |view, cx| view.set_anchor(&anchor, cx));
+                if reanchor_suggestion {
+                    open.suggested = suggested;
+                }
+                open.view.update(cx, |view, cx| {
+                    view.set_anchor(&anchor, cx);
+                    if let Some(text) = suggested_text.as_deref() {
+                        view.set_text(text, cx);
+                    }
+                });
             }
             None => {
                 let owner = cx.entity().downgrade();
                 let view = cx.new(|_| ComposerView::new(&anchor, owner));
-                self.line_composer = Some(LineComposer { anchor: anchor.clone(), revisions, view });
+                self.line_composer = Some(LineComposer { anchor: anchor.clone(), revisions, view, suggested: None });
+                // A fresh composer starts from a default status: pick up the
+                // tab's write state (e.g. a review already in progress) now.
+                // A re-anchored composer already has a status.
+                self.sync_writes(cx);
             }
+        }
+        if let Some(error) = suggestion_error {
+            self.write_refusal = Some((WriteTarget::Composer, error));
+            self.sync_writes(cx);
         }
         self.push_annotations(cx);
         if let RangeState::Ready { changes, .. } = &self.range {
@@ -322,12 +396,98 @@ impl ChangeRequestTab {
             .as_ref()
             .ok_or("No comment is being written.")?;
         let RangeState::Ready { .. } = &self.range else {
-            return Err("The diff is not loaded.".to_string());
+            let message = "The diff is not loaded.".to_string();
+            self.write_refusal = Some((WriteTarget::Composer, message.clone()));
+            self.sync_writes(cx);
+            return Err(message);
         };
         let anchor = to_line_anchor(&open.anchor);
         let body = open.view.read(cx).text(cx);
         let action = Action::LineComment { anchor, revisions: open.revisions.clone(), body };
         self.start_write(WriteTarget::Composer, action, cx)
+    }
+
+    pub(crate) fn send_line_to_review(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let open = self
+            .line_composer
+            .as_ref()
+            .ok_or("No comment is being written.")?;
+        let RangeState::Ready { .. } = &self.range else {
+            let message = "The diff is not loaded.".to_string();
+            self.write_refusal = Some((WriteTarget::Composer, message.clone()));
+            self.sync_writes(cx);
+            return Err(message);
+        };
+        let anchor = to_line_anchor(&open.anchor);
+        let body = open.view.read(cx).text(cx);
+        let action = Action::ReviewAdd {
+            target: ReviewTarget::Line { anchor, revisions: open.revisions.clone() },
+            body,
+        };
+        self.start_write(WriteTarget::Composer, action, cx)
+    }
+
+    /// *Suggest*: the anchored lines, as the diff reads them now, in a
+    /// ```suggestion block after what is written (spec §7.3). A refusal
+    /// shows under the composer like a send's does, and keeps the text; a
+    /// later successful Suggest clears it the way a send or a cancel does.
+    pub fn insert_suggestion(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        match self.suggested_text(cx) {
+            Ok((text, block)) => {
+                if self
+                    .write_refusal
+                    .as_ref()
+                    .is_some_and(|(target, _)| target == &WriteTarget::Composer)
+                {
+                    self.write_refusal = None;
+                }
+                if let Some(open) = self.line_composer.as_mut() {
+                    open.suggested = Some(block);
+                }
+                self.composer_set_text(&text, cx);
+                self.sync_writes(cx);
+                Ok(())
+            }
+            Err(message) => {
+                self.write_refusal = Some((WriteTarget::Composer, message.clone()));
+                self.sync_writes(cx);
+                Err(message)
+            }
+        }
+    }
+
+    /// What *Suggest* would insert: what is written plus the anchored
+    /// lines' current text in a ```suggestion block.
+    fn suggested_text(&self, cx: &App) -> Result<(String, String), String> {
+        let open = self
+            .line_composer
+            .as_ref()
+            .ok_or("No comment is being written.".to_string())?;
+        let block = self.suggestion_block_for(&open.anchor, cx)?;
+        let written = open.view.read(cx).text(cx);
+        let text = if written.trim().is_empty() { block.clone() } else { format!("{}\n\n{block}", written.trim_end()) };
+        Ok((text, block))
+    }
+
+    fn suggestion_block_for(&self, anchor: &CommentAnchor, cx: &App) -> Result<String, String> {
+        if anchor.side != AnnotationSide::New {
+            return Err("A suggestion replaces lines on the new side.".to_string());
+        }
+        let RangeState::Ready { changes, .. } = &self.range else {
+            return Err("The diff is not loaded.".to_string());
+        };
+        let lines = changes.read(cx).anchored_text(anchor).ok_or("Those lines are not in the loaded diff.".to_string())?;
+        Ok(suggestion::suggestion_block(&lines))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_text(&self, cx: &App) -> Option<String> {
+        self.line_composer.as_ref().map(|open| open.view.read(cx).text(cx))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_in_review(&self, cx: &App) -> Option<bool> {
+        self.line_composer.as_ref().map(|open| open.view.read(cx).write.in_review)
     }
 
     /// Every thread write goes through here: `perform`, and the field it
@@ -355,6 +515,7 @@ impl ChangeRequestTab {
     /// field that sent it).
     pub(crate) fn sync_writes(&mut self, cx: &mut Context<Self>) {
         let busy = self.action_busy();
+        let in_review = self.header.value().is_some_and(|header| header.draft.is_some());
         let failed = match &self.actions.state {
             actions::ActionState::Failed { message, .. } => Some(message.clone()),
             _ => None,
@@ -368,6 +529,7 @@ impl ChangeRequestTab {
                 .filter(|(owner, _)| owner == target)
                 .map(|(_, message)| message.clone())
                 .or_else(|| failed.clone().filter(|_| write_target.as_ref() == Some(target))),
+            in_review,
         };
         if let Some(open) = &self.line_composer {
             let status = status_for(&WriteTarget::Composer);
@@ -383,6 +545,7 @@ impl ChangeRequestTab {
                     comment.id == *id || comment.edit.as_ref().is_some_and(|edit| edit.id == *id)
                 }),
                 WriteTarget::Composer => false,
+                WriteTarget::Review => false,
             };
             let error = write_refusal
                 .as_ref()
@@ -394,7 +557,7 @@ impl ChangeRequestTab {
                     })
                 });
             view.update(cx, |view, cx| {
-                view.set_write(WriteStatus { busy, error }, cx);
+                view.set_write(WriteStatus { busy, error, in_review }, cx);
             });
         }
     }

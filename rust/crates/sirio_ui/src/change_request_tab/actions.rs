@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use ely_gpui_component::forms::TextInput;
 use ely_gpui_component::primitives::{IconName, Severity};
-use sirio_forge::{Action, ActionOutcome, ChangeState, CommentRef};
+use sirio_forge::{Action, ActionOutcome, ChangeState, CommentRef, ReviewVerdict};
 
 use super::composer::ComposerSend;
 use super::*;
@@ -293,9 +293,34 @@ impl ChangeRequestTab {
                 _ => self.actions.comment_edit = None,
             },
             "resolve" | "unresolve" => {}
+            "review-add" if !warned => match self.write_target.clone() {
+                Some(super::compose::WriteTarget::Composer) => {
+                    self.line_composer = None;
+                    if self.write_refusal.as_ref().is_some_and(|(target, _)| target == &super::compose::WriteTarget::Composer) {
+                        self.write_refusal = None;
+                    }
+                }
+                Some(super::compose::WriteTarget::Reply(thread)) => {
+                    if let Some(view) = self.thread_views.get(&super::threads::thread_key(&thread)).cloned() {
+                        view.update(cx, |view, cx| view.close_reply(cx));
+                    }
+                }
+                _ => {}
+            },
+            "review-add" => {}
+            "draft-delete" => {}
             "merge" | "auto-merge" => self.actions.merge.dialog = None,
-            "comment" | "approve" | "request-changes" => {
-                let sent = self.actions.sent.take();
+            "comment" | "approve" | "request-changes" | "review-submit" => {
+                if kind == "review-submit" {
+                    self.review.submit = None;
+                }
+                let sent = if kind == "review-submit"
+                    && self.write_target.as_ref() == Some(&super::compose::WriteTarget::Review)
+                {
+                    None
+                } else {
+                    self.actions.sent.take()
+                };
                 if let (false, Some(sent), Some(composer)) =
                     (warned, sent, self.actions.composer.clone())
                 {
@@ -304,6 +329,7 @@ impl ChangeRequestTab {
                     }
                 }
             }
+            "review-discard" => {}
             _ => {}
         }
     }
@@ -580,6 +606,74 @@ impl ChangeRequestTab {
                     self.save_thread_comment_edit(cx)
                 })();
                 self.record_refusal("edit-comment", outcome, cx)
+            }
+            "review-add" => {
+                let outcome = (|| {
+                    match text("thread") {
+                        Some(thread) => {
+                            self.open_reply(&thread, cx)?;
+                            if let Some(words) = text("text") {
+                                self.reply_set_text(&thread, &words, cx)?;
+                            }
+                            self.send_reply_to_review(&thread, cx)
+                        }
+                        None => {
+                            if self.line_composer.is_none() {
+                                return Err("No comment is being written; open one with thread --compose.".to_string());
+                            }
+                            if let Some(words) = text("text") {
+                                self.composer_set_text(&words, cx);
+                            }
+                            self.send_line_to_review(cx)
+                        }
+                    }
+                })();
+                self.record_refusal("review-add", outcome, cx)
+            }
+            "review-open-submit" => {
+                let outcome = self.open_review_submit(window, cx);
+                self.record_refusal("review-open-submit", outcome, cx)
+            }
+            "review-submit" => {
+                let outcome = (|| {
+                    let verdict = match text("verdict").as_deref() {
+                        Some("comment") => ReviewVerdict::Comment,
+                        Some("approve") => ReviewVerdict::Approve,
+                        Some("request-changes") => ReviewVerdict::RequestChanges,
+                        _ => return Err("review-submit needs verdict comment|approve|request-changes".to_string()),
+                    };
+                    self.open_review_submit(window, cx)?;
+                    if let Some(words) = text("text") {
+                        self.review_submit_set_text(&words, cx)?;
+                    }
+                    self.submit_review(verdict, cx)
+                })();
+                self.record_refusal("review-submit", outcome, cx)
+            }
+            "review-discard" => {
+                let outcome = self.open_review_discard(cx);
+                self.record_refusal("review-discard", outcome, cx)
+            }
+            "review-discard-confirm" => {
+                let outcome = self.confirm_review_discard(cx);
+                self.record_refusal("review-discard", outcome, cx)
+            }
+            "draft-edit" => {
+                let outcome = (|| {
+                    let comment = text("comment").ok_or("draft-edit needs comment")?;
+                    let words = text("text").ok_or("draft-edit needs text")?;
+                    self.start_thread_comment_edit(&comment, cx)?;
+                    self.thread_comment_set_text(&words, cx)?;
+                    self.save_thread_comment_edit(cx)
+                })();
+                self.record_refusal("edit-comment", outcome, cx)
+            }
+            "draft-delete" => {
+                let outcome = (|| {
+                    let comment = text("comment").ok_or("draft-delete needs comment")?;
+                    self.delete_draft_comment(&comment, cx)
+                })();
+                self.record_refusal("draft-delete", outcome, cx)
             }
             "picker-open" | "picker-type" | "picker-pick" | "picker-close" => {
                 self.control_picker(name, params, window, cx)

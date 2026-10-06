@@ -57,8 +57,11 @@ impl ChangeRequestTab {
         };
         let body = composer.read(cx).text().to_string();
         self.actions.sent = Some(body.clone());
+        let drafting = self.header.value().is_some_and(|header| header.draft.is_some());
         let action = match how {
             ComposerSend::Comment => Action::Comment { body },
+            ComposerSend::Approve if drafting => Action::ReviewSubmit { verdict: ReviewVerdict::Approve, body },
+            ComposerSend::RequestChanges if drafting => Action::ReviewSubmit { verdict: ReviewVerdict::RequestChanges, body },
             ComposerSend::Approve => Action::Review {
                 verdict: ReviewVerdict::Approve,
                 body,
@@ -82,6 +85,7 @@ impl ChangeRequestTab {
         }
         let busy = self.action_busy();
         let blank = self.actions.composer_blank;
+        let drafting = self.header.value().is_some_and(|header| header.draft.is_some());
         let send = |how: ComposerSend| {
             let entity = entity.clone();
             move |cx: &mut App| {
@@ -106,7 +110,7 @@ impl ChangeRequestTab {
                 let run = send(ComposerSend::RequestChanges);
                 menu = menu.item(
                     MenuItem::new("Request changes")
-                        .disabled(busy || blank)
+                        .disabled(busy || (blank && !drafting))
                         .on_click(move |_, cx| run(cx)),
                 );
             }

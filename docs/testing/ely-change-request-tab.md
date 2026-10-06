@@ -439,7 +439,8 @@ Both appearances ran to `FORGE ACTIONS E2E OK` on `:96` (1600x1500), with
 The `github-threads` and `gitlab-threads` scenarios of
 `Scripts/Tests/test-forge-diff-e2e.sh` check one Conversation entry per
 published thread, current/old/range anchors, resolved folds, outdated
-sections, draft exclusion and cards after the Files range is restored.
+sections, the draft thread drawn and counted pending, and cards after the
+Files range is restored.
 Standalone Changes sets the global Split mode before the scenario returns
 to the change request and checks the same line anchors.
 
@@ -532,8 +533,11 @@ script's `capture` prefixes each name with the scenario, so on disk they read
 
 ### Known gaps
 
-- Outdated threads cannot be resolved, replied to or edited in B3b; users do those writes on the forge until B3c.
-- A re-read that outdates a thread drops its open reply or edit draft.
+Closed in B3c: outdated threads take replies, resolves and edits; a reply or edit being written survives its thread going outdated, and its section opens so the draft stays visible.
+
+Not verified live: B3b's immediate *Comment* (REST review comment or
+published reply) while a GitHub pending review exists; GitHub may refuse it,
+and Sirio shows the forge's reason with the text kept.
 
 ### What was seen (2026-10-05, Xvfb, lavapipe, dark)
 
@@ -564,3 +568,53 @@ VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-di
   the header's fold), the field growing with multiline text, or the reply
   field's focus on open. Light appearance was not run; the script has no
   `--appearance`.
+
+## B3c: the drafted review, suggestions, outdated writes
+
+`scenario_review` in `Scripts/Tests/test-forge-diff-e2e.sh` exercises the
+GitHub and GitLab review strip, a received suggestion, a submitted review, a
+discarded review and a reply on an outdated thread. The `review` stage of
+`Scripts/Tests/test-forge-actions-e2e.sh` proves the review writes on the wire.
+The scenario captures these five frames per flavour (`<flavour>` is `github`
+or `gitlab`). Capture prefixes each name with `$SCENARIO` (`<flavour>-review`),
+so the files are named `<flavour>-review-review-<flavour>-<name>.png`:
+
+- `<flavour>-review-review-<flavour>-suggestion.png`: a received suggestion
+  drawn as a diff.
+- `<flavour>-review-review-<flavour>-strip.png`: the review strip after the
+  suggestion comment was sent; the line composer is closed.
+- `<flavour>-review-review-<flavour>-submit-dialog.png`: the open submit
+  dialog.
+- `<flavour>-review-review-<flavour>-discard-dialog.png`: the discard
+  confirmation.
+- `<flavour>-review-review-<flavour>-outdated.png`: the outdated thread after
+  its reply.
+
+### What was seen (controller's framed run, 2026-10-06)
+
+The run used Xvfb `:95` at 1600×1500, lavapipe and the dark appearance. It
+finished with `FORGE DIFF E2E OK` and saved 32 frames under
+`/home/epalmisano/.cache/st/b3c-framed`.
+
+- The review strip reads *Review in progress · 1 comment* and puts *Discard*
+  and *Submit review* under the merge strip. Its text wraps to two lines in
+  the narrow Secondary pane.
+- The submit dialog shows *Submit review*, *1 pending comment* and the summary
+  field, followed by *Cancel*, *Comment*, *Approve* and *Request changes*. The
+  four buttons crowd the dialog width, and Cancel nearly touches the left edge.
+- The discard dialog says *Discard your review?* and explains that the one
+  pending comment will be deleted and cannot be recovered; its buttons are
+  *Cancel* and red *Discard*.
+- A pending comment has an amber *Pending* badge plus *Edit* and *Delete*. A
+  draft-only thread's header reads *0 comments · 1 pending*.
+- The open outdated section contains `src/login.rs line 30 · 1 comment ·
+  Resolve`, its quoted hunk in color and the comments below.
+- GitLab's suggestion draws *Suggested change* and *Open on the forge*, with
+  the before line in red and proposed line in green. Its before line (*edited
+  12*) comes from the fixture's un-rewritten hunk.
+
+The GitHub suggestion card was absent from this run's frame because the
+scenario did not reveal `PRRT_range` first. `scenario_review` now reveals it
+before capture; this records the earlier framed run, and no new frame run was
+made for that edit. Light appearance was not run because
+`test-forge-diff-e2e.sh` has no `--appearance` option.

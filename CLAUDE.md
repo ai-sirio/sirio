@@ -340,10 +340,30 @@ reply or resolve preceded by a fresh read of that thread's permissions.
 on the lines within 3 of a change (`diff_annotations::commentable`), and
 emits `CommentOn`; the change request tab owns the one composer and every
 thread card's fields.
-`surface change-request thread --compose / --cancel` serve every build; `act
-reply|resolve|unresolve|line-comment|edit-thread-comment` are debug-only. The
-`threads` stage of `test-forge-actions-e2e.sh` proves the wire and
-`scenario_thread_writes` of `test-forge-diff-e2e.sh` the UI.
+`surface change-request thread --compose / --cancel / --suggest` serve every
+build; `act reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|
+review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete`
+are debug-only. The `threads` stage of `test-forge-actions-e2e.sh` proves the
+wire and `scenario_thread_writes` of `test-forge-diff-e2e.sh` the UI.
+
+B3c drafts a review **on the forge**. On GitHub that is the pending review:
+`addPullRequestReview` starts it with its first line comment in the same
+mutation. On GitLab it is the draft notes, over REST because GraphQL has none,
+and `bulk_publish` followed by B2's verdict submits them; a verdict that fails
+after the publish is a warning. `ChangeHeader.draft` is read with the header,
+and `act` reads it afresh before every review write, so *Start a review* joins a
+draft started elsewhere. The strip, the submit dialog and the discard
+confirmation live in `change_request_tab/review.rs`, and B2's *Approve* /
+*Request changes* submit the draft while one exists. A ```` ```suggestion ````
+block draws as a small diff whose "before" lines are the end of the thread's
+`diff_hunk` (`change_request_tab/suggestion.rs`); applying stays on the forge.
+Outdated threads have a `ThreadView` each, hosted by their file's
+`OutdatedView`, so they take writes and keep a reply across a re-read. `act
+review-add|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete`
+are debug-only; `thread --suggest` serves every build. The `review` stage of
+`test-forge-actions-e2e.sh` proves the wire, and `scenario_review` of
+`test-forge-diff-e2e.sh` the UI. The debug-only `review-open-submit` helper
+opens the submit dialog without sending, for the framed test.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and

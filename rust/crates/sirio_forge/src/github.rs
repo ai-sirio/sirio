@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, ThreadFacts, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewTarget, ReviewVerdict, ThreadFacts, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -21,7 +21,7 @@ use crate::mapping;
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
-    Candidate, Capabilities, ChangeHeader, ChangeState, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, Log, CiState, CommentKind,
+    Candidate, Capabilities, ChangeHeader, ChangeState, Draft, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, Log, CiState, CommentKind,
     CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
     PageCursor, ReviewOutcome, ReviewThread, Reviewer, Side, ThreadComment, TimelineItem,
 };
@@ -51,6 +51,10 @@ const THREAD_CONTEXT: &str = include_str!("queries/github/thread_context.graphql
 const ACTION_CONTEXT: &str = include_str!("queries/github/action_context.graphql");
 const ADD_COMMENT: &str = include_str!("queries/github/add_comment.graphql");
 const ADD_REVIEW: &str = include_str!("queries/github/add_review.graphql");
+const ADD_REVIEW_THREAD: &str = include_str!("queries/github/add_review_thread.graphql");
+const SUBMIT_REVIEW: &str = include_str!("queries/github/submit_review.graphql");
+const DELETE_REVIEW: &str = include_str!("queries/github/delete_review.graphql");
+const DELETE_REVIEW_COMMENT: &str = include_str!("queries/github/delete_review_comment.graphql");
 const CLOSE: &str = include_str!("queries/github/close.graphql");
 const REOPEN: &str = include_str!("queries/github/reopen.graphql");
 const READY: &str = include_str!("queries/github/ready.graphql");
@@ -341,6 +345,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         timeline_truncated: has_previous_page(node, "/timelineItems"),
         timeline,
         revisions: revisions(opt_str(node, "/baseRefOid"), opt_str(node, "/headRefOid"), None),
+        draft: mapping::github_pending_review(node),
     })
 }
 
@@ -730,15 +735,17 @@ fn review_thread(node: &Value) -> Option<ReviewThread> {
         .filter_map(|comment| {
             let id = opt_str(comment, "/id")?.to_string();
             let pending = opt_str(comment, "/pullRequestReview/state") == Some("PENDING");
+            let edit = if pending {
+                Some(CommentRef { id: id.clone(), kind: CommentKind::Draft })
+            } else {
+                bool_at(comment, "/viewerCanUpdate").then(|| CommentRef { id: id.clone(), kind: CommentKind::ReviewComment })
+            };
             Some(ThreadComment {
-                id: id.clone(),
+                id,
                 author: login_or_ghost(comment, "/author/login"),
                 body: str_at(comment, "/body"),
                 at: time_at(comment, "/createdAt"),
-                edit: (bool_at(comment, "/viewerCanUpdate") && !pending).then(|| CommentRef {
-                    id,
-                    kind: CommentKind::ReviewComment,
-                }),
+                edit,
                 pending,
             })
         })
@@ -824,6 +831,7 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
             .collect(),
         capabilities: capabilities(node, repository),
         thread: None,
+        draft: mapping::github_pending_review(node),
     })
 }
 
@@ -859,7 +867,10 @@ pub(crate) fn act(
     action: &Action,
 ) -> Result<ActionOutcome, ForgeError> {
     let mut context = action_context(client, number)?;
-    if let Action::Reply { thread, .. } | Action::Resolve { thread, .. } = action {
+    if let Action::Reply { thread, .. }
+    | Action::Resolve { thread, .. }
+    | Action::ReviewAdd { target: ReviewTarget::Reply { thread }, .. } = action
+    {
         context.thread = Some(thread_facts(client, number, thread)?);
     }
     check_action(&client.host, action, &context)?;
@@ -1087,13 +1098,90 @@ pub(crate) fn act(
                 UPDATE_REVIEW,
                 json!({ "pullRequestReviewId": comment.id, "body": body }),
             )?,
-            CommentKind::ReviewComment => mutate(
+            CommentKind::ReviewComment | CommentKind::Draft => mutate(
                 client,
                 "UpdatePullRequestReviewComment",
                 UPDATE_REVIEW_COMMENT,
                 json!({ "pullRequestReviewCommentId": comment.id, "body": body }),
             )?,
         },
+        // A line comment starts the review in the same mutation, so no
+        // empty pending review can be left behind (B3c revision (a)).
+        Action::ReviewAdd { target: ReviewTarget::Line { anchor, revisions }, body } => match &context.draft {
+            Some(Draft { id: Some(review), .. }) => {
+                let mut input = mapping::github_draft_thread(anchor, body);
+                input["pullRequestReviewId"] = json!(review);
+                mutate(client, "AddPullRequestReviewThread", ADD_REVIEW_THREAD, input)?
+            }
+            _ => mutate(
+                client,
+                "AddPullRequestReview",
+                ADD_REVIEW,
+                json!({
+                    "pullRequestId": id,
+                    "commitOID": revisions.head_sha,
+                    "threads": [mapping::github_draft_thread(anchor, body)],
+                }),
+            )?,
+        },
+        Action::ReviewAdd { target: ReviewTarget::Reply { thread }, body } => {
+            let (review, started) = match &context.draft {
+                Some(Draft { id: Some(review), .. }) => (review.clone(), false),
+                _ => {
+                    let mut input = json!({ "pullRequestId": id });
+                    if let Some(head) = &context.head_sha {
+                        input["commitOID"] = json!(head);
+                    }
+                    let data = execute_mutation(client, "AddPullRequestReview", ADD_REVIEW, json!({ "input": input }))?;
+                    let review = data
+                        .pointer("/addPullRequestReview/pullRequestReview/id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| ForgeError::UnexpectedResponse {
+                            host: client.host.clone(),
+                            detail: "a review started without an id".to_string(),
+                        })?
+                        .to_string();
+                    (review, true)
+                }
+            };
+            let reply = mutate(
+                client,
+                "AddPullRequestReviewThreadReply",
+                REPLY,
+                json!({ "pullRequestReviewThreadId": thread, "pullRequestReviewId": review, "body": body }),
+            );
+            match reply {
+                Ok(()) => {}
+                // The review exists now; saying so beats an error that
+                // reads as if nothing had happened (revision (a)).
+                Err(error) if started => {
+                    return Ok(ActionOutcome {
+                        warning: Some(format!("A review was started, but the reply could not be added: {error}")),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Action::ReviewSubmit { verdict, body } => {
+            let review = context.draft.as_ref().and_then(|draft| draft.id.clone()).unwrap_or_default();
+            let event = match verdict {
+                ReviewVerdict::Approve => "APPROVE",
+                ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+                ReviewVerdict::Comment => "COMMENT",
+            };
+            let mut input = json!({ "pullRequestReviewId": review, "event": event });
+            if !body.trim().is_empty() {
+                input["body"] = json!(body);
+            }
+            mutate(client, "SubmitPullRequestReview", SUBMIT_REVIEW, input)?
+        }
+        Action::ReviewDiscard => {
+            let review = context.draft.as_ref().and_then(|draft| draft.id.clone()).unwrap_or_default();
+            mutate(client, "DeletePullRequestReview", DELETE_REVIEW, json!({ "pullRequestReviewId": review }))?
+        }
+        Action::DraftDelete { comment } => {
+            mutate(client, "DeletePullRequestReviewComment", DELETE_REVIEW_COMMENT, json!({ "id": comment.id }))?
+        }
     }
     Ok(ActionOutcome::default())
 }
@@ -1276,5 +1364,17 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
             document: LABEL_CANDIDATES,
             variables: json!({ "owner": "ai-sirio", "name": "sirio", "q": "bug" }),
         },
+        write(
+            "AddPullRequestReviewThread",
+            ADD_REVIEW_THREAD,
+            json!({ "pullRequestReviewId": "PRR_sirio_live_check_0", "path": "x", "line": 1, "side": "RIGHT", "body": "x" }),
+        ),
+        write(
+            "SubmitPullRequestReview",
+            SUBMIT_REVIEW,
+            json!({ "pullRequestReviewId": "PRR_sirio_live_check_0", "event": "COMMENT" }),
+        ),
+        write("DeletePullRequestReview", DELETE_REVIEW, json!({ "pullRequestReviewId": "PRR_sirio_live_check_0" })),
+        write("DeletePullRequestReviewComment", DELETE_REVIEW_COMMENT, json!({ "id": "PRRC_sirio_live_check_0" })),
     ]
 }

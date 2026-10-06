@@ -987,11 +987,13 @@ enum PaneQuery {
 
 /// Which thread gesture `surface.change_request.thread` drives: revealing
 /// and folding a thread, or opening and closing the one line composer.
-/// Opening a composer writes nothing to a forge, so every build serves it.
+/// Opening a composer and suggesting in it write nothing to a forge, so every
+/// build serves them.
 enum ThreadCommand {
     Reveal(String),
     Toggle(String),
     Compose(String),
+    Suggest,
     Cancel,
 }
 
@@ -2444,15 +2446,17 @@ impl ControlHandler for AppControlHandler {
                     request.params.get("reveal"),
                     request.params.get("toggle"),
                     request.params.get("compose"),
+                    request.params.get("suggest"),
                     request.params.get("cancel"),
                 ) {
-                    (Some(id), None, None, None) if !id.trim().is_empty() => ThreadCommand::Reveal(id.clone()),
-                    (None, Some(id), None, None) if !id.trim().is_empty() => ThreadCommand::Toggle(id.clone()),
-                    (None, None, Some(spec), None) if !spec.trim().is_empty() => {
+                    (Some(id), None, None, None, None) if !id.trim().is_empty() => ThreadCommand::Reveal(id.clone()),
+                    (None, Some(id), None, None, None) if !id.trim().is_empty() => ThreadCommand::Toggle(id.clone()),
+                    (None, None, Some(spec), None, None) if !spec.trim().is_empty() => {
                         ThreadCommand::Compose(spec.clone())
                     }
-                    (None, None, None, Some(cancel)) if !cancel.trim().is_empty() => ThreadCommand::Cancel,
-                    _ => return ControlResponse::failure(&request.id, "surface.change_request.thread requires exactly one of reveal, toggle, compose or cancel"),
+                    (None, None, None, Some(suggest), None) if !suggest.trim().is_empty() => ThreadCommand::Suggest,
+                    (None, None, None, None, Some(cancel)) if !cancel.trim().is_empty() => ThreadCommand::Cancel,
+                    _ => return ControlResponse::failure(&request.id, "surface.change_request.thread requires exactly one of reveal, toggle, compose, suggest or cancel"),
                 };
                 self.queue_action(request, move |reply| ControlAction::ChangeRequestThread { op, reply })
             }
@@ -5365,6 +5369,7 @@ impl SirioWorkspace {
                                             ThreadCommand::Reveal(id) => tab.reveal_thread(&id, cx),
                                             ThreadCommand::Toggle(id) => tab.toggle_thread(&id, cx),
                                             ThreadCommand::Compose(spec) => tab.compose_at(&spec, cx),
+                                            ThreadCommand::Suggest => tab.insert_suggestion(cx),
                                             ThreadCommand::Cancel => {
                                                 tab.cancel_composer(cx);
                                                 Ok(())

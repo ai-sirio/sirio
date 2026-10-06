@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # One stage per slice of the spec (B2a, B2b, B2c), each added by its slice.
 # `--stage NAME` runs one: wire-github, wire-gitlab, failures, merge, metadata, cli,
-# scopes, ci, ui. Nothing
+# scopes, ci, threads, review, ui. Nothing
 # is published and the user's own gh/glab configuration is never read.
 #
 # The `ui` stage launches a real, isolated Sirio (debug build) against the
@@ -155,6 +155,20 @@ threads_readonly["data"]["project"]["mergeRequest"]["userPermissions"]["createNo
 for discussion in threads_readonly["data"]["project"]["mergeRequest"]["discussions"]["nodes"]:
     discussion["userPermissions"]["resolveNote"] = False
 save("gitlab", "MergeRequestThreads.readonly", threads_readonly)
+
+# B3c: the pending review the action context and the header read after a
+# review is started, and its absence once submitted or discarded.
+pending = {"nodes": [{"id": "PRR_pending1", "comments": {"totalCount": 1}}]}
+for name in ("ChangeRequestActionContext", "ChangeRequestHeader"):
+    base = load("github", name)
+    started = json.loads(json.dumps(base))
+    started["data"]["repository"]["pullRequest"]["pendingReview"] = pending
+    for after in ("AddPullRequestReview", "AddPullRequestReviewThread", "AddPullRequestReviewThreadReply.review"):
+        save("github", f"{name}.after.{after}", started)
+    ended = json.loads(json.dumps(base))
+    ended["data"]["repository"]["pullRequest"]["pendingReview"] = {"nodes": []}
+    for after in ("SubmitPullRequestReview", "DeletePullRequestReview"):
+        save("github", f"{name}.after.{after}", ended)
 PY
 
 start_forge() { # flavour port
@@ -400,6 +414,9 @@ expect_body_is_file github AddComment "$BODY_FILE"
 probe "${GH[@]}" act 101 approve
 expect_code 0 "an approval with no words"
 expect_input github AddPullRequestReview "{\"event\":\"APPROVE\",$GH_ID}"
+# B3c: a review sent with an event publishes at once and leaves no pending
+# review on the real forge; the fake records its event so it cannot trigger the
+# overlay for an event-less start of a pending review.
 probe "${GH[@]}" act 101 approve --body "Nice."
 expect_input github AddPullRequestReview "{\"body\":\"Nice.\",\"event\":\"APPROVE\",$GH_ID}"
 probe "${GH[@]}" act 101 request-changes --body "Please handle None."
@@ -1626,6 +1643,168 @@ probe "${GL_RO[@]}" act 201 resolve --thread gid://gitlab/Discussion/open12
 expect_line "MESSAGE You cannot resolve this thread."
 probe "${GL[@]}" act 201 edit-comment --id gid://gitlab/DiffNote/11 --body "Edited note"
 expect_input gitlab UpdateNote '{"body":"Edited note","id":"gid://gitlab/DiffNote/11"}'
+fi
+
+if wanted review; then
+echo "stage review: a review drafted on GitHub, added to, submitted and discarded"
+GH_HEAD=b2c3d4e5f60718293a4b5c6d7e8f901234567890
+GH_PR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"]["id"])' "$WORK/fixtures/github/ChangeRequestActionContext.json")
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" header 101
+expect_code 0 "github header"
+expect_line "DRAFT none"
+probe "${GH[@]}" threads 101
+expect_line "TEDIT PRRC_8 draft"
+
+echo "  a reply starts a review: an empty pending review, then the reply into it"
+probe "${GH[@]}" act 101 review-add --thread PRRT_open42 --body-file "$BODY_FILE"
+expect_code 0 "a reply that starts a review"
+expect_input github AddPullRequestReview "{\"commitOID\":\"$GH_HEAD\",\"pullRequestId\":\"$GH_PR\"}"
+expect_body_is_file github AddPullRequestReviewThreadReply "$BODY_FILE"
+sent_input github AddPullRequestReviewThreadReply | grep -q '"pullRequestReviewId":"PRR_pending1"' || fail "the reply did not join the new review"
+
+echo "  with a review in progress, a line comment joins it"
+probe "${GH[@]}" act 101 review-add --path src/login.rs --side new --line context:43:43 --start context:41:41 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body "Joins."
+expect_code 0 "a line comment added to the review"
+expect_input github AddPullRequestReviewThread '{"body":"Joins.","line":43,"path":"src/login.rs","pullRequestReviewId":"PRR_pending1","side":"RIGHT","startLine":41,"startSide":"RIGHT"}'
+probe "${GH[@]}" header 101
+expect_line "DRAFT PRR_pending1 1"
+
+echo "  a pending comment is edited and deleted, then the review is submitted"
+probe "${GH[@]}" act 101 edit-comment --id PRRC_8 --kind draft --body "Better."
+expect_input github UpdatePullRequestReviewComment '{"body":"Better.","pullRequestReviewCommentId":"PRRC_8"}'
+probe "${GH[@]}" act 101 draft-delete --id PRRC_8
+expect_input github DeletePullRequestReviewComment '{"id":"PRRC_8"}'
+probe "${GH[@]}" act 101 approve --body "Not like this."
+expect_code 20 "a separate review while one is in progress"
+expect_line "MESSAGE You have a review in progress; submit it instead."
+probe "${GH[@]}" act 101 review-submit --verdict approve --body "Ship it."
+expect_code 0 "submitting with Approve"
+expect_input github SubmitPullRequestReview '{"body":"Ship it.","event":"APPROVE","pullRequestReviewId":"PRR_pending1"}'
+probe "${GH[@]}" act 101 review-submit --verdict comment
+expect_code 20 "a second submit"
+expect_line "MESSAGE There is no review in progress."
+expect_sent github SubmitPullRequestReview 1
+
+echo "  a line comment with no review starts one in a single mutation; then it is discarded"
+reset_forge github "$GH_PORT"
+probe "${GH[@]}" act 101 review-add --path src/login.rs --side old --line removed:42:42 \
+  --base "$GH_HEAD" --head "$GH_HEAD" --body "Starts it."
+expect_code 0 "a line comment that starts a review"
+expect_input github AddPullRequestReview "{\"commitOID\":\"$GH_HEAD\",\"pullRequestId\":\"$GH_PR\",\"threads\":[{\"body\":\"Starts it.\",\"line\":42,\"path\":\"src/login.rs\",\"side\":\"LEFT\"}]}"
+expect_sent github AddPullRequestReviewThread 0
+probe "${GH[@]}" act 101 review-discard
+expect_code 0 "discard"
+expect_input github DeletePullRequestReview '{"pullRequestReviewId":"PRR_pending1"}'
+probe "${GH[@]}" act 101 review-add --path src/login.rs --side new --line context:43:43 \
+  --base "$GH_HEAD" --head 0000000000000000000000000000000000000000 --body "Stale."
+expect_code 20 "a review comment on a stale head"
+expect_line "ERR HeadMoved"
+probe "${GH_RO[@]}" act 101 review-add --thread PRRT_open42 --body "No."
+expect_line "MESSAGE You cannot reply to this thread."
+
+echo "stage review: GitLab's draft notes, added to, published with a verdict and discarded"
+GL_HEAD=d4e5f60718293a4b5c6d7e8f901234567890a1b2
+GL_AF=("$PROBE" --forge gitlab --host gitlab.test --project team/app --token approvefails)
+GL_DRAFTS="/api/v4/projects/team%2Fapp/merge_requests/201/draft_notes"
+seed_drafts() { curl -fsS -X POST "http://127.0.0.1:$GL_PORT/__drafts" --data-binary @"$WORK/fixtures/gitlab/DraftNotes.seed.json" >/dev/null; }
+last_body() { # METHOD path
+  python3 - "$WORK/gitlab-requests.log" "$1 $2" <<'PY'
+import json, re, sys
+log, want = sys.argv[1], sys.argv[2]
+last = None
+for line in open(log, encoding="utf-8"):
+    found = re.match(r"^(\S+) (\S+) - interaction=\S+ vars=(.*)$", line.rstrip("\n"))
+    if found and f"{found.group(1)} {found.group(2)}" == want:
+        last = json.loads(found.group(3))
+print(json.dumps(last, sort_keys=True, ensure_ascii=False))
+PY
+}
+reset_forge gitlab "$GL_PORT"
+probe "${GL[@]}" header 201
+expect_line "DRAFT none"
+seed_drafts
+probe "${GL[@]}" header 201
+expect_line "DRAFT - 2"
+probe "${GL[@]}" threads 201
+expect_line "TEDIT 7 draft"
+expect_line "TEDIT 8 draft"
+
+echo "  a reply and a line comment join the drafts"
+probe "${GL[@]}" act 201 review-add --thread gid://gitlab/Discussion/open12 --body-file "$BODY_FILE"
+expect_code 0 "a reply added to the review"
+python3 - "$BODY_FILE" "$(last_body POST "$GL_DRAFTS")" <<'PY' || fail "the draft reply's body"
+import json, sys
+body = json.loads(sys.argv[2])
+assert body == {"note": open(sys.argv[1], encoding="utf-8").read(), "in_reply_to_discussion_id": "open12"}, body
+PY
+probe "${GL[@]}" act 201 review-add --path src/login.rs --side new --line context:43:43 --start context:41:41 \
+  --base "$GL_HEAD" --head "$GL_HEAD" --start-sha "$GL_HEAD" --body "Joins."
+expect_code 0 "a line comment added to the review"
+[ "$(last_body POST "$GL_DRAFTS" | python3 -c 'import json,sys; b=json.load(sys.stdin); print(b["note"], b["position"]["line_range"]["end"]["line_code"].endswith("_43_43"))')" = "Joins. True" ] \
+  || fail "the draft line comment's position"
+
+echo "  a draft is edited and deleted; a separate review is refused"
+probe "${GL[@]}" act 201 edit-comment --id 7 --kind draft --body "Better."
+expect_code 0 "a draft edited"
+[ "$(last_body PUT "$GL_DRAFTS/7")" = '{"note": "Better."}' ] || fail "the draft edit's body"
+probe "${GL[@]}" act 201 draft-delete --id 7
+expect_code 0 "a draft deleted"
+grep -q "^DELETE $GL_DRAFTS/7 " "$WORK/gitlab-requests.log" || fail "no DELETE for draft 7"
+probe "${GL[@]}" act 201 approve
+expect_code 20 "a separate approval while drafts exist"
+expect_line "MESSAGE You have a review in progress; submit it instead."
+
+echo "  submitting publishes every draft, then approves, then posts the body"
+probe "${GL[@]}" act 201 review-submit --verdict approve --body "Ship it."
+expect_code 0 "submit with Approve"
+python3 - "$WORK/gitlab-requests.log" "$GL_DRAFTS" <<'PY' || fail "publish, approve and note were not sent in that order"
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+at = lambda needle: max(i for i, line in enumerate(lines) if needle in line)
+publish = at(f"POST {sys.argv[2]}/bulk_publish ")
+approve = at("/merge_requests/201/approve ")
+note = at("CreateNote")
+assert publish < approve < note, (publish, approve, note)
+assert '"Ship it."' in lines[note]
+PY
+probe "${GL[@]}" header 201
+expect_line "DRAFT none"
+probe "${GL[@]}" act 201 review-submit --verdict comment
+expect_code 20 "a second submit"
+expect_line "MESSAGE There is no review in progress."
+
+echo "  discarding deletes each draft"
+reset_forge gitlab "$GL_PORT"
+seed_drafts
+probe "${GL[@]}" act 201 review-discard
+expect_code 0 "discard"
+grep -q "^DELETE $GL_DRAFTS/7 " "$WORK/gitlab-requests.log" || fail "draft 7 was not deleted"
+grep -q "^DELETE $GL_DRAFTS/8 " "$WORK/gitlab-requests.log" || fail "draft 8 was not deleted"
+probe "${GL[@]}" header 201
+expect_line "DRAFT none"
+
+echo "  a verdict that fails after the publish is a warning"
+reset_forge gitlab "$GL_PORT"
+seed_drafts
+probe "${GL_AF[@]}" act 201 review-submit --verdict approve --body "Summary."
+expect_code 0 "a published review whose approval failed"
+expect_prefix "WARNING Your review was published, but approving failed:"
+python3 - "$WORK/gitlab-requests.log" <<'PY' || fail "failed approval should still post the review summary"
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+approve = max(i for i, line in enumerate(lines) if "/merge_requests/201/approve " in line)
+notes = [(i, line) for i, line in enumerate(lines) if " CreateNote " in line]
+assert notes, "no summary note was posted"
+note_at, note = notes[-1]
+assert approve < note_at, (approve, note_at)
+assert '"Summary."' in note, note
+PY
+probe "${GL_RO[@]}" act 201 review-add --path src/login.rs --side new --line context:43:43 \
+  --base "$GL_HEAD" --head "$GL_HEAD" --start-sha "$GL_HEAD" --body "No."
+expect_code 20 "a review comment without permission"
+grep -q "^POST $GL_DRAFTS " <(tail -n 3 "$WORK/gitlab-requests.log") && fail "a refused draft reached the forge"
 fi
 
 # Later stages are added above this line.
