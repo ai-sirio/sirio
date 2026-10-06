@@ -281,7 +281,6 @@ fn frame_error_kind(error: &FrameError) -> &'static str {
         FrameError::NonZeroFlags(_) => "nonzero_flags",
         FrameError::NonZeroReserved(_) => "nonzero_reserved",
         FrameError::TooLarge { .. } => "too_large",
-        FrameError::DataNotSupported => "data_not_supported",
     }
 }
 

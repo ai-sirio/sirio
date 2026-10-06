@@ -53,6 +53,11 @@ pub enum ErrorCode {
     // enum into a `oneOf`.)
     FrameError,
     Internal,
+    // Terminal session errors (SP2 spec §3.1).
+    UnknownSession,
+    SessionExited,
+    SpawnFailed,
+    InvalidCwd,
     #[serde(other)]
     Other,
 }
@@ -195,14 +200,27 @@ pub mod method {
     pub const SHUTDOWN: &str = "host.shutdown";
     pub const SUBSCRIBE: &str = "host.subscribe";
     pub const DEBUG_HOLD_SESSION: &str = "host.debug.hold_session";
+    pub const TERM_CREATE: &str = "term.create";
+    pub const TERM_ATTACH: &str = "term.attach";
+    pub const TERM_DETACH: &str = "term.detach";
+    pub const TERM_RESIZE: &str = "term.resize";
+    pub const TERM_READ: &str = "term.read";
+    pub const TERM_KEY: &str = "term.key";
+    pub const TERM_WRITE: &str = "term.write";
+    pub const TERM_FEED: &str = "term.feed";
+    pub const TERM_WAIT: &str = "term.wait";
+    pub const TERM_CLOSE: &str = "term.close";
+    pub const TERM_LIST: &str = "term.list";
 }
 
 pub mod topic {
     pub const HOST_STATE: &str = "host.state";
+    pub const TERM_SESSIONS: &str = "term.sessions";
 }
 
 pub mod capability {
     pub const HOST_V1: &str = "host.v1";
+    pub const TERMINAL: &str = "terminal";
 }
 
 #[cfg(test)]

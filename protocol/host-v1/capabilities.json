@@ -8,6 +8,24 @@
       "since_minor": 0,
       "methods": ["host.hello", "host.ping", "host.info", "host.shutdown", "host.subscribe"],
       "topics": ["host.state"]
+    },
+    {
+      "name": "terminal",
+      "since_minor": 1,
+      "methods": [
+        "term.create",
+        "term.attach",
+        "term.detach",
+        "term.resize",
+        "term.read",
+        "term.key",
+        "term.write",
+        "term.feed",
+        "term.wait",
+        "term.close",
+        "term.list"
+      ],
+      "topics": ["term.sessions"]
     }
   ]
 }

@@ -1,11 +1,13 @@
 //! The host protocol as types and pure functions — no process, no socket.
 //! Spec: docs/superpowers/specs/2026-10-05-host-foundation-design.md §6.
 
+pub mod data;
 pub mod frame;
 pub mod liveness;
 pub mod messages;
 pub mod paths;
 pub mod state_file;
+pub mod term;
 pub mod version;
 
 /// The JSON Schema of every wire type, in one document. Every type, and every
@@ -22,6 +24,11 @@ pub fn wire_schema() -> serde_json::Value {
     use schemars::schema_for;
     use serde_json::Value;
     use state_file::HostStateFile;
+    use term::{
+        AttachParams, Attached, BytesParams, CreateParams, Created, DetachParams, KeyParams,
+        ReadParams, ReadResult, ResizeParams, SessionEvent, SessionList, SessionParams, WaitParams,
+        WaitResult,
+    };
 
     fn define(defs: &mut serde_json::Map<String, Value>, name: &str, schema: Value) {
         if let Some(existing) = defs.insert(name.to_string(), schema.clone()) {
@@ -63,7 +70,22 @@ pub fn wire_schema() -> serde_json::Value {
         HoldSessionParams,
         SubscribeParams,
         Subscribed,
-        HostStateFile
+        HostStateFile,
+        CreateParams,
+        Created,
+        AttachParams,
+        Attached,
+        DetachParams,
+        ResizeParams,
+        ReadParams,
+        ReadResult,
+        KeyParams,
+        BytesParams,
+        WaitParams,
+        WaitResult,
+        SessionParams,
+        SessionList,
+        SessionEvent
     );
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",

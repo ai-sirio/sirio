@@ -1,5 +1,154 @@
 {
   "$defs": {
+    "AttachMode": {
+      "enum": [
+        "snapshot",
+        "resume",
+        "other"
+      ],
+      "type": "string"
+    },
+    "AttachParams": {
+      "properties": {
+        "resume_from": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "AttachParams",
+      "type": "object"
+    },
+    "Attached": {
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/AttachMode"
+        },
+        "size": {
+          "$ref": "#/$defs/TermSize"
+        },
+        "stream": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream",
+        "size",
+        "mode"
+      ],
+      "title": "Attached",
+      "type": "object"
+    },
+    "BytesParams": {
+      "properties": {
+        "data": {
+          "description": "Base64.",
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "data"
+      ],
+      "title": "BytesParams",
+      "type": "object"
+    },
+    "CreateParams": {
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/TermCommand"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prelude": {
+          "description": "Base64; fed into the VT and the journal before the child's first byte.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "$ref": "#/$defs/TermSize"
+        }
+      },
+      "required": [
+        "cwd",
+        "command",
+        "size",
+        "origin"
+      ],
+      "title": "CreateParams",
+      "type": "object"
+    },
+    "Created": {
+      "properties": {
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "pid"
+      ],
+      "title": "Created",
+      "type": "object"
+    },
+    "DetachParams": {
+      "properties": {
+        "stream": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "DetachParams",
+      "type": "object"
+    },
     "ErrorBody": {
       "properties": {
         "code": {
@@ -24,6 +173,10 @@
         "handshake_required",
         "frame_error",
         "internal",
+        "unknown_session",
+        "session_exited",
+        "spawn_failed",
+        "invalid_cwd",
         "other"
       ],
       "type": "string"
@@ -48,6 +201,74 @@
         "payload"
       ],
       "title": "Event",
+      "type": "object"
+    },
+    "ExitStatus": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "success",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "type": {
+              "const": "code",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "other",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Foreground": {
+      "properties": {
+        "running": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "running"
+      ],
       "type": "object"
     },
     "Hello": {
@@ -245,6 +466,30 @@
       "title": "HostStateFile",
       "type": "object"
     },
+    "KeyParams": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "key"
+      ],
+      "title": "KeyParams",
+      "type": "object"
+    },
+    "Origin": {
+      "enum": [
+        "app",
+        "control",
+        "other"
+      ],
+      "type": "string"
+    },
     "ProtocolVersion": {
       "properties": {
         "major": {
@@ -262,6 +507,61 @@
         "major",
         "minor"
       ],
+      "type": "object"
+    },
+    "ReadFormat": {
+      "enum": [
+        "text",
+        "raw",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ReadParams": {
+      "properties": {
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReadFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "ReadParams",
+      "type": "object"
+    },
+    "ReadResult": {
+      "properties": {
+        "data": {
+          "description": "UTF-8 text for `text`; base64 for `raw`.",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/ReadFormat"
+        }
+      },
+      "required": [
+        "format",
+        "data"
+      ],
+      "title": "ReadResult",
       "type": "object"
     },
     "Refused": {
@@ -315,6 +615,32 @@
       "title": "Request",
       "type": "object"
     },
+    "ResizeParams": {
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "cols",
+        "rows"
+      ],
+      "title": "ResizeParams",
+      "type": "object"
+    },
     "Response": {
       "properties": {
         "error": {
@@ -338,6 +664,247 @@
         "id"
       ],
       "title": "Response",
+      "type": "object"
+    },
+    "SessionEvent": {
+      "description": "The payload of a `term.sessions` event.",
+      "oneOf": [
+        {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/ExitStatus"
+            },
+            "type": {
+              "const": "exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "const": "title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "title"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "running": {
+              "type": "boolean"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "foreground",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "running"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "closed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Sent on the stream's own connection: the host detached `stream`\nbecause its queue filled; re-attach for a snapshot.",
+          "properties": {
+            "stream": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "lagged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "stream"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Sent on the stream's own connection: the host is about to send this\nstream a fresh snapshot (the alternate screen was left).",
+          "properties": {
+            "stream": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "resync",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "stream"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "other",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "SessionEvent"
+    },
+    "SessionList": {
+      "properties": {
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "title": "SessionList",
+      "type": "object"
+    },
+    "SessionParams": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "SessionParams",
+      "type": "object"
+    },
+    "SessionSummary": {
+      "properties": {
+        "clients": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "description": "Seconds since the Unix epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "foreground": {
+          "$ref": "#/$defs/Foreground"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "size": {
+          "$ref": "#/$defs/TermSize"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "pid",
+        "cwd",
+        "title",
+        "size",
+        "foreground",
+        "origin",
+        "clients",
+        "created_at"
+      ],
       "type": "object"
     },
     "ShutdownParams": {
@@ -376,6 +943,100 @@
       "title": "Subscribed",
       "type": "object"
     },
+    "TermCommand": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "shell",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "program": {
+              "type": "string"
+            },
+            "type": {
+              "const": "program",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "program"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TermSize": {
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cols",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "WaitParams": {
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_id",
+        "timeout_ms"
+      ],
+      "title": "WaitParams",
+      "type": "object"
+    },
+    "WaitResult": {
+      "properties": {
+        "exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "WaitResult",
+      "type": "object"
+    },
     "Welcome": {
       "properties": {
         "capabilities": {
@@ -409,6 +1070,6 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "major": 1,
-  "minor": 0,
+  "minor": 1,
   "protocol": "sirio-host"
 }
