@@ -170,17 +170,8 @@ fn remove_own_files(config: &HostConfig, bound: Option<(u64, u64)>, generation: 
         .as_ref()
         .is_some_and(|recorded| recorded.generation == generation);
 
-    #[cfg(unix)]
     if owns_state_file {
-        let endpoint = config.paths.endpoint(config.major);
-        if bound.is_some() && file_identity(&endpoint) == bound {
-            let _ = fs::remove_file(endpoint);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = bound;
-
-    if owns_state_file {
+        remove_bound_endpoint(config, bound);
         let _ = fs::remove_file(state_path);
     }
 }
