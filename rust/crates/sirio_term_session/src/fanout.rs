@@ -101,12 +101,18 @@ impl Fanout {
 /// `false` removes the slot: the receiver is gone, or the attachment lagged.
 fn deliver(slot: &Slot, chunk: Chunk, limit: usize) -> bool {
     let weight = chunk.weight();
-    let queued = slot.queued.load(Ordering::SeqCst);
-    if queued > 0 && queued + weight > limit {
+    let reserved = slot.queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |queued| {
+        let total = queued.saturating_add(weight);
+        if queued > 0 && total > limit {
+            None
+        } else {
+            Some(total)
+        }
+    });
+    if reserved.is_err() {
         let _ = slot.sender.send(Chunk::Lagged);
         return false;
     }
-    slot.queued.fetch_add(weight, Ordering::SeqCst);
     slot.sender.send(chunk).is_ok()
 }
 
