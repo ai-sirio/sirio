@@ -107,10 +107,10 @@ fn the_prelude_is_on_screen_before_the_childs_output() {
 #[cfg(unix)]
 #[test]
 fn a_terminal_query_with_no_client_gets_exactly_one_reply() {
-    // `stty -echo raw` so the reply is not echoed; the script reads what came
-    // back for six bytes and prints its length in hex.
+    // `stty -echo raw` so the reply is not echoed; keep draining the PTY for a
+    // bounded second so a duplicate reply is counted too.
     let session = Session::spawn(
-        spec("pane-1", r#"stty -echo raw; printf '\033[6n'; r=$(dd bs=1 count=6 2>/dev/null); stty sane; printf 'reply=%s\n' "$(printf '%s' "$r" | od -An -c | tr -d ' \n')"; sleep 5"#),
+        spec("pane-1", r#"stty -echo raw; printf '\033[6n'; r=$(dd bs=1 < /dev/tty 2>/dev/null & reader=$!; sleep 1; kill "$reader" 2>/dev/null; wait "$reader" 2>/dev/null); stty sane; printf 'reply=%s\n' "$(printf '%s' "$r" | od -An -c | tr -d ' \n')"; sleep 5"#),
         mpsc::channel().0,
     )
     .unwrap();

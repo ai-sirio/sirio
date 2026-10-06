@@ -85,6 +85,10 @@ pub struct Info {
     pub exit: Option<Exit>,
     pub foreground: bool,
     pub attachments: usize,
+    /// Windows job-adoption error kind; the host logs it as
+    /// `session.no_job <kind>` (Task 6). A missing process handle reports
+    /// `Unsupported`.
+    pub tree_kill_error: Option<String>,
 }
 
 pub struct Attach {
@@ -156,6 +160,20 @@ impl Session {
         drop(pair.slave);
         let pid = child.process_id().unwrap_or(0);
 
+        #[cfg(windows)]
+        let (kill_on_close, tree_kill_error) = match child.as_raw_handle() {
+            Some(handle) => match terminate::KillOnClose::adopt(handle) {
+                Ok(job) => (Some(job), None),
+                Err(error) => (None, Some(format!("{:?}", error.kind()))),
+            },
+            None => (
+                None,
+                Some(format!("{:?}", std::io::ErrorKind::Unsupported)),
+            ),
+        };
+        #[cfg(not(windows))]
+        let tree_kill_error = None;
+
         #[cfg(unix)]
         let master_fd = pair.master.as_raw_fd();
         let mut reader = pair.master.try_clone_reader().map_err(|error| {
@@ -176,16 +194,12 @@ impl Session {
             exit: None,
             foreground: false,
             attachments: 0,
+            tree_kill_error,
         }));
         let wait_state = Arc::new((Mutex::new(None), Condvar::new()));
         let (commands, command_rx) = mpsc::channel();
         let (bytes_tx, bytes_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
-
-        #[cfg(windows)]
-        let kill_on_close = child
-            .as_raw_handle()
-            .and_then(|handle| terminate::KillOnClose::adopt(handle).ok());
 
         owner::start(owner::Inputs {
             cols: spec.cols,
