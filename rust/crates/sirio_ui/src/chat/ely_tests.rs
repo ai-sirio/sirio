@@ -595,22 +595,24 @@ async fn ely_header_names_the_connection_and_activity_state(cx: &mut TestAppCont
     let (chat, cx) = super::tests::chat_view(cx, &["staged", dir.0.to_str().unwrap()]);
     pump_chat_until(cx, &chat, |v| v.client.is_some());
     refresh_frame(cx);
-    let header = cx.debug_bounds("chat-header").unwrap();
-    let idle = cx
-        .debug_bounds("chat-header-state-idle")
-        .expect("a connected, idle chat says so in its header");
-    assert!(inside(header, idle));
+    assert!(
+        cx.debug_bounds("chat-header").is_none(),
+        "the bar above the chat was removed"
+    );
+    assert!(
+        cx.debug_bounds("chat-status").is_some(),
+        "the connection state stays visible in the control row"
+    );
     chat.update(cx, |v, cx| {
         v.control_send("hello", cx);
     });
     pump_chat_until(cx, &chat, |v| v.streaming);
     refresh_frame(cx);
-    assert!(cx.debug_bounds("chat-header-state-working").is_some());
-    assert!(cx.debug_bounds("chat-header-state-idle").is_none());
+    assert!(cx.debug_bounds("chat-header").is_none());
     std::fs::write(dir.0.join("go"), "go").unwrap();
     pump_chat_until(cx, &chat, |v| !v.streaming);
     refresh_frame(cx);
-    assert!(cx.debug_bounds("chat-header-state-idle").is_some());
+    assert!(cx.debug_bounds("chat-header").is_none());
 }
 
 #[gpui::test]

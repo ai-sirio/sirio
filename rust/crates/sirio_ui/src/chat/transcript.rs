@@ -92,61 +92,6 @@ impl Chat {
             .into(),
         )
     }
-    pub(crate) fn render_header(&self, theme: &Theme, _: &Context<Self>) -> AnyElement {
-        let name = self.agent_badge_name();
-        // The connection/activity word alone, never the permission mode: the
-        // control row's pill names the mode, the header what the agent is
-        // doing.
-        let (dot, state) = super::composer_view::status_pill_content(
-            self.connecting,
-            self.streaming,
-            self.client.is_some(),
-            None,
-        );
-        let mut header = MessageHeader::new("chat-agent-header", name.clone());
-        if let Some(model) = self
-            .available_models
-            .iter()
-            .find(|model| Some(&model.id) == self.selected_model.as_ref())
-        {
-            header = header.model(model.name.clone());
-        }
-        div()
-            .id("chat-header")
-            .debug_selector(|| "chat-header".into())
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(theme.spacing.titlebar_control_spacing)
-            .px(theme.spacing.traffic_light_inset)
-            .py(theme.spacing.titlebar_control_spacing)
-            .border_b_1()
-            .border_color(theme.ely.border)
-            .child(super::identity::render_mark(
-                "chat-header-mark".into(),
-                self.agent_id.as_deref(),
-                &name,
-                theme,
-            ))
-            .child(header)
-            .child(
-                div()
-                    .debug_selector({
-                        let state = state.clone();
-                        move || format!("chat-header-state-{state}")
-                    })
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.ely.fg_muted)
-                    .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot.color()))
-                    .child(state),
-            )
-            .into_any_element()
-    }
     pub(super) fn render_entry(
         entry: Entry,
         row: TranscriptRowContext<'_>,
