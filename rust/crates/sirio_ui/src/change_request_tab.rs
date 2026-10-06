@@ -3848,6 +3848,35 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn reanchored_suggestion_uses_new_anchor_lines_when_unchanged(cx: &mut TestAppContext) {
+        let (tab, _forge, repo, head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.insert_suggestion(cx)).expect("new-side lines");
+        let expected = suggestion::suggestion_block(&head_lines(&repo.0, &head, 41, 43));
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
+        tab.read_with(cx, |tab, cx| assert_eq!(tab.composer_text(cx).as_deref(), Some(expected.as_str())));
+    }
+
+    #[gpui::test]
+    async fn reanchored_suggestion_names_old_anchor_after_edit(cx: &mut TestAppContext) {
+        let (tab, _forge, repo, head) = composing(cx).await;
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
+        tab.update(cx, |tab, cx| tab.insert_suggestion(cx)).expect("new-side lines");
+        let old_line = head_lines(&repo.0, &head, 43, 43).remove(0);
+        let old_block = suggestion::suggestion_block(&[old_line.clone()]);
+        let edited = old_block.replacen(&old_line, "edited suggestion", 1);
+        tab.update(cx, |tab, cx| tab.composer_set_text(&edited, cx));
+        tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:41-43", cx)).expect("a range near the change");
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.composer_text(cx).as_deref(), Some(edited.as_str()));
+            assert_eq!(
+                report_value(tab, cx, "line_composer_error"),
+                "The suggestion was written for a.txt:new:43."
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn an_old_side_line_offers_no_suggestion(cx: &mut TestAppContext) {
         let (tab, _forge, _repo, _head) = composing(cx).await;
         tab.update(cx, |tab, cx| tab.compose_at("a.txt:old:42", cx)).expect("the removed line");
