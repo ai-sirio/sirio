@@ -7607,6 +7607,7 @@ dependencies = [
 name = "sirio_term_session"
 version = "0.31.0"
 dependencies = [
+ "image",
  "libc",
  "libghostty-vt",
  "portable-pty",
@@ -7630,6 +7631,7 @@ dependencies = [
  "portable-pty",
  "sirio_perf",
  "sirio_project",
+ "sirio_term_session",
  "sirio_theme",
 ]
 

@@ -26,10 +26,11 @@ use gpui::{
     anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
 use image::{Frame, RgbaImage};
-use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{
-    DecodePng, DecodedImage, Graphics, ImageFormat, Layer, PlacementIteration, PlacementIterator,
+    Graphics, ImageFormat, Layer, PlacementIteration, PlacementIterator,
 };
+#[cfg(test)]
+use libghostty_vt::kitty::graphics::DecodePng;
 use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
     render::{CellIteration, CellIterator, Colors, RowIterator},
@@ -41,6 +42,9 @@ use libghostty_vt::{
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use sirio_theme::Theme;
+use sirio_term_session::{
+    apply_kitty_ingest_limits, login_shell as system_pane_shell, spawn_cwd, KittyPngDecoder,
+};
 
 mod context_menu;
 mod domain;
@@ -695,65 +699,6 @@ struct TerminalHandle {
     pty_master_fd: Option<std::os::unix::io::RawFd>,
 }
 
-/// The shell a `TerminalShell::System` pane falls back to when `$SHELL` is unset,
-/// together with the arguments that make it a login shell.
-///
-/// This is the last OS-specific assumption in the PTY spawn path, so it is gated
-/// per platform instead of shared. The reference implementation hardcodes
-/// `/bin/zsh` — macOS's default login shell. Inheriting that constant on Linux is
-/// not merely an unusual choice: `/bin/zsh` does not exist on a stock box, so the
-/// pane fails to spawn and the user gets no shell at all.
-///
-/// Each platform is named explicitly rather than folded into a single `cfg(unix)`
-/// arm, for the reason recorded further down this file — `cfg(unix)` silently
-/// hands macOS the Linux branch, which is how that earlier bug happened.
-#[cfg(target_os = "macos")]
-fn default_system_shell() -> (String, Vec<String>) {
-    ("/bin/zsh".to_string(), vec!["-il".to_string()])
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn default_system_shell() -> (String, Vec<String>) {
-    // POSIX guarantees `/bin/sh`, so it is the floor that can never fail to
-    // exist; bash is preferred when present because it is what a login shell on
-    // these systems normally is.
-    let program = ["/bin/bash", "/bin/sh"]
-        .into_iter()
-        .find(|candidate| std::path::Path::new(candidate).exists())
-        .unwrap_or("/bin/sh");
-    (program.to_string(), vec!["-il".to_string()])
-}
-
-/// `$SHELL` and the `-il` login convention are POSIX notions, so Windows resolves
-/// its own interpreter and passes no login arguments.
-#[cfg(windows)]
-fn default_system_shell() -> (String, Vec<String>) {
-    let program = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-    (program, Vec::new())
-}
-
-/// Program and arguments a [`TerminalShell::System`] pane spawns.
-///
-/// The single source of truth. The spawn path and the UI breadcrumb both read
-/// this, so what the user is told cannot drift from what is actually running —
-/// the drift is what #230 was.
-#[cfg(not(windows))]
-fn system_pane_shell() -> (String, Vec<String>) {
-    match std::env::var("SHELL") {
-        Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
-        _ => default_system_shell(),
-    }
-}
-
-/// `$SHELL` and `-il` are POSIX notions. A value inherited from Git Bash is an
-/// MSYS path (`/bin/bash.exe`) that `CreateProcessW` cannot resolve, so
-/// honouring it made every pane fail to start with os error 3 (#230). Windows
-/// resolves its own interpreter from `COMSPEC` instead.
-#[cfg(windows)]
-fn system_pane_shell() -> (String, Vec<String>) {
-    default_system_shell()
-}
-
 /// The display name of the shell a System pane runs: the file stem of
 /// [`system_pane_shell`]'s program, for UI that names the shell to the user.
 pub fn system_shell_display_name() -> String {
@@ -774,7 +719,7 @@ pub fn system_shell_display_name() -> String {
 /// (`-lc` is POSIX, cmd.exe wants `/C`).
 ///
 /// The macOS and Linux arms are deliberately shared here, unlike
-/// [`default_system_shell`]: what differs between them is only the fallback
+/// [`login_shell`]: what differs between them is only the fallback
 /// program, and that decision is delegated. Do not "fix" this into a
 /// three-way split — the split already happened one call down.
 #[cfg(not(windows))]
@@ -810,7 +755,7 @@ fn user_shell_program() -> String {
 /// must still pass the pieces through VERBATIM (`CommandBuilder::arg`).
 #[cfg(windows)]
 pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
-    let (program, _) = default_system_shell();
+    let (program, _) = system_pane_shell();
     // Unquoted: portable-pty's CommandBuilder quotes it (#39).
     (program, vec!["/C".to_string(), command.to_string()])
 }
@@ -1091,74 +1036,6 @@ fn decode_kitty_image(
     // wraps is the swap done above — `RgbaImage` is just bytes with a size.
     let frame = Frame::new(RgbaImage::from_raw(width, height, bgra)?);
     Some(RenderImage::new(vec![frame]))
-}
-
-/// #301: `DecodePng` the owner thread registers so PNG transmits (f=100 —
-/// what omp emits — measured in the shipped pi-tui's `encodeKittyTransmit`)
-/// are stored at all: ghostty refuses a PNG unless a decoder is registered
-/// (`graphics_image.zig` `complete`/`decodePng`). R2.1 keeps libghostty's own
-/// optional `png` feature off, so this uses the workspace `image` crate — the
-/// tree still has exactly one PNG implementation.
-struct KittyPngDecoder {
-    failure_flag: Arc<AtomicBool>,
-}
-
-impl KittyPngDecoder {
-    #[cfg(test)]
-    fn new() -> Self {
-        Self::with_failure_flag(Arc::new(AtomicBool::new(false)))
-    }
-
-    fn with_failure_flag(failure_flag: Arc<AtomicBool>) -> Self {
-        Self { failure_flag }
-    }
-}
-
-impl DecodePng for KittyPngDecoder {
-    fn decode_png<'alloc>(
-        &mut self,
-        alloc: &'alloc Allocator<'_>,
-        data: &[u8],
-    ) -> Option<DecodedImage<'alloc>> {
-        let mut reader =
-            image::ImageReader::with_format(std::io::Cursor::new(data), image::ImageFormat::Png);
-        let mut limits = image::Limits::default();
-        limits.max_alloc = Some(KITTY_DECOMPRESSED_MAX_BYTES);
-        reader.limits(limits);
-        let image = match reader.decode() {
-            Ok(image) => image.into_rgba8(),
-            Err(_) => {
-                self.failure_flag.store(true, Ordering::Release);
-                return None;
-            }
-        };
-        let (width, height) = image.dimensions();
-        // The output buffer must be allocated with ghostty's allocator — the
-        // emulator takes ownership and frees it through the same one.
-        let Some(mut out) = Bytes::new_with_alloc(alloc, image.as_raw().len()).ok() else {
-            self.failure_flag.store(true, Ordering::Release);
-            return None;
-        };
-        out.copy_from_slice(image.as_raw());
-        Some(DecodedImage {
-            width,
-            height,
-            data: out,
-        })
-    }
-}
-
-/// #301 R1.3: states the pane's Kitty ingest ceilings explicitly instead of
-/// inheriting the emulator's defaults. Applied by the owner thread at spawn
-/// and by the headless test harness, so the tested values are the shipped
-/// ones.
-fn apply_kitty_ingest_limits(terminal: &mut Terminal<'_, '_>) {
-    terminal
-        .set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES))
-        .expect("set the Kitty APC buffer ceiling");
-    terminal
-        .set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
-        .expect("set the Kitty image storage limit");
 }
 
 /// #308 (R4.3/R4.7): the decoded-image render cache for one pane, living
@@ -1774,47 +1651,6 @@ fn resolve_style_color(color: StyleColor, colors: Option<&Colors>) -> Option<Sir
     }
 }
 
-/// The working directory handed to a spawned PTY child. Strips the Windows
-/// verbatim prefix on Windows: `\\?\C:\a\b` becomes `C:\a\b` and
-/// `\\?\UNC\server\share\x` becomes `\\server\share\x`; on every other
-/// platform (and for any non-verbatim path) the input passes through
-/// untouched.
-///
-/// This is a **deliberate third copy** of an idiom already carried twice in
-/// this repo: `sirio_git::path_arg`/`sirio_git::strip_verbatim_prefix`
-/// (`crates/sirio_git/src/git.rs`) strip the prefix for paths leaving as
-/// *git arguments*, and `sirio_project::display_absolute_path`
-/// (`crates/sirio_project/src/domain.rs`) strips it for *display*. No new
-/// dependency is taken and neither existing copy is made public — the copies
-/// live independently on purpose. This one exists because a path handed to
-/// a **child process** as its working directory must not carry the prefix:
-/// `CreateProcess` accepts it, but `cmd.exe` then refuses to keep a `\\?\`
-/// directory as its cwd (it reads it as UNC) and silently falls back to the
-/// Windows directory — so every command in the terminal runs against the
-/// wrong directory (#150).
-///
-/// [`validate_working_directory`] deliberately keeps the original verbatim
-/// path: `std::fs::metadata` handles it fine and keeps its long-path
-/// capability. Only the child's cwd is stripped.
-fn spawn_cwd(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let string = path.to_string_lossy();
-        let rest = string.strip_prefix(r"\\?\");
-        if let Some(rest) = rest {
-            if let Some(unc) = rest.strip_prefix("UNC\\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest.to_string());
-        }
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_path_buf()
-    }
-}
-
 impl TerminalHandle {
     fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
@@ -2073,7 +1909,7 @@ impl TerminalHandle {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        terminate_descendant_process_groups(self.shell_pid);
+        sirio_term_session::terminate::terminate_descendant_process_groups(self.shell_pid);
         let _ = self.commands.send(TerminalCommand::Shutdown);
     }
 
@@ -2240,8 +2076,6 @@ fn normalize_scrollback_for_replay(bytes: &[u8]) -> Vec<u8> {
     normalized
 }
 
-#[cfg_attr(not(unix), allow(dead_code))] // referenced by unix-only teardown
-const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Reads where the viewport sits and stores it for the view, returning whether
@@ -2378,194 +2212,6 @@ fn resolve_link(cells: &[Vec<SnapshotCell>], row: usize, column: usize) -> Optio
     url_at_column(&text, byte_column)
 }
 
-#[cfg(unix)]
-fn terminate_process_group(process_group: u32) {
-    let process_group = process_group as libc::pid_t;
-    if process_group <= 0 {
-        return;
-    }
-
-    unsafe {
-        libc::killpg(process_group, libc::SIGTERM);
-    }
-
-    std::thread::spawn(move || {
-        std::thread::sleep(TERMINAL_TERMINATE_GRACE);
-        let group_is_alive = unsafe { libc::killpg(process_group, 0) == 0 };
-        if group_is_alive {
-            unsafe {
-                libc::killpg(process_group, libc::SIGKILL);
-            }
-        }
-    });
-}
-
-/// Every process id that is currently a descendant of `root` (not
-/// including `root` itself), discovered by walking the kernel's own live
-/// parent/child view (F-PER-06).
-///
-/// `/proc/<pid>/task/<tid>/children` is read fresh per pid rather than
-/// cached: a job-control-spawned child (a compound command, a backgrounded
-/// job) can detach into its own session/process group at any point after
-/// spawn, and a stubborn descendant can itself keep forking, so only a walk
-/// done at kill time — not the single pgid captured once at spawn — can
-/// find all of it. A process can have multiple threads (`task/<tid>`), and
-/// each thread's `children` file only lists the children *that thread*
-/// directly spawned, so every tid must be read to see the whole process's
-/// children.
-#[cfg(target_os = "linux")]
-fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
-    let mut discovered = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(root);
-    let mut frontier = vec![root];
-    while let Some(pid) = frontier.pop() {
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            continue;
-        };
-        for task in tasks.flatten() {
-            let Ok(contents) = std::fs::read_to_string(task.path().join("children")) else {
-                continue;
-            };
-            for token in contents.split_whitespace() {
-                let Ok(child) = token.parse::<libc::pid_t>() else {
-                    continue;
-                };
-                if seen.insert(child) {
-                    discovered.push(child);
-                    frontier.push(child);
-                }
-            }
-        }
-    }
-    discovered
-}
-
-/// macOS implementation of [`descendant_pids`], using libproc's live child
-/// table because macOS has no `/proc` filesystem.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut discovered = Vec::new();
-        let mut seen = std::collections::HashSet::from([root]);
-        let mut frontier = vec![root];
-        while let Some(pid) = frontier.pop() {
-            let Ok(children) = macos_child_pids(pid) else {
-                continue;
-            };
-            for child in children {
-                if seen.insert(child) {
-                    discovered.push(child);
-                    frontier.push(child);
-                }
-            }
-        }
-        discovered
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = root;
-        Vec::new()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_child_pids(parent: libc::pid_t) -> std::io::Result<Vec<libc::pid_t>> {
-    use std::os::raw::{c_int, c_void};
-
-    const INITIAL_PID_CAPACITY: usize = 64;
-    const MAX_PID_CAPACITY: usize = 16_384;
-
-    #[link(name = "proc")]
-    unsafe extern "C" {
-        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
-    }
-
-    let mut buffer = vec![0_i32; INITIAL_PID_CAPACITY];
-    loop {
-        let buffer_size = (buffer.len() * std::mem::size_of::<libc::pid_t>()) as c_int;
-        // libproc returns the number of PIDs copied, not a byte count.
-        let reported_count =
-            unsafe { proc_listchildpids(parent, buffer.as_mut_ptr().cast(), buffer_size) };
-        if reported_count < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let count = (reported_count as usize).min(buffer.len());
-        if (reported_count as usize) < buffer.len() {
-            return Ok(buffer[..count]
-                .iter()
-                .copied()
-                .filter(|pid| *pid > 0)
-                .map(|pid| pid as libc::pid_t)
-                .collect());
-        }
-
-        if buffer.len() >= MAX_PID_CAPACITY {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "macOS child-process list exceeded safety limit",
-            ));
-        }
-        buffer.resize((buffer.len() * 2).min(MAX_PID_CAPACITY), 0);
-    }
-}
-
-/// The distinct process groups spanning the shell (`shell_pid`) and every
-/// descendant it has right now, deduplicated. A single `killpg` on the pgid
-/// captured once at spawn only ever reaches the shell's *original* group —
-/// a job-control-spawned child that detached into a new group (a compound
-/// command run under job control, a backgrounded job in an interactive
-/// shell) is invisible to it and survives shutdown as an orphan (F-PER-06).
-/// Reading `getpgid` per pid at kill time, rather than assuming the shell's
-/// own pid is still its pgid, is what makes this correct even if the shell
-/// itself has re-grouped.
-#[cfg(unix)]
-fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
-    let mut pids = vec![shell_pid];
-    pids.extend(descendant_pids(shell_pid));
-    let mut groups: Vec<libc::pid_t> = Vec::new();
-    for pid in pids {
-        let pgid = unsafe { libc::getpgid(pid) };
-        if pgid > 0 && !groups.contains(&pgid) {
-            groups.push(pgid);
-        }
-    }
-    groups
-}
-
-/// Terminates the shell at `shell_pid` and every process group any of its
-/// current descendants live in — not just the group captured at spawn
-/// (F-PER-06). Each distinct group gets its own SIGTERM-then-grace-then-
-/// SIGKILL handling via [`terminate_process_group`].
-#[cfg(unix)]
-fn terminate_descendant_process_groups(shell_pid: u32) {
-    for group in descendant_process_groups(shell_pid as libc::pid_t) {
-        terminate_process_group(group as u32);
-    }
-}
-
-/// Windows stand-in for [`terminate_descendant_process_groups`]. Unix's
-/// `killpg`/`getpgid` walk over `/proc/<pid>/task/<tid>/children` has no
-/// Toolhelp32 port here (`CreateToolhelp32Snapshot` + `Process32First`/
-/// `Process32Next`, matching `th32ParentProcessID`, would enumerate the
-/// descendants; there is no Windows process-group signal to broadcast to
-/// once found). The more idiomatic Windows fix is different in kind, not
-/// just in API: attach the child to a Job Object created with
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the job handle kills the
-/// whole descendant tree atomically — no enumerate-then-kill race at all.
-/// `portable-pty`'s `tty/windows/` (ConPTY) backend is the natural
-/// place to own that job handle, since it already owns the child's lifetime;
-/// duplicating it here would fight that ownership rather than complement it.
-/// This is therefore a real no-op, not a partial implementation: the PTY's
-/// own child still gets torn down via the `Msg::Shutdown` send right after
-/// this call in `shutdown()`, but a descendant that has spawned its own
-/// detached process is not reached, and there is no substitute here yet.
-#[cfg(not(unix))]
-fn terminate_descendant_process_groups(_shell_pid: u32) {}
-
 /// A live PTY-backed terminal view, or a failed pane showing why the PTY
 /// could not be started.
 pub struct TerminalView {
@@ -2657,27 +2303,6 @@ fn terminal_pump_interval(capture_retry_pending: bool) -> Duration {
     }
 }
 
-/// #301 R1.3 + #308 R4.6: the Kitty ingest ceilings and the atlas cache cap
-/// are ALL decided together and stated as one coordinated pair of numbers —
-/// an emulator limit generous enough to retain hundreds of images, paired
-/// with a cache that uploads every one of them, would be an atlas policy
-/// nobody chose. 32 MiB holds any base64 PNG omp emits in a single APC; the
-/// emulator's image store keeps 64 MiB of image bytes (≈200 images at the
-/// 320 KiB average the store implies); the pane's atlas cache mirrors that
-/// same ≈200-image working set, evicting least-recently-painted first
-/// (R4.7) so GPU memory tracks the emulator's own retention instead of
-/// growing without limit.
-const KITTY_APC_MAX_BYTES: usize = 32 * 1024 * 1024;
-const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
-/// #303 R2.4: cap image decoder allocations, including the decompressed
-/// RGBA output, before a compressed PNG can expand into an unbounded buffer.
-const KITTY_DECOMPRESSED_MAX_BYTES: u64 = KITTY_IMAGE_STORAGE_LIMIT;
-
-/// #308 R4.6: the atlas ceiling, coordinated with `KITTY_IMAGE_STORAGE_LIMIT`
-/// above (64 MiB ÷ 200 ≈ 320 KiB per image). No agent session renders more
-/// than this many Kitty images at once, and the LRU-painted eviction (R4.7)
-/// bounds everything else, so GPU memory cannot grow past the configured
-/// ceiling however many images a session replaces or scrolls past.
 const KITTY_ATLAS_IMAGE_CAP: usize = 200;
 
 /// #301 R2.6: the wash for a placement whose image the pane refused to
@@ -7272,7 +6897,7 @@ mod tests {
         let parent_pid = std::process::id() as libc::pid_t;
         let mut descendants = Vec::new();
         for _ in 0..50 {
-            descendants = descendant_pids(parent_pid);
+            descendants = sirio_term_session::terminate::descendant_pids(parent_pid);
             if descendants.contains(&(child.id() as libc::pid_t)) {
                 break;
             }
@@ -8398,14 +8023,13 @@ mod view_tests {
     /// macOS-only path — red on the old code, green on the new.
     #[test]
     fn system_shell_falls_back_to_a_shell_that_exists_on_this_platform() {
-        let (program, _args) = default_system_shell();
+        let previous = std::env::var_os("SHELL");
+        unsafe { std::env::remove_var("SHELL") };
+        let (program, _args) = system_pane_shell();
         assert!(
             std::path::Path::new(&program).exists(),
             "the fallback must name a shell present on this platform, got: {program}"
         );
-
-        let previous = std::env::var_os("SHELL");
-        unsafe { std::env::remove_var("SHELL") };
 
         let working_directory = std::env::temp_dir().join(format!(
             "sirio-terminal-shell-fallback-{}",
