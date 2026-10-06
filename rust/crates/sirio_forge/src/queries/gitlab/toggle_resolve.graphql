@@ -1,0 +1,3 @@
+mutation DiscussionToggleResolve($input: DiscussionToggleResolveInput!) {
+  discussionToggleResolve(input: $input) { errors discussion { id } }
+}

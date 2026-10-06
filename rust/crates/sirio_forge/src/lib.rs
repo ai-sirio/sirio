@@ -22,16 +22,16 @@ mod transport;
 
 #[doc(hidden)]
 pub use action::{LiveProbe, live_probes};
-pub use action::{Action, ActionOutcome, RerunTarget, ReviewVerdict};
+pub use action::{Action, ActionOutcome, RerunTarget, ReviewTarget, ReviewVerdict};
 pub use client::ForgeClient;
 pub use error::ForgeError;
 
 pub use model::{
-    Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob,
+    AnchorLine, Capabilities, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob,
     CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
-    FileChangeKind, Filter, Forge, LineComment, ListQuery, Listing, PageCursor, Progress,
-    ReviewOutcome, ReviewState, Reviewer, Revisions, TimelineItem, BlockReason, Candidate, Label,
-    MergeCapability, MergeMethod, MergeMethods, MergeVerdict,
+    FileChangeKind, Filter, Forge, LineAnchor, LineComment, LineKind, ListQuery, Listing, PageCursor, Progress,
+    ReviewOutcome, ReviewState, ReviewThread, Reviewer, Revisions, Side, ThreadComment, TimelineItem, BlockReason, Candidate, Label,
+    MergeCapability, MergeMethod, MergeMethods, MergeVerdict, Draft,
 };
 pub use scopes::TokenScopes;
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};

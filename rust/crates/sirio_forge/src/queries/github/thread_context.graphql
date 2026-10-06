@@ -1,0 +1,5 @@
+query ReviewThreadContext($id: ID!) {
+  node(id: $id) {
+    ... on PullRequestReviewThread { viewerCanReply viewerCanResolve viewerCanUnresolve pullRequest { number } }
+  }
+}

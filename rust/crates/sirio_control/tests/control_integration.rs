@@ -48,14 +48,17 @@ impl TempDir {
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         #[cfg(unix)]
         {
-            // Deliberately short, and under /tmp rather than $TMPDIR: a unix
-            // socket path is capped at 104 bytes by sun_path, and the obvious
-            // name under macOS's per-user $TMPDIR (/private/var/folders/../T/)
-            // already spends ~55 of them. The descriptive version of this name
-            // pushed bind() past the limit once the test counter reached two
-            // digits, so it passed alone and failed in the suite.
+            // Keep the name short: a unix socket path is capped at 104 bytes.
+            // macOS's per-user TMPDIR already spends ~55 of them, so retain
+            // its short /tmp root. Linux honours TMPDIR, which may be needed
+            // when the machine's /tmp cannot hold the test's SQLite database.
             let _ = tag;
-            let path = std::path::PathBuf::from(format!("/tmp/tc{}-{unique}", std::process::id()));
+            let root = if cfg!(target_os = "linux") {
+                std::env::temp_dir()
+            } else {
+                PathBuf::from("/tmp")
+            };
+            let path = root.join(format!("tc{}-{unique}", std::process::id()));
             std::fs::create_dir_all(&path).expect("create temp dir");
             Self(std::fs::canonicalize(&path).expect("canonicalize"))
         }

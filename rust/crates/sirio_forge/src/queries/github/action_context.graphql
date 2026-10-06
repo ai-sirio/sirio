@@ -4,6 +4,7 @@ query ChangeRequestActionContext($owner: String!, $name: String!, $number: Int!)
     pullRequest(number: $number) {
       id state isDraft locked headRefOid headRefName isCrossRepository
       viewerCanUpdate viewerCanClose viewerCanReopen viewerDidAuthor viewerCanEnableAutoMerge
+      pendingReview: reviews(states: [PENDING], first: 1) { nodes { id comments { totalCount } } }
       mergeStateStatus reviewDecision
       autoMergeRequest { mergeMethod }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }

@@ -167,7 +167,7 @@ pub(crate) mod testing {
     use serde_json::{Value, json};
     use sirio_forge::{
         ApiResponse, ChangeRef, Forge, ForgeClient, ForgeError, ForgeTarget, Means, RestRequest,
-        Revisions, Transport,
+        RestMethod, Revisions, Transport,
     };
 
     use super::{ChangeRequestSource, Connection, HostRow, ReadyConnection, RevisionError};
@@ -179,6 +179,9 @@ pub(crate) mod testing {
     pub(crate) struct CannedForge {
         answers: Mutex<HashMap<String, (u16, Vec<(String, String)>, String)>>,
         seen: Mutex<Vec<String>>,
+        sent: Mutex<HashMap<String, Value>>,
+        rest: Mutex<HashMap<String, (u16, String)>>,
+        rest_seen: Mutex<Vec<(String, Option<Value>)>>,
     }
 
     impl CannedForge {
@@ -215,6 +218,37 @@ pub(crate) mod testing {
                 .filter(|seen| *seen == operation)
                 .count()
         }
+
+        /// The variables of the last request named `operation`.
+        pub(crate) fn sent(&self, operation: &str) -> Option<Value> {
+            self.sent.lock().unwrap().get(operation).cloned()
+        }
+
+        pub(crate) fn answer_rest(&self, key: &str, status: u16, body: &str) {
+            self.rest
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), (status, body.to_string()));
+        }
+
+        pub(crate) fn rest_count(&self, key: &str) -> usize {
+            self.rest_seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(seen, _)| seen == key)
+                .count()
+        }
+
+        pub(crate) fn rest_body(&self, key: &str) -> Option<Value> {
+            self.rest_seen
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(seen, _)| seen == key)
+                .and_then(|(_, body)| body.clone())
+        }
     }
 
     struct Shared(Arc<CannedForge>);
@@ -227,6 +261,7 @@ pub(crate) mod testing {
                 .unwrap_or_default()
                 .to_string();
             self.0.seen.lock().unwrap().push(operation.clone());
+            self.0.sent.lock().unwrap().insert(operation.clone(), request["variables"].clone());
             let (status, headers, body) = self
                 .0
                 .answers
@@ -242,12 +277,29 @@ pub(crate) mod testing {
             })
         }
 
-        /// No test of the UI reads a REST path yet.
-        fn request(&self, _request: &RestRequest) -> Result<ApiResponse, ForgeError> {
+        /// REST answers are canned by method and path.
+        fn request(&self, request: &RestRequest) -> Result<ApiResponse, ForgeError> {
+            let method = match request.method {
+                RestMethod::Get => "GET",
+                RestMethod::Post => "POST",
+                RestMethod::Put => "PUT",
+                RestMethod::Delete => "DELETE",
+            };
+            let key = format!("{method} {}", request.path);
+            let body = request.body.as_deref().and_then(|body| serde_json::from_slice(body).ok());
+            self.0.rest_seen.lock().unwrap().push((key.clone(), body));
+            let (status, body) = self
+                .0
+                .rest
+                .lock()
+                .unwrap()
+                .get(&key)
+                .cloned()
+                .unwrap_or((404, "{}".to_string()));
             Ok(ApiResponse {
-                status: 404,
+                status,
                 headers: Vec::new(),
-                body: b"{}".to_vec(),
+                body: body.into_bytes(),
             })
         }
     }

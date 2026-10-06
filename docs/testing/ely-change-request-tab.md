@@ -432,3 +432,189 @@ Both appearances ran to `FORGE ACTIONS E2E OK` on `:96` (1600x1500), with
   Its harness now waits for the initial sign-in/unknown-forge state, like
   the visible UI; production handling of overlapping socket calls is
   outside this B2c proof.
+
+
+## B3a: review threads in the diff
+
+The `github-threads` and `gitlab-threads` scenarios of
+`Scripts/Tests/test-forge-diff-e2e.sh` check one Conversation entry per
+published thread, current/old/range anchors, resolved folds, outdated
+sections, the draft thread drawn and counted pending, and cards after the
+Files range is restored.
+Standalone Changes sets the global Split mode before the scenario returns
+to the change request and checks the same line anchors.
+
+### Run and capture
+
+From the repository root, choose a free X display and software Vulkan:
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :96 -screen 0 1600x1500x24 -nolisten tcp -noreset > "$TMPDIR/b3a-xvfb.log" 2>&1 &
+B3A_XVFB_PID=$!
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+Scripts/Tests/test-forge-diff-e2e.sh --display :96 --out-dir "$TMPDIR/b3a-framed-dark"
+kill "$B3A_XVFB_PID"
+```
+
+This script has no `--appearance` flag, so the controller's framed run will
+cover only the app's default dark appearance. The controller runs the command
+above and reads its PID-matched frames. The B3a implementation run uses
+`--state-only`, with artifacts under `$TMPDIR/b3a-t7*`, and takes no frames.
+
+The new frames cover each forge's Conversation, unified and split thread
+cards, and an opened resolved thread. The state assertions also check the
+folded outdated section and the rebuilt diff after a graceful relaunch.
+
+### What was seen
+
+Framed run of 2026-10-05, dark, Xvfb `:96` at 1600×1500 with lavapipe, after
+the review's fix pass (`FORGE DIFF E2E OK`; frames under
+`~/.cache/st/b3a-framed/frames/*-threads-*.png`). Both forges read the same:
+
+- **Conversation.** One compact entry per thread with a published comment,
+  in time order among the activity: author, "commented", the age, a footnote
+  `on src/login.rs:<line> · <n> replies` with `· Outdated` / `· Resolved`
+  where so, and the first comment's body. The draft-only GitHub thread has no
+  entry.
+- **Unified, after `thread --reveal` of the open thread.** The view starts at
+  the revealed thread's line (`42 + edited 42`) with its card open under it —
+  both comments, avatars, ages, bodies. Below it the GitHub range thread sits
+  under line 45 as "lines 44–45", with 44 and 45 drawn out of what was a
+  band, then "15 hidden lines". The first framed run, before the fix pass,
+  showed the top of the file here with the card below the fold: the reveal
+  ran in the same rebuild that spliced the list, when no row was measured,
+  and `scroll_to_reveal_item` read the target as already in view.
+- **The file row** carries a comment icon and the number of open threads
+  drawn in the diff (3 on GitHub, 2 on GitLab). Right under it, "› 1 outdated
+  thread", folded. The context band before line 40 shows "22 hidden lines",
+  then line 40 and the resolved card folded to one line ("Resolved · alice ·
+  0 replies", "1 comment"). The old-side thread sits under the deleted
+  `42 - line 42` with an `old` tag.
+- **Split.** The same cards under the same rows: the resolved card under
+  line 40, the open thread under the zipped `42 - line 42 | 42 + edited 42`
+  row. Switching the mode rebuilds the list, so the view is at the top.
+- **Resolved opened** (`thread --toggle`): the header gains a green
+  "Resolved" tag and the comment shows below it.
+
+Not right yet, recorded as deferred minors in the B3a ledger: card text is
+drawn larger than the diff and the Conversation; a thread entry says
+"0 replies"; an old-side thread's Conversation entry does not say "old".
+
+### Not seen
+
+- `glab` transport or detection: it is not installed on this machine.
+- Live forges: these proofs use loopback fakes; nextest's live tests use
+  isolated credentials and print `SKIP:`.
+- macOS, Windows or Wayland, or a light appearance for this diff harness.
+- A GitLab range: GraphQL reports only its final line.
+- Visual appearance during the implementation run; it uses `--state-only`.
+
+## B3b: writing in threads
+
+The `scenario_thread_writes` scenarios of
+`Scripts/Tests/test-forge-diff-e2e.sh` (GitHub and GitLab) drive the
+gutter composer, a unicode range comment, a reply, a resolve confirmed by
+the folded card, and a cancelled old-side composer, over the control
+socket in a real, isolated Sirio. The `threads` stage of
+`Scripts/Tests/test-forge-actions-e2e.sh` proves the same writes on the
+wire. State-only runs capture no frames; the controller's framed run
+reads them.
+
+Frames captured per flavour (`<flavour>` is `github` or `gitlab`); the
+script's `capture` prefixes each name with the scenario, so on disk they read
+`*thread-writes-thread-writes-<flavour>-composer.png` and
+`*thread-writes-thread-writes-<flavour>-resolved.png`:
+
+- `…-composer.png`: the open line composer on the `41-43` new-side range,
+  before the send.
+- `…-resolved.png`: the thread folded after the resolve the forge confirmed.
+
+### Known gaps
+
+Closed in B3c: outdated threads take replies, resolves and edits; a reply or edit being written survives its thread going outdated, and its section opens so the draft stays visible.
+
+Not verified live: B3b's immediate *Comment* (REST review comment or
+published reply) while a GitHub pending review exists; GitHub may refuse it,
+and Sirio shows the forge's reason with the text kept.
+
+### What was seen (2026-10-05, Xvfb, lavapipe, dark)
+
+Run from the repository root, with a private display:
+
+```bash
+export TMPDIR=/home/epalmisano/.cache/st
+Xvfb :95 -screen 0 1600x1500x24 -nolisten tcp -noreset &
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-diff-e2e.sh --display :95 --out-dir "$TMPDIR/b3b-framed-final"
+```
+
+- **Composer**, GitHub and GitLab: a card titled *Comment on src/login.rs
+  lines 41–43* sits directly under line 43, inside the diff list, with an
+  empty field (*Leave a comment…*), *Cancel* and a *Comment* button that stays
+  disabled while the field is empty. The thread cards beside it (below on
+  GitHub, above on GitLab) keep their *Reply…* control, plus *Resolve* on GitHub.
+- **Resolved**, GitHub and GitLab: after the resolve the forge confirmed, the
+  thread folds into one row (*Resolved · alice · 0 r…*, *1 comment*,
+  *Unresolve*) above line 41. The open old-side thread at line 42 keeps its
+  *old* tag and, on GitHub, *Resolve*.
+- **Found and fixed by this run**: the first framed run (on `ac3f0a5c`) showed
+  *Unresolve* crossing the card's right border on both forges. The summary
+  could not shrink, so the header pushed its action out. The fix
+  (`b021296f`) truncates the summary with an ellipsis. On the final run
+  (`742a5665`), *Unresolve* sits inside the card with its margin.
+- **Not seen**: the gutter *+* is hover-only and every write is driven over the
+  socket. So these frames do not show the *+*, a click on *Resolve* (versus
+  the header's fold), the field growing with multiline text, or the reply
+  field's focus on open. Light appearance was not run; the script has no
+  `--appearance`.
+
+## B3c: the drafted review, suggestions, outdated writes
+
+`scenario_review` in `Scripts/Tests/test-forge-diff-e2e.sh` exercises the
+GitHub and GitLab review strip, a received suggestion, a submitted review, a
+discarded review and a reply on an outdated thread. The `review` stage of
+`Scripts/Tests/test-forge-actions-e2e.sh` proves the review writes on the wire.
+The scenario captures these five frames per flavour (`<flavour>` is `github`
+or `gitlab`). Capture prefixes each name with `$SCENARIO` (`<flavour>-review`),
+so the files are named `<flavour>-review-review-<flavour>-<name>.png`:
+
+- `<flavour>-review-review-<flavour>-suggestion.png`: a received suggestion
+  drawn as a diff.
+- `<flavour>-review-review-<flavour>-strip.png`: the review strip after the
+  suggestion comment was sent; the line composer is closed.
+- `<flavour>-review-review-<flavour>-submit-dialog.png`: the open submit
+  dialog.
+- `<flavour>-review-review-<flavour>-discard-dialog.png`: the discard
+  confirmation.
+- `<flavour>-review-review-<flavour>-outdated.png`: the outdated thread after
+  its reply.
+
+### What was seen (controller's framed run, 2026-10-06)
+
+The run used Xvfb `:95` at 1600×1500, lavapipe and the dark appearance. It
+finished with `FORGE DIFF E2E OK` and saved 32 frames under
+`/home/epalmisano/.cache/st/b3c-framed`.
+
+- The review strip reads *Review in progress · 1 comment* and puts *Discard*
+  and *Submit review* under the merge strip. Its text wraps to two lines in
+  the narrow Secondary pane.
+- The submit dialog shows *Submit review*, *1 pending comment* and the summary
+  field, followed by *Cancel*, *Comment*, *Approve* and *Request changes*. The
+  four buttons crowd the dialog width, and Cancel nearly touches the left edge.
+- The discard dialog says *Discard your review?* and explains that the one
+  pending comment will be deleted and cannot be recovered; its buttons are
+  *Cancel* and red *Discard*.
+- A pending comment has an amber *Pending* badge plus *Edit* and *Delete*. A
+  draft-only thread's header reads *0 comments · 1 pending*.
+- The open outdated section contains `src/login.rs line 30 · 1 comment ·
+  Resolve`, its quoted hunk in color and the comments below.
+- GitLab's suggestion draws *Suggested change* and *Open on the forge*, with
+  the before line in red and proposed line in green. Its before line (*edited
+  12*) comes from the fixture's un-rewritten hunk.
+
+The GitHub suggestion card was absent from this run's frame because the
+scenario did not reveal `PRRT_range` first. `scenario_review` now reveals it
+before capture; this records the earlier framed run, and no new frame run was
+made for that edit. Light appearance was not run because
+`test-forge-diff-e2e.sh` has no `--appearance` option.

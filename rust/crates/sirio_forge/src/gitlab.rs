@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use serde_json::{Value, json};
 
 use crate::action::{
-    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewVerdict, check_action,
+    Action, ActionContext, ActionOutcome, LiveProbe, RerunTarget, ReviewTarget, ReviewVerdict, ThreadFacts, check_action,
 };
 use crate::client::{ForgeClient, page, paged, percent_encode, pick_for_branch};
 use crate::error::ForgeError;
@@ -29,7 +29,7 @@ use crate::mapping::{self, SystemNote};
 use crate::model::{
     Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, Log, CommentKind, CommentRef,
     CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
-    ReviewOutcome, Reviewer, TimelineItem,
+    ReviewOutcome, ReviewThread, Reviewer, ThreadComment, TimelineItem,
 };
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
@@ -81,6 +81,7 @@ const SET_REVIEWERS: &str = include_str!("queries/gitlab/set_reviewers.graphql")
 const REVIEWER_CANDIDATES: &str = include_str!("queries/gitlab/reviewer_candidates.graphql");
 const LABEL_CANDIDATES: &str = include_str!("queries/gitlab/label_candidates.graphql");
 const CREATE_NOTE: &str = include_str!("queries/gitlab/create_note.graphql");
+const TOGGLE_RESOLVE: &str = include_str!("queries/gitlab/toggle_resolve.graphql");
 const UPDATE_NOTE: &str = include_str!("queries/gitlab/update_note.graphql");
 const UPDATE: &str = include_str!("queries/gitlab/update.graphql");
 const SET_DRAFT: &str = include_str!("queries/gitlab/set_draft.graphql");
@@ -91,6 +92,8 @@ const COUNT: &str = include_str!("queries/gitlab/count.graphql");
 const COMMITS: &str = include_str!("queries/gitlab/commits.graphql");
 const CHECKS: &str = include_str!("queries/gitlab/checks.graphql");
 const FILES: &str = include_str!("queries/gitlab/files.graphql");
+const THREADS: &str = include_str!("queries/gitlab/threads.graphql");
+const THREADS_BASELINE: &str = include_str!("queries/gitlab/threads_baseline.graphql");
 
 /// The full query, or its baseline once this server has rejected a newer
 /// field; after the first rejection every later call goes straight to the
@@ -348,6 +351,23 @@ pub(crate) fn for_branch(
     Ok(pick_for_branch(candidates, source_owner))
 }
 
+/// The viewer's draft notes (REST: GraphQL has none, checked against the
+/// schema on 2026-10-05). A server or role without draft notes answers
+/// `NotFound` or `Forbidden`, which reads as none (B3c revision (h)).
+fn draft_notes(client: &ForgeClient, number: u64) -> Result<Vec<Value>, ForgeError> {
+    let path = format!(
+        "projects/{}/merge_requests/{number}/draft_notes?per_page=100",
+        percent_encode(&client.project, false)
+    );
+    match execute_rest(client, &RestRequest::get(path)) {
+        Ok(response) => Ok(serde_json::from_slice::<Vec<Value>>(&response.body).map_err(|error| {
+            ForgeError::UnexpectedResponse { host: client.host.clone(), detail: format!("draft notes: {error}") }
+        })?),
+        Err(ForgeError::NotFound { .. } | ForgeError::Forbidden { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, ForgeError> {
     let me = client.viewer()?;
     let data = run(
@@ -373,6 +393,7 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         commit_count: opt_u32(node, "/commitCount"),
         timeline: timeline(&array_at(node, "/notes/nodes")),
         timeline_truncated: has_previous_page(node, "/notes"),
+        draft: mapping::gitlab_draft(&draft_notes(client, number)?),
         revisions: revisions(
             opt_str(node, "/diffRefs/baseSha"),
             opt_str(node, "/diffRefs/headSha"),
@@ -644,6 +665,85 @@ pub(crate) fn files(client: &ForgeClient, number: u64) -> Result<Listing<FileCha
     })
 }
 
+/// Diff discussions as threads (spec §4). A server without
+/// `truncatedDiffLines` gets the query without it, for this read only: the
+/// client's shared baseline flag is left alone, so the header keeps its own
+/// newer fields.
+pub(crate) fn review_threads(client: &ForgeClient, number: u64) -> Result<Listing<ReviewThread>, ForgeError> {
+    let mut text = THREADS;
+    let mut head: Option<String> = None;
+    let mut listing = paged(|after| {
+        let variables = json!({ "fullPath": client.project, "iid": number.to_string(), "after": after });
+        let data = match execute(client, "MergeRequestThreads", text, variables.clone()) {
+            Err(ForgeError::UnknownField { .. }) if text == THREADS => {
+                text = THREADS_BASELINE;
+                plain(client, "MergeRequestThreads", text, variables)?
+            }
+            answer => answer.map_err(no_unknown_field)?,
+        };
+        let merge_request = merge_request(client, &data)?;
+        if head.is_none() {
+            head = opt_str(merge_request, "/diffRefs/headSha").map(str::to_string);
+        }
+        let can_note = bool_at(merge_request, "/userPermissions/createNote");
+        let items = array_at(merge_request, "/discussions/nodes")
+            .into_iter()
+            .filter_map(|discussion| gitlab_thread(discussion, head.as_deref(), can_note))
+            .collect();
+        Ok((items, next_cursor(merge_request, "/discussions")))
+    })?;
+    let me = client.viewer()?;
+    mapping::gitlab_drafts_into(&mut listing.items, &draft_notes(client, number)?, &me, head.as_deref());
+    Ok(listing)
+}
+
+fn gitlab_thread(discussion: &Value, head: Option<&str>, can_note: bool) -> Option<ReviewThread> {
+    let notes = array_at(discussion, "/notes/nodes");
+    let first = notes.first()?;
+    // A system note or a note with no position is not a diff thread.
+    if bool_at(first, "/system") {
+        return None;
+    }
+    let path = opt_str(first, "/position/filePath")?.to_string();
+    let (side, line) = mapping::gitlab_anchor(
+        opt_u32(first, "/position/newLine"),
+        opt_u32(first, "/position/oldLine"),
+    );
+    let quoted: Vec<&str> = array_at(discussion, "/truncatedDiffLines")
+        .into_iter()
+        .filter_map(|line| opt_str(line, "/text"))
+        .collect();
+    let resolved = bool_at(discussion, "/resolved");
+    Some(ReviewThread {
+        id: opt_str(discussion, "/id")?.to_string(),
+        path,
+        side,
+        line,
+        start_line: None,
+        outdated: mapping::gitlab_thread_outdated(opt_str(first, "/position/diffRefs/headSha"), head),
+        resolved,
+        resolved_by: opt_str(discussion, "/resolvedBy/username").map(str::to_string),
+        diff_hunk: (!quoted.is_empty()).then(|| quoted.join("\n")),
+        can_reply: can_note,
+        can_resolve: bool_at(discussion, "/resolvable") && bool_at(discussion, "/userPermissions/resolveNote"),
+        file_level: matches!(opt_str(first, "/position/positionType"), Some("file" | "image")),
+        comments: notes
+            .iter()
+            .filter(|note| !bool_at(note, "/system"))
+            .filter_map(|note| {
+                Some(ThreadComment {
+                    id: opt_str(note, "/id")?.to_string(),
+                    author: opt_str(note, "/author/username").unwrap_or("ghost").to_string(),
+                    body: str_at(note, "/body"),
+                    at: time_at(note, "/createdAt"),
+                    edit: note_edit(note),
+                    pending: false,
+                })
+            })
+            .collect(),
+    })
+}
+
 /// The pre-flight read of one merge request: its global id (what a note is
 /// attached to), its state and what the viewer may do to it now. On a server
 /// that lacks `canApprove` the baseline query is used, and approving reads
@@ -677,6 +777,8 @@ fn action_context(client: &ForgeClient, number: u64) -> Result<ActionContext, Fo
         bot_ids: Vec::new(),
         unsendable_requests: Vec::new(),
         capabilities: capabilities(client, node),
+        thread: None,
+        draft: None,
     })
 }
 
@@ -687,6 +789,24 @@ fn mutate(
     input: Value,
 ) -> Result<(), ForgeError> {
     execute_mutation(client, operation, document, json!({ "input": input })).map(|_| ())
+}
+
+/// One discussion's permissions, read afresh from the discussions list:
+/// GitLab's GraphQL has no discussion by id. A reply needs the merge
+/// request's `createNote`; resolving and reopening need `resolveNote` on a
+/// resolvable discussion.
+fn thread_facts(client: &ForgeClient, number: u64, id: &str) -> Result<ThreadFacts, ForgeError> {
+    let listing = review_threads(client, number)?;
+    let thread = listing
+        .items
+        .iter()
+        .find(|thread| thread.id == id)
+        .ok_or_else(|| ForgeError::NotFound { host: client.host.clone() })?;
+    Ok(ThreadFacts {
+        can_reply: thread.can_reply,
+        can_resolve: thread.can_resolve,
+        can_unresolve: thread.can_resolve,
+    })
 }
 
 fn create_note(client: &ForgeClient, noteable: &str, body: &str) -> Result<(), ForgeError> {
@@ -711,6 +831,17 @@ fn approve(client: &ForgeClient, number: u64) -> Result<(), ForgeError> {
         body: None,
     };
     execute_rest(client, &request).map(|_| ())
+}
+
+/// Requesting changes shares one call between the `Review` action and the
+/// review submit below.
+fn request_changes(client: &ForgeClient, iid: &str) -> Result<(), ForgeError> {
+    mutate(
+        client,
+        "MergeRequestRequestChanges",
+        REQUEST_CHANGES,
+        json!({ "projectPath": client.project, "iid": iid }),
+    )
 }
 
 /// `mergeRequestUpdate` with only the fields the action changes.
@@ -746,10 +877,22 @@ pub(crate) fn act(
     number: u64,
     action: &Action,
 ) -> Result<ActionOutcome, ForgeError> {
-    let context = action_context(client, number)?;
+    let mut context = action_context(client, number)?;
+    if let Action::Reply { thread, .. }
+    | Action::Resolve { thread, .. }
+    | Action::ReviewAdd { target: ReviewTarget::Reply { thread }, .. } = action
+    {
+        context.thread = Some(thread_facts(client, number, thread)?);
+    }
+    let mut drafts = Vec::new();
+    if matches!(action, Action::Review { .. } | Action::ReviewSubmit { .. } | Action::ReviewDiscard) {
+        drafts = draft_notes(client, number)?;
+        context.draft = mapping::gitlab_draft(&drafts);
+    }
     check_action(&client.host, action, &context)?;
     let noteable = context.node_id.as_str();
     let iid = number.to_string();
+    let drafts_path = format!("projects/{}/merge_requests/{number}/draft_notes", percent_encode(&client.project, false));
     match action {
         Action::Comment { body }
         | Action::Review {
@@ -767,12 +910,7 @@ pub(crate) fn act(
             verdict: ReviewVerdict::RequestChanges,
             body,
         } => {
-            mutate(
-                client,
-                "MergeRequestRequestChanges",
-                REQUEST_CHANGES,
-                json!({ "projectPath": client.project, "iid": iid }),
-            )?;
+            request_changes(client, &iid)?;
             return Ok(then_comment(client, noteable, body, "Changes requested"));
         }
         Action::Close => update(client, number, json!({ "state": "CLOSED" }))?,
@@ -878,12 +1016,104 @@ pub(crate) fn act(
             };
             mutate(client, operation, document, json!({ "id": id }))?;
         }
+        Action::Reply { thread, body } => mutate(
+            client,
+            "CreateNote",
+            CREATE_NOTE,
+            json!({ "noteableId": noteable, "discussionId": thread, "body": body }),
+        )?,
+        Action::Resolve { thread, resolved } => mutate(
+            client,
+            "DiscussionToggleResolve",
+            TOGGLE_RESOLVE,
+            json!({ "id": thread, "resolve": resolved }),
+        )?,
+        // GraphQL's `DiffPositionInput` has no line range (checked against
+        // gitlab.com on 2026-10-05): every line comment takes REST, one
+        // path for a line and a range.
+        Action::LineComment { anchor, revisions, body } => {
+            let position = mapping::gitlab_position(anchor, revisions);
+            execute_rest(
+                client,
+                &RestRequest {
+                    method: RestMethod::Post,
+                    log: false,
+                    path: format!(
+                        "projects/{}/merge_requests/{number}/discussions",
+                        percent_encode(&client.project, false)
+                    ),
+                    body: Some(json!({ "body": body, "position": position }).to_string().into_bytes()),
+                },
+            )
+            .map(|_| ())?
+        }
+        Action::EditComment { comment, body } if comment.kind == CommentKind::Draft => {
+            execute_rest(client, &RestRequest {
+                method: RestMethod::Put,
+                log: false,
+                path: format!("{drafts_path}/{}", comment.id),
+                body: Some(json!({ "note": body }).to_string().into_bytes()),
+            })
+            .map(|_| ())?
+        }
         Action::EditComment { comment, body } => mutate(
             client,
             "UpdateNote",
             UPDATE_NOTE,
             json!({ "id": comment.id, "body": body }),
         )?,
+        Action::ReviewAdd { target, body } => {
+            execute_rest(client, &RestRequest {
+                method: RestMethod::Post,
+                log: false,
+                path: drafts_path.clone(),
+                body: Some(mapping::gitlab_draft_note(target, body).to_string().into_bytes()),
+            })
+            .map(|_| ())?
+        }
+        // Two steps (spec §5): once the drafts are published, a verdict that
+        // fails is said as a warning, never as an error that would read as if
+        // nothing had been published.
+        Action::ReviewSubmit { verdict, body } => {
+            execute_rest(client, &RestRequest {
+                method: RestMethod::Post,
+                log: false,
+                path: format!("{drafts_path}/bulk_publish"),
+                body: None,
+            })?;
+            let published = "Your review was published";
+            let verdict_failed = |what: &str, error: ForgeError| {
+                let mut warning = format!("{published}, but {what} failed: {error}");
+                if !body.trim().is_empty() {
+                    if let Err(note_error) = create_note(client, noteable, body) {
+                        warning.push_str(&format!("; your summary was not posted either: {note_error}"));
+                    }
+                }
+                ActionOutcome { warning: Some(warning) }
+            };
+            return Ok(match verdict {
+                ReviewVerdict::Comment => then_comment(client, noteable, body, published),
+                ReviewVerdict::Approve => match approve(client, number) {
+                    Ok(()) => then_comment(client, noteable, body, "Your review was published and approved"),
+                    Err(error) => verdict_failed("approving", error),
+                },
+                ReviewVerdict::RequestChanges => match request_changes(client, &iid) {
+                    Ok(()) => then_comment(client, noteable, body, "Your review was published with changes requested"),
+                    Err(error) => verdict_failed("requesting changes", error),
+                },
+            });
+        }
+        Action::ReviewDiscard => {
+            for note in &drafts {
+                if let Some(id) = note.get("id").and_then(Value::as_u64) {
+                    execute_rest(client, &RestRequest { method: RestMethod::Delete, log: false, path: format!("{drafts_path}/{id}"), body: None })?;
+                }
+            }
+        }
+        Action::DraftDelete { comment } => {
+            execute_rest(client, &RestRequest { method: RestMethod::Delete, log: false, path: format!("{drafts_path}/{}", comment.id), body: None })
+                .map(|_| ())?
+        }
     }
     Ok(ActionOutcome::default())
 }
@@ -1024,7 +1254,12 @@ pub(crate) fn live_probes() -> Vec<LiveProbe> {
         write(
             "CreateNote",
             CREATE_NOTE,
-            json!({ "noteableId": "gid://gitlab/MergeRequest/0", "body": "x" }),
+            json!({ "noteableId": "gid://gitlab/MergeRequest/0", "discussionId": "gid://gitlab/Discussion/0", "body": "x" }),
+        ),
+        write(
+            "DiscussionToggleResolve",
+            TOGGLE_RESOLVE,
+            json!({ "id": "gid://gitlab/Discussion/0", "resolve": true }),
         ),
         write(
             "UpdateNote",

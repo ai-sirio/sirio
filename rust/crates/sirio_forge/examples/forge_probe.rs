@@ -12,22 +12,24 @@
 //!
 //! ```text
 //! forge_probe --forge github|gitlab --host H --project P (--cli | --token T) <command> [args]
+//! forge_probe ... files N | threads N
 //! forge_probe ... act N <action> [--body TEXT | --body-file PATH] [--title T] [--target BRANCH] [--id ID --kind comment|review]
 //! ```
 //!
 //! `act`'s actions: `comment`, `approve`, `request-changes`, `review-comment`,
 //! `close`, `reopen`, `ready`, `draft`, `edit`, `edit-comment`, `merge`,
 //! `cancel-auto-merge`, `set-reviewers`, `set-labels`, `rerun-job`,
-//! `rerun-failed`. Re-runs take `--id <number>`. It prints
+//! `rerun-failed`, `review-add`, `review-submit`, `review-discard`,
+//! `draft-delete`. Re-runs take `--id <number>`. It prints
 //! `ACT ok`, then `WARNING <text>` when a second step failed.
 
 use std::process::ExitCode;
 
 use sirio_forge::{
-    Action, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
+    Action, AnchorLine, Capabilities, ChangePage, ChangeState, CheckStatus, CiState, CliProgram, CliTransport,
     CommentKind, CommentRef, EventKind, FileChangeKind, Filter, Forge, ForgeClient, ForgeError,
-    ForgeTarget, HostSetting, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
-    Resolution, RerunTarget, ReviewOutcome, ReviewState,
+    ForgeTarget, HostSetting, LineAnchor, LineKind, ListQuery, Means, MergeCapability, MergeMethod, MergeVerdict,
+    Resolution, RerunTarget, Revisions, ReviewOutcome, ReviewState, ReviewTarget, Side,
     ReviewVerdict, SystemProbes, TimelineItem, TokenTransport, Transport, resolve,
 };
 
@@ -226,6 +228,10 @@ fn run(args: &Args) -> Result<(), Failure> {
                 ),
                 None => println!("REVISIONS none"),
             }
+            match &header.draft {
+                Some(draft) => println!("DRAFT {} {}", draft.id.as_deref().unwrap_or("-"), draft.comments),
+                None => println!("DRAFT none"),
+            }
             println!("BODY {}", header.body.lines().next().unwrap_or(""));
             println!("CAPS {}", caps_words(&header.capabilities));
             println!("RERUN {}", yes_no(header.capabilities.can_rerun_checks));
@@ -309,6 +315,36 @@ fn run(args: &Args) -> Result<(), Failure> {
                     file.deletions,
                     file.path
                 );
+            }
+            println!("TRUNCATED {}", yes_no(listing.truncated));
+        }
+        "threads" => {
+            let listing = client.review_threads(number(args)?)?;
+            for thread in &listing.items {
+                println!(
+                    "THREAD {} {} {} {} {} outdated={} file={} reply={} resolve={} comments={} pending={} hunk={}",
+                    thread.path,
+                    match thread.side {
+                        sirio_forge::Side::Old => "old",
+                        sirio_forge::Side::New => "new",
+                    },
+                    count_word(thread.line),
+                    count_word(thread.start_line),
+                    if thread.resolved { "resolved" } else { "open" },
+                    yes_no(thread.outdated),
+                    yes_no(thread.file_level),
+                    yes_no(thread.can_reply),
+                    yes_no(thread.can_resolve),
+                    thread.comments.len(),
+                    thread.comments.iter().filter(|comment| comment.pending).count(),
+                    yes_no(thread.diff_hunk.is_some()),
+                );
+                for comment in &thread.comments {
+                    println!("TCOMMENT {} {}", comment.author, comment.body.lines().next().unwrap_or(""));
+                    if let Some(edit) = &comment.edit {
+                        println!("TEDIT {} {}", edit.id, kind_name(edit.kind));
+                    }
+                }
             }
             println!("TRUNCATED {}", yes_no(listing.truncated));
         }
@@ -615,6 +651,8 @@ fn kind_name(kind: CommentKind) -> &'static str {
     match kind {
         CommentKind::Comment => "comment",
         CommentKind::Review => "review",
+        CommentKind::ReviewComment => "review-comment",
+        CommentKind::Draft => "draft",
     }
 }
 
@@ -627,6 +665,31 @@ fn body_of(args: &Args) -> Result<String, Failure> {
     Ok(args.flag("body").unwrap_or_default().to_string())
 }
 
+fn anchor_line(value: Option<&str>) -> Result<AnchorLine, Failure> {
+    let invalid = || usage("line-comment needs KIND:OLD:NEW");
+    let mut parts = value.ok_or_else(invalid)?.split(':');
+    let kind = match parts.next() {
+        Some("added") => LineKind::Added,
+        Some("removed") => LineKind::Removed,
+        Some("context") => LineKind::Context,
+        _ => return Err(invalid()),
+    };
+    let old = parts.next().and_then(|part| part.parse().ok()).ok_or_else(invalid)?;
+    let new = parts.next().and_then(|part| part.parse().ok()).ok_or_else(invalid)?;
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(AnchorLine { kind, old, new })
+}
+
+fn side_of(args: &Args) -> Result<Side, Failure> {
+    match args.flag("side") {
+        Some("old") => Ok(Side::Old),
+        Some("new") => Ok(Side::New),
+        _ => Err(usage("line-comment needs --side old|new")),
+    }
+}
+
 /// `act N <action> ...` — one write, then what came of it.
 fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
     let number = number(args)?;
@@ -637,9 +700,66 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
         .as_str();
     let action = match name {
         "comment" => Action::Comment { body: body_of(args)? },
+        "reply" => Action::Reply {
+            thread: args.flag("thread").ok_or_else(|| usage("reply needs --thread"))?.to_string(),
+            body: body_of(args)?,
+        },
+        "resolve" | "unresolve" => Action::Resolve {
+            thread: args.flag("thread").ok_or_else(|| usage("resolve needs --thread"))?.to_string(),
+            resolved: name == "resolve",
+        },
+        "line-comment" => Action::LineComment {
+            anchor: LineAnchor {
+                path: args.flag("path").ok_or_else(|| usage("line-comment needs --path"))?.to_string(),
+                side: side_of(args)?,
+                line: anchor_line(args.flag("line"))?,
+                start: args.flag("start").map(|start| anchor_line(Some(start))).transpose()?,
+            },
+            revisions: Revisions {
+                base_sha: args.flag("base").ok_or_else(|| usage("line-comment needs --base"))?.to_string(),
+                head_sha: args.flag("head").ok_or_else(|| usage("line-comment needs --head"))?.to_string(),
+                start_sha: args.flag("start-sha").map(str::to_string),
+            },
+            body: body_of(args)?,
+        },
         "approve" => Action::Review { verdict: ReviewVerdict::Approve, body: body_of(args)? },
         "request-changes" => Action::Review { verdict: ReviewVerdict::RequestChanges, body: body_of(args)? },
         "review-comment" => Action::Review { verdict: ReviewVerdict::Comment, body: body_of(args)? },
+        "review-add" => Action::ReviewAdd {
+            target: match args.flag("thread") {
+                Some(thread) => ReviewTarget::Reply { thread: thread.to_string() },
+                None => ReviewTarget::Line {
+                    anchor: LineAnchor {
+                        path: args.flag("path").ok_or_else(|| usage("review-add needs --thread or --path"))?.to_string(),
+                        side: side_of(args)?,
+                        line: anchor_line(args.flag("line"))?,
+                        start: args.flag("start").map(|start| anchor_line(Some(start))).transpose()?,
+                    },
+                    revisions: Revisions {
+                        base_sha: args.flag("base").ok_or_else(|| usage("review-add needs --base"))?.to_string(),
+                        head_sha: args.flag("head").ok_or_else(|| usage("review-add needs --head"))?.to_string(),
+                        start_sha: args.flag("start-sha").map(str::to_string),
+                    },
+                },
+            },
+            body: body_of(args)?,
+        },
+        "review-submit" => Action::ReviewSubmit {
+            verdict: match args.flag("verdict") {
+                Some("approve") => ReviewVerdict::Approve,
+                Some("request-changes") => ReviewVerdict::RequestChanges,
+                Some("comment") => ReviewVerdict::Comment,
+                _ => return Err(usage("review-submit needs --verdict comment|approve|request-changes")),
+            },
+            body: args.flag("body").unwrap_or_default().to_string(),
+        },
+        "review-discard" => Action::ReviewDiscard,
+        "draft-delete" => Action::DraftDelete {
+            comment: CommentRef {
+                id: args.flag("id").ok_or_else(|| usage("draft-delete needs --id"))?.to_string(),
+                kind: CommentKind::Draft,
+            },
+        },
         "rerun-job" => Action::Rerun(RerunTarget::Job(id_number(args)?)),
         "rerun-failed" => Action::Rerun(RerunTarget::FailedInRun(id_number(args)?)),
         "close" => Action::Close,
@@ -659,6 +779,8 @@ fn act_command(client: &ForgeClient, args: &Args) -> Result<(), Failure> {
                 id: args.flag("id").ok_or_else(|| usage("edit-comment needs --id"))?.to_string(),
                 kind: match args.flag("kind") {
                     Some("review") => CommentKind::Review,
+                    Some("review-comment") => CommentKind::ReviewComment,
+                    Some("draft") => CommentKind::Draft,
                     _ => CommentKind::Comment,
                 },
             },

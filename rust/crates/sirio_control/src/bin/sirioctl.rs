@@ -12,6 +12,7 @@ use std::process::exit;
 use std::time::{Duration, Instant};
 
 use sirio_control::protocol::rows;
+use sirio_control::protocol::request::ThreadOp;
 use sirio_control::{
     ControlRequest, ControlResponse, default_socket_path,
     extract::{session_ref_from_json, session_ref_from_payload_arguments},
@@ -142,7 +143,8 @@ fn usage() {
          \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 surface ci-log open --job N|read|view [--toggle N] [--jump-error] [--refresh] [--copy all|N]\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
-         \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|rerun-job|rerun-failed\n\
+           \x20 surface change-request thread --reveal ID|--toggle ID|--compose PATH:SIDE:LINE[-LAST]|--suggest|--cancel\n\
+           \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|review-open-submit|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete|rerun-job|rerun-failed\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
@@ -849,6 +851,22 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             let line = parsed.positional.get(3).map(String::as_str);
             require_ok(socket, &sirio_control::protocol::request::change_request_reveal(path, line))
         }
+        ("change-request", "thread") => {
+            let reveal = parsed.value("reveal").filter(|id| !id.trim().is_empty());
+            let toggle = parsed.value("toggle").filter(|id| !id.trim().is_empty());
+            let compose = parsed.value("compose").filter(|spec| !spec.trim().is_empty());
+            let suggest = parsed.flag("suggest");
+            let cancel = parsed.flag("cancel");
+            let op = match (reveal, toggle, compose, suggest, cancel) {
+                (Some(id), None, None, false, false) => ThreadOp::Reveal(id),
+                (None, Some(id), None, false, false) => ThreadOp::Toggle(id),
+                (None, None, Some(spec), false, false) => ThreadOp::Compose(spec),
+                (None, None, None, true, false) => ThreadOp::Suggest,
+                (None, None, None, false, true) => ThreadOp::Cancel,
+                _ => return Err("thread needs exactly one of --reveal ID, --toggle ID, --compose PATH:SIDE:LINE, --suggest or --cancel".to_string()),
+            };
+            require_ok(socket, &sirio_control::protocol::request::change_request_thread(op))
+        }
         ("change-request", "open-file") => {
             let path = parsed.positional.get(2).ok_or_else(|| "Missing path".to_string())?;
             let line = parsed.positional.get(3).map(String::as_str);
@@ -914,6 +932,16 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             "label",
             "title",
             "inner",
+            "threads_open",
+            "threads_resolved",
+            "threads_outdated",
+            "threads_file",
+            "thread_rows",
+            "conversation_threads",
+            "draft",
+            "review_dialog",
+            "threads_pending",
+            "suggestions",
         ],
         parsed.flag("json"),
     );

@@ -208,6 +208,93 @@ pub struct LineComment {
     pub at: Option<i64>,
 }
 
+/// Which side of a diff a thread or a line sits on: the base's lines
+/// (`Old`, GitHub `LEFT`) or the head's (`New`, GitHub `RIGHT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    Old,
+    New,
+}
+
+/// One review discussion anchored in a change request's diff (spec §3, §4):
+/// a GitHub review thread or a GitLab diff discussion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewThread {
+    /// GitHub's `PullRequestReviewThread` node id, or GitLab's discussion id.
+    pub id: String,
+    pub path: String,
+    pub side: Side,
+    /// The anchored line on `side`; for an outdated GitHub thread, the line
+    /// it was written on (`originalLine`). `None` for a file-level thread.
+    pub line: Option<u32>,
+    /// The first line of a range; GitLab's GraphQL does not report one.
+    pub start_line: Option<u32>,
+    /// The forge says the anchor no longer maps onto the current diff.
+    pub outdated: bool,
+    pub resolved: bool,
+    pub resolved_by: Option<String>,
+    /// The code the thread quoted, in diff form (`+`/`-`/` ` prefixes).
+    pub diff_hunk: Option<String>,
+    pub can_reply: bool,
+    /// May resolve it, or, when resolved, unresolve it.
+    pub can_resolve: bool,
+    /// About the whole file, not a line: never drawn in the diff.
+    pub file_level: bool,
+    pub comments: Vec<ThreadComment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub at: Option<i64>,
+    /// Filled from slice B3b on; `None` throughout B3a.
+    pub edit: Option<CommentRef>,
+    /// Part of the viewer's unsubmitted review (spec §3 "Draft").
+    pub pending: bool,
+}
+
+/// What a drawn diff line is, for a new comment's position (spec §3 "Anchor").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineKind {
+    Added,
+    Removed,
+    Context,
+}
+
+/// One line of a new comment's anchor, in GitLab's diff counters: `old` and
+/// `new` are where the line is, and for a side the line is not on, where
+/// that side's next line would be (an added line's `old` is the next base
+/// line). GitHub reads only the number on the comment's side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorLine {
+    pub kind: LineKind,
+    pub old: u32,
+    pub new: u32,
+}
+
+impl AnchorLine {
+    /// The line's number on `side`, when the line exists there.
+    pub fn on(self, side: Side) -> Option<u32> {
+        match (side, self.kind) {
+            (Side::New, LineKind::Removed) | (Side::Old, LineKind::Added) => None,
+            (Side::New, _) => Some(self.new),
+            (Side::Old, _) => Some(self.old),
+        }
+    }
+}
+
+/// Where a new comment goes: one side, its last line and, for a range, its
+/// first. The path is the file's path at the head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineAnchor {
+    pub path: String,
+    pub side: Side,
+    pub line: AnchorLine,
+    pub start: Option<AnchorLine>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventKind {
     CommitsPushed {
@@ -232,6 +319,11 @@ pub enum EventKind {
 pub enum CommentKind {
     Comment,
     Review,
+    /// A comment in a review thread (GitHub's pull request review comment).
+    ReviewComment,
+    /// A comment of the viewer's unsubmitted review: a GitHub pending review
+    /// comment, or a GitLab draft note (its REST id).
+    Draft,
 }
 
 /// What an edit points at. A timeline entry carries one only where the
@@ -421,6 +513,14 @@ pub struct Capabilities {
     pub merge: MergeCapability,
 }
 
+/// The viewer's unsubmitted review (spec §3 "Draft"): GitHub's pending
+/// review, or GitLab's draft notes, which have no review id of their own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Draft {
+    pub id: Option<String>,
+    pub comments: u32,
+}
+
 /// The detail tab's header and Conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeHeader {
@@ -442,6 +542,8 @@ pub struct ChangeHeader {
     /// `None` where the forge did not report them, or reported them
     /// malformed: *Files* then stays on the forge's list (spec §7.1).
     pub revisions: Option<Revisions>,
+    /// The viewer's own review in progress, read with the header (B3c).
+    pub draft: Option<Draft>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

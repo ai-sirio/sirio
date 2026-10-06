@@ -985,6 +985,18 @@ enum PaneQuery {
     Scrollback(Option<usize>),
 }
 
+/// Which thread gesture `surface.change_request.thread` drives: revealing
+/// and folding a thread, or opening and closing the one line composer.
+/// Opening a composer and suggesting in it write nothing to a forge, so every
+/// build serves them.
+enum ThreadCommand {
+    Reveal(String),
+    Toggle(String),
+    Compose(String),
+    Suggest,
+    Cancel,
+}
+
 enum ControlAction {
     Quit {
         reply: ControlReply,
@@ -1089,6 +1101,10 @@ enum ControlAction {
         reply: ControlReply,
     },
     ReadChangeRequest {
+        reply: ControlReply,
+    },
+    ChangeRequestThread {
+        op: ThreadCommand,
         reply: ControlReply,
     },
     RevealChangeRequestFile {
@@ -2105,6 +2121,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.ci_log.read",
                     "surface.ci_log.view",
                     "surface.change_request.reveal",
+                    "surface.change_request.thread",
                     "surface.change_request.open_file",
                     "surface.change_request.open_commit",
                     "surface.tabs.read",
@@ -2423,6 +2440,25 @@ impl ControlHandler for AppControlHandler {
                 };
                 let line = request.params.get("line").and_then(|value| value.parse::<u32>().ok());
                 self.queue_action(request, move |reply| ControlAction::RevealChangeRequestFile { path, line, reply })
+            }
+            "surface.change_request.thread" => {
+                let op = match (
+                    request.params.get("reveal"),
+                    request.params.get("toggle"),
+                    request.params.get("compose"),
+                    request.params.get("suggest"),
+                    request.params.get("cancel"),
+                ) {
+                    (Some(id), None, None, None, None) if !id.trim().is_empty() => ThreadCommand::Reveal(id.clone()),
+                    (None, Some(id), None, None, None) if !id.trim().is_empty() => ThreadCommand::Toggle(id.clone()),
+                    (None, None, Some(spec), None, None) if !spec.trim().is_empty() => {
+                        ThreadCommand::Compose(spec.clone())
+                    }
+                    (None, None, None, Some(suggest), None) if !suggest.trim().is_empty() => ThreadCommand::Suggest,
+                    (None, None, None, None, Some(cancel)) if !cancel.trim().is_empty() => ThreadCommand::Cancel,
+                    _ => return ControlResponse::failure(&request.id, "surface.change_request.thread requires exactly one of reveal, toggle, compose, suggest or cancel"),
+                };
+                self.queue_action(request, move |reply| ControlAction::ChangeRequestThread { op, reply })
             }
             "surface.change_request.open_file" => {
                 let Some(path) = request.params.get("path").cloned() else {
@@ -5325,6 +5361,20 @@ impl SirioWorkspace {
                                     let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
                                         tab.reveal(PathBuf::from(&path), line, cx);
                                         Ok(())
+                                    }));
+                                }
+                                ControlAction::ChangeRequestThread { op, reply } => {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
+                                        match op {
+                                            ThreadCommand::Reveal(id) => tab.reveal_thread(&id, cx),
+                                            ThreadCommand::Toggle(id) => tab.toggle_thread(&id, cx),
+                                            ThreadCommand::Compose(spec) => tab.compose_at(&spec, cx),
+                                            ThreadCommand::Suggest => tab.insert_suggestion(cx),
+                                            ThreadCommand::Cancel => {
+                                                tab.cancel_composer(cx);
+                                                Ok(())
+                                            }
+                                        }
                                     }));
                                 }
                                 ControlAction::OpenChangeRequestFile { path, line, reply } => {
@@ -11571,6 +11621,7 @@ impl SirioWorkspace {
             tab,
             |workspace, _, event: &ChangesTabEvent, cx| match event {
                 ChangesTabEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                ChangesTabEvent::CommentOn(_) | ChangesTabEvent::CommentRefused(_) => {}
             },
         )
         .detach();
@@ -37236,6 +37287,7 @@ done
             | ControlAction::CiLogOpen { reply, .. }
             | ControlAction::CiLogRead { reply }
             | ControlAction::CiLogView { reply, .. }
+            | ControlAction::ChangeRequestThread { reply, .. }
             | ControlAction::RevealChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestFile { reply, .. }
             | ControlAction::OpenChangeRequestCommit { reply, .. }
@@ -37372,6 +37424,7 @@ done
             "surface.ci_log.read" => request::ci_log_read(),
             "surface.ci_log.view" => request::ci_log_view(None, true, false, None),
             "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
+            "surface.change_request.thread" => request::change_request_thread(request::ThreadOp::Reveal("PRRT_1")),
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
@@ -37420,6 +37473,7 @@ done
             loading: false,
             error: None,
             dialog: None,
+            annotations: Vec::new(),
         };
         let pairs = changes_report_pairs(1, &report).expect("a Changes section is accepted");
         let staged = pairs.iter().find(|(key, _)| key == "stagedCount").map(|(_, value)| value.as_str());
@@ -37456,6 +37510,7 @@ done
             loading: false,
             error: None,
             dialog: None,
+            annotations: Vec::new(),
         };
         ControlResponse::success(
             id,

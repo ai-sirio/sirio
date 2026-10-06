@@ -207,7 +207,8 @@ echo "step 4: the detail tab loads the conversation, then the checks"
 ctl surface change-request open 101
 wait_for state loaded surface change-request read
 wait_for title "Fix the login redirect" surface change-request read
-wait_for rows 5 surface change-request read
+wait_for conversation_threads 6 surface change-request read
+wait_for rows 11 surface change-request read
 capture detail-conversation
 ctl surface change-request tab checks
 wait_for state loaded surface change-request read
