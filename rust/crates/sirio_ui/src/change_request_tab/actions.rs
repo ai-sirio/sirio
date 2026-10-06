@@ -314,7 +314,13 @@ impl ChangeRequestTab {
                 if kind == "review-submit" {
                     self.review.submit = None;
                 }
-                let sent = self.actions.sent.take();
+                let sent = if kind == "review-submit"
+                    && self.write_target.as_ref() == Some(&super::compose::WriteTarget::Review)
+                {
+                    None
+                } else {
+                    self.actions.sent.take()
+                };
                 if let (false, Some(sent), Some(composer)) =
                     (warned, sent, self.actions.composer.clone())
                 {

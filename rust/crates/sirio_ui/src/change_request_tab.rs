@@ -4463,6 +4463,24 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_dialog_submit_does_not_clear_a_failed_conversation_comment(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut window) = reviewing(cx).await;
+        forge.fail("AddComment", 422);
+        tab.update_in(&mut window, |tab, window, cx| tab.ensure_composer(window, cx));
+        let composer = tab.read_with(cx, |tab, _| tab.actions.composer.clone().expect("the Conversation composer"));
+        composer.update(cx, |input, cx| input.set_text("Keep this Conversation comment", cx));
+        tab.update(cx, |tab, cx| tab.send_composer(composer::ComposerSend::Comment, cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed"));
+        assert_eq!(tab.read_with(cx, |tab, cx| tab.actions.composer.as_ref().unwrap().read(cx).text().to_string()), "Keep this Conversation comment");
+
+        tab.update_in(&mut window, |tab, window, cx| tab.open_review_submit(window, cx)).expect("a draft");
+        tab.update(cx, |tab, cx| tab.review_submit_set_text("Ship it.", cx)).expect("open");
+        tab.update(cx, |tab, cx| tab.submit_review(ReviewVerdict::Approve, cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "review_dialog").is_empty()));
+        assert_eq!(tab.read_with(cx, |tab, cx| tab.actions.composer.as_ref().unwrap().read(cx).text().to_string()), "Keep this Conversation comment");
+    }
+
+    #[gpui::test]
     async fn discarding_asks_first(cx: &mut TestAppContext) {
         let (tab, forge, _repo, window) = reviewing(cx).await;
         tab.update(cx, |tab, cx| tab.open_review_discard(cx)).expect("a draft");
