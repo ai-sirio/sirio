@@ -307,9 +307,24 @@ if flavour == "github":
     save("github/ChangeRequestActionContext.json", data)
     data = load("github/ChangeRequestThreads.json")
     for thread in data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]:
+        if thread.get("id") == "PRRT_range":
+            thread["comments"]["nodes"][0]["body"] += "\n```suggestion\nlet redirect = sanitize(target);\n```"
+    save("github/ChangeRequestThreads.json", data)
+    for thread in data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]:
         if thread.get("id") == "PRRT_open42":
             thread["isResolved"] = True
     save("github/ChangeRequestThreads.after.ResolveReviewThread.json", data)
+    pending = {"nodes": [{"id": "PRR_pending1", "comments": {"totalCount": 1}}]}
+    for name in ("ChangeRequestActionContext", "ChangeRequestHeader"):
+        base = load(f"github/{name}.json")
+        started = json.loads(json.dumps(base))
+        started["data"]["repository"]["pullRequest"]["pendingReview"] = pending
+        for after in ("AddPullRequestReview", "AddPullRequestReviewThread", "AddPullRequestReviewThreadReply.review"):
+            save(f"github/{name}.after.{after}.json", started)
+        ended = json.loads(json.dumps(base))
+        ended["data"]["repository"]["pullRequest"]["pendingReview"] = {"nodes": []}
+        for after in ("SubmitPullRequestReview", "DeletePullRequestReview"):
+            save(f"github/{name}.after.{after}.json", ended)
 else:
     data = load("gitlab/MergeRequestHeader.json")
     node = data["data"]["project"]["mergeRequest"]
@@ -327,6 +342,8 @@ else:
     }
     for discussion in node["discussions"]["nodes"]:
         kind = discussion["id"].rsplit("/", 1)[-1]
+        if discussion.get("id") == "gid://gitlab/Discussion/open12":
+            discussion["notes"]["nodes"][0]["body"] += "\n```suggestion\nlet redirect = sanitize(target);\n```"
         for note in discussion["notes"]["nodes"]:
             position = note.get("position")
             if not position:
@@ -755,7 +772,8 @@ scenario_threads() { # flavour host forge number remote-url
   if [ "$1" = github ]; then
     assert_contains thread_rows "PRRT_range:line:open" surface change-request read
     assert_contains thread_rows "PRRT_old42:line:open" surface change-request read
-    ! read_field thread_rows surface change-request read | grep -q PRRT_draft || fail "a draft-only thread was drawn"
+    assert_contains thread_rows "PRRT_draft:line:" surface change-request read
+    wait_for threads_pending 1 surface change-request read
   fi
   capture "$1-threads-unified"
   # The mode is global; this verb targets standalone Changes tabs only.
@@ -885,6 +903,117 @@ PY
   quit_app; stop_forge
 }
 
+scenario_review() { # flavour host forge number remote-url
+  local flavour=$1 host=$2 forge=$3 number=$4 remote=$5 open_id outdated_id suggested_id
+  SCENARIO="$flavour-review"
+  local log="$RUN_DIR/$SCENARIO-forge-requests.log"
+  if [ "$flavour" = github ]; then
+    open_id=PRRT_open42; outdated_id=PRRT_outdated; suggested_id=PRRT_range
+  else
+    open_id=gid://gitlab/Discussion/open12; outdated_id=gid://gitlab/Discussion/outdated; suggested_id=gid://gitlab/Discussion/open12
+  fi
+  echo "scenario review [$flavour]: a review drafted on the forge, a suggestion, an outdated thread answered"
+  build_forge_git "$flavour"; render_fixtures "$flavour"; start_forge "$flavour"
+  WT="$RUN_DIR/worktree-$SCENARIO"
+  make_worktree "$WT" "$remote" "$BARE"
+  launch_app "$host"
+  connect_and_open "$host" "$forge" "$number"
+  wait_for state loaded surface change-request read
+  ctl surface change-request thread --reveal "$open_id" >/dev/null
+  wait_for files_mode diff surface change-request read
+  wait_for commentable yes surface change-request read
+  wait_for draft "" surface change-request read
+
+  echo "  a received suggestion is drawn as a change"
+  assert_contains suggestions "$suggested_id" surface change-request read
+  capture "review-$flavour-suggestion"
+
+  echo "  Suggest fills the composer with line 43 as it reads, and Start a review sends it"
+  ctl surface change-request thread --compose src/login.rs:new:43 >/dev/null
+  wait_for line_composer src/login.rs:new:43 surface change-request read
+  ctl surface change-request thread --suggest >/dev/null
+  ctl surface change-request act review-add >/dev/null
+  wait_for action idle surface change-request read
+  wait_for line_composer "" surface change-request read
+  wait_for draft 1 surface change-request read
+  python3 - "$log" "$flavour" "$(git -C "$BARE" show "$(git -C "$BARE" rev-parse "$PULL_REF")":src/login.rs | sed -n 43p)" <<'PY' || fail "the suggestion that was sent"
+import json, re, sys
+log, flavour, line43 = sys.argv[1], sys.argv[2], sys.argv[3]
+want = f"```suggestion\n{line43}\n```"
+bodies = []
+for line in open(log, encoding="utf-8"):
+    if flavour == "github" and " AddPullRequestReview " in line:
+        vars_ = json.loads(line.split(" vars=", 1)[1])
+        bodies += [thread["body"] for thread in vars_["input"].get("threads", [])]
+    if flavour == "gitlab" and re.match(r"^POST \S+/draft_notes - ", line):
+        bodies.append(json.loads(line.split(" vars=", 1)[1])["note"])
+assert bodies and bodies[-1] == want, (bodies, want)
+PY
+  capture "review-$flavour-strip"
+
+  echo "  submitting with Comment publishes it"
+  ctl surface change-request act review-open-submit >/dev/null
+  wait_for review_dialog submit surface change-request read
+  capture "review-$flavour-submit-dialog"
+  ctl surface change-request act review-submit --verdict comment --text "Thanks." >/dev/null
+  wait_for action idle surface change-request read
+  wait_for draft "" surface change-request read
+  wait_for review_dialog "" surface change-request read
+  if [ "$flavour" = github ]; then
+    grep -qF '"event": "COMMENT"' <(grep " SubmitPullRequestReview " "$log") || fail "no COMMENT submit"
+  else
+    grep -q "^POST \\S*/draft_notes/bulk_publish " "$log" || fail "the drafts were not published"
+    grep -F "CreateNote" "$log" | grep -qF '"Thanks."' || fail "the review's body was not posted"
+  fi
+
+  echo "  a reply joins a new review; the discard dialog asks, then deletes"
+  ctl surface change-request act review-add --thread "$open_id" --text "One more." >/dev/null
+  wait_for action idle surface change-request read
+  wait_for draft 1 surface change-request read
+  ctl surface change-request act review-discard >/dev/null
+  wait_for review_dialog discard surface change-request read
+  capture "review-$flavour-discard-dialog"
+  ctl surface change-request act review-discard-confirm >/dev/null
+  wait_for action idle surface change-request read
+  wait_for draft "" surface change-request read
+  if [ "$flavour" = github ]; then
+    grep -q " DeletePullRequestReview " "$log" || fail "the review was not deleted"
+  else
+    grep -q "^DELETE \\S*/draft_notes/[0-9]* " "$log" || fail "the draft was not deleted"
+  fi
+
+  echo "  an outdated thread takes a reply"
+  ctl surface change-request thread --reveal "$outdated_id" >/dev/null
+  ctl surface change-request act reply --thread "$outdated_id" --text "Still relevant." >/dev/null
+  wait_for action idle surface change-request read
+  if [ "$flavour" = github ]; then
+    grep " AddPullRequestReviewThreadReply " "$log" | grep -qF "\"pullRequestReviewThreadId\": \"$outdated_id\"" || fail "the outdated reply"
+  else
+    grep " CreateNote " "$log" | grep -qF "\"discussionId\": \"$outdated_id\"" || fail "the outdated reply"
+  fi
+  capture "review-$flavour-outdated"
+
+  if [ "$flavour" = gitlab ]; then
+    echo "  a published review whose approval fails warns, and the dialog closes"
+    ctl surface change-requests token --host "$host" --forge "$forge" --token approvefails >/dev/null
+    wait_for state ready surface change-requests read
+    close_kind change_request no
+    ctl surface change-request open "$number" >/dev/null
+    wait_for state loaded surface change-request read
+    ctl surface change-request thread --reveal "$open_id" >/dev/null
+    wait_for files_mode diff surface change-request read
+    wait_for commentable yes surface change-request read
+    ctl surface change-request act review-add --thread "$open_id" --text "Last one." >/dev/null
+    wait_for draft 1 surface change-request read
+    ctl surface change-request act review-submit --verdict approve >/dev/null
+    wait_for action warning surface change-request read
+    assert_contains action_message "Your review was published, but approving failed" surface change-request read
+    wait_for review_dialog "" surface change-request read
+    wait_for draft "" surface change-request read
+  fi
+  quit_app; stop_forge
+}
+
 scenario_success github ghe.test github 101 '#101' https://ghe.test/acme/widgets.git commit-first
 scenario_failure 401 'http://127.0.0.1:@PORT@/acme/widgets.git' 'terminal prompts disabled' 15
 scenario_failure hang 'ssh://hang.invalid/acme/widgets.git' 'did not answer' 25
@@ -895,6 +1024,9 @@ scenario_threads gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git
 
 scenario_thread_writes github ghe.test github 101 https://ghe.test/acme/widgets.git
 scenario_thread_writes gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git
+
+scenario_review github ghe.test github 101 https://ghe.test/acme/widgets.git
+scenario_review gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git
 
 echo "artifact: $OUT_DIR"
 echo "FORGE DIFF E2E OK"

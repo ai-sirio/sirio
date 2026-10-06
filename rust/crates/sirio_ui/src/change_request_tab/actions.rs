@@ -624,6 +624,10 @@ impl ChangeRequestTab {
                 })();
                 self.record_refusal("review-add", outcome, cx)
             }
+            "review-open-submit" => {
+                let outcome = self.open_review_submit(window, cx);
+                self.record_refusal("review-open-submit", outcome, cx)
+            }
             "review-submit" => {
                 let outcome = (|| {
                     let verdict = match text("verdict").as_deref() {

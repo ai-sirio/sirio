@@ -163,7 +163,7 @@ for name in ("ChangeRequestActionContext", "ChangeRequestHeader"):
     base = load("github", name)
     started = json.loads(json.dumps(base))
     started["data"]["repository"]["pullRequest"]["pendingReview"] = pending
-    for after in ("AddPullRequestReview", "AddPullRequestReviewThread", "AddPullRequestReviewThreadReply"):
+    for after in ("AddPullRequestReview", "AddPullRequestReviewThread", "AddPullRequestReviewThreadReply.review"):
         save("github", f"{name}.after.{after}", started)
     ended = json.loads(json.dumps(base))
     ended["data"]["repository"]["pullRequest"]["pendingReview"] = {"nodes": []}
@@ -415,15 +415,12 @@ probe "${GH[@]}" act 101 approve
 expect_code 0 "an approval with no words"
 expect_input github AddPullRequestReview "{\"event\":\"APPROVE\",$GH_ID}"
 # B3c: a review sent with an event publishes at once and leaves no pending
-# review on the real forge; the fake cannot tell it from an event-less start,
-# so each of these is sent from a clean slate.
-reset_forge github "$GH_PORT"
+# review on the real forge; the fake records its event so it cannot trigger the
+# overlay for an event-less start of a pending review.
 probe "${GH[@]}" act 101 approve --body "Nice."
 expect_input github AddPullRequestReview "{\"body\":\"Nice.\",\"event\":\"APPROVE\",$GH_ID}"
-reset_forge github "$GH_PORT"
 probe "${GH[@]}" act 101 request-changes --body "Please handle None."
 expect_input github AddPullRequestReview "{\"body\":\"Please handle None.\",\"event\":\"REQUEST_CHANGES\",$GH_ID}"
-reset_forge github "$GH_PORT"
 probe "${GH[@]}" act 101 review-comment --body "A thought."
 expect_input github AddPullRequestReview "{\"body\":\"A thought.\",\"event\":\"COMMENT\",$GH_ID}"
 

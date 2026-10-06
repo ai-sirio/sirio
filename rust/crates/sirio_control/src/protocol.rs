@@ -599,8 +599,8 @@ pub mod request {
     }
 
     /// Which thread gesture `surface.change_request.thread` drives. Exactly
-    /// one is set per request: revealing, folding and composing write
-    /// nothing to a forge, so every build serves them.
+    /// one is set per request: revealing, folding, composing and suggesting
+    /// write nothing to a forge, so every build serves them.
     pub enum ThreadOp<'a> {
         Reveal(&'a str),
         Toggle(&'a str),
@@ -650,10 +650,11 @@ pub mod request {
         )
     }
 
-    /// Runs one write on the active change request's tab: the buttons' own
-    /// handlers, by name (`close`, `reopen`, `ready`, `draft`, `compose`,
+    /// Runs an action on the active change request's tab through the buttons'
+    /// own handlers. `review-open-submit` only opens the dialog; the action
+    /// names are `close`, `reopen`, `ready`, `draft`, `compose`,
     /// `send`, `edit`, `edit-comment`, `reply`, `resolve`, `unresolve`,
-    /// `line-comment`, `edit-thread-comment`, `review-add`, `review-submit`,
+    /// `line-comment`, `edit-thread-comment`, `review-add`, `review-open-submit`, `review-submit`,
     /// `review-discard`, `review-discard-confirm`, `draft-edit`, `draft-delete`,
     /// `rerun-job`, `rerun-failed`), with their text in `params`. A debug
     /// build of Sirio answers it; a release build answers "unknown method", so

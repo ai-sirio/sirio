@@ -532,8 +532,7 @@ script's `capture` prefixes each name with the scenario, so on disk they read
 
 ### Known gaps
 
-- Outdated threads cannot be resolved, replied to or edited in B3b; users do those writes on the forge until B3c.
-- A re-read that outdates a thread drops its open reply or edit draft.
+Closed in B3c: outdated threads take replies, resolves and edits; a reply or edit being written survives its thread going outdated.
 
 ### What was seen (2026-10-05, Xvfb, lavapipe, dark)
 
@@ -564,3 +563,21 @@ VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json Scripts/Tests/test-forge-di
   the header's fold), the field growing with multiline text, or the reply
   field's focus on open. Light appearance was not run; the script has no
   `--appearance`.
+
+## B3c: the drafted review, suggestions, outdated writes
+
+`scenario_review` in `Scripts/Tests/test-forge-diff-e2e.sh` exercises the
+GitHub and GitLab review strip, a received suggestion, a submitted review, a
+discarded review and a reply on an outdated thread. The `review` stage of
+`Scripts/Tests/test-forge-actions-e2e.sh` proves the review writes on the wire.
+The scenario captures these five frames per flavour (`<flavour>` is `github`
+or `gitlab`):
+
+- `review-<flavour>-suggestion.png`: a received suggestion drawn as a diff.
+- `review-<flavour>-strip.png`: the suggestion inserted into a line comment
+  and the pending review strip.
+- `review-<flavour>-submit-dialog.png`: the open submit dialog.
+- `review-<flavour>-discard-dialog.png`: the discard confirmation.
+- `review-<flavour>-outdated.png`: the outdated thread after its reply.
+
+### What was seen (controller's framed run)

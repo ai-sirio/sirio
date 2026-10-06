@@ -757,6 +757,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         for discriminator in ("state", "draft", "strategy", "resolve"):
             if discriminator in given:
                 key = f"{operation}.{str(given[discriminator]).lower() if isinstance(given[discriminator], bool) else given[discriminator]}"
+        if operation == "AddPullRequestReview" and "event" in given:
+            key = f"{operation}.{given['event']}"
+        if operation == "AddPullRequestReviewThreadReply" and "pullRequestReviewId" in given:
+            key = f"{operation}.review"
         self.remember(key)
         path = self.fixture_files.get(self.flavor, {}).get(operation)
         if path:

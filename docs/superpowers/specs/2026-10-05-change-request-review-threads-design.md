@@ -526,3 +526,26 @@ in the framed observations in `docs/testing/ely-change-request-tab.md`.
 - Revised after the whole-branch review: fixes 1–5 retain a line comment's original head, constrain thread-header layout, surface GitHub's 422 reasons, cache commentable lines per diff, and clear stale write ownership on gutter refusals.
 - Ruling: Outdated threads cannot be resolved, replied to or edited in B3b. This is deferred to B3c because B3b writes on drawn current threads and outdated sub-cards carry no write state — cost if wrong: users resolve outdated threads on the forge until B3c.
 - Ruling: A re-read that outdates a thread drops its open reply or edit draft. This is deferred with the above because outdated sub-cards carry no write state — cost if wrong: a reply draft is lost when a push outdates its thread.
+
+## §16 Revised while planning and building B3c (2026-10-05)
+
+### Facts verified live while planning
+
+- GitHub creates a pending review when `addPullRequestReview` has no `event`; a line can be included atomically in `threads`, while `addPullRequestReviewThread` and `addPullRequestReviewThreadReply` with `pullRequestReviewId` add to an existing pending review. `reviews(states: [PENDING], first: 1)` reads the viewer's own review.
+- GitLab has no GraphQL draft-note type or mutation. REST `draft_notes` supports list, create, edit, delete and `bulk_publish`; a draft reply names its discussion id, and a positioned draft note carries the forge's position fields.
+- Pending reviews do not appear in the GitHub review timeline, and pending thread comments remain in the model. The UI draws draft-only threads as pending while existing open/resolved/outdated counts stay published-only; GitLab draft notes are joined into `review_threads`.
+- Outdated cards need their own `ThreadView` to preserve reply and edit state through a re-read. Suggestions use anchored diff lines when composing and the thread hunk when drawing; the forge remains responsible for applying them.
+
+### Plan revisions, each with its reason
+
+- (a) Fold `ReviewStart` into `ReviewAdd`: fresh reads join an existing draft, and a first GitHub line comment starts it atomically; a failed reply after starting returns a warning.
+- (b) Use `EditComment` with `CommentKind::Draft` for draft edits; keep `DraftDelete` separate because published-comment deletion is out of scope.
+- (c) While a draft exists, B2's Approve and Request changes submit it; Comment remains a plain Conversation comment, and a second review is refused.
+- (d) Give the strip its own submit dialog so a draft can be submitted from Files without scrolling to the Conversation.
+- (e) Derive suggestion before-lines from the anchor side of `diff_hunk`; if the hunk is missing, show the proposed lines alone.
+- (f) Join GitLab draft replies to their discussion, draw positioned drafts as `draft-note:<id>` threads, omit summary drafts, and identify their author as the viewer.
+- (g) Draw draft-only threads with Pending while keeping existing thread counts published-only and counting draft comments in `threads_pending`.
+- (h) Read GitLab drafts over REST with the header; treat NotFound or Forbidden as no draft and surface other errors.
+- (i) Close the discard dialog on confirm; keep the submit dialog open until success so its body is retained on failure.
+
+### Rulings from the slice ledger
