@@ -387,7 +387,7 @@ impl ChangeRequestTab {
     /// ```suggestion block after what is written (spec §7.3). A refusal
     /// shows under the composer like a send's does, and keeps the text; a
     /// later successful Suggest clears it the way a send or a cancel does.
-    pub(crate) fn insert_suggestion(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn insert_suggestion(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         match self.suggested_text(cx) {
             Ok(text) => {
                 if self

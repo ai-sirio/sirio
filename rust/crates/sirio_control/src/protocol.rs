@@ -605,6 +605,7 @@ pub mod request {
         Reveal(&'a str),
         Toggle(&'a str),
         Compose(&'a str),
+        Suggest,
         Cancel,
     }
 
@@ -621,6 +622,9 @@ pub mod request {
             }
             ThreadOp::Compose(spec) => {
                 params.insert("compose".to_string(), spec.to_string());
+            }
+            ThreadOp::Suggest => {
+                params.insert("suggest".to_string(), "yes".to_string());
             }
             ThreadOp::Cancel => {
                 params.insert("cancel".to_string(), "yes".to_string());
@@ -649,8 +653,9 @@ pub mod request {
     /// Runs one write on the active change request's tab: the buttons' own
     /// handlers, by name (`close`, `reopen`, `ready`, `draft`, `compose`,
     /// `send`, `edit`, `edit-comment`, `reply`, `resolve`, `unresolve`,
-    /// `line-comment`, `edit-thread-comment`, `rerun-job`, `rerun-failed`),
-    /// with their text in `params`. A debug
+    /// `line-comment`, `edit-thread-comment`, `review-add`, `review-submit`,
+    /// `review-discard`, `review-discard-confirm`, `draft-edit`, `draft-delete`,
+    /// `rerun-job`, `rerun-failed`), with their text in `params`. A debug
     /// build of Sirio answers it; a release build answers "unknown method", so
     /// nothing that can write to a forge is reachable over the socket
     /// (spec §10).

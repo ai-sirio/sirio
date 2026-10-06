@@ -3373,6 +3373,47 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn the_socket_adds_to_a_review_and_discards_it_only_on_confirm(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut window) = reviewing(cx).await;
+        forge.answer("AddPullRequestReviewThreadReply", ok_mutation("addPullRequestReviewThreadReply"));
+        let params = |pairs: &[(&str, &str)]| {
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<String, String>>()
+        };
+        tab.update_in(
+            &mut window,
+            |tab, window, cx| tab.control_act("review-add", &params(&[("thread", "PRRT_1"), ("text", "Also.")]), window, cx),
+        )
+        .expect("sent");
+        pump_until(cx, || forge.count("AddPullRequestReviewThreadReply") == 1);
+        assert_eq!(forge.sent("AddPullRequestReviewThreadReply").expect("sent")["input"]["pullRequestReviewId"], "PRR_1");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "idle"));
+        tab.update_in(&mut window, |tab, window, cx| tab.control_act("review-discard", &params(&[]), window, cx))
+            .expect("asked");
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "review_dialog"), "discard"));
+        assert_eq!(forge.count("DeletePullRequestReview"), 0);
+        tab.update_in(&mut window, |tab, window, cx| {
+            tab.control_act("review-discard-confirm", &params(&[]), window, cx)
+        })
+        .expect("sent");
+        pump_until(cx, || forge.count("DeletePullRequestReview") == 1);
+    }
+
+    #[gpui::test]
+    async fn a_refused_review_verb_says_why_on_the_socket(cx: &mut TestAppContext) {
+        let (tab, _forge, _repo, mut window) = windowed_thread(cx).await;
+        let refused = tab.update_in(&mut window, |tab, window, cx| {
+            tab.control_act(
+                "review-submit",
+                &[("verdict".to_string(), "approve".to_string())].into_iter().collect(),
+                window,
+                cx,
+            )
+        });
+        assert_eq!(refused, Err("There is no review in progress.".to_string()));
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "action_message"), "There is no review in progress."));
+    }
+
+    #[gpui::test]
     async fn a_resolved_thread_folds_once_the_forge_says_so(cx: &mut TestAppContext) {
         let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
         forge.answer("ResolveReviewThread", ok_mutation("resolveReviewThread"));
