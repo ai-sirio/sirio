@@ -6123,7 +6123,6 @@ impl Render for Chat {
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
             })
-            .child(self.render_header(&theme, cx))
             .child(div().w_full().flex_1().min_h_0().child(
                 ely_gpui_component::chat::ChatContainer::new(
 div().size_full().min_h_0().relative().flex().flex_col().items_center()
