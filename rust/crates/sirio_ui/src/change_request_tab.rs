@@ -516,6 +516,9 @@ impl ChangeRequestTab {
         self.header.finish(result);
         self.ensure_range(cx);
         if succeeded {
+            if self.header.value().is_some_and(|header| header.draft.is_none()) {
+                self.review = review::ReviewUi::default();
+            }
             if let RangeState::Ready { changes, .. } = &self.range {
                 let (changes, commentable) = (changes.clone(), self.commentable(cx));
                 changes.update(cx, |changes, cx| changes.set_commentable(commentable, cx));
@@ -4414,6 +4417,38 @@ mod tests {
         tab.update(cx, |tab, cx| tab.confirm_review_discard(cx)).expect("sent");
         pump_until(cx, || forge.count("DeletePullRequestReview") == 1);
         assert_eq!(forge.sent("DeletePullRequestReview").expect("sent")["input"], serde_json::json!({ "pullRequestReviewId": "PRR_1" }));
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "review_dialog"), ""));
+    }
+
+    #[gpui::test]
+    async fn a_dialog_whose_review_is_gone_closes(cx: &mut TestAppContext) {
+        let (tab, forge, repo, mut window) = reviewing(cx).await;
+        tab.update_in(&mut window, |tab, window, cx| tab.open_review_submit(window, cx)).expect("a draft");
+        tab.update(cx, |tab, cx| tab.review_submit_set_text("Keep me?", cx)).expect("open");
+        let base = git(&repo.0, &["rev-parse", "main"]);
+        let head = git(&repo.0, &["rev-parse", "HEAD"]);
+        forge.answer(
+            "ChangeRequestHeader",
+            testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &head),
+        );
+        forge.answer("ChangeRequestActionContext", action_context_json(&head));
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "draft") == ""));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "review_dialog"), "");
+            assert_eq!(tab.review_submit_text(cx), None);
+        });
+        forge.answer(
+            "ChangeRequestHeader",
+            with_pending_review(
+                testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &head),
+                "PRR_1",
+                2,
+            ),
+        );
+        forge.answer("ChangeRequestActionContext", with_pending_review(action_context_json(&head), "PRR_1", 2));
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "draft") == "2"));
         tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "review_dialog"), ""));
     }
 
