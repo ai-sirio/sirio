@@ -753,17 +753,25 @@ pub(crate) struct OutdatedView {
 }
 
 impl OutdatedView {
-    fn new(path: String, threads: Vec<Entity<ThreadView>>, owner: WeakEntity<ChangeRequestTab>) -> Self {
-        Self { path, threads, open: false, revision: 0, owner }
+    fn new(path: String, threads: Vec<Entity<ThreadView>>, owner: WeakEntity<ChangeRequestTab>, open: bool) -> Self {
+        Self { path, threads, open, revision: 0, owner }
     }
 
-    fn set_threads(&mut self, threads: Vec<Entity<ThreadView>>, cx: &mut Context<Self>) {
-        if threads == self.threads {
-            return;
+    fn set_threads(&mut self, threads: Vec<Entity<ThreadView>>, open_for_write: bool, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if threads != self.threads {
+            self.threads = threads;
+            self.revision += 1;
+            changed = true;
         }
-        self.threads = threads;
-        self.revision += 1;
-        cx.notify();
+        if open_for_write && !self.open {
+            self.open = true;
+            self.revision += 1;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Its own revision and every card's: the list measures the section
@@ -1317,14 +1325,18 @@ impl ChangeRequestTab {
         }
         let mut outdated_views = HashMap::new();
         for (path, views) in outdated {
+            let open_for_write = views.iter().any(|view| {
+                let view = view.read(cx);
+                view.reply.is_some() || view.editing.is_some()
+            });
             let view = match self.outdated_views.remove(&path) {
                 Some(view) => {
-                    view.update(cx, |view, cx| view.set_threads(views, cx));
+                    view.update(cx, |view, cx| view.set_threads(views, open_for_write, cx));
                     view
                 }
                 None => {
                     let (owner, path) = (owner.clone(), path.clone());
-                    cx.new(|_| OutdatedView::new(path, views, owner))
+                    cx.new(|_| OutdatedView::new(path, views, owner, open_for_write))
                 }
             };
             outdated_views.insert(path, view);

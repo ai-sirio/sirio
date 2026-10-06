@@ -532,7 +532,7 @@ script's `capture` prefixes each name with the scenario, so on disk they read
 
 ### Known gaps
 
-Closed in B3c: outdated threads take replies, resolves and edits; a reply or edit being written survives its thread going outdated.
+Closed in B3c: outdated threads take replies, resolves and edits; a reply or edit being written survives its thread going outdated, and its section opens so the draft stays visible.
 
 ### What was seen (2026-10-05, Xvfb, lavapipe, dark)
 

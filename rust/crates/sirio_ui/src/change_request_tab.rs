@@ -3217,6 +3217,7 @@ mod tests {
                 && tab.read_with(cx, |tab, cx| report_value(tab, cx, "thread_rows").contains("outdated:a.txt:1"))
         });
         tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "thread_rows"), "outdated:a.txt:1:open");
             assert_eq!(report_value(tab, cx, "thread_replying"), "PRRT_1");
             assert_eq!(tab.reply_text("PRRT_1", cx).as_deref(), Some("Half a thought"));
         });
