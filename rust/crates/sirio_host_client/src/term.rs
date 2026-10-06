@@ -14,15 +14,15 @@ use sirio_host_protocol::term::{
 };
 
 use crate::connection::CallError;
-use crate::mux::{CALL_TIMEOUT, Mux, STREAM_QUEUE_DEPTH, StreamItem};
+use crate::mux::{CALL_TIMEOUT, Mux, StreamReceiver, stream_channel};
 
 pub struct TermClient {
     mux: Arc<Mux>,
 }
 
 impl TermClient {
-    pub fn new(mux: Arc<Mux>) -> Self {
-        Self { mux }
+    pub fn new(mux: Arc<Mux>) -> Option<Self> {
+        mux.has_terminal().then_some(Self { mux })
     }
 
     pub fn create(&self, params: &CreateParams) -> Result<Created, CallError> {
@@ -34,8 +34,8 @@ impl TermClient {
         &self,
         session_id: &str,
         resume_from: Option<u64>,
-    ) -> Result<(Attached, Receiver<StreamItem>), CallError> {
-        let (sink, stream) = mpsc::sync_channel(STREAM_QUEUE_DEPTH);
+    ) -> Result<(Attached, StreamReceiver), CallError> {
+        let (sink, stream) = stream_channel();
         let params = AttachParams {
             session_id: session_id.to_string(),
             resume_from,

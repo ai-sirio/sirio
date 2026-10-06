@@ -282,7 +282,7 @@ fn term_client(paths: &HostPaths, major: u32, majors: &[u32]) -> TermClient {
     )
     .expect("terminal host connection");
     assert!(welcome.capabilities.iter().any(|name| name == "terminal"));
-    TermClient::new(Arc::new(mux))
+    TermClient::new(Arc::new(mux)).expect("host did not advertise the terminal capability")
 }
 
 fn term_create(paths: &HostPaths, major: u32, majors: &[u32], args: &[String]) {

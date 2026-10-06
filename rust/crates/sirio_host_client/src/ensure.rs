@@ -295,17 +295,13 @@ impl HostHandle {
         {
             return None;
         }
-        let (mux, welcome) = Mux::open(
+        let (mux, _) = Mux::open(
             &self.primary.endpoint,
             &self.primary.client_version,
             &majors_spoken(self.primary.major),
         )
         .ok()?;
-        welcome
-            .capabilities
-            .iter()
-            .any(|name| name == capability::TERMINAL)
-            .then(|| TermClient::new(Arc::new(mux)))
+        TermClient::new(Arc::new(mux))
     }
 
     /// The diagnostic row (spec §7): version, pid, mode, verdict.

@@ -607,9 +607,7 @@ fn send_data_piece(
         Ok(payload) => payload,
         Err(_) => return false,
     };
-    let sent = outbound.frame(FrameKind::Data, &payload);
-    attachment.consumed(bytes.len());
-    sent
+    outbound.data_frame(&payload, attachment.consumption_callback(bytes.len()))
 }
 
 fn unknown_session(id: u64, session_id: &str) -> Response {

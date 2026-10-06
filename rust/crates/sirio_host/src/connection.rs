@@ -32,7 +32,10 @@ pub const WRITE_DEADLINE: Duration = Duration::from_secs(10);
 const READ_WAKE: Duration = Duration::from_millis(250);
 
 enum OutboundMessage {
-    Frame(Vec<u8>),
+    Frame {
+        bytes: Vec<u8>,
+        on_written: Option<Box<dyn FnOnce() + Send>>,
+    },
     Close,
 }
 
@@ -50,7 +53,33 @@ impl Outbound {
             return false;
         }
         match encode(kind, payload) {
-            Ok(frame) => self.tx.send(OutboundMessage::Frame(frame)).is_ok(),
+            Ok(bytes) => self
+                .tx
+                .send(OutboundMessage::Frame {
+                    bytes,
+                    on_written: None,
+                })
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    pub fn data_frame(
+        &self,
+        payload: &[u8],
+        on_written: impl FnOnce() + Send + 'static,
+    ) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        match encode(FrameKind::Data, payload) {
+            Ok(bytes) => self
+                .tx
+                .send(OutboundMessage::Frame {
+                    bytes,
+                    on_written: Some(Box::new(on_written)),
+                })
+                .is_ok(),
             Err(_) => false,
         }
     }
@@ -85,13 +114,8 @@ pub fn serve(mut stream: LocalStream, core: Arc<HostCore>, router: Arc<Router>, 
             let closed = Arc::clone(&closed);
             std::thread::spawn(move || {
                 while let Ok(message) = rx.recv() {
-                    match message {
-                        OutboundMessage::Frame(frame) => {
-                            if w.write_all(&frame).and_then(|_| w.flush()).is_err() {
-                                break;
-                            }
-                        }
-                        OutboundMessage::Close => break,
+                    if !write_outbound_frame(&mut w, message) {
+                        break;
                     }
                 }
                 closed.store(true, Ordering::SeqCst);
@@ -113,6 +137,21 @@ pub fn serve(mut stream: LocalStream, core: Arc<HostCore>, router: Arc<Router>, 
     let _ = writer.join();
     core.client_disconnected();
     log.line("client.disconnected", "");
+}
+
+fn write_outbound_frame(writer: &mut impl Write, message: OutboundMessage) -> bool {
+    match message {
+        OutboundMessage::Frame { bytes, on_written } => {
+            if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
+                return false;
+            }
+            if let Some(on_written) = on_written {
+                on_written();
+            }
+            true
+        }
+        OutboundMessage::Close => false,
+    }
 }
 
 fn read_loop(
@@ -305,4 +344,59 @@ fn send_frame_error(outbound: &Outbound, message: &str) {
         FrameKind::Response,
         &Response::err(0, ErrorCode::FrameError, message),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn data_consumption_runs_only_after_the_frame_is_written() {
+        let (tx, rx) = mpsc::channel();
+        let outbound = Outbound {
+            tx,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let consumed = Arc::new(AtomicBool::new(false));
+        let callback_state = Arc::clone(&consumed);
+        assert!(outbound.data_frame(b"payload", move || {
+            callback_state.store(true, Ordering::SeqCst);
+        }));
+        assert!(!consumed.load(Ordering::SeqCst));
+
+        let message = rx.recv().unwrap();
+        let mut written = Vec::new();
+        assert!(write_outbound_frame(&mut written, message));
+        assert!(consumed.load(Ordering::SeqCst));
+        assert!(!written.is_empty());
+    }
+
+    #[test]
+    fn a_failed_data_write_does_not_consume_attachment_bytes() {
+        struct FailedWrite;
+        impl Write for FailedWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("write failed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let outbound = Outbound {
+            tx,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let consumed = Arc::new(AtomicBool::new(false));
+        let callback_state = Arc::clone(&consumed);
+        assert!(outbound.data_frame(b"payload", move || {
+            callback_state.store(true, Ordering::SeqCst);
+        }));
+        let message = rx.recv().unwrap();
+        assert!(!write_outbound_frame(&mut FailedWrite, message));
+        assert!(!consumed.load(Ordering::SeqCst));
+    }
 }

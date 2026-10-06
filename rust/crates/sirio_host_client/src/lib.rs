@@ -13,5 +13,5 @@ pub mod term;
 pub use ensure::{
     EnsureError, EnsureOptions, HostHandle, HostSession, ensure_host, status_line_for_error,
 };
-pub use mux::{Mux, StreamItem};
+pub use mux::{Mux, StreamItem, StreamReceiver};
 pub use term::TermClient;

@@ -41,10 +41,19 @@ pub struct Attachment {
 
 impl Attachment {
     pub fn consumed(&self, bytes: usize) {
-        let _ = self.queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |q| {
-            Some(q.saturating_sub(bytes))
-        });
+        release(&self.queued, bytes);
     }
+
+    pub fn consumption_callback(&self, bytes: usize) -> impl FnOnce() + Send + 'static {
+        let queued = Arc::clone(&self.queued);
+        move || release(&queued, bytes)
+    }
+}
+
+fn release(queued: &AtomicUsize, bytes: usize) {
+    let _ = queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |q| {
+        Some(q.saturating_sub(bytes))
+    });
 }
 
 struct Slot {
@@ -205,5 +214,28 @@ mod tests {
         f.broadcast_output(0, b"x");
         assert!(drain(&ra.receiver).is_empty());
         assert_eq!(f.len(), 0);
+    }
+
+    #[test]
+    fn a_write_completion_callback_releases_queued_bytes() {
+        let mut f = Fanout::new(4);
+        let (id, attachment) = f.add();
+        f.broadcast_output(0, b"abcd");
+        assert!(matches!(
+            attachment.receiver.recv().unwrap(),
+            Chunk::Output { .. }
+        ));
+
+        attachment.consumption_callback(4)();
+        f.broadcast_output(4, b"x");
+        assert_eq!(
+            drain(&attachment.receiver),
+            vec![Chunk::Output {
+                offset: 4,
+                bytes: b"x".to_vec(),
+            }]
+        );
+        assert_eq!(f.len(), 1, "a written frame releases its queue charge");
+        f.remove(id);
     }
 }

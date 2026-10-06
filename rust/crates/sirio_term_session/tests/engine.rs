@@ -156,6 +156,42 @@ fn a_snapshot_rebuilds_the_hosts_screen_in_a_fresh_replica() {
 
 #[cfg(unix)]
 #[test]
+fn a_snapshot_is_followed_by_an_empty_output_at_the_journal_head() {
+    let session = Session::spawn(
+        spec("pane-1", "printf 'SNAPSHOT-MARKER'; sleep 30"),
+        mpsc::channel().0,
+    )
+    .unwrap();
+    until("snapshot marker output", Duration::from_secs(5), || {
+        text(&session).contains("SNAPSHOT-MARKER")
+    });
+
+    let attach = session.attach(None);
+    assert!(!attach.resumed);
+    let snapshot = attach
+        .attachment
+        .receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(snapshot, Chunk::Snapshot(_)));
+    let journal_head = session.read(Format::Raw, None).len() as u64;
+    let marker = attach
+        .attachment
+        .receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        marker,
+        Chunk::Output {
+            offset: journal_head,
+            bytes: Vec::new(),
+        }
+    );
+    session.close();
+}
+
+#[cfg(unix)]
+#[test]
 fn a_resume_inside_the_journal_continues_byte_for_byte() {
     let session = Session::spawn(
         spec("pane-1", "i=0; while [ $i -lt 400 ]; do echo tick $i; i=$((i+1)); sleep 0.01; done; sleep 5"),
@@ -347,7 +383,15 @@ fn feed_reaches_the_screen_and_every_attachment_but_not_the_child() {
     let a = session.attach(None);
     let _ = a.attachment.receiver.recv_timeout(Duration::from_secs(2)); // the snapshot
     session.feed(b"FED-TEXT\r\n".to_vec());
-    match a.attachment.receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let output = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match a.attachment.receiver.recv_timeout(remaining).unwrap() {
+            Chunk::Output { bytes, .. } if bytes.is_empty() => continue,
+            chunk => break chunk,
+        }
+    };
+    match output {
         Chunk::Output { bytes, .. } => assert_eq!(bytes, b"FED-TEXT\r\n"),
         other => panic!("{other:?}"),
     }

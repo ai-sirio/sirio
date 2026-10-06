@@ -211,6 +211,13 @@ fn run(inputs: Inputs) {
             for id in alternate_attachments.drain() {
                 fanout.send_to(id, Chunk::Resync);
                 fanout.send_to(id, Chunk::Snapshot(crate::render_snapshot(&terminal)));
+                fanout.send_to(
+                    id,
+                    Chunk::Output {
+                        offset: journal.head(),
+                        bytes: Vec::new(),
+                    },
+                );
             }
         }
         was_alternate = is_alternate;
@@ -270,6 +277,13 @@ fn run(inputs: Inputs) {
                         true
                     } else {
                         fanout.send_to(id, Chunk::Snapshot(crate::render_snapshot(&terminal)));
+                        fanout.send_to(
+                            id,
+                            Chunk::Output {
+                                offset: journal.head(),
+                                bytes: Vec::new(),
+                            },
+                        );
                         false
                     };
                     if terminal.active_screen().ok() == Some(Screen::Alternate) {
