@@ -2,11 +2,13 @@
 //! sessions behind the same lock.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use sirio_host_protocol::frame::FrameKind;
 use sirio_host_protocol::messages::{Event, HostMode, HostStateEvent};
+
+use crate::connection::Outbound;
 
 pub struct HostCore {
     pub version: String,
@@ -23,7 +25,7 @@ struct Counters {
     clients: u32,
     held_sessions: u32,
     next_subscription: u64,
-    subscribers: Vec<(u64, u64, Sender<Event>)>, // (subscription, next seq, sink)
+    subscribers: Vec<(u64, u64, Outbound)>, // (subscription, next seq, sink)
     /// When a client last connected or left, or a session was last held or
     /// released — or the host started. The idle window (spec §5.5) runs from
     /// here, so a client that came and went between two samples of the idle
@@ -152,17 +154,22 @@ impl HostCore {
     }
 
     /// Registers a sink and immediately sends it the current state.
-    pub fn subscribe(&self, sink: Sender<Event>) -> u64 {
+    pub fn subscribe(&self, sink: Outbound) -> u64 {
         let mut c = self.counters();
         let payload = self.snapshot(&c);
         c.next_subscription += 1;
         let id = c.next_subscription;
-        let _ = sink.send(Event {
-            subscription: id,
-            seq: 0,
-            payload,
-        });
-        c.subscribers.push((id, 1, sink));
+        let sent = sink.json(
+            FrameKind::Event,
+            &Event {
+                subscription: id,
+                seq: 0,
+                payload,
+            },
+        );
+        if sent {
+            c.subscribers.push((id, 1, sink));
+        }
         id
     }
 
@@ -171,13 +178,14 @@ impl HostCore {
     fn broadcast_locked(&self, c: &mut Counters) {
         let payload = self.snapshot(c);
         c.subscribers.retain_mut(|(id, seq, sink)| {
-            let sent = sink
-                .send(Event {
+            let sent = sink.json(
+                FrameKind::Event,
+                &Event {
                     subscription: *id,
                     seq: *seq,
                     payload: payload.clone(),
-                })
-                .is_ok();
+                },
+            );
             *seq += 1;
             sent
         });

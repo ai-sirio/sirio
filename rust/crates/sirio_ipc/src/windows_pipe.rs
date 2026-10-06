@@ -64,8 +64,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-    LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, FALSE, GENERIC_READ, GENERIC_WRITE,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
@@ -956,6 +956,7 @@ pub fn open_client(path: &Path) -> Result<PipeStream, ClientConnectError> {
                     handle,
                     event: std::ptr::null_mut(),
                     read_timeout: Cell::new(None),
+                    write_timeout: Cell::new(None),
                 }),
                 Err(_) => {
                     let owner = pipe_owner_sid_string(handle).unwrap_or_default();
@@ -984,6 +985,7 @@ fn wrap_stream(handle: HANDLE) -> Option<PipeStream> {
         handle,
         event: std::ptr::null_mut(),
         read_timeout: Cell::new(None),
+        write_timeout: Cell::new(None),
     })
 }
 
@@ -999,6 +1001,7 @@ pub struct PipeStream {
     /// one end are exclusive by construction.
     event: HANDLE,
     read_timeout: Cell<Option<Duration>>,
+    write_timeout: Cell<Option<Duration>>,
 }
 
 impl PipeStream {
@@ -1009,10 +1012,49 @@ impl PipeStream {
         unsafe { DisconnectNamedPipe(self.handle) };
     }
 
+    /// A second overlapped handle on the same pipe. Each handle needs its own
+    /// event because both may have an operation pending at the same time.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        let process = unsafe { GetCurrentProcess() };
+        let mut handle: HANDLE = std::ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                process,
+                self.handle,
+                process,
+                &mut handle,
+                0,
+                FALSE,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(last_error("DuplicateHandle"));
+        }
+        let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if event.is_null() || event == INVALID_HANDLE_VALUE {
+            let error = last_error("CreateEventW");
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+        Ok(Self {
+            handle,
+            event,
+            read_timeout: Cell::new(self.read_timeout.get()),
+            write_timeout: Cell::new(self.write_timeout.get()),
+        })
+    }
+
     /// Mirrors `UnixStream::set_read_timeout`: bounds how long a single
     /// read may block. `None` waits forever (the server side).
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.read_timeout.set(timeout);
+        Ok(())
+    }
+
+    /// Bounds how long a single write may block. `None` waits forever.
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.write_timeout.set(timeout);
         Ok(())
     }
 
@@ -1137,11 +1179,15 @@ impl PipeStream {
     /// Full-write loop, partial-write-safe: byte-mode pipes may accept
     /// fewer bytes than requested.
     fn write_all_impl(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        let deadline = self
+            .write_timeout
+            .get()
+            .map(|timeout| Instant::now() + timeout);
         while !buf.is_empty() {
             // WriteFile needs a *mut buffer even though it never writes to it;
             // copy into scratch memory rather than lie about mutability.
             let mut scratch = buf.to_vec();
-            let written = self.transfer(&mut scratch, false, None)?;
+            let written = self.transfer(&mut scratch, false, deadline)?;
             if written == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,

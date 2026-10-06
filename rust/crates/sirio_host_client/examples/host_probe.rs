@@ -7,6 +7,7 @@
 //!   host_probe hold <on|off>             host.debug.hold_session
 //!   host_probe shutdown [--force]        host.shutdown; print ok or error=<code>
 //!   host_probe subscribe <n>             print n host.state events
+//!   host_probe silent <seconds>          connect without sending; print when the host closes
 //!   host_probe conformance <dir>         run every case in <dir>; print `case=<name> PASS|FAIL <why>`
 //!   host_probe raw-ndjson                write one NDJSON line to the endpoint; print what came back
 //!   host_probe alive <pid>               exit 0 while the process runs, 1 otherwise (the check the
@@ -144,6 +145,33 @@ fn main() {
                         println!("event timeout");
                         break;
                     }
+                }
+            }
+        }
+        Some("silent") => {
+            let seconds: u64 = args[1].parse().expect("silent <seconds>");
+            let mut stream = sirio_ipc::connect(&paths.endpoint(major)).expect("connect");
+            LocalStreamExt::set_read_timeout(&stream, Some(Duration::from_millis(100)))
+                .expect("read timeout");
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(seconds);
+            let mut buf = [0u8; 1];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => {
+                        println!("closed_after_ms={}", started.elapsed().as_millis());
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(_) => {
+                        println!("closed_after_ms={}", started.elapsed().as_millis());
+                        break;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    println!("still_open");
+                    break;
                 }
             }
         }

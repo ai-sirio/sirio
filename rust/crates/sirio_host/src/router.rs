@@ -2,15 +2,20 @@
 //! response out. Nothing here knows about sockets or pipes.
 
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 
 use sirio_host_protocol::messages::*;
 use sirio_host_protocol::version::PROTOCOL_MINOR;
 
+use crate::connection::Outbound;
 use crate::core::HostCore;
 
 pub struct Router {
     core: Arc<HostCore>,
+}
+
+pub struct ConnState<'a> {
+    router: &'a Router,
+    pub(crate) outbound: Outbound,
 }
 
 impl Router {
@@ -83,11 +88,22 @@ impl Router {
         }
     }
 
+    pub fn connection(&self, outbound: Outbound) -> ConnState<'_> {
+        ConnState {
+            router: self,
+            outbound,
+        }
+    }
+
+    pub fn capabilities(&self) -> Vec<String> {
+        vec![capability::HOST_V1.to_string()]
+    }
+
     pub fn subscribe(
         &self,
         _principal: &Principal,
         topic_name: &str,
-        sink: Sender<Event>,
+        sink: Outbound,
     ) -> Result<u64, ErrorBody> {
         if topic_name == topic::HOST_STATE {
             Ok(self.core.subscribe(sink))
@@ -108,6 +124,12 @@ impl Router {
                 "request belongs to another host generation",
             )
         })
+    }
+}
+
+impl ConnState<'_> {
+    pub fn handle(&self, principal: &Principal, request: &Request) -> Response {
+        self.router.handle(principal, request)
     }
 }
 

@@ -44,10 +44,10 @@ set -eEuo pipefail
 #   12. foreign-client    the control socket's NDJSON is closed on, unanswered
 #   13. successor         a host whose root was removed and re-created under
 #                         it leaves its successor's endpoint and state file
+#   14. handshake-deadline a silent peer is closed after five seconds; the host
+#                         remains available to another client
 #   15. isolation         different absolute SIRIO_DB paths start and stop
 #                         different hosts
-#
-# Case id 14 is reserved for the connection-deadline case in SP2 Task 2.
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
 # Linux only. The systemd scope arm of case 3 runs only on Linux with a user
 # manager.
@@ -863,6 +863,20 @@ case_isolation() {
   pass
 }
 
+case_handshake_deadline() {
+  fresh_root
+  probe ensure
+  local pid closed_after
+  pid="$(getf pid)"
+  probe silent 10
+  closed_after="$(getf closed_after_ms)"
+  [ -n "$closed_after" ] || fail "expected a closed_after_ms result, got: $OUT"
+  [ "$closed_after" -ge 4500 ] && [ "$closed_after" -le 7000 ] || fail "silent connection closed after ${closed_after}ms, expected 4500–7000ms"
+  probe info
+  [ "$(getf pid)" = "$pid" ] || fail "host did not answer info after closing the silent connection"
+  pass
+}
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -876,6 +890,7 @@ run_case unverifiable      case_unverifiable
 run_case path-too-long     case_path_too_long
 run_case foreign-client    case_foreign_client
 run_case successor         case_successor
+run_case handshake-deadline case_handshake_deadline 14
 run_case isolation         case_isolation 15
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"
