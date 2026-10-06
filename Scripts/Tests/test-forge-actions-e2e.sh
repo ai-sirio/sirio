@@ -1788,9 +1788,19 @@ expect_line "DRAFT none"
 echo "  a verdict that fails after the publish is a warning"
 reset_forge gitlab "$GL_PORT"
 seed_drafts
-probe "${GL_AF[@]}" act 201 review-submit --verdict approve
+probe "${GL_AF[@]}" act 201 review-submit --verdict approve --body "Summary."
 expect_code 0 "a published review whose approval failed"
 expect_prefix "WARNING Your review was published, but approving failed:"
+python3 - "$WORK/gitlab-requests.log" <<'PY' || fail "failed approval should still post the review summary"
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+approve = max(i for i, line in enumerate(lines) if "/merge_requests/201/approve " in line)
+notes = [(i, line) for i, line in enumerate(lines) if " CreateNote " in line]
+assert notes, "no summary note was posted"
+note_at, note = notes[-1]
+assert approve < note_at, (approve, note_at)
+assert '"Summary."' in note, note
+PY
 probe "${GL_RO[@]}" act 201 review-add --path src/login.rs --side new --line context:43:43 \
   --base "$GL_HEAD" --head "$GL_HEAD" --start-sha "$GL_HEAD" --body "No."
 expect_code 20 "a review comment without permission"

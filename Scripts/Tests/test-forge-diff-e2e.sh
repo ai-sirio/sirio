@@ -1005,9 +1005,10 @@ PY
     wait_for commentable yes surface change-request read
     ctl surface change-request act review-add --thread "$open_id" --text "Last one." >/dev/null
     wait_for draft 1 surface change-request read
-    ctl surface change-request act review-submit --verdict approve >/dev/null
+    ctl surface change-request act review-submit --verdict approve --text "Summary." >/dev/null
     wait_for action warning surface change-request read
     assert_contains action_message "Your review was published, but approving failed" surface change-request read
+    grep -F "CreateNote" "$log" | grep -qF '"Summary."' || fail "the review summary did not reach the forge"
     wait_for review_dialog "" surface change-request read
     wait_for draft "" surface change-request read
   fi

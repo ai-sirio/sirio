@@ -1082,8 +1082,14 @@ pub(crate) fn act(
                 body: None,
             })?;
             let published = "Your review was published";
-            let verdict_failed = |what: &str, error: ForgeError| ActionOutcome {
-                warning: Some(format!("{published}, but {what} failed: {error}")),
+            let verdict_failed = |what: &str, error: ForgeError| {
+                let mut warning = format!("{published}, but {what} failed: {error}");
+                if !body.trim().is_empty() {
+                    if let Err(note_error) = create_note(client, noteable, body) {
+                        warning.push_str(&format!("; your summary was not posted either: {note_error}"));
+                    }
+                }
+                ActionOutcome { warning: Some(warning) }
             };
             return Ok(match verdict {
                 ReviewVerdict::Comment => then_comment(client, noteable, body, published),
