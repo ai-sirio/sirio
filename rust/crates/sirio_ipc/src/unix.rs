@@ -123,7 +123,9 @@ fn prepare_parent_directory(path: &Path) -> Result<(), BindError> {
 
 /// Removes a stale socket file, or refuses if a live server owns it.
 fn prepare_path(path: &Path) -> Result<(), BindError> {
-    if path.as_os_str().as_encoded_bytes().len() > MAX_SOCKET_PATH_LENGTH {
+    // sun_path holds the terminating NUL, so a path as long as its capacity
+    // cannot be bound.
+    if path.as_os_str().as_encoded_bytes().len() >= MAX_SOCKET_PATH_LENGTH {
         return Err(BindError::PathTooLong {
             path: path.to_path_buf(),
         });
@@ -217,6 +219,21 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
         io::ErrorKind::AddrInUse,
         "could not find a free temporary socket name",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_path_at_sun_path_capacity_is_rejected_before_bind() {
+        let path = PathBuf::from(format!("/{}", "e".repeat(MAX_SOCKET_PATH_LENGTH - 1)));
+        assert!(matches!(
+            prepare_path(&path),
+            Err(BindError::PathTooLong { .. })
+        ));
+    }
 }
 
 /// Verifies the bound path is a socket owned by the current user,

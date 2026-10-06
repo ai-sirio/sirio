@@ -15,7 +15,7 @@ set -eEuo pipefail
 # properties of a real process tree on a real filesystem, and a host that
 # fails them fails silently: the app would simply show "Not available".
 #
-# What it proves, one fresh data root per case, in this order:
+# What it proves, one or more fresh data roots per case, in this order:
 #
 #    1. start-and-adopt   a client starts a host; the next one adopts it (same
 #                         pid, no second start)
@@ -44,7 +44,10 @@ set -eEuo pipefail
 #   12. foreign-client    the control socket's NDJSON is closed on, unanswered
 #   13. successor         a host whose root was removed and re-created under
 #                         it leaves its successor's endpoint and state file
+#   15. isolation         different absolute SIRIO_DB paths start and stop
+#                         different hosts
 #
+# Case id 14 is reserved for the connection-deadline case in SP2 Task 2.
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
 # Linux only. The systemd scope arm of case 3 runs only on Linux with a user
 # manager.
@@ -94,6 +97,7 @@ native() {
 HELPERS=()
 CASE_ROOTS=()
 N=0
+CASE_ID=""
 CASE_NAME=""
 NOTE=""
 ROOT=""
@@ -106,13 +110,13 @@ TRANSCRIPT=/dev/null
 # ---------------------------------------------------------------- reporting
 
 fail() {
-  echo "CASE $N $CASE_NAME FAIL: $*" >&2
+  echo "CASE ${CASE_ID:-$N} $CASE_NAME FAIL: $*" >&2
   show_evidence >&2
   exit 1
 }
 
 unexpected() {
-  echo "CASE $N $CASE_NAME FAIL: unexpected error at line $1 (a command the script did not expect to fail)" >&2
+  echo "CASE ${CASE_ID:-$N} $CASE_NAME FAIL: unexpected error at line $1 (a command the script did not expect to fail)" >&2
   show_evidence >&2
 }
 trap 'unexpected $LINENO' ERR
@@ -136,10 +140,10 @@ show_evidence() {
 
 pass() {
   local took=$(( $(date +%s) - CASE_STARTED ))
-  echo "CASE $N $CASE_NAME PASS${NOTE:+ ($NOTE)} ${took}s"
+  echo "CASE ${CASE_ID:-$N} $CASE_NAME PASS${NOTE:+ ($NOTE)} ${took}s"
 }
 skip() {
-  echo "CASE $N $CASE_NAME SKIP ($*)"
+  echo "CASE ${CASE_ID:-$N} $CASE_NAME SKIP ($*)"
 }
 
 # ---------------------------------------------------------------- processes
@@ -377,14 +381,16 @@ end_case() {
   CASE_ROOTS=()
 }
 
-run_case() { # NAME FUNCTION
+run_case() { # NAME FUNCTION [DISPLAY_ID]
   N=$((N + 1))
   CASE_NAME="$1"
+  CASE_ID="${3:-$N}"
   NOTE=""
   LAST_CALL=""
   CASE_STARTED="$(date +%s)"
   "$2"
   end_case
+  CASE_ID=""
 }
 
 # The exit trap: nothing this script started survives it, a pass or a fail.
@@ -396,6 +402,12 @@ cleanup() {
     if job_running "$pid"; then kill_hard "$pid"; fi
   done
   if [ -n "$ROOT_BASE" ] && [ -d "$ROOT_BASE" ]; then
+    for root in ${CASE_ROOTS[@]+"${CASE_ROOTS[@]}"}; do
+      [ -d "$root" ] || continue
+      archive_root "$root"
+      shutdown_hosts_in "$root" cleanup
+      archive_root "$root"
+    done
     for root in "$ROOT_BASE"/*/; do
       [ -d "$root" ] || continue
       archive_root "${root%/}"
@@ -820,6 +832,37 @@ case_successor() {
   pass
 }
 
+case_isolation() {
+  local root_a="$ROOT_BASE/iso-a/host" root_b="$ROOT_BASE/iso-b/host"
+  local db_a="$ROOT_BASE/iso-a/sirio.sqlite" db_b="$ROOT_BASE/iso-b/sirio.sqlite"
+  local pid_a pid_b
+  ROOT="$root_a"
+  CASE_ROOTS+=("$root_a" "$root_b")
+  unset SIRIO_HOST_HOME
+  export SIRIO_DB
+
+  SIRIO_DB="$(native "$db_a")"
+  probe ensure
+  pid_a="$(getf pid)"
+  [ -n "$pid_a" ] || fail "ensure with iso-a SIRIO_DB printed no pid"
+  [ -f "$root_a/host-v1.json" ] || fail "iso-a host-v1.json was not created"
+
+  SIRIO_DB="$(native "$db_b")"
+  probe ensure
+  pid_b="$(getf pid)"
+  [ -n "$pid_b" ] || fail "ensure with iso-b SIRIO_DB printed no pid"
+  [ "$pid_a" != "$pid_b" ] || fail "the two isolated databases adopted the same host pid $pid_a"
+  [ -f "$root_b/host-v1.json" ] || fail "iso-b host-v1.json was not created"
+
+  SIRIO_DB="$(native "$db_a")"
+  probe shutdown --force
+  [ "$(getf_raw)" = ok ] || fail "iso-a shutdown --force answered '$OUT', not ok"
+  SIRIO_DB="$(native "$db_b")"
+  probe shutdown --force
+  [ "$(getf_raw)" = ok ] || fail "iso-b shutdown --force answered '$OUT', not ok"
+  pass
+}
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -833,5 +876,6 @@ run_case unverifiable      case_unverifiable
 run_case path-too-long     case_path_too_long
 run_case foreign-client    case_foreign_client
 run_case successor         case_successor
+run_case isolation         case_isolation 15
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"

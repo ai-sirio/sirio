@@ -14,6 +14,7 @@ use crate::connection::Connection;
 
 pub struct Observation {
     pub verdict: Verdict,
+    pub lock: LockState,
     pub state: Option<HostStateFile>,
     pub reply: Option<HelloReply>,
 }
@@ -39,7 +40,8 @@ pub fn observe(paths: &HostPaths, major: u32, client_majors: &[u32]) -> Observat
         Some(s) => observe_process(s.start_time, sirio_ipc::process::start_time(s.pid)),
     };
     Observation {
-        verdict: verdict(handshake, lock, process),
+        verdict: verdict(handshake, lock.clone(), process),
+        lock,
         state,
         reply,
     }
@@ -56,7 +58,7 @@ fn lock_state(paths: &HostPaths, major: u32) -> LockState {
         Err(e) if e.kind() == ErrorKind::NotFound => return LockState::Free,
         // A lock file that cannot be opened is not evidence of absence, and
         // only an `Absent` verdict permits a start.
-        Err(_) => return LockState::Held,
+        Err(e) => return LockState::Unopenable(format!("{:?}", e.kind())),
     };
     match file.try_lock() {
         Ok(()) => {

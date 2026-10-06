@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sirio_host_protocol::liveness::Verdict;
+use sirio_host_protocol::liveness::{LockState, Verdict};
 use sirio_host_protocol::messages::{HelloReply, HostInfo, HostMode, Welcome, method};
 use sirio_host_protocol::paths::HostPaths;
 use sirio_host_protocol::version::majors_spoken;
@@ -51,6 +51,7 @@ pub enum EnsureError {
     Spawn(io::Error),
     Unverifiable {
         waited: Duration,
+        reason: Option<String>,
     },
     Refused {
         host_major: u32,
@@ -85,11 +86,17 @@ impl std::fmt::Display for EnsureError {
             ),
             Self::Stage(e) => write!(f, "could not copy sirio-host: {e}"),
             Self::Spawn(e) => write!(f, "could not start sirio-host: {e}"),
-            Self::Unverifiable { waited } => write!(
-                f,
-                "a host holds the lock but does not answer (waited {}s)",
-                waited.as_secs()
-            ),
+            Self::Unverifiable { waited, reason } => {
+                write!(
+                    f,
+                    "a host holds the lock but does not answer (waited {}s)",
+                    waited.as_secs()
+                )?;
+                if let Some(reason) = reason {
+                    write!(f, " — {reason}")?;
+                }
+                Ok(())
+            }
             Self::Refused {
                 host_major,
                 client_majors,
@@ -171,6 +178,12 @@ fn ensure_major(
                 if started.elapsed() >= UNVERIFIABLE_WAIT {
                     return Err(EnsureError::Unverifiable {
                         waited: started.elapsed(),
+                        reason: match observation.lock {
+                            LockState::Unopenable(kind) => Some(format!(
+                                "the lock file cannot be opened ({kind})"
+                            )),
+                            LockState::Held | LockState::Free => None,
+                        },
                     });
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -427,5 +440,20 @@ mod tests {
         let line = compose_status(Some(&info(HostMode::OnDemand)), "0.31.0", None, None);
         assert!(line.contains("on-demand"), "{line}");
         assert!(!line.contains("OnDemand"), "{line}");
+    }
+
+    #[test]
+    fn unverifiable_error_includes_the_lock_open_reason() {
+        let error = EnsureError::Unverifiable {
+            waited: Duration::from_secs(10),
+            reason: Some("the lock file cannot be opened (PermissionDenied)".into()),
+        };
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "a host holds the lock but does not answer (waited 10s)",
+                " — the lock file cannot be opened (PermissionDenied)"
+            )
+        );
     }
 }
