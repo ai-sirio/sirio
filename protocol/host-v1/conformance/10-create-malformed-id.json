@@ -1,0 +1,14 @@
+{
+  "name": "create-malformed-id",
+  "major": 1,
+  "steps": [
+    {
+      "send": { "id": 1, "method": "host.hello", "params": { "client_version": "conformance", "majors": [1], "minor": 1 } },
+      "expect": { "id": 1, "result": { "type": "welcome" } }
+    },
+    {
+      "send": { "id": 2, "method": "term.create", "params": { "session_id": "tab-1", "cwd": "/", "command": { "type": "shell" }, "size": { "cols": 80, "rows": 24 }, "origin": "control" }, "generation": "$generation" },
+      "expect": { "id": 2, "error": { "code": "invalid_params" } }
+    }
+  ]
+}

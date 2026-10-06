@@ -35,11 +35,16 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(60));
+    let start_delay = debug("SIRIO_HOST_START_DELAY_MS")
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::ZERO);
     std::process::exit(run(HostConfig {
         paths,
         major: effective_major(debug("SIRIO_HOST_PROTOCOL_MAJOR")),
         mode,
         idle_grace,
+        start_delay,
         version: env!("CARGO_PKG_VERSION").to_string(),
     }));
 }

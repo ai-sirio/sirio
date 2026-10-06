@@ -161,8 +161,19 @@ fn read_loop(
             };
             match frame.kind {
                 FrameKind::Request => {}
-                // Task 6: `FrameKind::Data if welcomed && conn.terminal()` → conn.data(&frame.payload),
-                // returning on Err with send_frame_error.
+                FrameKind::Data => {
+                    if !welcomed || !conn.terminal() {
+                        log.line("client.frame_error", "bad_data");
+                        send_frame_error(outbound, "Data requires a terminal welcome");
+                        return;
+                    }
+                    if let Err(reason) = conn.data(&frame.payload) {
+                        log.line("client.frame_error", "bad_data");
+                        send_frame_error(outbound, &reason);
+                        return;
+                    }
+                    continue;
+                }
                 _ => {
                     log.line("client.frame_error", "unexpected_kind");
                     send_frame_error(outbound, "only request frames are accepted from a client");
@@ -183,7 +194,9 @@ fn read_loop(
                 match hello(core, router, &request) {
                     Hello::Welcomed(response) => {
                         welcomed = true;
-                        outbound.json(FrameKind::Response, &response);
+                        if outbound.json(FrameKind::Response, &response) {
+                            conn.welcomed_terminal();
+                        }
                     }
                     Hello::Close(response) => {
                         outbound.json(FrameKind::Response, &response);
@@ -200,7 +213,8 @@ fn read_loop(
             } else {
                 conn.handle(&principal, &request)
             };
-            outbound.json(FrameKind::Response, &response);
+            let sent = outbound.json(FrameKind::Response, &response);
+            conn.after_response(sent);
         }
     }
 }
@@ -257,7 +271,7 @@ fn subscribe(
     router: &Router,
     principal: &Principal,
     request: &Request,
-    conn: &mut ConnState<'_>,
+    conn: &mut ConnState,
 ) -> Response {
     match serde_json::from_value::<SubscribeParams>(request.params.clone()) {
         Err(e) => Response::err(request.id, ErrorCode::InvalidParams, e.to_string()),

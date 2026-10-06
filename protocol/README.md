@@ -78,3 +78,7 @@ header, or 1,048,563 bytes. A large snapshot is sent in consecutive phase 0
 frames; the first phase 1 frame ends it.
 
 A client sends `Data` only after `Welcome` named `terminal`.
+
+Events about a connection's own terminal streams use subscription `0` and
+sequence `0` (for example, `resync` and `lagged`). No `host.subscribe` call
+returns `0`; host-wide subscriptions start at `1`.

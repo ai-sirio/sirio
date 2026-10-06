@@ -38,6 +38,7 @@ pub fn run(config: HostConfig) -> i32 {
             return 3;
         }
     };
+    std::thread::sleep(config.start_delay);
     let mut listener = match LocalListener::bind(&config.paths.endpoint(config.major)) {
         Ok(listener) => listener,
         Err(error) => {
@@ -65,14 +66,15 @@ pub fn run(config: HostConfig) -> i32 {
     let bound = file_identity(&config.paths.endpoint(config.major));
     #[cfg(not(unix))]
     let bound = None;
-    let generation = random_token();
-    let core = Arc::new(HostCore::new(
+    let generation = crate::sessions::random_token();
+    let core = HostCore::new(
         config.version.clone(),
         config.major,
         config.mode.clone(),
         generation.clone(),
-        random_token(),
-    ));
+        crate::sessions::random_token(),
+        Arc::clone(&log),
+    );
     let state = HostStateFile {
         pid: std::process::id(),
         start_time: sirio_ipc::process::start_time(std::process::id()).unwrap_or(0),
@@ -208,27 +210,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("json.{}", std::process::id()));
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)
-}
-
-/// An identifier that only has to differ between host starts: two hashes of
-/// the process id and the clock, each seeded by `RandomState`'s own
-/// per-instance random keys, printed as 32 hex digits. It is not a secret and
-/// not drawn straight from the OS's entropy source — nothing may treat it as
-/// one — but needs no crate and behaves the same on every platform.
-fn random_token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u32(std::process::id());
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    let a = hasher.finish();
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u64(a);
-    format!("{a:016x}{:016x}", hasher.finish())
 }
 
 #[cfg(unix)]

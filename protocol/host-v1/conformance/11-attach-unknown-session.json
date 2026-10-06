@@ -1,0 +1,14 @@
+{
+  "name": "attach-unknown-session",
+  "major": 1,
+  "steps": [
+    {
+      "send": { "id": 1, "method": "host.hello", "params": { "client_version": "conformance", "majors": [1], "minor": 1 } },
+      "expect": { "id": 1, "result": { "type": "welcome" } }
+    },
+    {
+      "send": { "id": 2, "method": "term.attach", "params": { "session_id": "pane-999999" }, "generation": "$generation" },
+      "expect": { "id": 2, "error": { "code": "unknown_session" } }
+    }
+  ]
+}

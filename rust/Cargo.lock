@@ -7458,6 +7458,7 @@ dependencies = [
  "serde_json",
  "sirio_host_protocol",
  "sirio_ipc",
+ "sirio_term_session",
 ]
 
 [[package]]
