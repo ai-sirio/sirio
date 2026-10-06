@@ -107,21 +107,25 @@ Methods with an effect carry `generation` (SP1 §6.2).
 
 | Method | Effect | Params → result |
 |---|---|---|
-| `term.create` | yes | `{cwd, command: {type: "shell"} \| {type: "program", program, args}, env: {..}, size: {cols, rows}, origin: "app" \| "control", parent?: session_id}` → `{session_id, pid}` |
+| `term.create` | yes | `{session_id?, cwd, command: {type: "shell"} \| {type: "program", program, args}, env: {..}, size: {cols, rows}, origin: "app" \| "control", parent?: session_id, prelude?: base64}` → `{session_id, pid}`. `prelude` is fed into the VT and the journal before the child's first byte (a restored tab's scrollback) |
 | `term.attach` | yes | `{session_id, resume_from?: u64}` → `{stream: u32, size, mode: "snapshot" \| "resume"}` |
 | `term.detach` | yes | `{stream}` → `{}`; the session continues. Closing the connection detaches all its streams |
 | `term.resize` | yes | `{session_id, cols, rows}` → `{}`; the last resize wins (several clients: SP7) |
 | `term.read` | no | `{session_id, format?: "text" \| "raw", max_bytes?}` → `{data}` (base64 for `raw`); `text` is the VT's screen and scrollback, `raw` the journal's tail. The default format follows the origin (§5) |
 | `term.key` | yes | `{session_id, key}` → `{}`; encoded by the host against its VT's modes, with `panel.key`'s key names |
 | `term.write` | yes | `{session_id, data}` → `{}`; for clients without a stream (`sirioctl`) |
+| `term.feed` | yes | `{session_id, data}` → `{}`; bytes into the VT and the journal, **not** the PTY — what `TerminalView`'s `clear_screen` and `replay_scrollback` do to their own VT today, now done where every replica sees it |
 | `term.wait` | no | `{session_id, timeout_ms}` → `{exit: status \| null}` |
 | `term.close` | yes | `{session_id}` → `{}`; terminates (§2) and forgets the session |
 | `term.list` | no | → `[{session_id, pid, cwd, title, size, exit, foreground: {running}, origin, parent, clients, created_at}]` |
 
-`session_id` is assigned by the host and has the form `pane-<12 lower-case
-hex digits>` — the `pane-` prefix keeps today's id shape for scripts and for
-`sirioctl` users. It is the value of `SIRIO_PANE_ID` in the session's
-environment (§4.1).
+`session_id` is named by its creator (§4.1). The app passes its pane key,
+`pane-<n>`; a creator that passes none (`sirioctl`) gets
+`pane-c<12 lower-case hex digits>` from the host, a namespace the app's
+decimal keys cannot reach. A malformed id, or one the host already holds, is
+refused with `invalid_params`. The `pane-` prefix keeps today's id shape for
+scripts and for `sirioctl` users. The id is the value of `SIRIO_PANE_ID` in
+the session's environment.
 
 **End all sessions** is SP1's `host.shutdown {force: true}`: it terminates
 every session and the host. The next terminal the app opens starts a new one.
@@ -171,6 +175,16 @@ Input travels as `Data`, not JSON, because typing is the hot path.
   palette nor OSC 7, which belong to the client (unpeel's
   `vt_state_snapshot`). Snapshot and live output are taken atomically on the
   owner thread, so no byte falls between them.
+- **The alternate screen.** The formatter reconstructs the *active* screen.
+  A client that attaches while the alternate screen is active (an agent's
+  TUI, `vim`) receives that screen; the host then sends that stream a fresh
+  snapshot when the alternate screen is left, so the replica's primary screen
+  and scrollback are the host's again.
+- **Connections.** The host reads a connection on one thread and writes it
+  from another, fed by the outbound queues; nothing polls. SP1's 50 ms read
+  poll stays only for clients that do not use `terminal`. Splitting a
+  connection needs a second handle on the stream: `try_clone` on unix,
+  `DuplicateHandle` of the overlapped pipe on Windows.
 - **Back-pressure.** The PTY reader never waits for a client. Each stream has
   a bounded outbound queue (**4 MiB**); a client that lets it fill is detached
   with the event `{type: "lagged", stream}` and re-attaches (snapshot). An
@@ -180,16 +194,20 @@ Input travels as `Data`, not JSON, because typing is the hot path.
 
 ### §4.1 Identity
 
-`SIRIO_PANE_ID` is in a shell's environment from birth and cannot change; an
-app-assigned counter (`pane-N` today, restarting at every launch) would cut
-every surviving agent's hooks (Layer A) off from its tab. **The host assigns
-the id**; the app keeps its internal pane keys and maps each terminal pane to
-its `session_id`, which is what every external surface uses — the control
-socket, the activity model, the hooks.
+`SIRIO_PANE_ID` is in a shell's environment from birth and cannot change, so
+the id must be the same on both sides of a relaunch. The app's pane keys
+already are: they live in the persisted pane tree, a restored tab gets its
+old leaf ids back, and `next_pane_id` resumes above the largest. **The app
+therefore names its sessions `pane-<leaf id>`** — the id it already exports
+and that the activity model, the hooks and the control socket already use —
+and the host refuses a duplicate. At startup the app raises `next_pane_id`
+above every `pane-<n>` the host lists with `origin: app`, so a new pane never
+collides with an orphan.
 
-The persisted terminal tab records its `session_id`, written **at creation**
-(a hook-style immediate write, like `save_session_ref`), not at the next
-periodic save, so a crash right after creation leaves no orphan behind.
+A new terminal tab triggers an immediate save of the session (as a hook write
+like `save_session_ref` does), not the next periodic one, so a crash right
+after creation rarely leaves an orphan; orphan adoption (§4.2) covers the
+window that remains.
 
 ### §4.2 Events
 
