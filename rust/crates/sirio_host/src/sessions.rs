@@ -143,7 +143,7 @@ impl SessionTable {
         drop(entries);
 
         let prelude = match params.prelude.as_deref() {
-            Some(value) => base64_decode(value)
+            Some(value) => b64_decode(value)
                 .ok_or_else(|| CreateError::Spawn("prelude is not base64".into()))?,
             None => Vec::new(),
         };
@@ -320,55 +320,6 @@ pub(crate) fn wait_status(exit: Option<Exit>) -> Option<ExitStatus> {
     exit.map(exit_status)
 }
 
-pub(crate) fn base64_decode(encoded: &str) -> Option<Vec<u8>> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = encoded.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return None;
-    }
-    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        let last = index + 1 == bytes.len() / 4;
-        let first = alphabet_value(chunk[0], ALPHABET)?;
-        let second = alphabet_value(chunk[1], ALPHABET)?;
-        let third = if chunk[2] == b'=' {
-            None
-        } else {
-            Some(alphabet_value(chunk[2], ALPHABET)?)
-        };
-        let fourth = if chunk[3] == b'=' {
-            None
-        } else {
-            Some(alphabet_value(chunk[3], ALPHABET)?)
-        };
-        if !last || (third.is_some() && fourth.is_some()) {
-            if chunk[2] == b'=' || chunk[3] == b'=' {
-                return None;
-            }
-        }
-        decoded.push((first << 2) | (second >> 4));
-        match (third, fourth) {
-            (Some(third), Some(fourth)) => {
-                decoded.push((second << 4) | (third >> 2));
-                decoded.push((third << 6) | fourth);
-            }
-            (Some(third), None) if last && chunk[3] == b'=' && third & 0x03 == 0 => {
-                decoded.push((second << 4) | (third >> 2));
-            }
-            (None, None) if last && chunk[2] == b'=' && chunk[3] == b'=' && second & 0x0f == 0 => {}
-            _ => return None,
-        }
-    }
-    Some(decoded)
-}
-
-fn alphabet_value(byte: u8, alphabet: &[u8; 64]) -> Option<u8> {
-    alphabet
-        .iter()
-        .position(|value| *value == byte)
-        .map(|value| value as u8)
-}
-
 /// A host-local token used for generated pane ids and host generations.
 pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
@@ -384,27 +335,4 @@ pub(crate) fn random_token() -> String {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u64(first);
     format!("{first:016x}{:016x}", hasher.finish())
-}
-
-pub(crate) fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-        output.push(ALPHABET[(first >> 2) as usize] as char);
-        output.push(ALPHABET[((first & 0x03) << 4 | second >> 4) as usize] as char);
-        output.push(if chunk.len() > 1 {
-            ALPHABET[((second & 0x0f) << 2 | third >> 6) as usize] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            ALPHABET[(third & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    output
 }

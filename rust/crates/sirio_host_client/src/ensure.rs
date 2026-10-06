@@ -5,17 +5,20 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sirio_host_protocol::liveness::{LockState, Verdict};
-use sirio_host_protocol::messages::{HelloReply, HostInfo, HostMode, Welcome, method};
+use sirio_host_protocol::messages::{HelloReply, HostInfo, HostMode, Welcome, capability, method};
 use sirio_host_protocol::paths::HostPaths;
 use sirio_host_protocol::version::majors_spoken;
 
 use crate::connection::Connection;
 use crate::detach::{DetachMethod, DetachedSpawn, spawn_detached};
+use crate::mux::Mux;
 use crate::observe::observe;
 use crate::stage::{host_binary_name, locate_packaged_host, prune_binaries, stage_binary};
+use crate::term::TermClient;
 
 const UNVERIFIABLE_WAIT: Duration = Duration::from_secs(10);
 const START_WAIT: Duration = Duration::from_secs(10);
@@ -33,6 +36,8 @@ pub struct HostSession {
     pub connection: Connection,
     pub welcome: Welcome,
     pub major: u32,
+    endpoint: PathBuf,
+    client_version: String,
 }
 
 pub struct HostHandle {
@@ -259,13 +264,15 @@ fn connect(
     major: u32,
     majors: &[u32],
 ) -> Result<HostSession, EnsureError> {
-    let mut connection =
-        Connection::open(&options.paths.endpoint(major), CALL_TIMEOUT).map_err(EnsureError::Io)?;
+    let endpoint = options.paths.endpoint(major);
+    let mut connection = Connection::open(&endpoint, CALL_TIMEOUT).map_err(EnsureError::Io)?;
     match connection.hello(&options.client_version, majors) {
         Ok(HelloReply::Welcome(welcome)) => Ok(HostSession {
             connection,
             welcome,
             major,
+            endpoint,
+            client_version: options.client_version.clone(),
         }),
         Ok(HelloReply::Refused(r)) => Err(EnsureError::Refused {
             host_major: r.host_major,
@@ -276,6 +283,31 @@ fn connect(
 }
 
 impl HostHandle {
+    /// Opens the terminal capability on the primary host with a second
+    /// connection, keeping the existing SP1 connection intact.
+    pub fn term(&self) -> Option<TermClient> {
+        if !self
+            .primary
+            .welcome
+            .capabilities
+            .iter()
+            .any(|name| name == capability::TERMINAL)
+        {
+            return None;
+        }
+        let (mux, welcome) = Mux::open(
+            &self.primary.endpoint,
+            &self.primary.client_version,
+            &majors_spoken(self.primary.major),
+        )
+        .ok()?;
+        welcome
+            .capabilities
+            .iter()
+            .any(|name| name == capability::TERMINAL)
+            .then(|| TermClient::new(Arc::new(mux)))
+    }
+
     /// The diagnostic row (spec §7): version, pid, mode, verdict.
     pub fn status_line(&mut self) -> String {
         let info = self

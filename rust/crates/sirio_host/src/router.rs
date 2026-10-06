@@ -16,7 +16,7 @@ use sirio_term_session::{Format, InputError, KeyError};
 
 use crate::connection::Outbound;
 use crate::core::HostCore;
-use crate::sessions::{CreateError, Entry, base64_decode, base64_encode, wait_status};
+use crate::sessions::{CreateError, Entry, wait_status};
 
 pub struct Router {
     core: Arc<HostCore>,
@@ -361,7 +361,7 @@ impl ConnState {
             .map(|max_bytes| usize::try_from(max_bytes).unwrap_or(usize::MAX));
         let bytes = entry.session.read(session_format, max_bytes);
         let data = match format {
-            ReadFormat::Raw => base64_encode(&bytes),
+            ReadFormat::Raw => b64_encode(&bytes),
             ReadFormat::Text | ReadFormat::Other => String::from_utf8_lossy(&bytes).into_owned(),
         };
         Response::ok(request.id, ReadResult { format, data })
@@ -411,7 +411,7 @@ impl ConnState {
         let Some(entry) = self.router.core.sessions.get(&params.session_id) else {
             return unknown_session(request.id, &params.session_id);
         };
-        let Some(bytes) = base64_decode(&params.data) else {
+        let Some(bytes) = b64_decode(&params.data) else {
             return Response::err(request.id, ErrorCode::InvalidParams, "data is not base64");
         };
         if to_pty {

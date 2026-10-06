@@ -7466,10 +7466,13 @@ name = "sirio_host_client"
 version = "0.31.0"
 dependencies = [
  "libc",
+ "libghostty-vt",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "sirio_host_protocol",
  "sirio_ipc",
+ "sirio_term_session",
  "windows-sys 0.61.2",
 ]
 

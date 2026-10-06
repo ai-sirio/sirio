@@ -156,6 +156,78 @@ pub enum SessionEvent {
     Other,
 }
 
+/// Encode bytes using the standard padded Base64 alphabet used on the wire.
+pub fn b64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(ALPHABET[(first >> 2) as usize] as char);
+        output.push(ALPHABET[((first & 0x03) << 4 | second >> 4) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[((second & 0x0f) << 2 | third >> 6) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(third & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
+}
+
+/// Decode standard padded Base64, rejecting non-alphabet bytes and malformed
+/// or non-canonical padding.
+pub fn b64_decode(encoded: &str) -> Option<Vec<u8>> {
+    let bytes = encoded.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
+    let chunks = bytes.as_chunks::<4>().0;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let last = index + 1 == chunks.len();
+        let first = alphabet_value(chunk[0])?;
+        let second = alphabet_value(chunk[1])?;
+        match (chunk[2], chunk[3]) {
+            (b'=', b'=') if last && second & 0x0f == 0 => {
+                decoded.push((first << 2) | (second >> 4));
+            }
+            (third, b'=') if last => {
+                let third = alphabet_value(third)?;
+                if third & 0x03 != 0 {
+                    return None;
+                }
+                decoded.push((first << 2) | (second >> 4));
+                decoded.push((second << 4) | (third >> 2));
+            }
+            (third, fourth) => {
+                let third = alphabet_value(third)?;
+                let fourth = alphabet_value(fourth)?;
+                decoded.push((first << 2) | (second >> 4));
+                decoded.push((second << 4) | (third >> 2));
+                decoded.push((third << 6) | fourth);
+            }
+        }
+    }
+    Some(decoded)
+}
+
+fn alphabet_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +263,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!((p.session_id, p.prelude, p.env.len()), (None, None, 0));
+    }
+
+    #[test]
+    fn base64_round_trips_empty_and_each_tail_length() {
+        for bytes in [b"".as_slice(), b"f", b"fo", b"foo", b"foob", b"fooba"] {
+            let encoded = b64_encode(bytes);
+            assert_eq!(b64_decode(&encoded).as_deref(), Some(bytes));
+        }
+        assert_eq!(b64_encode(b""), "");
+        assert_eq!(b64_encode(b"f"), "Zg==");
+        assert_eq!(b64_encode(b"fo"), "Zm8=");
+        assert_eq!(b64_encode(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn base64_rejects_invalid_characters_and_padding() {
+        for invalid in ["?AAA", "AA A", "AA\nA", "=AAA", "A===", "AA=A"] {
+            assert_eq!(b64_decode(invalid), None, "{invalid:?}");
+        }
+        for invalid in ["Zg", "Zg=", "Zg===", "Zm=8", "Zm9="] {
+            assert_eq!(b64_decode(invalid), None, "{invalid:?}");
+        }
     }
 }
