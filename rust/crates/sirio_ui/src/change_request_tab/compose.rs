@@ -396,7 +396,10 @@ impl ChangeRequestTab {
             .as_ref()
             .ok_or("No comment is being written.")?;
         let RangeState::Ready { .. } = &self.range else {
-            return Err("The diff is not loaded.".to_string());
+            let message = "The diff is not loaded.".to_string();
+            self.write_refusal = Some((WriteTarget::Composer, message.clone()));
+            self.sync_writes(cx);
+            return Err(message);
         };
         let anchor = to_line_anchor(&open.anchor);
         let body = open.view.read(cx).text(cx);
@@ -410,7 +413,10 @@ impl ChangeRequestTab {
             .as_ref()
             .ok_or("No comment is being written.")?;
         let RangeState::Ready { .. } = &self.range else {
-            return Err("The diff is not loaded.".to_string());
+            let message = "The diff is not loaded.".to_string();
+            self.write_refusal = Some((WriteTarget::Composer, message.clone()));
+            self.sync_writes(cx);
+            return Err(message);
         };
         let anchor = to_line_anchor(&open.anchor);
         let body = open.view.read(cx).text(cx);

@@ -3904,9 +3904,12 @@ mod tests {
         tab.update(cx, |tab, cx| tab.compose_at("a.txt:new:43", cx)).expect("a line near the change");
         tab.update(cx, |tab, _| tab.range = RangeState::Fetching);
         let review_refused = tab.update(cx, |tab, cx| tab.send_line_to_review(cx));
+        assert_eq!(review_refused, Err("The diff is not loaded.".to_string()));
+        assert_eq!(tab.read_with(cx, |tab, cx| report_value(tab, cx, "line_composer_error")), "The diff is not loaded.");
         let comment_refused = tab.update(cx, |tab, cx| tab.send_line_comment(cx));
         assert_eq!(review_refused, comment_refused);
         assert_eq!(review_refused, Err("The diff is not loaded.".to_string()));
+        assert_eq!(tab.read_with(cx, |tab, cx| report_value(tab, cx, "line_composer_error")), "The diff is not loaded.");
         assert_eq!(forge.count("AddPullRequestReview"), 0);
         assert_eq!(forge.count("AddPullRequestReviewThread"), 0);
     }
