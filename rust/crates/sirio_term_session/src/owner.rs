@@ -116,6 +116,24 @@ pub(super) enum Command {
     Close(Sender<()>),
 }
 
+fn input_reply_then_write<W: Write>(
+    writer: &mut W,
+    bytes: &[u8],
+    exited: bool,
+    reply: Sender<Result<(), crate::InputError>>,
+) {
+    let result = if exited {
+        Err(crate::InputError::Exited)
+    } else {
+        Ok(())
+    };
+    let _ = reply.send(result);
+    if result.is_ok() {
+        let _ = writer.write_all(bytes);
+        let _ = writer.flush();
+    }
+}
+
 pub(super) fn start(inputs: Inputs) {
     std::thread::spawn(move || run(inputs));
 }
@@ -205,27 +223,25 @@ fn run(inputs: Inputs) {
         while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
             match command {
                 Command::Input(bytes, reply) => {
-                    let result = if cached.exit.is_some() {
-                        Err(crate::InputError::Exited)
-                    } else {
-                        let _ = writer.write_all(&bytes);
-                        let _ = writer.flush();
-                        Ok(())
-                    };
-                    let _ = reply.send(result);
+                    input_reply_then_write(&mut writer, &bytes, cached.exit.is_some(), reply);
                 }
                 Command::Key(name, reply) => {
-                    let result = if cached.exit.is_some() {
-                        Err(crate::KeyError::Session(crate::InputError::Exited))
+                    if cached.exit.is_some() {
+                        let _ = reply.send(Err(crate::KeyError::Session(
+                            crate::InputError::Exited,
+                        )));
                     } else {
-                        crate::keys::encode(&terminal, &mut keys, &name)
-                            .map_err(crate::KeyError::InvalidKey)
-                            .map(|bytes| {
+                        match crate::keys::encode(&terminal, &mut keys, &name) {
+                            Err(reason) => {
+                                let _ = reply.send(Err(crate::KeyError::InvalidKey(reason)));
+                            }
+                            Ok(bytes) => {
+                                let _ = reply.send(Ok(()));
                                 let _ = writer.write_all(&bytes);
                                 let _ = writer.flush();
-                            })
-                    };
-                    let _ = reply.send(result);
+                            }
+                        }
+                    }
                 }
                 Command::Feed(bytes) => {
                     feed(&mut terminal, &mut journal, &mut fanout, bytes);
@@ -424,4 +440,51 @@ fn close_session(
     let _ = child.kill();
     drop(master);
     drop(writer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::input_reply_then_write;
+    use std::io::{self, Write};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct BlockingWriter {
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Write for BlockingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let _ = self.started.send(());
+            let _ = self.release.recv();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn input_reply_precedes_a_blocking_pty_write() {
+        let (reply, response) = mpsc::channel();
+        let (started, write_started) = mpsc::channel();
+        let (release, unblock) = mpsc::channel();
+        let mut writer = BlockingWriter {
+            started,
+            release: unblock,
+        };
+        let worker = std::thread::spawn(move || {
+            input_reply_then_write(&mut writer, b"input", false, reply);
+        });
+
+        write_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("owner entered the blocking PTY write");
+        let result = response.recv_timeout(Duration::from_millis(100));
+        let _ = release.send(());
+        worker.join().unwrap();
+        assert_eq!(result, Ok(Ok(())));
+    }
 }

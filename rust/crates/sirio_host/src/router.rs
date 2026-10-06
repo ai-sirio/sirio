@@ -386,6 +386,9 @@ impl ConnState {
             Err(KeyError::InvalidKey(reason)) => {
                 Response::err(request.id, ErrorCode::InvalidParams, reason)
             }
+            Err(KeyError::TimedOut) => {
+                Response::err(request.id, ErrorCode::Internal, "session command timed out")
+            }
         }
     }
 

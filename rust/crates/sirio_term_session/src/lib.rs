@@ -27,6 +27,17 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const JOURNAL_BYTES: usize = 4 << 20;
 pub(crate) const STREAM_QUEUE_BYTES: usize = 4 << 20;
 
+fn wait_for_input_reply(
+    receiver: mpsc::Receiver<Result<(), InputError>>,
+    timeout: Duration,
+) -> Result<(), InputError> {
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(InputError::Gone),
+    }
+}
+
 /// The information needed to create one terminal PTY and its resident VT.
 pub struct SpawnSpec {
     pub id: String,
@@ -65,6 +76,7 @@ pub enum InputError {
 pub enum KeyError {
     Session(InputError),
     InvalidKey(String),
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -289,7 +301,7 @@ impl Session {
         self.commands
             .send(owner::Command::Input(bytes, reply))
             .map_err(|_| InputError::Gone)?;
-        receiver.recv().unwrap_or(Err(InputError::Gone))
+        wait_for_input_reply(receiver, RESPONSE_TIMEOUT)
     }
 
     pub fn key(&self, name: &str) -> Result<(), KeyError> {
@@ -297,9 +309,14 @@ impl Session {
         self.commands
             .send(owner::Command::Key(name.to_string(), reply))
             .map_err(|_| KeyError::Session(InputError::Gone))?;
-        receiver
-            .recv()
-            .unwrap_or(Err(KeyError::Session(InputError::Gone)))
+        receiver.recv_timeout(RESPONSE_TIMEOUT).unwrap_or_else(|error| {
+            Err(match error {
+                mpsc::RecvTimeoutError::Timeout => KeyError::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => {
+                    KeyError::Session(InputError::Gone)
+                }
+            })
+        })
     }
 
     pub fn feed(&self, bytes: Vec<u8>) {
@@ -359,6 +376,19 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_input_reply;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn input_timeout_is_accepted() {
+        let (_reply, receiver) = mpsc::channel();
+        assert_eq!(wait_for_input_reply(receiver, Duration::ZERO), Ok(()));
     }
 }
 
