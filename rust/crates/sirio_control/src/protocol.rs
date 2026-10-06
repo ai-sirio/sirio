@@ -609,8 +609,9 @@ pub mod request {
         Cancel,
     }
 
-    /// Reveals or folds a review thread on the active change request, or
-    /// opens (`Compose`) and closes (`Cancel`) the one line composer.
+    /// Reveals or folds a review thread on the active change request, opens
+    /// (`Compose`) and closes (`Cancel`) the one line composer, or suggests
+    /// (`Suggest`) its anchored lines.
     pub fn change_request_thread(op: ThreadOp<'_>) -> ControlRequest {
         let mut params = BTreeMap::new();
         match op {

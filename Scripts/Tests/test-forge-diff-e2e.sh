@@ -926,6 +926,9 @@ scenario_review() { # flavour host forge number remote-url
 
   echo "  a received suggestion is drawn as a change"
   assert_contains suggestions "$suggested_id" surface change-request read
+  if [ "$flavour" = github ]; then
+    ctl surface change-request thread --reveal "$suggested_id" >/dev/null
+  fi
   capture "review-$flavour-suggestion"
 
   echo "  Suggest fills the composer with line 43 as it reads, and Start a review sends it"

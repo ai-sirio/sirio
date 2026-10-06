@@ -532,7 +532,7 @@ in the framed observations in `docs/testing/ely-change-request-tab.md`.
 ### Facts verified live while planning
 
 - GitHub creates a pending review when `addPullRequestReview` has no `event`; a line can be included atomically in `threads`, while `addPullRequestReviewThread` and `addPullRequestReviewThreadReply` with `pullRequestReviewId` add to an existing pending review. `reviews(states: [PENDING], first: 1)` reads the viewer's own review.
-- GitLab has no GraphQL draft-note type or mutation. REST `draft_notes` supports list, create, edit, delete and `bulk_publish`; a draft reply names its discussion id, and a positioned draft note carries the forge's position fields.
+- GitLab has no GraphQL draft-note type or mutation. REST `draft_notes` supports list, create, edit, delete and `bulk_publish`; `bulk_publish` is sent with no body so older servers work; a draft reply names its discussion id, and a positioned draft note carries the forge's position fields. `in_reply_to_discussion_id` is the hex tail of the GraphQL discussion gid.
 - Pending reviews do not appear in the GitHub review timeline, and pending thread comments remain in the model. The UI draws draft-only threads as pending while existing open/resolved/outdated counts stay published-only; GitLab draft notes are joined into `review_threads`.
 - Outdated cards need their own `ThreadView` to preserve reply and edit state through a re-read. Suggestions use anchored diff lines when composing and the thread hunk when drawing; the forge remains responsible for applying them.
 
@@ -549,3 +549,21 @@ in the framed observations in `docs/testing/ely-change-request-tab.md`.
 - (i) Close the discard dialog on confirm; keep the submit dialog open until success so its body is retained on failure.
 
 ### Rulings from the slice ledger
+
+- Task 4 (pre-flight): keep GitLab's half inside Task 3's `review` stage block so the stage stays contiguous; cost if wrong: the stage may need splitting.
+- Pre-flight: use the standing-authorized OpenCode implementer while Codex is over quota; cost if wrong: none.
+- Task 1: let Task 2 pipeline on Task 1's integration head before review; cost if wrong: a later Task 1 fix merges as a separate commit.
+- Task 2: request GitLab drafts with `per_page=100` because the list is paged; cost if wrong: reviews with more than 100 drafts show a short count.
+- Task 3: distinguish B2 mutations from B3c draft writes in `fake_forge` by event and review-id presence, retaining only B3c pending overlays; cost if wrong: another harness edit for phantom drafts.
+- Task 6: close the outdated pending-card finding in Task 9 by using full `ThreadView` cards; cost if wrong: another Task 9 fix round.
+- Task 6: defer the stale review-label fix until Task 7 merges because both touch `compose.rs`; cost if wrong: the label stays stale through Task 7's review.
+- Task 7: initially keep an inserted suggestion block on re-anchor because it may contain user edits and `HeadMoved` was expected to stop a mismatched send; cost if wrong: a same-head re-pick can send a suggestion quoting fewer lines than its range.
+- Task 7: route the unloaded-diff refusals and add the `RangeState::Ready` guard for review sends in its fix round, with stale dead-code cleanup; cost if wrong: none.
+- Task 6: send the remaining `open_composer` write-sync fix to Task 7 after Task 6's round because they share `compose.rs`; cost if wrong: none.
+- Task 8: defer its dialog-state fix until Task 9 merges because both touch `change_request_tab.rs`; cost if wrong: none.
+- Task 10: after Task 11, use `checked_add` for suggestion offsets and fold in the stale comments and per-line ids; cost if wrong: none.
+- Task 12: assign the E2E/docs task to Codex after quota returned; cost if wrong: none.
+- Final: reverse Task 7's suggestion-block ruling because same-head re-anchoring can delete lines not quoted by the block; track the inserted block and rebuild it when unchanged, otherwise explain its old anchor; cost if wrong: a little composer state.
+- Final: assign the final fix wave to Codex in one dispatch; cost if wrong: none.
+
+Revised after the whole-branch review: fixed GitLab summary loss after verdict failure, kept open replies and edits visible in outdated sections, protected unsent Conversation text from dialog submits, rebuilt unchanged suggestion blocks on re-anchor, and surfaced unloaded-diff refusals.
