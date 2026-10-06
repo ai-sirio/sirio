@@ -105,8 +105,8 @@ pub(super) struct Inputs {
 }
 
 pub(super) enum Command {
-    Input(Vec<u8>),
-    Key(String, Sender<Result<(), String>>),
+    Input(Vec<u8>, Sender<Result<(), crate::InputError>>),
+    Key(String, Sender<Result<(), crate::KeyError>>),
     Feed(Vec<u8>),
     Resize(u16, u16),
     Attach(Option<u64>, Sender<Attach>),
@@ -204,16 +204,27 @@ fn run(inputs: Inputs) {
         // with respect to output already read from the master.
         while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
             match command {
-                Command::Input(bytes) => {
-                    let _ = writer.write_all(&bytes);
-                    let _ = writer.flush();
-                }
-                Command::Key(name, reply) => {
-                    let result = crate::keys::encode(&terminal, &mut keys, &name);
-                    let result = result.map(|bytes| {
+                Command::Input(bytes, reply) => {
+                    let result = if cached.exit.is_some() {
+                        Err(crate::InputError::Exited)
+                    } else {
                         let _ = writer.write_all(&bytes);
                         let _ = writer.flush();
-                    });
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                Command::Key(name, reply) => {
+                    let result = if cached.exit.is_some() {
+                        Err(crate::KeyError::Session(crate::InputError::Exited))
+                    } else {
+                        crate::keys::encode(&terminal, &mut keys, &name)
+                            .map_err(crate::KeyError::InvalidKey)
+                            .map(|bytes| {
+                                let _ = writer.write_all(&bytes);
+                                let _ = writer.flush();
+                            })
+                    };
                     let _ = reply.send(result);
                 }
                 Command::Feed(bytes) => {

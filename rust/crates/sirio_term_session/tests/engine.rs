@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use sirio_term_session::{fanout::Chunk, Event, Exit, Format, Session, SpawnSpec};
+use sirio_term_session::{
+    fanout::Chunk, Event, Exit, Format, InputError, KeyError, Session, SpawnSpec,
+};
 
 fn spec(id: &str, script: &str) -> SpawnSpec {
     SpawnSpec {
@@ -280,11 +282,33 @@ fn exit_is_reported_once_as_an_event_and_by_wait() {
 
 #[cfg(unix)]
 #[test]
+fn input_after_observed_exit_returns_exited() {
+    let session = Session::spawn(spec("pane-1", "exit 0"), mpsc::channel().0).unwrap();
+    assert_eq!(session.wait(Duration::from_secs(5)), Some(Exit::Success));
+    assert_eq!(session.input(b"late input".to_vec()), Err(InputError::Exited));
+    assert_eq!(
+        session.key("up"),
+        Err(KeyError::Session(InputError::Exited))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn input_after_owner_shutdown_returns_gone() {
+    let session = Session::spawn(spec("pane-1", "sleep 30"), mpsc::channel().0).unwrap();
+    session.close();
+    assert_eq!(session.input(b"late input".to_vec()), Err(InputError::Gone));
+}
+
+#[cfg(unix)]
+#[test]
 fn the_title_and_the_foreground_state_arrive_as_events() {
     let (tx, rx) = mpsc::channel();
     let session = Session::spawn(SpawnSpec { program: None, ..spec("pane-1", "") }, tx).unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    session.input(b"printf '\\033]0;hello title\\007'; sleep 2\r".to_vec());
+    session
+        .input(b"printf '\\033]0;hello title\\007'; sleep 2\r".to_vec())
+        .unwrap();
     let mut title = false;
     let mut running = false;
     let deadline = Instant::now() + Duration::from_secs(5);

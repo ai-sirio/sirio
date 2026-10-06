@@ -167,7 +167,7 @@ fn read_loop(
                         send_frame_error(outbound, "Data requires a terminal welcome");
                         return;
                     }
-                    if let Err(reason) = conn.data(&frame.payload) {
+                    if let Err(reason) = conn.data(&frame.payload, log) {
                         log.line("client.frame_error", "bad_data");
                         send_frame_error(outbound, &reason);
                         return;

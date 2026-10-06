@@ -12,7 +12,7 @@ use sirio_host_protocol::messages::*;
 use sirio_host_protocol::term::*;
 use sirio_host_protocol::version::PROTOCOL_MINOR;
 use sirio_term_session::fanout::{Attachment, AttachmentId, Chunk};
-use sirio_term_session::Format;
+use sirio_term_session::{Format, InputError, KeyError};
 
 use crate::connection::Outbound;
 use crate::core::HostCore;
@@ -197,7 +197,7 @@ impl ConnState {
         }
     }
 
-    pub fn data(&mut self, payload: &[u8]) -> Result<(), String> {
+    pub fn data(&mut self, payload: &[u8], log: &crate::log::Log) -> Result<(), String> {
         if !self.terminal {
             return Err("terminal capability was not welcomed".into());
         }
@@ -212,10 +212,12 @@ impl ConnState {
         let stream = streams
             .get(&header.stream)
             .ok_or_else(|| "client Data names a stream it does not hold".to_string())?;
-        if stream.entry.session.wait(Duration::ZERO).is_some() {
-            return Err(format!("session {} has exited", stream.session_id));
+        match stream.entry.session.input(bytes.to_vec()) {
+            Ok(()) => {}
+            Err(InputError::Exited | InputError::Gone) => {
+                log.line("stream.input_after_exit", &stream.session_id);
+            }
         }
-        stream.entry.session.input(bytes.to_vec());
         Ok(())
     }
 
@@ -376,16 +378,14 @@ impl ConnState {
         let Some(entry) = self.router.core.sessions.get(&params.session_id) else {
             return unknown_session(request.id, &params.session_id);
         };
-        if entry.session.wait(Duration::ZERO).is_some() {
-            return session_exited(request.id, &params.session_id);
-        }
         match entry.session.key(&params.key) {
             Ok(()) => Response::ok(request.id, serde_json::json!({})),
-            Err(reason) if entry.session.wait(Duration::ZERO).is_some() => {
-                let _ = reason;
+            Err(KeyError::Session(InputError::Exited | InputError::Gone)) => {
                 session_exited(request.id, &params.session_id)
             }
-            Err(reason) => Response::err(request.id, ErrorCode::InvalidParams, reason),
+            Err(KeyError::InvalidKey(reason)) => {
+                Response::err(request.id, ErrorCode::InvalidParams, reason)
+            }
         }
     }
 
@@ -411,15 +411,17 @@ impl ConnState {
         let Some(bytes) = base64_decode(&params.data) else {
             return Response::err(request.id, ErrorCode::InvalidParams, "data is not base64");
         };
-        if to_pty && entry.session.wait(Duration::ZERO).is_some() {
-            return session_exited(request.id, &params.session_id);
-        }
         if to_pty {
-            entry.session.input(bytes);
+            match entry.session.input(bytes) {
+                Ok(()) => Response::ok(request.id, serde_json::json!({})),
+                Err(InputError::Exited | InputError::Gone) => {
+                    session_exited(request.id, &params.session_id)
+                }
+            }
         } else {
             entry.session.feed(bytes);
+            Response::ok(request.id, serde_json::json!({}))
         }
-        Response::ok(request.id, serde_json::json!({}))
     }
 
     fn wait(&self, request: &Request) -> Response {

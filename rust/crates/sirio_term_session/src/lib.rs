@@ -55,6 +55,18 @@ impl std::fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputError {
+    Exited,
+    Gone,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyError {
+    Session(InputError),
+    InvalidKey(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exit {
     Success,
@@ -272,18 +284,22 @@ impl Session {
         let _ = self.commands.send(owner::Command::Detach(id));
     }
 
-    pub fn input(&self, bytes: Vec<u8>) {
-        let _ = self.commands.send(owner::Command::Input(bytes));
+    pub fn input(&self, bytes: Vec<u8>) -> Result<(), InputError> {
+        let (reply, receiver) = mpsc::channel();
+        self.commands
+            .send(owner::Command::Input(bytes, reply))
+            .map_err(|_| InputError::Gone)?;
+        receiver.recv().unwrap_or(Err(InputError::Gone))
     }
 
-    pub fn key(&self, name: &str) -> Result<(), String> {
+    pub fn key(&self, name: &str) -> Result<(), KeyError> {
         let (reply, receiver) = mpsc::channel();
         self.commands
             .send(owner::Command::Key(name.to_string(), reply))
-            .map_err(|_| "session is closed".to_string())?;
+            .map_err(|_| KeyError::Session(InputError::Gone))?;
         receiver
-            .recv_timeout(RESPONSE_TIMEOUT)
-            .unwrap_or_else(|_| Err("session command timed out".into()))
+            .recv()
+            .unwrap_or(Err(KeyError::Session(InputError::Gone)))
     }
 
     pub fn feed(&self, bytes: Vec<u8>) {
