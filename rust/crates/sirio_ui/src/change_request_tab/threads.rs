@@ -133,7 +133,7 @@ fn replaced_count(thread: &ReviewThread, above: u32, below: u32) -> Option<usize
     }
     let line = thread.line?;
     let span = line.saturating_sub(thread.start_line.unwrap_or(line)) + 1;
-    usize::try_from(span + above).ok()
+    usize::try_from(span.checked_add(above)?).ok()
 }
 
 /// Each comment's body as parts: Markdown, and suggestions as changes.
@@ -792,8 +792,10 @@ impl OutdatedView {
 /// A proposed change: the lines it replaces in red, the proposal in green.
 /// Applying it stays on the forge (spec §12).
 fn suggestion_diff(id: (&'static str, usize), before: Option<&[String]>, after: &[String], theme: &Theme, owner: WeakEntity<ChangeRequestTab>) -> AnyElement {
-    let line = |prefix: char, text: &str, color| {
-        div().text_color(color).child(selectable_text(format!("{prefix} {text}")))
+    let before = before.unwrap_or_default();
+    let before_len = before.len();
+    let line = |n: usize, prefix: char, text: &str, color| {
+        div().text_color(color).child(selectable_text(format!("{prefix} {text}")).id(("change-request-suggestion-line", n)))
     };
     div()
         .id(id)
@@ -825,8 +827,8 @@ fn suggestion_diff(id: (&'static str, usize), before: Option<&[String]>, after: 
                 .rounded(theme.radii.control)
                 .bg(theme.ely.sunken)
                 .font_family(theme.typography.code_family)
-                .children(before.unwrap_or_default().iter().map(|text| line('-', text, theme.ely.danger)))
-                .children(after.iter().map(|text| line('+', text, theme.ely.success))),
+                .children(before.iter().enumerate().map(|(n, text)| line(n, '-', text, theme.ely.danger)))
+                .children(after.iter().enumerate().map(|(n, text)| line(before_len + n, '+', text, theme.ely.success))),
         )
         .into_any_element()
 }
@@ -1462,6 +1464,31 @@ mod tests {
         assert_eq!(thread_key("PRRT_1"), thread_key("PRRT_1"));
         assert_ne!(thread_key("PRRT_1"), thread_key("PRRT_2"));
         assert_ne!(outdated_key("a.rs"), thread_key("a.rs"));
+    }
+
+    #[gpui::test]
+    fn an_absurd_suggestion_offset_draws_no_before_lines(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let theme = cx.update(|cx| *Theme::get(cx));
+        let mut absurd = thread("absurd", "a.rs", Some(10), Some(1));
+        absurd.diff_hunk = Some("@@ -10,1 +10,1 @@\n-old 10\n+new 10".to_string());
+        absurd.comments = vec![ThreadComment {
+            id: "absurd-c".to_string(),
+            author: "bob".to_string(),
+            body: "```suggestion:-4294967295+0\nnew 10\n```".to_string(),
+            at: Some(1),
+            edit: None,
+            pending: false,
+        }];
+        let docs = comment_docs(&absurd, &theme);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].len(), 1);
+        let (before, after) = match &docs[0][0] {
+            Part::Suggestion { before, after } => (before.clone(), after.clone()),
+            Part::Doc(_) => panic!("expected a suggestion"),
+        };
+        assert_eq!(before, None);
+        assert_eq!(after, vec!["new 10".to_string()]);
     }
 
     #[gpui::test]
