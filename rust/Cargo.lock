@@ -7604,6 +7604,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_term_session"
+version = "0.31.0"
+dependencies = [
+ "libc",
+ "libghostty-vt",
+ "portable-pty",
+ "sirio_perf",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "sirio_terminal"
 version = "0.31.0"
 dependencies = [
