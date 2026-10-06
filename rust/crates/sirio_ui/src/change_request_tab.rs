@@ -26,6 +26,7 @@ mod composer;
 mod edit;
 mod merge;
 mod people;
+mod review;
 mod suggestion;
 mod threads;
 
@@ -263,6 +264,7 @@ pub struct ChangeRequestTab {
     commit_task: Option<Task<()>>,
     /// The write in flight, and the fields of an edit in progress.
     actions: actions::ActionsState,
+    review: review::ReviewUi,
 }
 
 impl ChangeRequestTab {
@@ -326,6 +328,7 @@ impl ChangeRequestTab {
             commit_error: None,
             commit_task: None,
             actions: actions::ActionsState::new(),
+            review: Default::default(),
         }
     }
 
@@ -1156,6 +1159,8 @@ impl ChangeRequestTab {
                 "merge_dialog".to_string(),
                 if self.actions.merge.dialog.is_some() { "open" } else { "closed" }.to_string(),
             ),
+            ("draft".to_string(), self.header.value().and_then(|header| header.draft.as_ref()).map(|draft| draft.comments.to_string()).unwrap_or_default()),
+            ("review_dialog".to_string(), if self.review.submit.is_some() { "submit" } else if self.review.discard { "discard" } else { "" }.to_string()),
             (
                 "merge_sending".to_string(),
                 if self.merge_sending(&["merge", "auto-merge", "cancel-auto-merge"]) { "yes" } else { "no" }.to_string(),
@@ -2334,8 +2339,10 @@ impl Render for ChangeRequestTab {
             .text_color(theme.ely.fg)
             .child(self.render_header(&theme, &entity))
             .children(self.render_merge_strip(&theme, &entity))
+            .children(self.render_review_strip(&theme, &entity))
             .child(body)
             .children(self.render_merge_dialog(&theme, &entity))
+            .children(self.render_review_dialog(&theme, &entity))
     }
 }
 
@@ -2427,11 +2434,12 @@ mod tests {
     use std::sync::Arc;
 
     use gpui::TestAppContext;
-    use sirio_forge::Forge;
+    use sirio_forge::{Forge, ReviewVerdict};
     use sirio_theme::Theme;
 
     use super::*;
     use super::actions::ActionState;
+    use super::composer::ComposerSend;
     use crate::changes::ChangesTabEvent;
     use crate::forge_source::testing::{self, CannedForge, FakeSource};
     use crate::forge_source::{self, Connection, RevisionError};
@@ -4275,6 +4283,107 @@ mod tests {
         let (_, groups) = check_groups(&items, Forge::GitLab, true);
         assert_eq!(groups.iter().map(|group| group.title.as_str()).collect::<Vec<_>>(), ["other", "test", "Other checks"]);
         assert_ne!(groups[0].key, groups[2].key, "disclosures must have separate overrides");
+    }
+
+    /// A tab with a review in progress, in a window, its header read.
+    async fn reviewing(cx: &mut TestAppContext) -> (Entity<ChangeRequestTab>, Arc<CannedForge>, RepoDir, gpui::VisualTestContext) {
+        let (repo, base, head) = range_repo();
+        let forge = forge_for(&base, &head);
+        forge.answer(
+            "ChangeRequestHeader",
+            with_pending_review(
+                testing::header_with_revisions(101, "Fix the login redirect", "## What", &base, &head),
+                "PRR_1",
+                2,
+            ),
+        );
+        forge.answer("ChangeRequestThreads", threads_json(vec![thread_node("PRRT_1", 42)]));
+        forge.answer("ChangeRequestActionContext", with_pending_review(action_context_json(&head), "PRR_1", 2));
+        forge.answer("ReviewThreadContext", facts_json(true, true, true));
+        forge.answer("SubmitPullRequestReview", ok_mutation("submitPullRequestReview"));
+        forge.answer("DeletePullRequestReview", ok_mutation("deletePullRequestReview"));
+        let source = FakeSource::ready(testing::github_client(forge.clone()), None);
+        cx.update(|cx| {
+            Theme::init(cx);
+            forge_source::set_source(source, cx);
+        });
+        let (tab, vcx) = {
+            let (tab, vcx) = cx.add_window_view(|_, cx| {
+                ChangeRequestTab::new(testing::reference(101), "Fix".to_string(), repo.0.clone(), cx)
+            });
+            (tab, vcx.clone())
+        };
+        tab.update(cx, |tab, cx| {
+            tab.on_selected(cx);
+            tab.select_inner(InnerTab::Files, cx);
+        });
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "draft") == "2"));
+        (tab, forge, repo, vcx)
+    }
+
+    #[gpui::test]
+    async fn submitting_sends_the_review_in_progress_with_its_verdict(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut window) = reviewing(cx).await;
+        tab.update_in(&mut window, |tab, window, cx| tab.open_review_submit(window, cx)).expect("a draft");
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "review_dialog"), "submit"));
+        tab.update(cx, |tab, cx| tab.review_submit_set_text("Ship it.", cx)).expect("open");
+        tab.update(cx, |tab, cx| tab.submit_review(ReviewVerdict::Approve, cx)).expect("sent");
+        pump_until(cx, || forge.count("SubmitPullRequestReview") == 1);
+        assert_eq!(
+            forge.sent("SubmitPullRequestReview").expect("sent")["input"],
+            serde_json::json!({ "pullRequestReviewId": "PRR_1", "event": "APPROVE", "body": "Ship it." })
+        );
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "review_dialog").is_empty()));
+    }
+
+    #[gpui::test]
+    async fn a_refused_submit_keeps_the_dialog_and_its_text(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut window) = reviewing(cx).await;
+        forge.answer(
+            "SubmitPullRequestReview",
+            r#"{"data":{"submitPullRequestReview":null},"errors":[{"type":"UNPROCESSABLE","message":"Can not approve your own pull request"}]}"#.to_string(),
+        );
+        tab.update_in(&mut window, |tab, window, cx| tab.open_review_submit(window, cx)).expect("a draft");
+        tab.update(cx, |tab, cx| tab.review_submit_set_text("Mine.", cx)).expect("open");
+        tab.update(cx, |tab, cx| tab.submit_review(ReviewVerdict::Approve, cx)).expect("sent");
+        pump_until(cx, || tab.read_with(cx, |tab, cx| report_value(tab, cx, "action") == "failed"));
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "review_dialog"), "submit");
+            assert_eq!(tab.review_error().as_deref(), Some("Can not approve your own pull request"));
+            assert_eq!(tab.review_submit_text(cx).as_deref(), Some("Mine."));
+        });
+    }
+
+    #[gpui::test]
+    async fn discarding_asks_first(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, window) = reviewing(cx).await;
+        tab.update(cx, |tab, cx| tab.open_review_discard(cx)).expect("a draft");
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "review_dialog"), "discard"));
+        tab.update(cx, |tab, cx| tab.close_review_discard(cx));
+        window.run_until_parked();
+        assert_eq!(forge.count("DeletePullRequestReview"), 0, "dismissing sends nothing");
+        tab.update(cx, |tab, cx| tab.open_review_discard(cx)).expect("a draft");
+        tab.update(cx, |tab, cx| tab.confirm_review_discard(cx)).expect("sent");
+        pump_until(cx, || forge.count("DeletePullRequestReview") == 1);
+        assert_eq!(forge.sent("DeletePullRequestReview").expect("sent")["input"], serde_json::json!({ "pullRequestReviewId": "PRR_1" }));
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "review_dialog"), ""));
+    }
+
+    #[gpui::test]
+    async fn approving_from_the_conversation_submits_the_review_in_progress(cx: &mut TestAppContext) {
+        let (tab, forge, _repo, mut window) = reviewing(cx).await;
+        tab.update_in(&mut window, |tab, window, cx| tab.ensure_composer(window, cx));
+        tab.update(cx, |tab, cx| tab.send_composer(ComposerSend::Approve, cx)).expect("sent");
+        pump_until(cx, || forge.count("SubmitPullRequestReview") == 1);
+        assert_eq!(forge.count("AddPullRequestReview"), 0, "no second review");
+        assert_eq!(forge.sent("SubmitPullRequestReview").expect("sent")["input"]["event"], "APPROVE");
+    }
+
+    #[gpui::test]
+    async fn without_a_review_there_is_nothing_to_submit_or_discard(cx: &mut TestAppContext) {
+        let (tab, _forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
+        tab.read_with(cx, |tab, cx| assert_eq!(report_value(tab, cx, "draft"), ""));
+        assert_eq!(tab.update(cx, |tab, cx| tab.open_review_discard(cx)), Err("There is no review in progress.".to_string()));
     }
 
 }

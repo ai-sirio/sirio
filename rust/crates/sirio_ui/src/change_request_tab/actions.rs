@@ -310,7 +310,10 @@ impl ChangeRequestTab {
             "review-add" => {}
             "draft-delete" => {}
             "merge" | "auto-merge" => self.actions.merge.dialog = None,
-            "comment" | "approve" | "request-changes" => {
+            "comment" | "approve" | "request-changes" | "review-submit" => {
+                if kind == "review-submit" {
+                    self.review.submit = None;
+                }
                 let sent = self.actions.sent.take();
                 if let (false, Some(sent), Some(composer)) =
                     (warned, sent, self.actions.composer.clone())
@@ -320,6 +323,7 @@ impl ChangeRequestTab {
                     }
                 }
             }
+            "review-discard" => {}
             _ => {}
         }
     }

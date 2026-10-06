@@ -20,6 +20,7 @@ pub(crate) enum WriteTarget {
     Reply(String),
     Resolve(String),
     EditComment(String),
+    Review,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -492,6 +493,7 @@ impl ChangeRequestTab {
                     comment.id == *id || comment.edit.as_ref().is_some_and(|edit| edit.id == *id)
                 }),
                 WriteTarget::Composer => false,
+                WriteTarget::Review => false,
             };
             let error = write_refusal
                 .as_ref()
