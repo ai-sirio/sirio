@@ -39,7 +39,6 @@ fn closes(line: &str, opened: usize) -> bool {
 
 /// A comment body around its suggestions.
 // Task 10 draws a received suggestion from these parts.
-#[allow(dead_code)]
 pub(crate) fn split(body: &str) -> Vec<BodyPart> {
     let body = body.replace("\r\n", "\n");
     let lines: Vec<&str> = body.split('\n').collect();
@@ -76,7 +75,6 @@ pub(crate) fn split(body: &str) -> Vec<BodyPart> {
 /// quoted (B3c revision (e)): the last `count` lines on the new side, each
 /// without its one-character prefix. `None` when the hunk is shorter.
 // Task 10 reads the "before" lines from the thread's quoted hunk through this.
-#[allow(dead_code)]
 pub(crate) fn replaced_lines(hunk: &str, count: usize) -> Option<Vec<String>> {
     let new_side: Vec<String> = hunk
         .lines()

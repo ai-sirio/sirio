@@ -3120,6 +3120,21 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_suggestion_in_a_thread_is_drawn_as_a_change(cx: &mut TestAppContext) {
+        let mut node = thread_node("PRRT_1", 42);
+        node["comments"]["nodes"][0]["body"] = serde_json::json!("Simpler:\n```suggestion\nlet ok = true;\n```");
+        node["comments"]["nodes"][0]["diffHunk"] = serde_json::json!("@@ -41,2 +41,2 @@\n line 41\n-old 42\n+let ok = false;");
+        let (tab, _forge, _repo) = a_thread(cx, node).await;
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(report_value(tab, cx, "suggestions"), "PRRT_1");
+            assert_eq!(
+                tab.suggestion_parts("PRRT_1", cx),
+                vec![(Some(vec!["let ok = false;".to_string()]), vec!["let ok = true;".to_string()])]
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn a_reply_added_to_the_review_in_progress_joins_it(cx: &mut TestAppContext) {
         let (tab, forge, _repo) = a_thread(cx, thread_node("PRRT_1", 42)).await;
         let head = report_head(&tab, cx);

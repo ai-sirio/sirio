@@ -116,12 +116,47 @@ fn annotation_side(side: Side) -> AnnotationSide {
     }
 }
 
-/// Each comment's body as Markdown, aligned with them.
-fn comment_docs(thread: &ReviewThread, theme: &Theme) -> Vec<markdown::Doc> {
+/// One drawn piece of a comment's body: Markdown, or a suggestion as a
+/// small before/after change.
+#[derive(Clone)]
+pub(crate) enum Part {
+    Doc(markdown::Doc),
+    Suggestion { before: Option<Vec<String>>, after: Vec<String> },
+}
+
+/// How many lines a suggestion replaces: the thread's range, plus GitLab's
+/// lines above; `None` when they cannot be read from the quoted hunk (old
+/// side, or lines below the anchor).
+fn replaced_count(thread: &ReviewThread, above: u32, below: u32) -> Option<usize> {
+    if thread.side != Side::New || below > 0 {
+        return None;
+    }
+    let line = thread.line?;
+    let span = line.saturating_sub(thread.start_line.unwrap_or(line)) + 1;
+    usize::try_from(span + above).ok()
+}
+
+/// Each comment's body as parts: Markdown, and suggestions as changes.
+fn comment_docs(thread: &ReviewThread, theme: &Theme) -> Vec<Vec<Part>> {
     thread
         .comments
         .iter()
-        .map(|comment| markdown_doc(&comment.body, theme))
+        .map(|comment| {
+            suggestion::split(&comment.body)
+                .into_iter()
+                .map(|part| match part {
+                    suggestion::BodyPart::Text(text) => Part::Doc(markdown_doc(&text, theme)),
+                    suggestion::BodyPart::Suggestion { lines, above, below } => Part::Suggestion {
+                        before: thread
+                            .diff_hunk
+                            .as_deref()
+                            .zip(replaced_count(thread, above, below))
+                            .and_then(|(hunk, count)| suggestion::replaced_lines(hunk, count)),
+                        after: lines,
+                    },
+                })
+                .collect()
+        })
         .collect()
 }
 
@@ -161,7 +196,7 @@ pub(super) fn nested_card(id: impl Into<gpui::ElementId>, theme: &Theme) -> gpui
 pub(crate) struct ThreadView {
     key: u64,
     pub(crate) thread: ReviewThread,
-    docs: Vec<markdown::Doc>,
+    docs: Vec<Vec<Part>>,
     expanded: bool,
     pub(super) reply: Option<compose::FieldState>,
     pub(super) editing: Option<(CommentRef, compose::FieldState)>,
@@ -350,12 +385,15 @@ impl ThreadView {
 
     fn render_comments(&mut self, window: &mut Window, cx: &mut Context<Self>, theme: &Theme) -> Vec<AnyElement> {
         let now = style::now();
-        let comments: Vec<(usize, (ThreadComment, markdown::Doc))> = self.thread.comments.iter()
+        let comments: Vec<(usize, (ThreadComment, Vec<Part>))> = self.thread.comments.iter()
             .cloned()
             .zip(self.docs.iter().cloned())
             .enumerate()
             .collect();
-        comments.into_iter().map(|(index, (comment, doc))| {
+        // One running number for every suggestion in the card, so each of
+        // its elements keeps a unique id.
+        let mut suggestion_no = 0usize;
+        comments.into_iter().map(|(index, (comment, parts))| {
             let editing = self.editing.as_ref().is_some_and(|(editing, _)| editing.id == comment.id);
             let mut metadata = div()
                 .flex()
@@ -463,9 +501,18 @@ impl ThreadView {
                     )
                     .into_any_element()
             } else {
+                let owner = self.owner.clone();
+                let drawn: Vec<AnyElement> = parts.into_iter().map(|part| match part {
+                    Part::Doc(doc) => Chat::render_markdown_document_with_link_override(doc, theme, open_links()),
+                    Part::Suggestion { before, after } => {
+                        let no = suggestion_no;
+                        suggestion_no += 1;
+                        suggestion_diff(("change-request-suggestion", no), before.as_deref(), &after, theme, owner.clone())
+                    }
+                }).collect();
                 div()
                     .id(("change-request-thread-body", index))
-                    .child(Chat::render_markdown_document_with_link_override(doc, theme, open_links()))
+                    .children(drawn)
                     .into_any_element()
             };
             div()
@@ -742,6 +789,48 @@ impl OutdatedView {
     }
 }
 
+/// A proposed change: the lines it replaces in red, the proposal in green.
+/// Applying it stays on the forge (spec §12).
+fn suggestion_diff(id: (&'static str, usize), before: Option<&[String]>, after: &[String], theme: &Theme, owner: WeakEntity<ChangeRequestTab>) -> AnyElement {
+    let line = |prefix: char, text: &str, color| {
+        div().text_color(color).child(selectable_text(format!("{prefix} {text}")))
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_color(theme.ely.fg_muted).child("Suggested change"))
+                .child(actions::indexed_button(
+                    "change-request-suggestion-open",
+                    id.1,
+                    "Open on the forge",
+                    theme,
+                    true,
+                    move |_, cx| {
+                        let _ = owner.update(cx, |tab, cx| tab.open_on_forge(cx));
+                    },
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .p(px(6.0))
+                .rounded(theme.radii.control)
+                .bg(theme.ely.sunken)
+                .font_family(theme.typography.code_family)
+                .children(before.unwrap_or_default().iter().map(|text| line('-', text, theme.ely.danger)))
+                .children(after.iter().map(|text| line('+', text, theme.ely.success))),
+        )
+        .into_any_element()
+}
+
 /// The last lines of the code a thread quoted, coloured by their prefix.
 fn quoted_code(hunk: &str, theme: &Theme) -> AnyElement {
     let lines: Vec<&str> = hunk.lines().collect();
@@ -792,6 +881,14 @@ impl Render for OutdatedView {
 }
 
 impl ChangeRequestTab {
+    /// Opens the change request on its forge: what the header's open button
+    /// does, and what a suggestion's button does too (spec §12: no apply).
+    pub(crate) fn open_on_forge(&self, cx: &mut App) {
+        if let Some(url) = self.header.value().map(|header| header.summary.web_url.clone()) {
+            cx.open_url(&url);
+        }
+    }
+
     fn thread_view(&self, id: &str) -> Result<Entity<ThreadView>, String> {
         self.thread_views.get(&thread_key(id)).cloned().ok_or_else(|| format!("no thread {id}"))
     }
@@ -956,6 +1053,16 @@ impl ChangeRequestTab {
         self.thread_views.get(&thread_key(thread)).map(|view| view.read(cx).write.in_review)
     }
 
+    #[cfg(test)]
+    pub(crate) fn suggestion_parts(&self, thread: &str, cx: &App) -> Vec<(Option<Vec<String>>, Vec<String>)> {
+        self.thread_views.get(&thread_key(thread)).map(|view| {
+            view.read(cx).docs.iter().flatten().filter_map(|part| match part {
+                Part::Suggestion { before, after } => Some((before.clone(), after.clone())),
+                Part::Doc(_) => None,
+            }).collect()
+        }).unwrap_or_default()
+    }
+
     /// Selects Files and opens the thread's card or outdated section. Queued
     /// reveals retain the side and annotation key until the range is ready.
     pub fn reveal_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
@@ -1078,6 +1185,9 @@ impl ChangeRequestTab {
             ("thread_rows".to_string(), rows),
             ("conversation_threads".to_string(), conversation.to_string()),
             ("threads_notice".to_string(), self.threads_notice().map(|(_, text, _)| text).unwrap_or_default()),
+            ("suggestions".to_string(), self.threads.value().map(|listing| drawn_in_diff(&listing.items).into_iter()
+                .filter(|thread| thread.comments.iter().any(|comment| suggestion::split(&comment.body).iter().any(|part| matches!(part, suggestion::BodyPart::Suggestion { .. }))))
+                .map(|thread| thread.id.clone()).collect::<Vec<_>>().join(",")).unwrap_or_default()),
         ]
     }
 
