@@ -90,6 +90,7 @@ pub use status::{
 };
 pub use worktree::{
     UpstreamBranch, WorktreeError, create_worktree, delete_remote_branch, derive_worktree_path,
-    init_repository, remove_worktree, remove_worktree_and_remote_branch, resolve_parent_directory,
+    init_repository, remove_missing_worktree, remove_worktree, remove_worktree_and_remote_branch,
+    resolve_parent_directory,
     upstream_of, worktree_for_branch,
 };
