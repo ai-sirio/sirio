@@ -214,6 +214,16 @@ pub struct TabStateRecord {
     pub state: String,
 }
 
+/// A worktree checked out from a change request (change requests C1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeRequestLinkRecord {
+    pub path: String,
+    pub forge: String,
+    pub host: String,
+    pub project: String,
+    pub number: u64,
+}
+
 /// A stored row removed from active state because its payload could not be
 /// materialized. The original bytes remain available for diagnosis or recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]

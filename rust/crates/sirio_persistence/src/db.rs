@@ -19,7 +19,8 @@ use crate::agent_ref::AgentRef;
 use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
-    AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChatSessionSummary, ChatTranscript,
+    AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord,
+    ChatSessionSummary, ChatTranscript,
     ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
@@ -864,6 +865,67 @@ impl AppDatabase {
     pub fn delete_session_ref(&self, session: &str) -> Result<(), PersistenceError> {
         self.conn
             .execute("DELETE FROM session_ref WHERE session = ?1", [session])?;
+        Ok(())
+    }
+
+    /// Saves the link of a worktree to a change request, replacing any
+    /// earlier link of that worktree.
+    pub fn save_change_request_link(
+        &self,
+        link: &ChangeRequestLinkRecord,
+    ) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO change_request_link (path, forge, host, project, number)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET forge = excluded.forge, host = excluded.host,
+                 project = excluded.project, number = excluded.number",
+            params![link.path, link.forge, link.host, link.project, link.number as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The change request a worktree was checked out from, if linked.
+    pub fn change_request_link(
+        &self,
+        path: &str,
+    ) -> Result<Option<ChangeRequestLinkRecord>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT path, forge, host, project, number FROM change_request_link WHERE path = ?1",
+        )?;
+        let mut rows = statement.query_map([path], |row| {
+            Ok(ChangeRequestLinkRecord {
+                path: row.get(0)?,
+                forge: row.get(1)?,
+                host: row.get(2)?,
+                project: row.get(3)?,
+                number: row.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Every worktree path linked to one change request, in path order.
+    pub fn change_request_links_to(
+        &self,
+        forge: &str,
+        host: &str,
+        project: &str,
+        number: u64,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT path FROM change_request_link
+             WHERE forge = ?1 AND host = ?2 AND project = ?3 AND number = ?4 ORDER BY path",
+        )?;
+        let paths = statement
+            .query_map(params![forge, host, project, number as i64], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(paths)
+    }
+
+    /// Removes the link of a worktree, if present.
+    pub fn delete_change_request_link(&self, path: &str) -> Result<(), PersistenceError> {
+        self.conn
+            .execute("DELETE FROM change_request_link WHERE path = ?1", [path])?;
         Ok(())
     }
 
