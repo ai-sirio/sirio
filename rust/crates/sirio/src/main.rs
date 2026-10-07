@@ -35523,6 +35523,75 @@ done
     }
 
     #[gpui::test]
+    async fn removing_a_change_request_worktree_removes_its_fork_remote_only(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("sidebar-remove-fork-remote");
+        let branch = "alice/feat";
+        let removed_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-sidebar-remove-fork-remote-worktree");
+        let _ = std::fs::remove_dir_all(&removed_path);
+        sirio_git::create_worktree(&repo, branch, &removed_path, None)
+            .expect("create the fixture worktree");
+        // The fork remote of this change request, and the one of another change
+        // request from the same owner: removing the first worktree leaves the second.
+        git_test(&repo, &["remote", "add", "sirio-alice-101", "https://forge.example/alice/widgets.git"]);
+        git_test(&repo, &["remote", "add", "sirio-alice-102", "https://forge.example/alice/widgets.git"]);
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: branch.into(),
+                        path: removed_path.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+        let reference = sirio_forge::ChangeRef {
+            forge: sirio_forge::Forge::GitHub,
+            host: "forge.example".into(),
+            project: "acme/widgets".into(),
+            number: 101,
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.session.save_change_request_link(&removed_path, &reference, branch);
+            workspace
+                .select_worktree(removed_path.clone(), None, cx)
+                .expect("select the worktree before removing it");
+            git_test(
+                &repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    removed_path.to_str().expect("fixture path is utf-8"),
+                ],
+            );
+            workspace.handle_sidebar_event(
+                &SidebarEvent::WorktreeRemoved {
+                    project_id: "worktree-state-project".into(),
+                    path: removed_path.clone(),
+                },
+                cx,
+            );
+        });
+
+        let names: Vec<String> = sirio_git::list_remotes(&repo).into_iter().map(|(name, _)| name).collect();
+        assert!(!names.iter().any(|name| name == "sirio-alice-101"), "{names:?}");
+        assert!(names.iter().any(|name| name == "sirio-alice-102"), "{names:?}");
+    }
+
+    #[gpui::test]
     async fn sidebar_remove_worktree_refreshes_catalog_and_control_state(cx: &mut TestAppContext) {
         let repo = committed_test_repo("sidebar-remove-state");
         let branch = "sidebar-removed";
