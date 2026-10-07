@@ -334,7 +334,7 @@ pub fn init_repository(directory: &Path) -> Result<(), GitError> {
 }
 
 /// The checkout path of the worktree currently on `branch`, if any.
-fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
+pub fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
     let output = git::run_accepting(&["worktree", "list", "--porcelain"], repo, &[0])?;
     let mut current_path: Option<PathBuf> = None;
     for line in output.stdout_string().lines() {

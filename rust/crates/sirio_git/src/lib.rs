@@ -39,6 +39,7 @@
 
 mod actions;
 mod branches;
+mod checkout;
 mod clone;
 mod diff;
 mod directory_status;
@@ -56,6 +57,11 @@ mod worktree;
 
 pub use actions::{GitActions, discard, discard_all, stage, stage_all, unstage};
 pub use branches::{GitBranches, list_branches};
+pub use checkout::{
+    FastForward, LocalBranch, RemoteOutcome, create_worktree_at, create_worktree_tracking,
+    ensure_push_refspec, ensure_remote, fast_forward, fetch_branch, is_ancestor, local_branch,
+    set_upstream,
+};
 pub use clone::{GitClone, clone_repository};
 pub use diff::{
     DEFAULT_CONTEXT_LINES, DiffLine, DiffOrigin, DiffStat, FileDiff, Hunk,
@@ -85,5 +91,5 @@ pub use status::{
 pub use worktree::{
     UpstreamBranch, WorktreeError, create_worktree, delete_remote_branch, derive_worktree_path,
     init_repository, remove_worktree, remove_worktree_and_remote_branch, resolve_parent_directory,
-    upstream_of,
+    upstream_of, worktree_for_branch,
 };
