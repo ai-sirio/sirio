@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sirio_forge::ChangeRef;
+use sirio_forge::{ChangeRef, Forge};
 use sirio_git::{FastForward, FetchError, RemoteOutcome};
 use sirio_ui::forge_source::ChangeRequestSource;
 use sirio_ui::handoff::{self, BranchFacts, Facts, ListedRemote, Plan, PushTarget, Start, Target};
@@ -60,7 +60,25 @@ impl ForgeHub {
             url: remotes.iter().find(|(name, _)| *name == listed_name).map(|(_, url)| url.clone()).unwrap_or_default(),
             name: listed_name,
         };
-        let target = handoff::target(&header.summary.source_branch, &listed, header.head.as_ref());
+        let every: Vec<ListedRemote> = remotes
+            .iter()
+            .map(|(name, url)| ListedRemote { name: name.clone(), url: url.clone() })
+            .collect();
+        // The local branch when the head repository is gone (the forge drops
+        // the owner with it): the change request's own number, never a name
+        // the user may have picked for their own branch.
+        let gone_branch = match reference.forge {
+            Forge::GitHub => format!("pr-{}", reference.number),
+            Forge::GitLab => format!("mr-{}", reference.number),
+        };
+        let target = handoff::target(
+            &header.summary.source_branch,
+            reference.number,
+            &listed,
+            &every,
+            header.head.as_ref(),
+            &gone_branch,
+        );
 
         // The head commit, through B1's fetch, so ancestry can be judged
         // before anything is created.

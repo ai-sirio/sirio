@@ -62,16 +62,38 @@ impl Target {
     }
 }
 
-pub fn target(source_branch: &str, listed: &ListedRemote, head: Option<&HeadRepository>) -> Target {
+/// The target of a change request checkout. `base` is the remote the project
+/// lists for the forge; `remotes` is every remote of the project. `gone_branch`
+/// names the local branch when the head repository no longer exists (the forge
+/// then drops its owner too, so `<owner>/<branch>` cannot be built).
+pub fn target(
+    source_branch: &str,
+    number: u64,
+    base: &ListedRemote,
+    remotes: &[ListedRemote],
+    head: Option<&HeadRepository>,
+    gone_branch: &str,
+) -> Target {
     let Some(head) = head else {
         return Target {
-            branch: source_branch.to_string(),
+            branch: gone_branch.to_string(),
             push: PushTarget::ReadOnly(ReadOnlyReason::HeadRepositoryGone),
         };
     };
     if !head.cross_repository {
         let push = if head.branch_exists {
-            PushTarget::Listed { remote: listed.name.clone(), branch: source_branch.to_string() }
+            PushTarget::Listed { remote: base.name.clone(), branch: source_branch.to_string() }
+        } else {
+            PushTarget::ReadOnly(ReadOnlyReason::BranchGone)
+        };
+        return Target { branch: source_branch.to_string(), push };
+    }
+    // The viewer's own fork, already a remote (origin, usually): the branch is
+    // theirs, so it keeps its name and tracks that remote, as in the same
+    // repository.
+    if let Some(own) = remotes.iter().find(|remote| names_head_repository(&remote.url, head)) {
+        let push = if head.branch_exists {
+            PushTarget::Listed { remote: own.name.clone(), branch: source_branch.to_string() }
         } else {
             PushTarget::ReadOnly(ReadOnlyReason::BranchGone)
         };
@@ -83,12 +105,38 @@ pub fn target(source_branch: &str, listed: &ListedRemote, head: Option<&HeadRepo
         PushTarget::ReadOnly(ReadOnlyReason::ForkRefusesPush)
     } else {
         PushTarget::Fork {
-            remote: fork_remote_name(&head.owner),
-            url: clone_url_like(&listed.url, head),
+            remote: fork_remote_name(&head.owner, number),
+            url: clone_url_like(&base.url, head),
             branch: source_branch.to_string(),
         }
     };
     Target { branch: format!("{}/{}", head.owner, source_branch), push }
+}
+
+/// Whether a remote's URL names the change request's head repository, in
+/// either of the forge's spellings.
+fn names_head_repository(url: &str, head: &HeadRepository) -> bool {
+    let url = normalised_url(url);
+    !url.is_empty() && (url == normalised_url(&head.http_url) || url == normalised_url(&head.ssh_url))
+}
+
+/// `host/owner/repo` for comparing two spellings of one repository: the
+/// scheme and any user are dropped, the host is lower-cased, and a trailing
+/// `/` and `.git` go. The path keeps its case.
+pub fn normalised_url(url: &str) -> String {
+    let url = url.trim();
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/').unwrap_or((rest, "")),
+        // The scp-like form `user@host:path`.
+        None => url.split_once(':').unwrap_or((url, "")),
+    };
+    let host = authority.rsplit('@').next().unwrap_or("").to_ascii_lowercase();
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return String::new();
+    }
+    format!("{host}/{path}")
 }
 
 fn uses_ssh(url: &str) -> bool {
@@ -104,9 +152,11 @@ fn clone_url_like(listed: &str, head: &HeadRepository) -> String {
     if preferred.is_empty() { other.clone() } else { preferred.clone() }
 }
 
-/// `sirio-<owner>`, lower-case, with every run of characters a remote name
-/// should not carry folded to one `-`.
-pub fn fork_remote_name(owner: &str) -> String {
+/// `sirio-<owner>-<number>`, lower-case, with every run of characters a remote
+/// name should not carry folded to one `-`. One remote per change request: a
+/// remote's push mapping names one branch, so two change requests from one
+/// owner cannot share it.
+pub fn fork_remote_name(owner: &str, number: u64) -> String {
     let mut slug = String::new();
     for character in owner.chars() {
         if character.is_ascii_alphanumeric() || character == '_' {
@@ -116,7 +166,7 @@ pub fn fork_remote_name(owner: &str) -> String {
         }
     }
     let slug = slug.trim_end_matches('-');
-    if slug.is_empty() { "sirio-fork".to_string() } else { format!("sirio-{slug}") }
+    if slug.is_empty() { format!("sirio-fork-{number}") } else { format!("sirio-{slug}-{number}") }
 }
 
 /// The branch as one directory name: `alice/feat` → `alice-feat`.
@@ -184,7 +234,7 @@ impl Refusal {
                 format!("the local branch {branch} tracks {upstream}; rename or delete it first")
             }
             Self::BranchPointsElsewhere { branch } => format!(
-                "the local branch {branch} points at other commits; rename or delete it first"
+                "the local branch {branch} has commits the change request does not; check it out yourself or push them"
             ),
             Self::RemoteUrlDiffers { remote, url } => {
                 format!("the remote {remote} already points at {url}")
@@ -267,9 +317,14 @@ mod tests {
         }
     }
 
+    fn target_of(source: &str, head: Option<&HeadRepository>, remotes: &[ListedRemote]) -> Target {
+        target(source, 101, &remotes[0], remotes, head, "pr-101")
+    }
+
     #[test]
     fn same_repository_tracks_the_listed_remote() {
-        let t = target("feat", &listed("https://forge.example/acme/widgets.git"), Some(&head("acme", false, true, true)));
+        let remotes = [listed("https://forge.example/acme/widgets.git")];
+        let t = target_of("feat", Some(&head("acme", false, true, true)), &remotes);
         assert_eq!(t.branch, "feat");
         assert_eq!(t.push, PushTarget::Listed { remote: "origin".into(), branch: "feat".into() });
         assert_eq!(t.upstream().as_deref(), Some("origin/feat"));
@@ -277,22 +332,24 @@ mod tests {
 
     #[test]
     fn a_fork_that_accepts_pushes_gets_its_own_remote_in_the_listed_scheme() {
-        let https = target("feat", &listed("https://forge.example/acme/widgets.git"), Some(&head("alice", true, true, true)));
+        let remotes = [listed("https://forge.example/acme/widgets.git")];
+        let https = target_of("feat", Some(&head("alice", true, true, true)), &remotes);
         assert_eq!(https.branch, "alice/feat");
         assert_eq!(
             https.push,
-            PushTarget::Fork { remote: "sirio-alice".into(), url: "https://forge.example/alice/widgets.git".into(), branch: "feat".into() }
+            PushTarget::Fork { remote: "sirio-alice-101".into(), url: "https://forge.example/alice/widgets.git".into(), branch: "feat".into() }
         );
-        assert_eq!(https.upstream().as_deref(), Some("sirio-alice/feat"));
-        let ssh = target("feat", &listed("git@forge.example:acme/widgets.git"), Some(&head("alice", true, true, true)));
+        assert_eq!(https.upstream().as_deref(), Some("sirio-alice-101/feat"));
+        let ssh = target_of("feat", Some(&head("alice", true, true, true)), &[listed("git@forge.example:acme/widgets.git")]);
         assert!(matches!(ssh.push, PushTarget::Fork { ref url, .. } if url == "git@forge.example:alice/widgets.git"));
-        let ssh_scheme = target("feat", &listed("ssh://git@forge.example/acme/widgets.git"), Some(&head("alice", true, true, true)));
+        let ssh_scheme = target_of("feat", Some(&head("alice", true, true, true)), &[listed("ssh://git@forge.example/acme/widgets.git")]);
         assert!(matches!(ssh_scheme.push, PushTarget::Fork { ref url, .. } if url.starts_with("git@")));
     }
 
     #[test]
     fn a_fork_that_refuses_pushes_is_read_only() {
-        let t = target("feat", &listed("https://forge.example/acme/widgets.git"), Some(&head("alice", true, true, false)));
+        let remotes = [listed("https://forge.example/acme/widgets.git")];
+        let t = target_of("feat", Some(&head("alice", true, true, false)), &remotes);
         assert_eq!(t.branch, "alice/feat");
         assert_eq!(t.push, PushTarget::ReadOnly(ReadOnlyReason::ForkRefusesPush));
         assert_eq!(t.upstream(), None);
@@ -300,16 +357,18 @@ mod tests {
 
     #[test]
     fn a_gone_branch_is_read_only_in_the_same_repository_and_in_a_fork() {
-        let same = target("feat", &listed("https://f/acme/w.git"), Some(&head("acme", false, false, true)));
+        let remotes = [listed("https://f/acme/w.git")];
+        let same = target_of("feat", Some(&head("acme", false, false, true)), &remotes);
         assert_eq!((same.branch.as_str(), &same.push), ("feat", &PushTarget::ReadOnly(ReadOnlyReason::BranchGone)));
-        let fork = target("feat", &listed("https://f/acme/w.git"), Some(&head("alice", true, false, true)));
+        let fork = target_of("feat", Some(&head("alice", true, false, true)), &remotes);
         assert_eq!((fork.branch.as_str(), &fork.push), ("alice/feat", &PushTarget::ReadOnly(ReadOnlyReason::BranchGone)));
     }
 
     #[test]
-    fn a_deleted_head_repository_is_read_only_on_the_source_branch() {
-        let t = target("feat", &listed("https://f/acme/w.git"), None);
-        assert_eq!(t.branch, "feat");
+    fn a_deleted_head_repository_takes_the_numbered_name_and_is_read_only() {
+        let remotes = [listed("https://f/acme/w.git")];
+        let t = target("feat", 101, &remotes[0], &remotes, None, "pr-101");
+        assert_eq!(t.branch, "pr-101");
         assert_eq!(t.push, PushTarget::ReadOnly(ReadOnlyReason::HeadRepositoryGone));
     }
 
@@ -317,18 +376,68 @@ mod tests {
     fn a_fork_with_a_missing_url_in_the_listed_scheme_uses_the_other() {
         let mut fork = head("alice", true, true, true);
         fork.ssh_url.clear();
-        let t = target("feat", &listed("git@forge.example:acme/widgets.git"), Some(&fork));
+        let remotes = [listed("git@forge.example:acme/widgets.git")];
+        let t = target_of("feat", Some(&fork), &remotes);
         assert!(matches!(t.push, PushTarget::Fork { ref url, .. } if url.starts_with("https://")));
     }
 
     #[test]
+    fn the_viewers_own_fork_remote_is_the_push_target_whatever_it_is_called() {
+        // origin is the viewer's fork, upstream the base repository: the
+        // checkout pushes to origin and the branch keeps its own name.
+        let remotes = [
+            listed("https://forge.example/acme/widgets.git"),
+            ListedRemote { name: "origin".into(), url: "git@FORGE.example:alice/widgets.git/".into() },
+        ];
+        let own = target_of("feat", Some(&head("alice", true, true, true)), &remotes);
+        assert_eq!(own.branch, "feat");
+        assert_eq!(own.push, PushTarget::Listed { remote: "origin".into(), branch: "feat".into() });
+        assert_eq!(own.upstream().as_deref(), Some("origin/feat"));
+        let gone = target_of("feat", Some(&head("alice", true, false, true)), &remotes);
+        assert_eq!((gone.branch.as_str(), &gone.push), ("feat", &PushTarget::ReadOnly(ReadOnlyReason::BranchGone)));
+    }
+
+    #[test]
+    fn a_remote_of_another_owner_is_not_the_viewers_own_fork() {
+        let remotes = [
+            listed("https://forge.example/acme/widgets.git"),
+            ListedRemote { name: "mirror".into(), url: "https://forge.example/bob/widgets.git".into() },
+        ];
+        let t = target_of("feat", Some(&head("alice", true, true, true)), &remotes);
+        assert_eq!(t.branch, "alice/feat");
+        assert!(matches!(t.push, PushTarget::Fork { ref remote, .. } if remote == "sirio-alice-101"));
+    }
+
+    #[test]
+    fn repository_urls_name_one_repository_in_every_spelling() {
+        let canonical = normalised_url("https://forge.example/alice/widgets.git");
+        for spelling in [
+            "http://forge.example/alice/widgets.git",
+            "https://FORGE.example/alice/widgets",
+            "https://forge.example/alice/widgets.git/",
+            "ssh://git@forge.example/alice/widgets.git",
+            "git@forge.example:alice/widgets.git",
+            "git@FORGE.example:alice/widgets/",
+        ] {
+            assert_eq!(normalised_url(spelling), canonical, "{spelling}");
+        }
+        assert_ne!(normalised_url("https://forge.example/bob/widgets.git"), canonical);
+        assert_ne!(normalised_url("https://other.example/alice/widgets.git"), canonical);
+    }
+
+    #[test]
     fn fork_remote_names_are_valid_git_remote_names() {
-        assert_eq!(fork_remote_name("alice"), "sirio-alice");
-        assert_eq!(fork_remote_name("Alice.Smith"), "sirio-alice-smith");
-        assert_eq!(fork_remote_name("forks/alice"), "sirio-forks-alice");
-        assert_eq!(fork_remote_name("a..b"), "sirio-a-b");
-        assert_eq!(fork_remote_name("-x-"), "sirio-x");
-        assert_eq!(fork_remote_name("..."), "sirio-fork");
+        assert_eq!(fork_remote_name("alice", 101), "sirio-alice-101");
+        assert_eq!(fork_remote_name("Alice.Smith", 7), "sirio-alice-smith-7");
+        assert_eq!(fork_remote_name("forks/alice", 201), "sirio-forks-alice-201");
+        assert_eq!(fork_remote_name("a..b", 3), "sirio-a-b-3");
+        assert_eq!(fork_remote_name("-x-", 4), "sirio-x-4");
+        assert_eq!(fork_remote_name("...", 5), "sirio-fork-5");
+    }
+
+    #[test]
+    fn two_change_requests_from_one_owner_get_two_remotes() {
+        assert_ne!(fork_remote_name("alice", 101), fork_remote_name("alice", 102));
     }
 
     #[test]
@@ -470,6 +579,13 @@ mod tests {
             decide(&read_only_target(), &facts()),
             Plan::Create { start: Start::At { ref commit }, add_remote: None, .. } if commit == HEAD_SHA
         ));
+    }
+
+    #[test]
+    fn a_branch_with_its_own_commits_is_told_to_keep_them_and_never_to_delete_them() {
+        let message = Refusal::BranchPointsElsewhere { branch: "feat".into() }.message();
+        assert!(message.contains("commits the change request does not"), "{message}");
+        assert!(!message.contains("delete"), "{message}");
     }
 
     #[test]
