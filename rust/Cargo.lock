@@ -7633,10 +7633,13 @@ dependencies = [
  "libghostty-vt",
  "parking_lot",
  "portable-pty",
+ "sirio_host_client",
+ "sirio_host_protocol",
  "sirio_perf",
  "sirio_project",
  "sirio_term_session",
  "sirio_theme",
+ "sirio_ui",
 ]
 
 [[package]]

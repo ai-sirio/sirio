@@ -1,0 +1,940 @@
+//! What a terminal pane's owner thread talks to instead of a PTY.
+//!
+//! A [`SessionLink`] is the view side of a terminal session: bytes in, live
+//! [`LinkChunk`]s out, in order. Two engines implement it — [`LocalLink`],
+//! the in-process fallback (SP2 spec §1, §10), and [`HostLink`], a session
+//! on the host — and the owner thread cannot tell them apart.
+
+use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+    Mutex,
+};
+use std::time::{Duration, Instant};
+
+use sirio_host_client::connection::CallError;
+use sirio_host_client::term::TermClient;
+use sirio_host_client::{StreamItem, StreamReceiver};
+use sirio_host_protocol::messages::ErrorCode;
+use sirio_host_protocol::term::{
+    CreateParams, ExitStatus, Origin, SessionEvent, TermCommand, TermSize, b64_encode,
+};
+use sirio_term_session::{
+    Event, Exit, Session, SpawnSpec,
+    fanout::{Attachment, Chunk},
+};
+
+use crate::{TerminalExitStatus, TerminalShell};
+
+/// What a terminal pane's owner thread talks to instead of a PTY.
+pub trait SessionLink: Send + 'static {
+    fn session_id(&self) -> &str;
+    fn shell_pid(&self) -> Option<u32>;
+    fn input(&self, bytes: Vec<u8>);
+    fn feed(&self, bytes: Vec<u8>);
+    fn resize(&self, cols: u16, rows: u16);
+    /// Bytes for the replica, in order. `Snapshot` resets the replica first.
+    fn chunks(&self) -> &mpsc::Receiver<LinkChunk>;
+    /// End the session (tab, worktree or project closed; End all sessions).
+    fn end(&self);
+    /// Stop watching; the session lives on (Quit, eviction, Drop). For a
+    /// `LocalLink` this ends it too: an in-process session cannot outlive the app.
+    fn detach(&self);
+    fn survives_app(&self) -> bool;
+}
+
+pub enum LinkChunk {
+    Snapshot { cols: u16, rows: u16, bytes: Vec<u8> },
+    Output(Vec<u8>),
+    Title(String),
+    Foreground(bool),
+    Exited(TerminalExitStatus),
+    /// The host is gone or the stream could not be re-established.
+    Lost,
+}
+
+/// Opens links. The app installs a `HostSessions` factory once the host is
+/// known; until then `open` answers `Pending`, and without any factory (tests,
+/// a build with no host) every pane gets a `LocalLink`.
+pub trait SessionFactory: Send + Sync + 'static {
+    fn open(&self, request: OpenRequest) -> OpenOutcome;
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenRequest {
+    pub session_id: String,
+    pub cwd: std::path::PathBuf,
+    pub shell: TerminalShell,
+    pub cols: u16,
+    pub rows: u16,
+    /// Fed before the child's first byte when the session is created here
+    /// (a restored tab's scrollback); ignored when an existing session is
+    /// attached.
+    pub prelude: Vec<u8>,
+}
+
+pub enum OpenOutcome {
+    Linked(Box<dyn SessionLink>),
+    /// The host is still being found; ask again on `SessionFactoryReady`.
+    Pending,
+    Failed(String),
+}
+
+#[derive(Clone)]
+pub struct SessionFactoryGlobal(pub Option<Arc<dyn SessionFactory>>);
+impl gpui::Global for SessionFactoryGlobal {}
+
+/// The in-process engine: the temporary fallback (SP2 spec §1, §10).
+pub struct LocalLink {
+    session_id: String,
+    shell_pid: Option<u32>,
+    incoming: mpsc::Receiver<LinkChunk>,
+    session: Arc<Session>,
+    done: Arc<AtomicBool>,
+}
+
+impl LocalLink {
+    pub fn open(request: &OpenRequest) -> Result<LocalLink, String> {
+        let program = match &request.shell {
+            TerminalShell::System => None,
+            TerminalShell::WithArguments { program, args } => {
+                Some((program.clone(), args.clone()))
+            }
+        };
+        // The app's full environment. `Session::spawn` exports the pane id
+        // (`SIRIO_PANE_ID`, `TILLER_PANE_ID`) from `spec.id` on top of this.
+        let env: BTreeMap<String, String> = std::env::vars().collect();
+        let (events_tx, events_rx) = mpsc::channel();
+        let session = Session::spawn(
+            SpawnSpec {
+                id: request.session_id.clone(),
+                cwd: request.cwd.clone(),
+                program,
+                env,
+                cols: request.cols,
+                rows: request.rows,
+                prelude: request.prelude.clone(),
+            },
+            events_tx,
+        )
+        .map_err(|error| error.to_string())?;
+        let session = Arc::new(session);
+        let attach = session.attach(None);
+        let size = attach.size;
+        let attachment = attach.attachment;
+        let (chunks_tx, chunks_rx) = mpsc::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let shell_pid = Some(session.info().pid);
+        std::thread::Builder::new()
+            .name(format!("sirio-terminal-link-{}", request.session_id))
+            .spawn({
+                let session = Arc::clone(&session);
+                let done = Arc::clone(&done);
+                move || {
+                    forward_local(session, attachment, events_rx, chunks_tx, size, done);
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(LocalLink {
+            session_id: request.session_id.clone(),
+            shell_pid,
+            incoming: chunks_rx,
+            session,
+            done,
+        })
+    }
+}
+
+/// Turns one attachment and the session events into [`LinkChunk`]s.
+///
+/// Every forwarded chunk releases its queue charge at once (`consumed`): this
+/// thread drains the attachment continuously, so it is the view's
+/// back-pressure — a view that stops draining these lets this channel grow,
+/// and a session that outruns even this thread lags the attachment, which is
+/// re-attached below. `size` is the session's size from the `Attach` that
+/// produced `attachment`, refreshed on every re-attach.
+fn forward_local(
+    session: Arc<Session>,
+    mut attachment: Attachment,
+    events_rx: mpsc::Receiver<Event>,
+    chunks_tx: mpsc::Sender<LinkChunk>,
+    mut size: (u16, u16),
+    done: Arc<AtomicBool>,
+) {
+    let mut next_offset = 0u64;
+    let reattach = |attachment: &mut Attachment, size: &mut (u16, u16), next_offset: u64| {
+        let fresh = session.attach(Some(next_offset));
+        *size = fresh.size;
+        *attachment = fresh.attachment;
+    };
+    loop {
+        if done.load(Ordering::Acquire) {
+            return;
+        }
+        match attachment.receiver.recv_timeout(Duration::from_millis(4)) {
+            Ok(chunk) => {
+                match chunk {
+                    Chunk::Snapshot(bytes) => {
+                        let charged = bytes.len();
+                        if chunks_tx
+                            .send(LinkChunk::Snapshot {
+                                cols: size.0,
+                                rows: size.1,
+                                bytes,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        attachment.consumed(charged);
+                    }
+                    Chunk::Output { offset, bytes } => {
+                        next_offset = offset + bytes.len() as u64;
+                        let charged = bytes.len();
+                        // The engine follows every snapshot (and resync) with
+                        // an empty Output carrying the journal head: forward it
+                        // like any other chunk — the owner thread treats an
+                        // empty Output as a no-op without a wakeup.
+                        if chunks_tx.send(LinkChunk::Output(bytes)).is_err() {
+                            return;
+                        }
+                        attachment.consumed(charged);
+                    }
+                    // The alternate screen was left; a fresh Snapshot follows
+                    // on this same attachment.
+                    Chunk::Resync => {}
+                    Chunk::Lagged => {
+                        reattach(&mut attachment, &mut size, next_offset);
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if done.load(Ordering::Acquire) {
+                    return;
+                }
+                reattach(&mut attachment, &mut size, next_offset);
+            }
+        }
+        while let Ok(event) = events_rx.try_recv() {
+            let chunk = match event {
+                Event::Title(title) => LinkChunk::Title(title),
+                Event::Foreground(running) => LinkChunk::Foreground(running),
+                Event::Exited(exit) => LinkChunk::Exited(session_exit_status(&exit)),
+            };
+            if chunks_tx.send(chunk).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+impl SessionLink for LocalLink {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
+    }
+
+    fn input(&self, bytes: Vec<u8>) {
+        let _ = self.session.input(bytes);
+    }
+
+    fn feed(&self, bytes: Vec<u8>) {
+        self.session.feed(bytes);
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        self.session.resize(cols, rows);
+    }
+
+    fn chunks(&self) -> &mpsc::Receiver<LinkChunk> {
+        &self.incoming
+    }
+
+    fn end(&self) {
+        self.done.store(true, Ordering::Release);
+        self.session.close();
+    }
+
+    fn detach(&self) {
+        self.done.store(true, Ordering::Release);
+        self.session.close();
+    }
+
+    fn survives_app(&self) -> bool {
+        false
+    }
+}
+
+impl Drop for LocalLink {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        self.session.close();
+    }
+}
+
+/// A session on the host.
+pub struct HostLink {
+    session_id: String,
+    shell_pid: Option<u32>,
+    incoming: mpsc::Receiver<LinkChunk>,
+    control: Arc<Mutex<HostControl>>,
+    /// The factory's reconnect closure: re-opens a `Mux` to the host's
+    /// endpoint. Cloned into the forwarder at spawn; kept here so the link
+    /// owns its own re-establishment path.
+    #[allow(dead_code)]
+    reconnect: ReconnectFn,
+    done: Arc<AtomicBool>,
+}
+
+type ReconnectFn = Arc<dyn Fn() -> Option<TermClient> + Send + Sync>;
+
+struct HostControl {
+    client: TermClient,
+    stream: u32,
+}
+
+impl HostLink {
+    /// Attach to `session_id` if the host lists it (any state), else create it
+    /// with `origin: app`, the app's environment and `prelude`, then attach.
+    pub fn attach_or_create(
+        client: TermClient,
+        request: &OpenRequest,
+    ) -> Result<HostLink, String> {
+        Self::attach_or_create_with_reconnect(client, request, Arc::new(|| None))
+    }
+
+    /// [`HostLink::attach_or_create`] with the reconnect closure the factory
+    /// hands over: re-opening a `Mux` to the host's endpoint, used to
+    /// re-establish the stream after the connection drops.
+    pub fn attach_or_create_with_reconnect(
+        client: TermClient,
+        request: &OpenRequest,
+        reconnect: ReconnectFn,
+    ) -> Result<HostLink, String> {
+        let listed = client.list().map_err(|error| error.to_string())?;
+        let listed_pid = listed
+            .sessions
+            .iter()
+            .find(|summary| summary.session_id == request.session_id)
+            .map(|summary| summary.pid);
+        let created_pid = if listed_pid.is_none() {
+            let params = CreateParams {
+                session_id: Some(request.session_id.clone()),
+                cwd: request.cwd.to_string_lossy().into_owned(),
+                command: term_command(&request.shell),
+                env: std::env::vars().collect(),
+                size: TermSize {
+                    cols: request.cols,
+                    rows: request.rows,
+                },
+                origin: Origin::App,
+                parent: None,
+                prelude: if request.prelude.is_empty() {
+                    None
+                } else {
+                    Some(b64_encode(&request.prelude))
+                },
+            };
+            match client.create(&params) {
+                Ok(created) => Some(created.pid),
+                // A racing create answered `invalid_params` for a duplicate
+                // id: the session exists now, attach to it.
+                Err(CallError::Remote(body))
+                    if body.code == ErrorCode::InvalidParams
+                        && body.message.contains("duplicate") =>
+                {
+                    None
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        } else {
+            None
+        };
+        let (attached, stream_rx) = client
+            .attach(&request.session_id, None)
+            .map_err(|error| error.to_string())?;
+        let events_rx = client.events().map_err(|error| error.to_string())?;
+        let size = attached.size;
+        let stream = attached.stream;
+        let (chunks_tx, chunks_rx) = mpsc::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(Mutex::new(HostControl { client, stream }));
+        let session_id = request.session_id.clone();
+        std::thread::Builder::new()
+            .name(format!("sirio-terminal-host-link-{session_id}"))
+            .spawn({
+                let control = Arc::clone(&control);
+                let done = Arc::clone(&done);
+                let reconnect = Arc::clone(&reconnect);
+                move || {
+                    forward_host(
+                        session_id,
+                        control,
+                        reconnect,
+                        stream_rx,
+                        events_rx,
+                        chunks_tx,
+                        size,
+                        done,
+                    );
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(HostLink {
+            session_id: request.session_id.clone(),
+            shell_pid: created_pid.or(listed_pid),
+            incoming: chunks_rx,
+            control,
+            reconnect,
+            done,
+        })
+    }
+}
+
+/// How long a dropped connection is retried before the link reports `Lost`,
+/// and how often a fresh client is attempted in between.
+const HOST_RECONNECT_GRACE: Duration = Duration::from_secs(10);
+const HOST_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Reads one stream and the session events into [`LinkChunk`]s, remembering
+/// the next offset so a re-attach can resume where the bytes stopped.
+///
+/// `Lagged` (this stream fell too far behind) re-attaches for a snapshot
+/// transparently on the same connection. `Closed` (the connection is gone)
+/// retries the attach against a fresh client every 500 ms for 10 s; `Lost`
+/// goes out only when the host no longer lists the id or no host answers —
+/// never on the dropped connection alone (SP2 spec §8).
+#[allow(clippy::too_many_arguments)]
+fn forward_host(
+    session_id: String,
+    control: Arc<Mutex<HostControl>>,
+    reconnect: ReconnectFn,
+    mut stream_rx: StreamReceiver,
+    mut events_rx: mpsc::Receiver<SessionEvent>,
+    chunks_tx: mpsc::Sender<LinkChunk>,
+    mut size: TermSize,
+    done: Arc<AtomicBool>,
+) {
+    let mut next_offset = 0u64;
+    // Re-attach on the live connection (after `Lagged`): a snapshot, no
+    // resume offset. Returns false when the view is gone.
+    let reattach_snapshot = |control: &Arc<Mutex<HostControl>>,
+                             stream_rx: &mut StreamReceiver,
+                             size: &mut TermSize| {
+        let attached = {
+            let control = control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            control.client.attach(&session_id, None)
+        };
+        match attached {
+            Ok((attached, fresh_rx)) => {
+                control
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .stream = attached.stream;
+                *stream_rx = fresh_rx;
+                *size = attached.size;
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    loop {
+        if done.load(Ordering::Acquire) {
+            return;
+        }
+        match stream_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(item) => match item {
+                StreamItem::Snapshot(bytes) => {
+                    if chunks_tx
+                        .send(LinkChunk::Snapshot {
+                            cols: size.cols,
+                            rows: size.rows,
+                            bytes,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                StreamItem::Output { offset, bytes } => {
+                    next_offset = offset + bytes.len() as u64;
+                    if chunks_tx.send(LinkChunk::Output(bytes)).is_err() {
+                        return;
+                    }
+                }
+                // The host is about to send a fresh snapshot on this same
+                // stream; nothing to do until it arrives.
+                StreamItem::Resync => {}
+                StreamItem::Lagged => {
+                    if !reattach_snapshot(&control, &mut stream_rx, &mut size) && !reconnect_until_attached(
+                        &session_id,
+                        &control,
+                        &reconnect,
+                        &mut stream_rx,
+                        &mut events_rx,
+                        &chunks_tx,
+                        &mut size,
+                        Some(next_offset),
+                        &done,
+                    ) {
+                        return;
+                    }
+                }
+                StreamItem::Closed => {
+                    if !reconnect_until_attached(
+                        &session_id,
+                        &control,
+                        &reconnect,
+                        &mut stream_rx,
+                        &mut events_rx,
+                        &chunks_tx,
+                        &mut size,
+                        Some(next_offset),
+                        &done,
+                    ) {
+                        return;
+                    }
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if !reconnect_until_attached(
+                    &session_id,
+                    &control,
+                    &reconnect,
+                    &mut stream_rx,
+                    &mut events_rx,
+                    &chunks_tx,
+                    &mut size,
+                    Some(next_offset),
+                    &done,
+                ) {
+                    return;
+                }
+            }
+        }
+        let mut events_gone = false;
+        loop {
+            match events_rx.try_recv() {
+                Ok(event) => {
+                    let chunk = match event {
+                        SessionEvent::Title {
+                            session_id: id,
+                            title,
+                        } if id == session_id => LinkChunk::Title(title),
+                        SessionEvent::Foreground {
+                            session_id: id,
+                            running,
+                        } if id == session_id => LinkChunk::Foreground(running),
+                        SessionEvent::Exited {
+                            session_id: id,
+                            status,
+                        } if id == session_id => LinkChunk::Exited(host_exit_status(&status)),
+                        _ => continue,
+                    };
+                    if chunks_tx.send(chunk).is_err() {
+                        return;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                // The events subscription lives on the same connection as
+                // the stream: when it is gone the connection is too.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    events_gone = true;
+                    break;
+                }
+            }
+        }
+        if events_gone && !reconnect_until_attached(
+            &session_id,
+            &control,
+            &reconnect,
+            &mut stream_rx,
+            &mut events_rx,
+            &chunks_tx,
+            &mut size,
+            Some(next_offset),
+            &done,
+        ) {
+            return;
+        }
+    }
+}
+
+/// Re-establish the stream against a fresh client after the connection
+/// dropped. Every 500 ms for 10 s: no fresh client, or a host that no longer
+/// lists the id, ends in `Lost` (sent exactly once); `true` means the stream,
+/// events and size were replaced and the loop continues.
+#[allow(clippy::too_many_arguments)]
+fn reconnect_until_attached(
+    session_id: &str,
+    control: &Arc<Mutex<HostControl>>,
+    reconnect: &ReconnectFn,
+    stream_rx: &mut StreamReceiver,
+    events_rx: &mut mpsc::Receiver<SessionEvent>,
+    chunks_tx: &mpsc::Sender<LinkChunk>,
+    size: &mut TermSize,
+    resume_from: Option<u64>,
+    done: &Arc<AtomicBool>,
+) -> bool {
+    let deadline = Instant::now() + HOST_RECONNECT_GRACE;
+    loop {
+        if done.load(Ordering::Acquire) {
+            return false;
+        }
+        if Instant::now() >= deadline {
+            let _ = chunks_tx.send(LinkChunk::Lost);
+            return false;
+        }
+        std::thread::sleep(HOST_RECONNECT_INTERVAL);
+        if done.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(fresh) = reconnect() else {
+            continue;
+        };
+        match fresh.list() {
+            Ok(listed)
+                if !listed
+                    .sessions
+                    .iter()
+                    .any(|summary| summary.session_id == session_id) =>
+            {
+                let _ = chunks_tx.send(LinkChunk::Lost);
+                return false;
+            }
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        let attached = fresh.attach(session_id, resume_from);
+        match attached {
+            Ok((attached, fresh_rx)) => match fresh.events() {
+                Ok(fresh_events) => {
+                    if done.load(Ordering::Acquire) {
+                        let _ = fresh.detach(attached.stream);
+                        return false;
+                    }
+                    {
+                        // The new client owns the re-established stream from
+                        // here: every later input, resize, end and detach must
+                        // travel on its connection.
+                        let mut control = control
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        control.stream = attached.stream;
+                        control.client = fresh;
+                    }
+                    *stream_rx = fresh_rx;
+                    *events_rx = fresh_events;
+                    *size = attached.size;
+                    return true;
+                }
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        }
+    }
+}
+
+impl SessionLink for HostLink {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
+    }
+
+    fn input(&self, bytes: Vec<u8>) {
+        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = control.client.input(control.stream, &bytes);
+    }
+
+    fn feed(&self, bytes: Vec<u8>) {
+        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = control.client.feed(&self.session_id, &bytes);
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = control.client.resize(&self.session_id, cols, rows);
+    }
+
+    fn chunks(&self) -> &mpsc::Receiver<LinkChunk> {
+        &self.incoming
+    }
+
+    fn end(&self) {
+        self.done.store(true, Ordering::Release);
+        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = control.client.close(&self.session_id);
+    }
+
+    fn detach(&self) {
+        self.done.store(true, Ordering::Release);
+        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = control.client.detach(control.stream);
+    }
+
+    fn survives_app(&self) -> bool {
+        true
+    }
+}
+
+impl Drop for HostLink {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+    }
+}
+
+fn session_exit_status(exit: &Exit) -> TerminalExitStatus {
+    match exit {
+        Exit::Success => TerminalExitStatus::Success,
+        Exit::Code(code) => TerminalExitStatus::Code(*code),
+        Exit::Unknown => TerminalExitStatus::Unknown,
+    }
+}
+
+fn host_exit_status(status: &ExitStatus) -> TerminalExitStatus {
+    match status {
+        ExitStatus::Success => TerminalExitStatus::Success,
+        ExitStatus::Code { code } => TerminalExitStatus::Code(*code),
+        ExitStatus::Unknown | ExitStatus::Other => TerminalExitStatus::Unknown,
+    }
+}
+
+fn term_command(shell: &TerminalShell) -> TermCommand {
+    match shell {
+        TerminalShell::System => TermCommand::Shell,
+        TerminalShell::WithArguments { program, args } => TermCommand::Program {
+            program: program.clone(),
+            args: args.clone(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pty_fixture_shell;
+    use std::time::Duration;
+
+    fn test_directory(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "sirio-link-test-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn open_request(session_id: &str, cwd: std::path::PathBuf, shell: TerminalShell) -> OpenRequest {
+        OpenRequest {
+            session_id: session_id.to_string(),
+            cwd,
+            shell,
+            cols: 80,
+            rows: 24,
+            prelude: Vec::new(),
+        }
+    }
+
+    fn next_chunk(link: &LocalLink, timeout: Duration) -> LinkChunk {
+        link.chunks()
+            .recv_timeout(timeout)
+            .expect("the link must deliver a chunk")
+    }
+
+    /// A child that exits with `code` on every platform: `/bin/sh` on unix,
+    /// `python3` (which the PTY fixture already requires) elsewhere.
+    fn exit_shell(code: i32) -> TerminalShell {
+        #[cfg(unix)]
+        {
+            TerminalShell::WithArguments {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), format!("exit {code}")],
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            TerminalShell::WithArguments {
+                program: "python3".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    format!("import sys; sys.exit({code})"),
+                ],
+            }
+        }
+    }
+
+    #[test]
+    fn local_link_snapshot_carries_the_session_size() {
+        let directory = test_directory("snapshot-size");
+        let mut request = open_request(
+            "pane-9101",
+            directory.clone(),
+            pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
+        );
+        request.cols = 100;
+        request.rows = 30;
+        let link = LocalLink::open(&request).expect("open the in-process session");
+        assert_eq!(link.session_id(), "pane-9101");
+        assert!(link.shell_pid().is_some_and(|pid| pid != 0));
+        assert!(!link.survives_app());
+        match next_chunk(&link, Duration::from_secs(10)) {
+            LinkChunk::Snapshot { cols, rows, .. } => {
+                assert_eq!((cols, rows), (100, 30));
+            }
+            other => panic!("the first chunk must be a snapshot, got {}", chunk_name(&other)),
+        }
+        link.end();
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn local_link_echoes_input_back_as_output() {
+        let directory = test_directory("echo");
+        let request = open_request(
+            "pane-9102",
+            directory.clone(),
+            pty_fixture_shell("exec cat", &["cat"]),
+        );
+        let link = LocalLink::open(&request).expect("open the in-process session");
+        link.input(b"LINK_ECHO_PROBE\n".to_vec());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match link.chunks().recv_timeout(Duration::from_millis(200)) {
+                Ok(LinkChunk::Output(bytes)) => {
+                    seen.extend_from_slice(&bytes);
+                    if seen.windows(15).any(|w| w == b"LINK_ECHO_PROBE") {
+                        link.end();
+                        let _ = std::fs::remove_dir_all(directory);
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        panic!(
+            "the input never came back as output: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+    }
+
+    #[test]
+    fn local_link_reports_exit_status() {
+        let directory = test_directory("exit");
+        let request = open_request("pane-9103", directory.clone(), exit_shell(3));
+        let link = LocalLink::open(&request).expect("open the in-process session");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match link.chunks().recv_timeout(Duration::from_millis(200)) {
+                Ok(LinkChunk::Exited(status)) => {
+                    assert_eq!(status, TerminalExitStatus::Code(3));
+                    link.end();
+                    let _ = std::fs::remove_dir_all(directory);
+                    return;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        panic!("the session exit never arrived as a link chunk");
+    }
+
+    #[test]
+    fn local_link_forwards_the_session_title() {
+        let directory = test_directory("title");
+        let request = open_request(
+            "pane-9104",
+            directory.clone(),
+            pty_fixture_shell(
+                "printf '\\033]0;LINK_TITLE\\007'; exec sleep 60",
+                &[
+                    "print",
+                    "\\033]0;LINK_TITLE\\007",
+                    "--expand",
+                    "--sleep",
+                    "60",
+                ],
+            ),
+        );
+        let link = LocalLink::open(&request).expect("open the in-process session");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match link.chunks().recv_timeout(Duration::from_millis(200)) {
+                Ok(LinkChunk::Title(title)) if title == "LINK_TITLE" => {
+                    link.end();
+                    let _ = std::fs::remove_dir_all(directory);
+                    return;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        panic!("the OSC title never arrived as a link chunk");
+    }
+
+    #[test]
+    fn local_link_end_closes_the_session() {
+        let directory = test_directory("end");
+        let request = open_request(
+            "pane-9105",
+            directory.clone(),
+            pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
+        );
+        let link = LocalLink::open(&request).expect("open the in-process session");
+        // Drain the opening snapshot so the channel is quiet before the end.
+        let _ = link.chunks().recv_timeout(Duration::from_secs(10));
+        link.end();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match link.chunks().recv_timeout(Duration::from_millis(200)) {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = std::fs::remove_dir_all(directory);
+                    return;
+                }
+            }
+        }
+        panic!("ending the link never closed the chunk channel");
+    }
+
+    #[test]
+    fn local_link_open_refuses_a_missing_directory() {
+        let missing = std::env::temp_dir().join(format!(
+            "sirio-link-test-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&missing);
+        let request = open_request(
+            "pane-9106",
+            missing,
+            TerminalShell::System,
+        );
+        assert!(
+            LocalLink::open(&request).is_err(),
+            "a missing cwd must fail the open like the old spawn did"
+        );
+    }
+
+    fn chunk_name(chunk: &LinkChunk) -> &'static str {
+        match chunk {
+            LinkChunk::Snapshot { .. } => "Snapshot",
+            LinkChunk::Output(_) => "Output",
+            LinkChunk::Title(_) => "Title",
+            LinkChunk::Foreground(_) => "Foreground",
+            LinkChunk::Exited(_) => "Exited",
+            LinkChunk::Lost => "Lost",
+        }
+    }
+}

@@ -7694,6 +7694,7 @@ impl SirioWorkspace {
                         TerminalActivityEvent::LifecycleChanged { .. } => {
                             "activity_event.lifecycle_changed"
                         }
+                        TerminalActivityEvent::SessionLost => "activity_event.session_lost",
                     },
                     pane_id as u64,
                 );
@@ -7748,7 +7749,12 @@ impl SirioWorkspace {
                         );
                     }
                     TerminalActivityEvent::OscTitle(_)
-                    | TerminalActivityEvent::OutputSettled { .. } => {}
+                    | TerminalActivityEvent::OutputSettled { .. }
+                    // The Session-lost surface (a "Session lost" row with a
+                    // Restart that replays the scrollback as prelude) is a
+                    // later SP2 task's; the view already repaints itself on
+                    // the event, so the workspace needs nothing here yet.
+                    | TerminalActivityEvent::SessionLost => {}
                 }
                 if let Some(transition) = transition.as_ref() {
                     workspace.post_activity_notification(transition);
@@ -9795,8 +9801,9 @@ impl SirioWorkspace {
         };
         for id in evicted {
             // An evicted worktree is no longer mounted, so release the strong
-            // entity references here. TerminalView::drop then shuts down its
-            // PTY instead of leaving a shell behind in the cache.
+            // entity references here. TerminalView::drop then detaches its
+            // session instead of leaving a shell behind in the cache (a host
+            // session lives on; a local one ends with its link).
             self.terminal_pane_cache.remove_worktree(&id);
             self.parked_worktree_tabs.remove(&id);
             self.retained_worktree_chats.remove(&id);

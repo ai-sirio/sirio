@@ -50,6 +50,9 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
         }
         TerminalActivityEvent::LifecycleChanged { .. } => None,
+        // A lost session keeps its scrollback and offers a Restart; it
+        // changes no agent identity or status on its own.
+        TerminalActivityEvent::SessionLost => None,
     }
 }
 
