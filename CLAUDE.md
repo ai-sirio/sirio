@@ -69,6 +69,12 @@ Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
 # --appearance light|dark seeds the isolated app's appearance.
 Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
 
+# Checking a change request out into a worktree (change requests C1): same
+# repository, forks that accept and refuse pushes, a gone branch and a closed
+# request, reuse with fast-forward, refusals and the pinned card, against bare
+# repositories and the fake forge; same flags as the other forge E2Es.
+Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
+
 # Ely's Tabs and git badges with Sirio's theme, on a private Xvfb with
 # Mesa's lavapipe: PID-matched captures, a click per tab, the badge tooltip,
 # dark and light (docs/testing/ely-forge-probe.md).
@@ -364,6 +370,27 @@ are debug-only; `thread --suggest` serves every build. The `review` stage of
 `test-forge-actions-e2e.sh` proves the wire, and `scenario_review` of
 `test-forge-diff-e2e.sh` the UI. The debug-only `review-open-submit` helper
 opens the submit dialog without sending, for the framed test.
+
+**C1** checks a change request out into a worktree. `sirio_ui::handoff`
+decides, purely, the local branch (`<source_branch>`, or
+`<owner>/<source_branch>` for a fork), the push target (the listed remote, a
+`sirio-<owner>` remote when the viewer may push to the fork, or none —
+read-only) and whether to reuse, create or refuse. `ForgeHub::checkout`
+(`sirio/src/forge/checkout.rs`) fetches the head through B1's
+`RevisionFetcher` first, so nothing is created before a refusal, then runs the
+`sirio_git` steps off the GPUI thread. A fork's local `<owner>/<branch>` gets
+`remote.sirio-<owner>.push = refs/heads/<owner>/<branch>:refs/heads/<branch>`,
+because a plain `git push` under `push.default=simple` would not reach
+`<branch>`. A reused worktree is fast-forwarded only when it is clean and on
+the change request's branch; one switched elsewhere, dirty or diverged is left
+as it is and the status line says why. The link worktree → change request lives
+in `sirio_persistence` (`change_request_link`, v22, keyed by the exact path the
+sidebar uses), and the card reads it with `ForgeClient::summary` before the
+branch match. *Open in a worktree* is in the tab's action bar and the list
+row's menu (which opens the tab); the outcome is the tab's checkout status
+line. `surface change-request checkout` acts on the open tab and serves every
+build because it touches only local git. `test-change-request-handoff-e2e.sh`
+proves it.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and

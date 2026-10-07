@@ -348,3 +348,71 @@ still applies.
 - That GitHub keeps `refs/pull/N/head` and GitLab `refs/merge-requests/N/head`
   for a closed change request whose fork was deleted. Fallback: the dialog
   says the head is gone and creates nothing.
+
+## §14 Revised while planning and building C1 (2026-10-07)
+
+*Facts verified live while planning* (read-only introspection, 2026-10-07):
+github.com `PullRequest` has `maintainerCanModify`, `isCrossRepository`,
+`headRepository`, `headRepositoryOwner`, `headRef`; `Repository` has `sshUrl`,
+`url`, `nameWithOwner`, `viewerPermission`; gitlab.com `MergeRequest` has
+`allowCollaboration`, `sourceProject`, `targetProject`, `sourceProjectId`,
+`targetProjectId`, `sourceBranchExists`; `Project` has `fullPath`,
+`sshUrlToRepo`, `httpUrlToRepo`, `userPermissions { pushCode }`.
+
+*Revisions:*
+
+- `maintainer_can_push` became `can_push`. GitHub: write access to the head
+  repository, or `maintainerCanModify` and write access to the change
+  request's repository. GitLab: `pushCode` on the source project, or
+  `allowCollaboration` and `pushCode` on the target project —
+  `allowCollaboration` admits only members of the target project who may
+  merge, so it says nothing about a viewer who is not one.
+- `branch_exists` was added (GitHub `headRef`, GitLab `sourceBranchExists`).
+- A fork owner's `/` and other characters fold to `-` in the remote name, and
+  the worktree directory flattens the branch's `/`. Two owners that fold to
+  the same name (`forks/alice`, `forks-alice`) meet a remote whose URL differs,
+  and the checkout refuses rather than pushing to the wrong fork.
+- C1 has no dialog: the outcome is the tab's checkout status line, and the
+  list's menu item opens the tab first.
+- The card needed `ForgeClient::summary(number)`.
+- A fork's `<owner>/<branch>` cannot push to `<branch>` with a plain
+  `git push` under `push.default=simple`, so Sirio adds
+  `remote.sirio-<owner>.push = refs/heads/<owner>/<branch>:refs/heads/<branch>`.
+- The link is reported by the list's read (`linked`) and the checkout outcome
+  by the tab's (`checkout`, `checkout_detail`), not both on
+  `surface.change_request.read`.
+- `surface.change_request.checkout` takes no `{number}` (§8 said it would): it
+  acts on the open change request tab, like `surface.change_request.read` and
+  `act`. The list's menu item opens the tab first, so both entry points share
+  one path.
+- The head is fetched through B1's `RevisionFetcher` before deciding, so
+  refusals that depend on ancestry come before anything is created.
+- `viewer_is_author` moves to C2, the first slice that uses it.
+
+*Rulings from the slice ledger:*
+
+- When the head repository is deleted, the forge drops its owner too (GitHub
+  `headRepository` and `headRepositoryOwner` are null, GitLab `sourceProject`
+  is null), so §5's `<owner>/<source_branch>` cannot be built. The local
+  branch is the bare `<source_branch>`; when a branch of that name already
+  points at commits the head does not reach, the checkout refuses instead of
+  touching it.
+- Reusing a worktree fetches, then fast-forwards only the branch the worktree
+  has checked out and only when it is the change request's branch. A worktree
+  switched to another branch is left as it is, and §5's "no existing branch is
+  ever rewritten" holds. A read-only worktree is fast-forwarded to the change
+  request's head.
+- For an existing local branch that needs an upstream, the upstream is set
+  before the worktree is created, so a failure leaves nothing a retry would
+  refuse. A failure after creation still refreshes the sidebar, so the user
+  sees what was made (§9).
+- The new GitLab header fields are in the baseline queries too: they predate
+  every field the baseline exists to omit (GitLab 12–13 against 15–16).
+- The link is keyed by the exact path string the sidebar uses, with no
+  canonicalisation; the checkout saves it under the catalog row's path.
+- A linked read that fails falls back to the branch match, and its rate-limit
+  error still pauses every read (§9). On a detached HEAD only a linked worktree
+  has a card, and its loading and error states are drawn.
+- `ensure_remote` compares the configured URL (`remote.<name>.url`), not the
+  one `git remote get-url` returns after `url.<base>.insteadOf`, so a rewrite
+  never reads as a conflicting remote.
