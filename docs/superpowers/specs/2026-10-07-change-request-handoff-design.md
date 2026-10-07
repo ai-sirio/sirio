@@ -180,7 +180,7 @@ The expected branch and push target:
 | Change request | Local branch | Push target |
 |---|---|---|
 | Same repository, source branch on the forge | `<source_branch>` | `<listed remote>/<source_branch>` |
-| The viewer's own fork is a remote of the project (`origin`, usually) | `<source_branch>` | that remote, `<source_branch>` — tracks `<remote>/<source_branch>` as in the same repository |
+| The viewer's own fork is a remote of the project (`origin`, usually), the viewer may push to the head, and the local `<source_branch>` is absent or already tracks `<remote>/<source_branch>` | `<source_branch>` | that remote, `<source_branch>` — tracks `<remote>/<source_branch>` as in the same repository |
 | Fork, maintainer may push | `<owner>/<source_branch>` | remote `sirio-<owner>-<number>` (one per change request), URL in the listed remote's scheme (ssh or https), with exactly one push mapping |
 | Fork, maintainer may not push | `<owner>/<source_branch>` | none — read-only |
 | Source branch gone | `<owner>/<source_branch>` for a fork, `<source_branch>` otherwise | none — read-only, from the forge's head ref |
@@ -196,7 +196,9 @@ Refusals, all before anything is created, each with its reason in the dialog:
 a fetch that fails; a local branch of the expected name that points elsewhere
 and is not an ancestor of the head; a `sirio-<owner>-<number>` remote with
 another URL; a target directory that already exists. No existing branch is ever
-rewritten and no remote is ever changed.
+rewritten and no remote Sirio did not make is ever changed. Sirio's own fork
+remotes are added (and, with their last worktree, removed) per change request;
+the flip to a pushable fork adds the mapping to the one remote of its request.
 
 ## §6 The hand-off and its context (C2)
 
@@ -454,8 +456,10 @@ github.com `PullRequest` has `maintainerCanModify`, `isCrossRepository`,
 - Ruling: M-3 — the "branch has commits the change request does not" refusal
   says to check the branch out or push it, and never to delete it. Cost: none.
 - A linked read that fails falls back to the branch match, and its rate-limit
-  error still pauses every read (§9). On a detached HEAD only a linked worktree
-  has a card, and its loading and error states are drawn.
+  error still pauses every read (§9). On a detached HEAD a worktree has no card:
+  a link is honoured only while the worktree is on its branch (I-3), so the
+  linked-on-detached arm of the card is not reached. The card's loading and
+  error states are drawn for a linked worktree on its branch.
 - `ensure_remote` compares the configured URL (`remote.<name>.url`), not the
   one `git remote get-url` returns after `url.<base>.insteadOf`, so a rewrite
   never reads as a conflicting remote.

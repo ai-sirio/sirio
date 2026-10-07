@@ -375,12 +375,14 @@ opens the submit dialog without sending, for the framed test.
 decides, purely, the local branch (`<source_branch>`, `<owner>/<source_branch>`
 for a fork, or `pr-<N>`/`mr-<N>` when the head repository is gone), the push
 target (the listed remote, the viewer's own fork remote when a project remote
-already names the head repository, a `sirio-<owner>-<number>` remote when the
+already names the head repository and the viewer may push to it (and the local
+branch of the source name is free or tracks that remote), a `sirio-<owner>-<number>` remote when the
 viewer may push to a fork, or none — read-only) and whether to reuse, create or
 refuse. Each fork change request has its own remote, because a remote's push
 mapping is per remote: two change requests sharing one would make a plain
 `git push` from either worktree push both branches. The remote is removed with
-the last linked worktree. `ForgeHub::checkout`
+the last linked worktree, and only when its single push mapping names that
+worktree's branch. `ForgeHub::checkout`
 (`sirio/src/forge/checkout.rs`) fetches the head through B1's
 `RevisionFetcher` first, so nothing is created before a refusal, then runs the
 `sirio_git` steps off the GPUI thread. A fork's local `<owner>/<branch>` gets
