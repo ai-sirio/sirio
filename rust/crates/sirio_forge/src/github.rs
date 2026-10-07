@@ -21,7 +21,7 @@ use crate::mapping;
 use crate::scopes::TokenScopes;
 use crate::transport::{RestMethod, RestRequest};
 use crate::model::{
-    Candidate, Capabilities, ChangeHeader, ChangeState, Draft, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, Log, CiState, CommentKind,
+    Candidate, Capabilities, ChangeHeader, ChangeState, Draft, HeadRepository, Label, MergeCapability, MergeMethod, ChangePage, ChangeSummary, Check, CheckJob, Log, CiState, CommentKind,
     CommentRef, CommitSummary, EventKind, FileChange, Filter, LineComment, ListQuery, Listing,
     PageCursor, ReviewOutcome, ReviewThread, Reviewer, Side, ThreadComment, TimelineItem,
 };
@@ -43,6 +43,7 @@ const MINE: &str = with_summary!("queries/github/mine.graphql");
 const COUNT: &str = include_str!("queries/github/count.graphql");
 const BRANCH: &str = with_summary!("queries/github/branch.graphql");
 const HEADER: &str = with_summary!("queries/github/header.graphql");
+const BY_NUMBER: &str = with_summary!("queries/github/change_request.graphql");
 const COMMITS: &str = include_str!("queries/github/commits.graphql");
 const CHECKS: &str = include_str!("queries/github/checks.graphql");
 const FILES: &str = include_str!("queries/github/files.graphql");
@@ -346,6 +347,49 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
         timeline,
         revisions: revisions(opt_str(node, "/baseRefOid"), opt_str(node, "/headRefOid"), None),
         draft: mapping::github_pending_review(node),
+        head: head_repository(repository, node),
+    })
+}
+
+fn writes(permission: Option<&str>) -> bool {
+    matches!(permission, Some("ADMIN" | "MAINTAIN" | "WRITE"))
+}
+
+fn head_repository(repository: &Value, node: &Value) -> Option<HeadRepository> {
+    let head = node.pointer("/headRepository").filter(|value| !value.is_null())?;
+    let project = opt_str(head, "/nameWithOwner")?.to_string();
+    let owner = project.split('/').next()?.to_string();
+    let url = opt_str(head, "/url")?;
+    Some(HeadRepository {
+        owner,
+        http_url: format!("{}.git", url.trim_end_matches('/')),
+        ssh_url: str_at(head, "/sshUrl"),
+        cross_repository: bool_at(node, "/isCrossRepository"),
+        branch_exists: node.pointer("/headRef").is_some_and(|value| !value.is_null()),
+        can_push: writes(opt_str(head, "/viewerPermission"))
+            || (bool_at(node, "/maintainerCanModify") && writes(opt_str(repository, "/viewerPermission"))),
+        project,
+    })
+}
+
+pub(crate) fn summary_by_number(client: &ForgeClient, number: u64) -> Result<ChangeSummary, ForgeError> {
+    let viewer = client.viewer()?;
+    let (owner, name) = owner_and_name(client)?;
+    let data = run(
+        client,
+        "ChangeRequestByNumber",
+        BY_NUMBER,
+        json!({ "owner": owner, "name": name, "number": number }),
+    )?;
+    let node = data
+        .pointer("/repository/pullRequest")
+        .filter(|node| !node.is_null())
+        .ok_or_else(|| ForgeError::NotFound {
+            host: client.host.clone(),
+        })?;
+    summary(client, node, &viewer).ok_or_else(|| ForgeError::UnexpectedResponse {
+        host: client.host.clone(),
+        detail: "a pull request without a number or title".to_string(),
     })
 }
 

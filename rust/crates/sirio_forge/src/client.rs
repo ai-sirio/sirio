@@ -129,6 +129,15 @@ impl ForgeClient {
         }
     }
 
+    /// One change request's summary, read by number: the card of a worktree
+    /// linked to it (spec C §4).
+    pub fn summary(&self, number: u64) -> Result<ChangeSummary, ForgeError> {
+        match self.forge {
+            Forge::GitHub => github::summary_by_number(self, number),
+            Forge::GitLab => gitlab::summary_by_number(self, number),
+        }
+    }
+
     pub fn commits(&self, number: u64) -> Result<Listing<CommitSummary>, ForgeError> {
         match self.forge {
             Forge::GitHub => github::commits(self, number),

@@ -521,6 +521,26 @@ pub struct Draft {
     pub comments: u32,
 }
 
+/// The repository a change request's head lives in (spec C §4): where to
+/// fetch it from and whether the viewer may push back to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadRepository {
+    /// GitHub: the owner's login. GitLab: the namespace path (`forks/alice`).
+    pub owner: String,
+    /// GitHub `owner/name`; GitLab the full path.
+    pub project: String,
+    pub http_url: String,
+    pub ssh_url: String,
+    /// The head is in another repository than the change request's.
+    pub cross_repository: bool,
+    /// The source branch still exists on the forge.
+    pub branch_exists: bool,
+    /// The viewer may push to the head branch: write access to the head
+    /// repository, or the author lets maintainers push and the viewer may
+    /// write to the change request's repository.
+    pub can_push: bool,
+}
+
 /// The detail tab's header and Conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeHeader {
@@ -544,6 +564,8 @@ pub struct ChangeHeader {
     pub revisions: Option<Revisions>,
     /// The viewer's own review in progress, read with the header (B3c).
     pub draft: Option<Draft>,
+    /// `None` when the forge no longer names the head repository (a deleted fork).
+    pub head: Option<HeadRepository>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

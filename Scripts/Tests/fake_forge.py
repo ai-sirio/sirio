@@ -131,7 +131,7 @@ def load_fixtures(root):
 
 
 # Operations that have a baseline variant, and the fields those variants omit.
-BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext", "MergeRequestThreads"}
+BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestByNumber", "MergeRequestActionContext", "MergeRequestThreads"}
 NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove",
                        "canMerge", "detailedMergeStatus", "squashOnMerge", "squashReadOnly", "autoMergeEnabled",
                        "availableAutoMergeStrategies", "shouldRemoveSourceBranch", "truncatedDiffLines"}

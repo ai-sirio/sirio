@@ -3,6 +3,8 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
     mergeRequest(iid: $iid) {
       headPipeline { userPermissions { updatePipeline } }
       ...MergeRequestSummary
+      sourceProjectId targetProjectId sourceBranchExists allowCollaboration
+      sourceProject { fullPath httpUrlToRepo sshUrlToRepo userPermissions { pushCode } }
       id
       discussionLocked
       userPermissions { canApprove canMerge createNote updateMergeRequest }

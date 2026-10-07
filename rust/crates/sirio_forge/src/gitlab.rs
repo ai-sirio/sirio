@@ -28,7 +28,7 @@ use crate::graphql::{
 use crate::mapping::{self, SystemNote};
 use crate::model::{
     Candidate, Capabilities, Label, MergeMethod, ChangeHeader, ChangePage, ChangeSummary, Check, CheckJob, Log, CommentKind, CommentRef,
-    CommitSummary, FileChange, Filter, LineComment, ListQuery, Listing, PageCursor,
+    CommitSummary, FileChange, HeadRepository, Filter, LineComment, ListQuery, Listing, PageCursor,
     ReviewOutcome, ReviewThread, Reviewer, ThreadComment, TimelineItem,
 };
 use crate::scopes::TokenScopes;
@@ -70,6 +70,10 @@ const BRANCH: (&str, &str) = (
 const HEADER: (&str, &str) = (
     full!("queries/gitlab/header.graphql"),
     baseline!("queries/gitlab/header_baseline.graphql"),
+);
+const BY_NUMBER: (&str, &str) = (
+    full!("queries/gitlab/merge_request.graphql"),
+    baseline!("queries/gitlab/merge_request_baseline.graphql"),
 );
 const ACTION_CONTEXT: (&str, &str) = (
     include_str!("queries/gitlab/action_context.graphql"),
@@ -399,6 +403,44 @@ pub(crate) fn header(client: &ForgeClient, number: u64) -> Result<ChangeHeader, 
             opt_str(node, "/diffRefs/headSha"),
             opt_str(node, "/diffRefs/startSha"),
         ),
+        head: head_repository(node),
+    })
+}
+
+fn head_repository(node: &Value) -> Option<HeadRepository> {
+    let source = node.pointer("/sourceProject").filter(|value| !value.is_null())?;
+    let project = opt_str(source, "/fullPath")?.to_string();
+    let owner = project
+        .rsplit_once('/')
+        .map_or(project.as_str(), |(namespace, _)| namespace)
+        .to_string();
+    let cross_repository = match (node.pointer("/sourceProjectId"), node.pointer("/targetProjectId")) {
+        (Some(source_id), Some(target_id)) if !source_id.is_null() && !target_id.is_null() => source_id != target_id,
+        _ => false,
+    };
+    Some(HeadRepository {
+        owner,
+        http_url: str_at(source, "/httpUrlToRepo"),
+        ssh_url: str_at(source, "/sshUrlToRepo"),
+        cross_repository,
+        branch_exists: node.pointer("/sourceBranchExists").and_then(Value::as_bool).unwrap_or(true),
+        can_push: bool_at(source, "/userPermissions/pushCode") || bool_at(node, "/allowCollaboration"),
+        project,
+    })
+}
+
+pub(crate) fn summary_by_number(client: &ForgeClient, number: u64) -> Result<ChangeSummary, ForgeError> {
+    let me = client.viewer()?;
+    let data = run(
+        client,
+        "MergeRequestByNumber",
+        BY_NUMBER,
+        json!({ "fullPath": client.project, "iid": number.to_string() }),
+    )?;
+    let node = merge_request(client, &data)?;
+    summary(client, node, &me).ok_or_else(|| ForgeError::UnexpectedResponse {
+        host: client.host.clone(),
+        detail: "a merge request without an iid or title".to_string(),
     })
 }
 

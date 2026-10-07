@@ -2,6 +2,8 @@ query MergeRequestHeader($fullPath: ID!, $iid: String!) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
       ...MergeRequestSummary
+      sourceProjectId targetProjectId sourceBranchExists allowCollaboration
+      sourceProject { fullPath httpUrlToRepo sshUrlToRepo userPermissions { pushCode } }
       id
       discussionLocked
       userPermissions { createNote updateMergeRequest }
