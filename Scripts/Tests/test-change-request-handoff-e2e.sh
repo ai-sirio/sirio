@@ -11,12 +11,14 @@ set -euo pipefail
 #
 # Scenarios, each for GitHub and GitLab where the forge allows it:
 #   same            the branch is in the project's repository: checkout creates
-#                   <project>-feat tracking origin/feat; a push from it lands on
-#                   origin; a second checkout fast-forwards a clean worktree to
-#                   a commit pushed meanwhile, refuses a dirty one, leaves a
-#                   worktree switched to another branch alone, and recreates a
-#                   worktree whose folder was removed (the link is dropped);
-#                   the tab belongs to the worktree the checkout selected.
+#                   <project>-feat tracking origin/feat and selects it (the
+#                   selected workspace's path is that folder, and the change
+#                   request tab reads in it); a push from it lands on origin; a
+#                   second checkout fast-forwards a clean worktree to a commit
+#                   pushed meanwhile (the forge's head moves with each push),
+#                   refuses a dirty one, leaves a worktree switched to another
+#                   branch alone, and recreates a worktree whose folder was
+#                   removed (the link is dropped).
 #   fork-push       a fork that accepts pushes: a worktree on <owner>/feat with
 #                   its own remote; a push from it lands on the fork's branch,
 #                   and origin has no such branch.
@@ -25,15 +27,18 @@ set -euo pipefail
 #                   checkout fast-forwards it. GitLab's variant has allowCollaboration
 #                   true and the target's pushCode false, so only the stricter rule
 #                   makes it read-only.
-#   gone            the source branch is gone from the forge: read-only at the head.
+#   gone            the source branch is gone from the forge and the change request
+#                   is CLOSED (spec §10): the checkout still completes, read-only at
+#                   the head, because refs/pull/N/head survives a closed request.
 #   refusals        a branch that points at other commits, a project with no remote
 #                   for the forge, and a second checkout while one runs.
 #
 # The artifact: --out-dir DIR (default artifacts/handoff-e2e-<stamp>-<pid>)
 # keeps transcript.log, one app log per launch, one fake-forge request log per
-# scenario, the git state per scenario (<scenario>-git.txt) and -- unless
-# --state-only -- PID-matched window captures in frames/. Rerunning the script
-# reproduces it.
+# scenario, the state of every repository per scenario (<scenario>-git.txt: the
+# project checkout's worktrees, remotes and branches, and the refs of the forge's
+# origin and fork bares) and -- unless --state-only -- PID-matched window
+# captures in frames/. A rerun clears the previous artifacts first.
 #
 # Usage: Scripts/Tests/test-change-request-handoff-e2e.sh [--state-only] [--out-dir DIR] [--display :N]
 
@@ -52,8 +57,9 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/forge-diff-e2e-$(date +%Y%m%d-%H%M%S)-$$"
+[ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/handoff-e2e-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$OUT_DIR/frames"
+rm -f "$OUT_DIR"/*.log "$OUT_DIR"/*-git.txt "$OUT_DIR"/frames/* 2>/dev/null || true
 exec > >(tee "$OUT_DIR/transcript.log") 2>&1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -67,7 +73,7 @@ command -v git >/dev/null || fail "git is required"
 command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required (the fake forge's readiness probe)"
 
-RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sirio-handoff-e2e-XXXXXX")
+RUN_DIR=$(mktemp -d "${TMPDIR:?TMPDIR must be set; the run never falls back to /tmp}/sirio-handoff-e2e-XXXXXX")
 APP_PID=""
 FORGE_PID=""
 stop_app() { [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; APP_PID=""; }; }
@@ -244,6 +250,10 @@ if flavour == "github":
         node["isCrossRepository"] = cross
         node["maintainerCanModify"] = kind == "fork-push"
         node["headRef"] = None if kind == "gone" else {"id": "REF_1"}
+        # A closed request whose head branch was deleted (spec §10): the checkout
+        # still works, because refs/pull/N/head survives the close.
+        if kind == "gone":
+            node["state"] = "CLOSED"
         node["headRepository"] = {
             "nameWithOwner": f"{owner}/widgets",
             "url": f"https://ghe.test/{owner}/widgets",
@@ -315,7 +325,6 @@ open_scenario() { # host forge number -- the app, connected and on the change re
 }
 
 label_of() { if [ "$1" = gitlab ]; then echo '!201'; else echo '#101'; fi; }
-number_of() { if [ "$1" = gitlab ]; then echo 201; else echo 101; fi; }
 
 # The fork's branch, remote and folder name for flavour (the owner path differs).
 fork_branch_of() { if [ "$1" = gitlab ]; then echo 'forks/alice/feat'; else echo 'alice/feat'; fi; }
@@ -329,7 +338,31 @@ checkout_and_wait() { # expected-state (done|failed)
   echo "detail: $DETAIL"
 }
 
-# push_to_origin_feat message -> the new tip of origin's feat, from a scratch clone
+# set_forge_head flavour sha -- the forge's head ref and the head its header
+# serves from now on: the header's `after.push` overlay is rewritten (the fixture
+# is read per request) and /__push makes the forge serve it.
+set_forge_head() {
+  python3 - "$1" "$2" "$FIXTURES_DIR" <<'PY'
+import json, sys
+flavour, sha, root = sys.argv[1:4]
+if flavour == "github":
+    path = f"{root}/github/ChangeRequestHeader.after.push.json"
+    data = json.load(open(path))
+    data["data"]["repository"]["pullRequest"]["headRefOid"] = sha
+else:
+    path = f"{root}/gitlab/MergeRequestHeader.after.push.json"
+    data = json.load(open(path))
+    node = data["data"]["project"]["mergeRequest"]
+    node["diffRefs"]["headSha"] = sha
+    node["diffHeadSha"] = sha
+json.dump(data, open(path, "w"))
+PY
+  git -C "$ORIGIN" update-ref "$(pull_ref_of "$1")" "$2"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__push"
+}
+
+# push_to_origin_feat flavour message -> the new tip of origin's feat, from a scratch
+# clone; the forge's head moves to it too, as a push to the change request does.
 push_to_origin_feat() {
   local scratch="$RUN_DIR/scratch-$SCENARIO"
   rm -rf "$scratch"
@@ -339,7 +372,10 @@ push_to_origin_feat() {
   echo "$1" >>"$scratch/a.txt"
   git -C "$scratch" commit -q -am "$1"
   git -C "$scratch" push -q origin feat
-  git -C "$scratch" rev-parse HEAD
+  local tip
+  tip=$(git -C "$scratch" rev-parse HEAD)
+  set_forge_head "$1" "$tip"
+  echo "$tip"
 }
 
 dump_git() { # -- the repository's worktrees, remotes and branches, for the artifact
@@ -348,6 +384,10 @@ dump_git() { # -- the repository's worktrees, remotes and branches, for the arti
     echo "-- worktrees"; git -C "$WT" worktree list --porcelain
     echo "-- remotes"; git -C "$WT" remote -v
     echo "-- branches"; git -C "$WT" for-each-ref --format='%(refname) %(objectname) %(upstream)' refs/heads
+    for bare in "$ORIGIN" "$FORK"; do
+      [ -d "$bare" ] || continue
+      echo "-- refs of $(basename "$bare")"; git -C "$bare" for-each-ref --format='%(refname) %(objectname)'
+    done
   } >"$OUT_DIR/$SCENARIO-git.txt"
 }
 
@@ -365,7 +405,10 @@ scenario_same() { # flavour host forge number origin-url fork-url
   [ -d "$NEW" ] || fail "the worktree $NEW was not created"
   [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = origin/feat ] || fail "the new worktree does not track origin/feat"
   echo "OK: $(basename "$NEW") tracks origin/feat"
+  [ "$(read_field path current-workspace)" = "$NEW" ] || fail "the selected worktree is not $NEW"
+  echo "OK: the selected worktree is $NEW"
   assert_contains label "$label" surface change-request read
+  assert_contains checkout done surface change-request read
 
   echo "a commit from the worktree pushes to origin"
   printf 'pushed from the worktree\n' >>"$NEW/a.txt"
@@ -379,14 +422,14 @@ scenario_same() { # flavour host forge number origin-url fork-url
   capture "checkout-$1-same-done"
 
   echo "reuse: a clean worktree fast-forwards to a commit pushed meanwhile"
-  X2=$(push_to_origin_feat "pushed by someone else")
+  X2=$(push_to_origin_feat "$1" "pushed by someone else")
   checkout_and_wait done
   assert_contains checkout_detail "fast-forwarded" surface change-request read
   [ "$(git -C "$NEW" rev-parse HEAD)" = "$X2" ] || fail "the reused worktree is not at the pushed commit"
   echo "OK: the reused worktree is at $X2"
 
   echo "dirty: a worktree with uncommitted changes is left as it is"
-  X3=$(push_to_origin_feat "pushed while dirty")
+  X3=$(push_to_origin_feat "$1" "pushed while dirty")
   echo "uncommitted" >>"$NEW/a.txt"
   checkout_and_wait done
   assert_contains checkout_detail "uncommitted changes" surface change-request read
@@ -407,11 +450,6 @@ scenario_same() { # flavour host forge number origin-url fork-url
 
   echo "stale link: a link whose folder was removed is dropped, and the worktree is created again"
   git -C "$WT" worktree remove --force "$NEW"
-  # feat still holds X2, which the forge's head does not reach, so a plain
-  # re-create would be refused as pointing at other commits. Point the local
-  # branch at the forge's head, which the head check accepts, so this step
-  # tests the dropped link and nothing else.
-  git -C "$WT" branch -f feat "$HEAD_SHA"
   checkout_and_wait done
   assert_contains checkout_detail "Created" surface change-request read
   [ -d "$NEW" ] || fail "the worktree was not created again"
@@ -480,7 +518,7 @@ scenario_fork_readonly() { # flavour host forge number origin-url fork-url
   quit_app; stop_forge
 }
 
-scenario_gone() { # flavour host forge number origin-url fork-url
+scenario_gone() { # flavour host forge number origin-url fork-url -- a closed change request, its head branch gone
   SCENARIO="$1-gone"
   echo "=== $SCENARIO"
   prepare_scenario "$1" gone "$5" "$6"
@@ -488,6 +526,7 @@ scenario_gone() { # flavour host forge number origin-url fork-url
   local NEW="$(dirname "$WT")/$(basename "$WT")-feat"
 
   checkout_and_wait done
+  assert_contains cr_state closed surface change-request read
   assert_contains checkout_detail "read-only: the source branch is gone from the forge" surface change-request read
   [ -d "$NEW" ] || fail "the worktree $NEW was not created"
   [ "$(git -C "$NEW" rev-parse HEAD)" = "$HEAD_SHA" ] || fail "the read-only worktree is not at the head"
@@ -520,6 +559,7 @@ scenario_refusals() { # flavour host forge number origin-url fork-url
   git -C "$WT" remote set-url origin https://ghe.test/other/repo.git
   checkout_and_wait failed
   assert_contains checkout_detail "no remote of this project points at acme/widgets" surface change-request read
+  [ ! -e "$(dirname "$WT")/$(basename "$WT")-feat" ] || fail "the refused checkout created a worktree"
   git -C "$WT" remote set-url origin "$5"
   echo "OK: the project with no matching remote was refused, and its URL restored"
 
@@ -553,17 +593,6 @@ start_forge() { # flavour
   [ "$ready" -eq 1 ] || fail "the fake forge never answered on port $PORT"
 }
 
-make_worktree() { # dir remote-url fetch-url
-  mkdir -p "$1"
-  git -C "$1" init -q -b main
-  git -C "$1" config user.email t@example.com
-  git -C "$1" config user.name Tester
-  git -C "$1" config credential.helper ""
-  git -C "$1" -c commit.gpgSign=false commit -q --allow-empty -m first
-  git -C "$1" remote add origin "$2"
-  git -C "$1" config "url.$3.insteadOf" "$2"
-}
-
 launch_app() { # host [log-name]
   local log="$RUN_DIR/${2:-$SCENARIO-app}.log"
   export SIRIO_SOCKET="$RUN_DIR/$SCENARIO.sock"
@@ -577,7 +606,9 @@ launch_app() { # host [log-name]
   export GH_CONFIG_DIR="$RUN_DIR/gh-$SCENARIO" GLAB_CONFIG_DIR="$RUN_DIR/glab-$SCENARIO"
   mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
   chmod 700 "$GLAB_CONFIG_DIR"
-  unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy || true
+  unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITLAB_TOKEN \
+    GL_TOKEN SIRIO_FORGE_LIVE_GITLAB_TOKEN GH_HOST GITLAB_HOST HTTP_PROXY HTTPS_PROXY \
+    http_proxy https_proxy ALL_PROXY all_proxy || true
   rm -f "$SIRIO_SOCKET"
   if [ "$STATE_ONLY" -eq 1 ]; then
     (cd "$WT" && exec env -u DISPLAY -u WAYLAND_DISPLAY "$BIN" >"$log" 2>&1) &
