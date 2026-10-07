@@ -78,7 +78,7 @@ impl ForgeHub {
         match handoff::decide(&target, &facts) {
             Plan::Refuse(refusal) => Err(refusal.message()),
             Plan::Reuse { worktree, .. } => {
-                let detail = self.sync(repo, &worktree, &target)?;
+                let detail = self.sync(repo, &worktree, &target, &revisions.head_sha)?;
                 Ok(done(worktree, detail))
             }
             Plan::Create { path, branch, start, add_remote } => {
@@ -115,12 +115,15 @@ impl ForgeHub {
                         format!("Created {} on {branch} (read-only: {reason})", name_of(&path))
                     }
                     Start::Existing { set_upstream } => {
-                        sirio_git::create_worktree(repo, &branch, &path, None)
-                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
+                        // The upstream first: git sets it on a branch no
+                        // worktree has checked out, so a failure here leaves
+                        // nothing new behind for a retry to refuse.
                         if let Some(upstream) = set_upstream {
                             sirio_git::set_upstream(repo, &branch, upstream)
                                 .map_err(|error| format!("setting the upstream failed: {error}"))?;
                         }
+                        sirio_git::create_worktree(repo, &branch, &path, None)
+                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
                         let to = target.upstream().unwrap_or_else(|| revisions.head_sha.clone());
                         let moved = sirio_git::fast_forward(&path, &to)
                             .map_err(|error| format!("fast-forwarding failed: {error}"))?;
@@ -194,22 +197,41 @@ impl ForgeHub {
         })
     }
 
-    /// Brings a reused worktree up to its upstream when it is clean and behind.
-    fn sync(&self, repo: &Path, worktree: &Path, target: &Target) -> Result<String, String> {
+    /// Brings a reused worktree up to its upstream (or, for a read-only
+    /// target, to the change request's head) when it is clean and behind.
+    /// Only the branch the worktree has checked out is ever moved, and only
+    /// when it is `target.branch`: a worktree switched elsewhere is left alone.
+    fn sync(&self, repo: &Path, worktree: &Path, target: &Target, head_sha: &str) -> Result<String, String> {
+        let name = name_of(worktree);
+        let on_target = matches!(
+            sirio_project::current_branch(worktree),
+            Ok(Some(ref current)) if *current == target.branch
+        );
         let Some((remote, branch)) = target.remote_and_branch() else {
             let reason = match &target.push {
                 PushTarget::ReadOnly(reason) => reason.message(),
                 _ => "",
             };
-            return Ok(format!("Reused {} (read-only: {reason})", name_of(worktree)));
+            if !on_target {
+                return Ok(format!("Reused {name} (read-only: {reason}){ON_ANOTHER_BRANCH}"));
+            }
+            let moved = sirio_git::fast_forward(worktree, head_sha)
+                .map_err(|error| format!("fast-forwarding failed: {error}"))?;
+            return Ok(format!(
+                "Reused {name} (read-only: {reason}){}",
+                sync_words(&moved, "the change request's head")
+            ));
         };
         self.map_fork_push(repo, target)?;
         sirio_git::fetch_branch(repo, remote, branch, fetch_timeout())
             .map_err(|error| format!("fetching {remote}/{branch} failed: {}", fetch_message(error)))?;
+        if !on_target {
+            return Ok(format!("Reused {name}{ON_ANOTHER_BRANCH}"));
+        }
         let upstream = format!("{remote}/{branch}");
         let moved = sirio_git::fast_forward(worktree, &upstream)
             .map_err(|error| format!("fast-forwarding failed: {error}"))?;
-        Ok(format!("Reused {}{}", name_of(worktree), sync_words(&moved, &upstream)))
+        Ok(format!("Reused {name}{}", sync_words(&moved, &upstream)))
     }
 
     /// A fork's local branch is `<owner>/<branch>`: map it so a plain
@@ -223,6 +245,9 @@ impl ForgeHub {
         Ok(())
     }
 }
+
+/// Named where a reused worktree is not on the change request's branch.
+const ON_ANOTHER_BRANCH: &str = ": it is on another branch, so it was left as it is";
 
 fn sync_words(moved: &FastForward, upstream: &str) -> String {
     match moved {

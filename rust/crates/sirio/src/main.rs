@@ -13619,6 +13619,9 @@ impl SirioWorkspace {
         outcome: Result<forge::CheckoutDone, String>,
         cx: &mut Context<Self>,
     ) {
+        // Before the outcome is read: a step after `git worktree add` can
+        // fail with the worktree already on disk, and it must show up.
+        self.refresh_catalog_project(&project_id, None, cx);
         let done = match outcome {
             Err(reason) => {
                 tab.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Failed(reason), cx));
@@ -13626,7 +13629,6 @@ impl SirioWorkspace {
             }
             Ok(done) => done,
         };
-        self.refresh_catalog_project(&project_id, None, cx);
         // The catalog's own spelling of the path (the sidebar's and
         // `working_directory`'s), which is what the link is looked up by.
         let path = self
