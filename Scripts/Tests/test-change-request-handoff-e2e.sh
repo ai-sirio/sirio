@@ -30,6 +30,9 @@ set -euo pipefail
 #                   plain push from one worktree moves only its own fork branch.
 #   own-fork        the viewer's own fork is origin and the base is upstream: the
 #                   branch is feat, tracking origin/feat, with no sirio- remote.
+#   maint-remote    a maintainer's remote names a contributor's fork while the local
+#                   feat tracks origin/main: the contributor's feat goes on the fork
+#                   path (alice/feat, sirio-alice-101) and the maintainer's feat stays.
 #   fork-readonly   a fork that refuses pushes: a read-only worktree at the
 #                   head commit; when the forge's head moves on, a second
 #                   checkout fast-forwards it; when the fork starts accepting
@@ -658,6 +661,39 @@ scenario_two_forks() { # -- two fork change requests (#101 feat, #102 fix) from 
   [ "$(git -C "$FORK" rev-parse refs/heads/feat)" = "$(git -C "$NEW1" rev-parse HEAD)" ] || fail "a push from the fix worktree moved the fork's feat"
   echo "OK: the fork's feat is unchanged by the fix push"
 
+  echo "a force push from the feat worktree leaves the fork's fix alone, unpushed work on fix included"
+  printf 'unpushed work\n' >>"$NEW2/a.txt"
+  git -C "$NEW2" commit -q -am "unpushed work on the fix request"
+  local WIP=$(git -C "$NEW2" rev-parse HEAD)
+  FIX_BEFORE=$(git -C "$FORK" rev-parse refs/heads/fix)
+  git -C "$NEW1" commit -q --amend -m "amended feat"
+  git -C "$NEW1" push -q --force
+  [ "$(git -C "$FORK" rev-parse refs/heads/feat)" = "$(git -C "$NEW1" rev-parse HEAD)" ] || fail "the force push did not reach the fork's feat"
+  [ "$(git -C "$FORK" rev-parse refs/heads/fix)" = "$FIX_BEFORE" ] || fail "a force push from the feat worktree moved the fork's fix"
+  [ "$(git -C "$NEW2" rev-parse HEAD)" = "$WIP" ] || fail "the unpushed work on fix was lost"
+  echo "OK: the fork's fix is unchanged at $FIX_BEFORE, and the unpushed work at $WIP is kept"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_maint_remote() { # -- a maintainer's remote names a contributor's fork, and the local branch is theirs
+  SCENARIO="github-maint-remote"
+  echo "=== $SCENARIO"
+  prepare_scenario github fork-push https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+  git -C "$WT" fetch -q origin
+  git -C "$WT" branch -q feat main
+  git -C "$WT" branch -q --set-upstream-to=origin/main feat
+  git -C "$WT" remote add alice https://ghe.test/alice/widgets.git
+  open_scenario ghe.test github 101
+  local NEW="$(dirname "$WT")/widgets-alice-feat"
+
+  checkout_and_wait done
+  assert_contains checkout_detail "Created widgets-alice-feat on alice/feat, tracking sirio-alice-101/feat" surface change-request read
+  [ "$(git -C "$WT" rev-parse --abbrev-ref feat@{u})" = origin/main ] || fail "the maintainer's own feat was changed"
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = sirio-alice-101/feat ] || fail "the worktree does not track sirio-alice-101/feat"
+  echo "OK: the contributor's feat is alice/feat, and the maintainer's feat is untouched"
+
   dump_git
   quit_app; stop_forge
 }
@@ -817,6 +853,7 @@ scenario_gone github ghe.test github 101 https://ghe.test/acme/widgets.git https
 scenario_refusals github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
 scenario_two_forks
 scenario_own_fork
+scenario_maint_remote
 
 echo "artifact: $OUT_DIR"
 echo "HANDOFF E2E OK"
