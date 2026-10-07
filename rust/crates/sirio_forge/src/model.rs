@@ -535,9 +535,11 @@ pub struct HeadRepository {
     pub cross_repository: bool,
     /// The source branch still exists on the forge.
     pub branch_exists: bool,
-    /// The viewer may push to the head branch: write access to the head
-    /// repository, or the author lets maintainers push and the viewer may
-    /// write to the change request's repository.
+    /// The viewer may push to the head branch. GitHub: write access to the
+    /// head repository, or `maintainerCanModify` with write access to the
+    /// change request's repository. GitLab: push access to the source
+    /// project, or `allowCollaboration` with push access to the target
+    /// project; a missing target project counts as no access.
     pub can_push: bool,
 }
 

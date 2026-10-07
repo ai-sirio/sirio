@@ -424,7 +424,8 @@ fn head_repository(node: &Value) -> Option<HeadRepository> {
         ssh_url: str_at(source, "/sshUrlToRepo"),
         cross_repository,
         branch_exists: node.pointer("/sourceBranchExists").and_then(Value::as_bool).unwrap_or(true),
-        can_push: bool_at(source, "/userPermissions/pushCode") || bool_at(node, "/allowCollaboration"),
+        can_push: bool_at(source, "/userPermissions/pushCode")
+            || (bool_at(node, "/allowCollaboration") && bool_at(node, "/targetProject/userPermissions/pushCode")),
         project,
     })
 }
