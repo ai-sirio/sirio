@@ -2004,6 +2004,27 @@ impl SessionStore {
         }
     }
 
+    /// Whether any worktree is still linked to this change request. A read
+    /// error answers yes: when it is unknown, nothing is removed.
+    pub fn change_request_remains_linked(&self, reference: &sirio_forge::ChangeRef) -> bool {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return true;
+        };
+        match db.change_request_links_to(
+            forge_word(reference.forge),
+            &reference.host,
+            &reference.project,
+            reference.number,
+        ) {
+            Ok(paths) => !paths.is_empty(),
+            Err(error) => {
+                eprintln!("[session] failed to read the links of {}: {error}", reference.label());
+                true
+            }
+        }
+    }
+
     /// Every worktree linked to this change request.
     pub fn linked_worktrees(&self, reference: &sirio_forge::ChangeRef) -> Vec<PathBuf> {
         let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

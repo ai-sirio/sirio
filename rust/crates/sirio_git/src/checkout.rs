@@ -57,14 +57,23 @@ pub fn fetch_branch(
     }
 }
 
-/// Removes the fork remotes Sirio made for one change request (`sirio-<owner>-<number>`,
-/// see `handoff::fork_remote_name`), with their tracking refs. Any other remote
-/// is left as it is. Returns the names removed.
-pub fn remove_fork_remotes(repo: &Path, number: u64) -> Result<Vec<String>, GitError> {
+/// Removes the fork remotes Sirio made for one change request, with their
+/// tracking refs. A remote is one of them only when its name is
+/// `sirio-<owner>-<number>` (see `handoff::fork_remote_name`) and its single push
+/// mapping is the request's own branch, `refs/heads/<branch>:…`. Any other remote,
+/// including one a user named alike, is left as it is. Returns the names removed.
+pub fn remove_fork_remotes(repo: &Path, number: u64, branch: &str) -> Result<Vec<String>, GitError> {
     let suffix = format!("-{number}");
+    let own_mapping = format!("refs/heads/{branch}:");
     let mut removed = Vec::new();
     for (name, _) in crate::fetch::list_remotes(repo) {
-        if name.starts_with("sirio-") && name.ends_with(&suffix) {
+        if !(name.starts_with("sirio-") && name.ends_with(&suffix)) {
+            continue;
+        }
+        let key = format!("remote.{name}.push");
+        let mappings = git::run_accepting(&["config", "--get-all", &key], repo, &[0, 1])?;
+        let mappings: Vec<String> = mappings.stdout_string().lines().map(|line| line.trim().to_string()).collect();
+        if mappings.len() == 1 && mappings[0].starts_with(&own_mapping) {
             git::run_accepting(&["remote", "remove", &name], repo, &[0])?;
             removed.push(name);
         }
@@ -79,7 +88,10 @@ pub enum RemoteOutcome {
     Conflict { existing: String },
 }
 
-pub fn ensure_remote(repo: &Path, name: &str, url: &str) -> Result<RemoteOutcome, GitError> {
+/// Adds `name` for `url` fetching only `branch`, or confirms it is there. A
+/// remote made for one change request fetches that request's branch alone, not
+/// every branch of the fork.
+pub fn ensure_remote(repo: &Path, name: &str, url: &str, branch: &str) -> Result<RemoteOutcome, GitError> {
     // `name` comes from `handoff::fork_remote_name` and never starts with `-`.
     // The raw configured value, not `get-url`: `get-url` expands
     // `url.<base>.insteadOf`, so a rewritten remote would read back as a
@@ -88,7 +100,7 @@ pub fn ensure_remote(repo: &Path, name: &str, url: &str) -> Result<RemoteOutcome
     let existing = git::run_accepting(&["config", "--get", &key], repo, &[0, 1])?;
     let existing = existing.stdout_string().trim().to_string();
     if existing.is_empty() {
-        git::run_accepting(&["remote", "add", name, url], repo, &[0])?;
+        git::run_accepting(&["remote", "add", "-t", branch, name, url], repo, &[0])?;
         return Ok(RemoteOutcome::Added);
     }
     if existing == url {
@@ -165,7 +177,9 @@ pub fn set_upstream(repo: &Path, branch: &str, upstream: &str) -> Result<(), Git
 /// Makes a plain `git push` from `local` land on `remote_branch` of `remote`.
 /// A fork's local branch is `<owner>/<branch>`, and `push.default=simple`
 /// refuses to push a branch to another name, so the remote carries the
-/// mapping (`remote.<remote>.push`). Added once; other entries are kept.
+/// mapping (`remote.<remote>.push`). The remote is Sirio's own, one per change
+/// request, so the mapping replaces what it had: a renamed branch leaves one
+/// entry, never the old name beside the new.
 pub fn ensure_push_refspec(
     repo: &Path,
     remote: &str,
@@ -182,7 +196,7 @@ pub fn ensure_push_refspec(
     {
         return Ok(());
     }
-    git::run_accepting(&["config", "--add", &key, &refspec], repo, &[0])?;
+    git::run_accepting(&["config", "--replace-all", &key, &refspec], repo, &[0])?;
     Ok(())
 }
 

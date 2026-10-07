@@ -5,7 +5,7 @@ use std::time::Duration;
 use sirio_git::{
     FastForward, FetchError, RemoteOutcome, create_worktree_at, create_worktree_tracking,
     ensure_push_refspec, ensure_remote, fast_forward, fetch_branch, is_ancestor, local_branch,
-    set_upstream, upstream_of, worktree_for_branch,
+    remove_fork_remotes, set_upstream, upstream_of, worktree_for_branch,
 };
 
 struct Scratch(PathBuf);
@@ -88,10 +88,10 @@ fn a_fetch_that_hangs_stops_at_the_timeout() {
 fn a_remote_is_added_once_and_another_url_is_a_conflict() {
     let (_scratch, repo, bare, _feat) = fixture("remote");
     let url = bare.to_str().unwrap();
-    assert_eq!(ensure_remote(&repo, "sirio-alice", url).unwrap(), RemoteOutcome::Added);
-    assert_eq!(ensure_remote(&repo, "sirio-alice", url).unwrap(), RemoteOutcome::AlreadyThere);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", url, "feat").unwrap(), RemoteOutcome::Added);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", url, "feat").unwrap(), RemoteOutcome::AlreadyThere);
     assert_eq!(
-        ensure_remote(&repo, "sirio-alice", "https://elsewhere.example/x.git").unwrap(),
+        ensure_remote(&repo, "sirio-alice", "https://elsewhere.example/x.git", "feat").unwrap(),
         RemoteOutcome::Conflict { existing: url.to_string() }
     );
     assert_eq!(git(&repo, &["remote", "get-url", "sirio-alice"]), url);
@@ -105,10 +105,10 @@ fn a_remote_whose_url_an_insteadof_rule_rewrites_is_still_ours() {
     // A rule that rewrites the prefix of the URL this test passes.
     let rule = format!("url.file://{base}/mirror/.insteadOf");
     git(&repo, &["config", &rule, &format!("{base}/")]);
-    assert_eq!(ensure_remote(&repo, "sirio-alice", url).unwrap(), RemoteOutcome::Added);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", url, "feat").unwrap(), RemoteOutcome::Added);
     // The rule is live: `get-url` now reads back the rewritten URL.
     assert_ne!(git(&repo, &["remote", "get-url", "sirio-alice"]), url);
-    assert_eq!(ensure_remote(&repo, "sirio-alice", url).unwrap(), RemoteOutcome::AlreadyThere);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", url, "feat").unwrap(), RemoteOutcome::AlreadyThere);
     assert_eq!(git(&repo, &["config", "--get-all", "remote.sirio-alice.url"]), url);
 }
 
@@ -153,7 +153,7 @@ fn a_fork_branch_with_another_local_name_pushes_with_a_plain_git_push() {
     let fork = scratch.0.join("fork.git");
     git(&scratch.0, &["clone", "-q", "--bare", scratch.0.join("origin.git").to_str().unwrap(), fork.to_str().unwrap()]);
     git(&repo, &["config", "push.default", "simple"]);
-    assert_eq!(ensure_remote(&repo, "sirio-alice", fork.to_str().unwrap()).unwrap(), RemoteOutcome::Added);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", fork.to_str().unwrap(), "feat").unwrap(), RemoteOutcome::Added);
     fetch_branch(&repo, "sirio-alice", "feat", TIMEOUT).unwrap();
     let path = scratch.0.join("repo-alice-feat");
     create_worktree_tracking(&repo, "alice/feat", &path, "sirio-alice/feat").unwrap();
@@ -236,4 +236,57 @@ fn an_untracked_file_does_not_make_a_worktree_dirty() {
     create_worktree_tracking(&repo, "feat", &path, "origin/feat").unwrap();
     std::fs::write(path.join("notes.md"), "mine\n").unwrap();
     assert_eq!(fast_forward(&path, "origin/feat").unwrap(), FastForward::UpToDate);
+}
+
+#[test]
+fn a_fork_remote_fetches_only_the_branch_it_was_made_for() {
+    let (scratch, repo, _bare, _feat) = fixture("fork-fetch");
+    let fork = scratch.0.join("fork.git");
+    git(&scratch.0, &["clone", "-q", "--bare", scratch.0.join("origin.git").to_str().unwrap(), fork.to_str().unwrap()]);
+    assert_eq!(ensure_remote(&repo, "sirio-alice-101", fork.to_str().unwrap(), "feat").unwrap(), RemoteOutcome::Added);
+    assert_eq!(
+        git(&repo, &["config", "--get-all", "remote.sirio-alice-101.fetch"]),
+        "+refs/heads/feat:refs/remotes/sirio-alice-101/feat"
+    );
+}
+
+#[test]
+fn a_renamed_branch_leaves_its_remote_with_exactly_one_push_mapping() {
+    let (scratch, repo, _bare, _feat) = fixture("rename-map");
+    let fork = scratch.0.join("fork.git");
+    git(&scratch.0, &["clone", "-q", "--bare", scratch.0.join("origin.git").to_str().unwrap(), fork.to_str().unwrap()]);
+    ensure_remote(&repo, "sirio-alice-101", fork.to_str().unwrap(), "feat").unwrap();
+    ensure_push_refspec(&repo, "sirio-alice-101", "alice/feat", "feat").unwrap();
+    // The contributor renamed the branch: the same remote maps the new local name.
+    ensure_push_refspec(&repo, "sirio-alice-101", "alice/feat2", "feat").unwrap();
+    assert_eq!(
+        git(&repo, &["config", "--get-all", "remote.sirio-alice-101.push"]),
+        "refs/heads/alice/feat2:refs/heads/feat"
+    );
+}
+
+#[test]
+fn removing_fork_remotes_takes_only_the_ones_that_map_the_branch() {
+    let (scratch, repo, _bare, _feat) = fixture("remove-fork");
+    let fork = scratch.0.join("fork.git");
+    git(&scratch.0, &["clone", "-q", "--bare", scratch.0.join("origin.git").to_str().unwrap(), fork.to_str().unwrap()]);
+    let url = fork.to_str().unwrap();
+    // #101 (this request), #102 from the same owner, and a remote the user
+    // named like a Sirio one with no mapping at all.
+    ensure_remote(&repo, "sirio-alice-101", url, "feat").unwrap();
+    ensure_push_refspec(&repo, "sirio-alice-101", "alice/feat", "feat").unwrap();
+    ensure_remote(&repo, "sirio-alice-102", url, "fix").unwrap();
+    ensure_push_refspec(&repo, "sirio-alice-102", "alice/fix", "fix").unwrap();
+    git(&repo, &["remote", "add", "sirio-x-101", url]);
+    // A remote of this number whose mapping is another branch's: not this request's.
+    git(&repo, &["remote", "add", "sirio-bob-101", url]);
+    git(&repo, &["config", "--add", "remote.sirio-bob-101.push", "refs/heads/bob/other:refs/heads/other"]);
+
+    let removed = remove_fork_remotes(&repo, 101, "alice/feat").unwrap();
+    assert_eq!(removed, vec!["sirio-alice-101".to_string()]);
+    let remaining: Vec<String> = git(&repo, &["remote"]).lines().map(str::to_string).collect();
+    assert!(remaining.contains(&"sirio-x-101".to_string()), "{remaining:?}");
+    assert!(remaining.contains(&"sirio-bob-101".to_string()), "{remaining:?}");
+    assert!(remaining.contains(&"sirio-alice-102".to_string()), "{remaining:?}");
+    assert!(!remaining.contains(&"sirio-alice-101".to_string()), "{remaining:?}");
 }

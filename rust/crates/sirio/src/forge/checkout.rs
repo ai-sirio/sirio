@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use sirio_forge::{ChangeRef, Forge};
 use sirio_git::{FastForward, FetchError, RemoteOutcome};
 use sirio_ui::forge_source::ChangeRequestSource;
-use sirio_ui::handoff::{self, BranchFacts, Facts, ListedRemote, Plan, PushTarget, Start, Target};
+use sirio_ui::handoff::{self, BranchFacts, Facts, ListedRemote, LocalSource, Plan, PushTarget, Start, Target};
 
 use super::{ForgeHub, choose_remote, fetch_timeout};
 
@@ -71,6 +71,17 @@ impl ForgeHub {
             Forge::GitHub => format!("pr-{}", reference.number),
             Forge::GitLab => format!("mr-{}", reference.number),
         };
+        // The local branch of the source name decides whether the viewer's own
+        // fork may take it (see `handoff::target`).
+        let local = match sirio_git::local_branch(repo, &header.summary.source_branch)
+            .map_err(|error| format!("reading the branch {} failed: {error}", header.summary.source_branch))?
+        {
+            None => LocalSource::Absent,
+            Some(local) => match local.upstream {
+                Some(upstream) => LocalSource::Tracks(format!("{}/{}", upstream.remote, upstream.branch)),
+                None => LocalSource::Untracked,
+            },
+        };
         let target = handoff::target(
             &header.summary.source_branch,
             reference.number,
@@ -78,6 +89,7 @@ impl ForgeHub {
             &every,
             header.head.as_ref(),
             &gone_branch,
+            &local,
         );
 
         // The head commit, through B1's fetch, so ancestry can be judged
@@ -101,7 +113,11 @@ impl ForgeHub {
             }
             Plan::Create { path, branch, start, add_remote } => {
                 if let Some((name, url)) = &add_remote {
-                    match sirio_git::ensure_remote(repo, name, url) {
+                    let fork_branch = match &target.push {
+                        PushTarget::Fork { branch, .. } => branch.as_str(),
+                        _ => "",
+                    };
+                    match sirio_git::ensure_remote(repo, name, url, fork_branch) {
                         Ok(RemoteOutcome::Added | RemoteOutcome::AlreadyThere) => {}
                         Ok(RemoteOutcome::Conflict { existing }) => {
                             return Err(format!("the remote {name} already points at {existing}"));
@@ -256,7 +272,7 @@ impl ForgeHub {
         // its remote is added, fetched, and the branch gets its upstream before
         // the mapping that a plain push relies on is written.
         if let PushTarget::Fork { url, .. } = &target.push {
-            match sirio_git::ensure_remote(repo, remote, url) {
+            match sirio_git::ensure_remote(repo, remote, url, branch) {
                 Ok(RemoteOutcome::Added | RemoteOutcome::AlreadyThere) => {}
                 Ok(RemoteOutcome::Conflict { existing }) => {
                     return Err(format!("the remote {remote} already points at {existing}"));

@@ -8322,10 +8322,10 @@ impl SirioWorkspace {
                 // made for it, with that remote's tracking refs.
                 let link = self.session.change_request_link(path);
                 self.session.drop_change_request_link(path);
-                if let Some((reference, _)) = link
-                    && self.session.linked_worktrees(&reference).is_empty()
+                if let Some((reference, branch)) = link
+                    && !self.session.change_request_remains_linked(&reference)
                     && let Some(project) = self.project_catalog.projects().iter().find(|project| project.id == *project_id)
-                    && let Err(error) = sirio_git::remove_fork_remotes(&project.root_path, reference.number)
+                    && let Err(error) = sirio_git::remove_fork_remotes(&project.root_path, reference.number, &branch)
                 {
                     eprintln!("[sirio] failed to remove the fork remotes of {}: {error}", reference.label());
                 }
@@ -35536,7 +35536,11 @@ done
         // The fork remote of this change request, and the one of another change
         // request from the same owner: removing the first worktree leaves the second.
         git_test(&repo, &["remote", "add", "sirio-alice-101", "https://forge.example/alice/widgets.git"]);
+        git_test(&repo, &["config", "--add", "remote.sirio-alice-101.push", "refs/heads/alice/feat:refs/heads/feat"]);
         git_test(&repo, &["remote", "add", "sirio-alice-102", "https://forge.example/alice/widgets.git"]);
+        git_test(&repo, &["config", "--add", "remote.sirio-alice-102.push", "refs/heads/alice/fix:refs/heads/fix"]);
+        // A remote a user named like a Sirio one, for the same number, that Sirio did not make.
+        git_test(&repo, &["remote", "add", "sirio-x-101", "https://forge.example/x/widgets.git"]);
 
         cx.set_global(Theme::light());
         let workspace = cx.new(|cx| {
@@ -35589,6 +35593,7 @@ done
         let names: Vec<String> = sirio_git::list_remotes(&repo).into_iter().map(|(name, _)| name).collect();
         assert!(!names.iter().any(|name| name == "sirio-alice-101"), "{names:?}");
         assert!(names.iter().any(|name| name == "sirio-alice-102"), "{names:?}");
+        assert!(names.iter().any(|name| name == "sirio-x-101"), "{names:?}");
     }
 
     #[gpui::test]

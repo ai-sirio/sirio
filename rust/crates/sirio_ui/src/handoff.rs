@@ -38,6 +38,18 @@ pub enum PushTarget {
     ReadOnly(ReadOnlyReason),
 }
 
+/// The state of the local branch named after the change request's source
+/// branch, which decides whether the viewer's own fork may take that name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalSource {
+    /// No local branch of that name.
+    Absent,
+    /// A local branch with no upstream.
+    Untracked,
+    /// A local branch tracking `remote/branch`.
+    Tracks(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     /// The local branch.
@@ -73,6 +85,7 @@ pub fn target(
     remotes: &[ListedRemote],
     head: Option<&HeadRepository>,
     gone_branch: &str,
+    local: &LocalSource,
 ) -> Target {
     let Some(head) = head else {
         return Target {
@@ -92,9 +105,20 @@ pub fn target(
     // theirs, so it keeps its name and tracks that remote, as in the same
     // repository. A `sirio-` remote is Sirio's own fork remote for some change
     // request, never the viewer's.
-    let own_fork = remotes
-        .iter()
-        .find(|remote| !remote.name.starts_with("sirio-") && names_head_repository(&remote.url, head));
+    // It is the viewer's branch only when the viewer may push to the head, and
+    // the local branch of that name is free or already theirs: a maintainer's
+    // remote for a contributor's fork, or a local `main` tracking `origin/main`,
+    // takes the fork path instead.
+    let own_fork = remotes.iter().find(|remote| {
+        !remote.name.starts_with("sirio-")
+            && names_head_repository(&remote.url, head)
+            && head.can_push
+            && match local {
+                LocalSource::Absent => true,
+                LocalSource::Untracked => false,
+                LocalSource::Tracks(upstream) => *upstream == format!("{}/{}", remote.name, source_branch),
+            }
+    });
     if let Some(own) = own_fork {
         let push = if head.branch_exists {
             PushTarget::Listed { remote: own.name.clone(), branch: source_branch.to_string() }
@@ -322,7 +346,11 @@ mod tests {
     }
 
     fn target_of(source: &str, head: Option<&HeadRepository>, remotes: &[ListedRemote]) -> Target {
-        target(source, 101, &remotes[0], remotes, head, "pr-101")
+        target_local(source, head, remotes, &LocalSource::Absent)
+    }
+
+    fn target_local(source: &str, head: Option<&HeadRepository>, remotes: &[ListedRemote], local: &LocalSource) -> Target {
+        target(source, 101, &remotes[0], remotes, head, "pr-101", local)
     }
 
     #[test]
@@ -371,7 +399,7 @@ mod tests {
     #[test]
     fn a_deleted_head_repository_takes_the_numbered_name_and_is_read_only() {
         let remotes = [listed("https://f/acme/w.git")];
-        let t = target("feat", 101, &remotes[0], &remotes, None, "pr-101");
+        let t = target("feat", 101, &remotes[0], &remotes, None, "pr-101", &LocalSource::Absent);
         assert_eq!(t.branch, "pr-101");
         assert_eq!(t.push, PushTarget::ReadOnly(ReadOnlyReason::HeadRepositoryGone));
     }
@@ -402,6 +430,51 @@ mod tests {
     }
 
     #[test]
+    fn a_maintainers_remote_naming_a_contributors_fork_is_not_the_own_fork() {
+        // The maintainer's `main` tracks origin/main, so the contributor's `main`
+        // cannot take the bare name: it goes on the fork path as alice/main.
+        let remotes = [
+            listed("https://forge.example/acme/widgets.git"),
+            ListedRemote { name: "alice".into(), url: "https://forge.example/alice/widgets.git".into() },
+        ];
+        let local = LocalSource::Tracks("origin/main".into());
+        let t = target_local("main", Some(&head("alice", true, true, true)), &remotes, &local);
+        assert_eq!(t.branch, "alice/main");
+        assert_eq!(
+            t.push,
+            PushTarget::Fork { remote: "sirio-alice-101".into(), url: "https://forge.example/alice/widgets.git".into(), branch: "main".into() }
+        );
+    }
+
+    #[test]
+    fn an_own_fork_the_viewer_may_not_push_to_is_read_only_on_the_fork_path() {
+        let remotes = [ListedRemote { name: "origin".into(), url: "https://forge.example/alice/widgets.git".into() }];
+        let t = target_local("feat", Some(&head("alice", true, true, false)), &remotes, &LocalSource::Absent);
+        assert_eq!(t.branch, "alice/feat");
+        assert_eq!(t.push, PushTarget::ReadOnly(ReadOnlyReason::ForkRefusesPush));
+    }
+
+    #[test]
+    fn an_own_fork_is_the_push_target_when_the_local_branch_is_absent_or_tracks_it() {
+        let remotes = [ListedRemote { name: "origin".into(), url: "https://forge.example/alice/widgets.git".into() }];
+        let own = head("alice", true, true, true);
+        let absent = target_local("feat", Some(&own), &remotes, &LocalSource::Absent);
+        assert_eq!(absent.branch, "feat");
+        assert_eq!(absent.push, PushTarget::Listed { remote: "origin".into(), branch: "feat".into() });
+        let tracking = target_local("feat", Some(&own), &remotes, &LocalSource::Tracks("origin/feat".into()));
+        assert_eq!(tracking.branch, "feat");
+        assert_eq!(tracking.push, PushTarget::Listed { remote: "origin".into(), branch: "feat".into() });
+    }
+
+    #[test]
+    fn an_own_fork_with_an_untracked_local_branch_of_the_same_name_takes_the_fork_path() {
+        let remotes = [ListedRemote { name: "origin".into(), url: "https://forge.example/alice/widgets.git".into() }];
+        let t = target_local("feat", Some(&head("alice", true, true, true)), &remotes, &LocalSource::Untracked);
+        assert_eq!(t.branch, "alice/feat");
+        assert!(matches!(t.push, PushTarget::Fork { ref remote, .. } if remote == "sirio-alice-101"));
+    }
+
+    #[test]
     fn a_remote_sirio_made_for_another_change_request_is_not_the_viewers_own_fork() {
         // The fork remote of #101 names the same repository; #102 from it must
         // still get its own remote, not reuse #101's.
@@ -409,7 +482,7 @@ mod tests {
             listed("https://forge.example/acme/widgets.git"),
             ListedRemote { name: "sirio-alice-101".into(), url: "https://forge.example/alice/widgets.git".into() },
         ];
-        let t = target("fix", 102, &remotes[0], &remotes, Some(&head("alice", true, true, true)), "pr-102");
+        let t = target("fix", 102, &remotes[0], &remotes, Some(&head("alice", true, true, true)), "pr-102", &LocalSource::Absent);
         assert_eq!(t.branch, "alice/fix");
         assert_eq!(
             t.push,
