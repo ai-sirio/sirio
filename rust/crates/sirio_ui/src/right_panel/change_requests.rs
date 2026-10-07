@@ -421,35 +421,46 @@ impl ChangeRequestList {
         self.card_task = Some(cx.spawn(async move |this, cx| {
             // The branch is read here, not taken from `ready`: `connect`
             // read it once, and the worktree may have switched since.
-            let mut result = cx
+            let (mut result, mut linked_error) = cx
                 .background_spawn(async move {
                     let branch = source.current_branch(&worktree);
                     // A link is read by number first. If that fails, the
-                    // branch lookup below decides, as it always did.
+                    // branch lookup below decides, as it always did; the
+                    // link's error still reaches the rate-limit pause.
                     let linked_result = linked.as_ref().map(|reference| client.summary(reference.number));
-                    if let Some(Ok(summary)) = linked_result {
-                        let create_url = branch
-                            .as_deref()
-                            .map(|branch| client.creation_url(branch))
-                            .unwrap_or_default();
-                        return Ok(Some((Some(summary), create_url, branch)));
+                    let mut linked_error = None;
+                    match linked_result {
+                        Some(Ok(summary)) => {
+                            let create_url = branch
+                                .as_deref()
+                                .map(|branch| client.creation_url(branch))
+                                .unwrap_or_default();
+                            return (Ok(Some((Some(summary), create_url, branch))), None);
+                        }
+                        Some(Err(error)) => linked_error = Some(error),
+                        None => {}
                     }
                     let Some(branch) = branch else {
                         // A detached HEAD has no branch to look up: only a
                         // link can have a card, and its failure is reported.
-                        return match linked_result {
-                            Some(Err(error)) => Err(error),
-                            _ => Ok(None),
+                        let result = match linked_error {
+                            Some(error) => Err(error),
+                            None => Ok(None),
                         };
+                        return (result, None);
                     };
-                    client
+                    let result = client
                         .for_branch(&branch, owner.as_deref())
-                        .map(|found| Some((found, client.creation_url(&branch), Some(branch))))
+                        .map(|found| Some((found, client.creation_url(&branch), Some(branch))));
+                    (result, linked_error)
                 })
                 .await;
             let _ = this.update(cx, |list, cx| {
                 if list.generation != generation {
                     return;
+                }
+                if let Some(error) = &mut linked_error {
+                    list.note_rate_limited(error, cx);
                 }
                 if let Err(error) = &mut result {
                     list.note_rate_limited(error, cx);
@@ -955,7 +966,7 @@ impl ChangeRequestList {
     ) -> Option<AnyElement> {
         let branch = self.card_branch.clone();
         // A detached HEAD has no branch; only a linked change request has a card there.
-        if branch.is_none() && !matches!(self.card, Card::Found(_)) {
+        if branch.is_none() && self.linked.is_none() {
             return None;
         }
         let noun = ready.client.forge().change_noun();
