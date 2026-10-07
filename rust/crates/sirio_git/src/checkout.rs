@@ -57,6 +57,21 @@ pub fn fetch_branch(
     }
 }
 
+/// Removes the fork remotes Sirio made for one change request (`sirio-<owner>-<number>`,
+/// see `handoff::fork_remote_name`), with their tracking refs. Any other remote
+/// is left as it is. Returns the names removed.
+pub fn remove_fork_remotes(repo: &Path, number: u64) -> Result<Vec<String>, GitError> {
+    let suffix = format!("-{number}");
+    let mut removed = Vec::new();
+    for (name, _) in crate::fetch::list_remotes(repo) {
+        if name.starts_with("sirio-") && name.ends_with(&suffix) {
+            git::run_accepting(&["remote", "remove", &name], repo, &[0])?;
+            removed.push(name);
+        }
+    }
+    Ok(removed)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteOutcome {
     Added,

@@ -8317,7 +8317,18 @@ impl SirioWorkspace {
                 let removed_current = paths_name_the_same_document(&self.working_directory, path);
                 let selector = path.to_string_lossy().into_owned();
                 let _ = self.close_workspace(&selector, cx);
+                // The link is read before it is dropped: a change request whose
+                // last linked worktree this was loses the fork remote Sirio
+                // made for it, with that remote's tracking refs.
+                let link = self.session.change_request_link(path);
                 self.session.drop_change_request_link(path);
+                if let Some((reference, _)) = link
+                    && self.session.linked_worktrees(&reference).is_empty()
+                    && let Some(project) = self.project_catalog.projects().iter().find(|project| project.id == *project_id)
+                    && let Err(error) = sirio_git::remove_fork_remotes(&project.root_path, reference.number)
+                {
+                    eprintln!("[sirio] failed to remove the fork remotes of {}: {error}", reference.label());
+                }
                 self.refresh_catalog_project(project_id, Some(path), cx);
 
                 if removed_current {
