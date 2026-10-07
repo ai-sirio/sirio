@@ -90,8 +90,12 @@ pub fn target(
     }
     // The viewer's own fork, already a remote (origin, usually): the branch is
     // theirs, so it keeps its name and tracks that remote, as in the same
-    // repository.
-    if let Some(own) = remotes.iter().find(|remote| names_head_repository(&remote.url, head)) {
+    // repository. A `sirio-` remote is Sirio's own fork remote for some change
+    // request, never the viewer's.
+    let own_fork = remotes
+        .iter()
+        .find(|remote| !remote.name.starts_with("sirio-") && names_head_repository(&remote.url, head));
+    if let Some(own) = own_fork {
         let push = if head.branch_exists {
             PushTarget::Listed { remote: own.name.clone(), branch: source_branch.to_string() }
         } else {
@@ -395,6 +399,22 @@ mod tests {
         assert_eq!(own.upstream().as_deref(), Some("origin/feat"));
         let gone = target_of("feat", Some(&head("alice", true, false, true)), &remotes);
         assert_eq!((gone.branch.as_str(), &gone.push), ("feat", &PushTarget::ReadOnly(ReadOnlyReason::BranchGone)));
+    }
+
+    #[test]
+    fn a_remote_sirio_made_for_another_change_request_is_not_the_viewers_own_fork() {
+        // The fork remote of #101 names the same repository; #102 from it must
+        // still get its own remote, not reuse #101's.
+        let remotes = [
+            listed("https://forge.example/acme/widgets.git"),
+            ListedRemote { name: "sirio-alice-101".into(), url: "https://forge.example/alice/widgets.git".into() },
+        ];
+        let t = target("fix", 102, &remotes[0], &remotes, Some(&head("alice", true, true, true)), "pr-102");
+        assert_eq!(t.branch, "alice/fix");
+        assert_eq!(
+            t.push,
+            PushTarget::Fork { remote: "sirio-alice-102".into(), url: "https://forge.example/alice/widgets.git".into(), branch: "fix".into() }
+        );
     }
 
     #[test]
