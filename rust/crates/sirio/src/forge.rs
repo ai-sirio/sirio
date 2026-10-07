@@ -343,12 +343,21 @@ impl ChangeRequestSource for ForgeHub {
             Resolution::Ready { forge, means } => {
                 let origin = origin.as_deref().and_then(parse_remote_url);
                 let source_owner = source_owner(forge, &target, origin.as_ref());
+                let linked = self
+                    .settings
+                    .change_request_link(worktree)
+                    .filter(|reference| {
+                        reference.forge == forge
+                            && reference.host == target.host
+                            && reference.project == target.project
+                    });
                 match self.client(forge, means, target) {
                     Ok(client) => Connection::Ready(ReadyConnection {
                         client,
                         means,
                         branch: self.current_branch(worktree),
                         source_owner,
+                        linked,
                     }),
                     Err(connection) => connection,
                 }

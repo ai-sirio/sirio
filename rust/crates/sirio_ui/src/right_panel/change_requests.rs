@@ -112,6 +112,9 @@ pub(crate) struct ChangeRequestList {
     /// The branch the card is about. `connect` reads it once and the panel
     /// stays open across `git switch`, so every card load reads it again.
     pub(crate) card_branch: Option<String>,
+    /// The change request this worktree was checked out from; the card reads
+    /// it first. Set by every card load.
+    pub(crate) linked: Option<ChangeRef>,
     to_review: Option<u32>,
     /// A rate limit's reset: no request before it (spec §9).
     paused_until: Option<i64>,
@@ -146,6 +149,7 @@ impl ChangeRequestList {
             list_error: None,
             card: Card::Hidden,
             card_branch: None,
+            linked: None,
             to_review: None,
             paused_until: None,
             search: None,
@@ -410,6 +414,8 @@ impl ChangeRequestList {
         }
         let client = ready.client;
         let owner = ready.source_owner;
+        let linked = ready.linked;
+        self.linked = linked.clone();
         let worktree = self.worktree.clone();
         let generation = self.generation;
         self.card_task = Some(cx.spawn(async move |this, cx| {
@@ -417,12 +423,28 @@ impl ChangeRequestList {
             // read it once, and the worktree may have switched since.
             let mut result = cx
                 .background_spawn(async move {
-                    let Some(branch) = source.current_branch(&worktree) else {
-                        return Ok(None);
+                    let branch = source.current_branch(&worktree);
+                    // A link is read by number first. If that fails, the
+                    // branch lookup below decides, as it always did.
+                    let linked_result = linked.as_ref().map(|reference| client.summary(reference.number));
+                    if let Some(Ok(summary)) = linked_result {
+                        let create_url = branch
+                            .as_deref()
+                            .map(|branch| client.creation_url(branch))
+                            .unwrap_or_default();
+                        return Ok(Some((Some(summary), create_url, branch)));
+                    }
+                    let Some(branch) = branch else {
+                        // A detached HEAD has no branch to look up: only a
+                        // link can have a card, and its failure is reported.
+                        return match linked_result {
+                            Some(Err(error)) => Err(error),
+                            _ => Ok(None),
+                        };
                     };
                     client
                         .for_branch(&branch, owner.as_deref())
-                        .map(|found| Some((found, client.creation_url(&branch), branch)))
+                        .map(|found| Some((found, client.creation_url(&branch), Some(branch))))
                 })
                 .await;
             let _ = this.update(cx, |list, cx| {
@@ -438,10 +460,13 @@ impl ChangeRequestList {
                         Card::Hidden
                     }
                     Ok(Some((found, create_url, branch))) => {
-                        list.card_branch = Some(branch.clone());
-                        match found {
-                            Some(found) => Card::Found(found),
-                            None => Card::Missing { branch, create_url },
+                        list.card_branch = branch.clone();
+                        match (found, branch) {
+                            (Some(found), _) => Card::Found(found),
+                            (None, Some(branch)) => Card::Missing { branch, create_url },
+                            // Only a link is found without a branch, so a
+                            // branchless result is always a summary.
+                            (None, None) => Card::Hidden,
                         }
                     }
                     Err(error) => Card::Failed(error),
@@ -715,6 +740,12 @@ impl ChangeRequestList {
             ),
             ("card".to_string(), card),
             (
+                "linked".to_string(),
+                self.linked
+                    .as_ref()
+                    .map_or("-".to_string(), |reference| reference.label()),
+            ),
+            (
                 "toReview".to_string(),
                 self.to_review
                     .map_or("-".to_string(), |count| count.to_string()),
@@ -922,7 +953,11 @@ impl ChangeRequestList {
         theme: &Theme,
         entity: &Entity<Self>,
     ) -> Option<AnyElement> {
-        let branch = self.card_branch.clone()?;
+        let branch = self.card_branch.clone();
+        // A detached HEAD has no branch; only a linked change request has a card there.
+        if branch.is_none() && !matches!(self.card, Card::Found(_)) {
+            return None;
+        }
         let noun = ready.client.forge().change_noun();
         let body: AnyElement = match &self.card {
             Card::Found(found) => div()
@@ -994,7 +1029,10 @@ impl ChangeRequestList {
                         .text_size(theme.typography.caption2)
                         .text_color(theme.ely.fg_subtle)
                         .child(EIcon::new(IconName::GitBranch).size(EIconSize::Xs).color(theme.ely.fg_subtle))
-                        .child(format!("THIS WORKTREE · {branch}")),
+                        .child(match &branch {
+                            Some(branch) => format!("THIS WORKTREE · {branch}"),
+                            None => "THIS WORKTREE".to_string(),
+                        }),
                 )
                 .child(body)
                 .into_any_element(),
