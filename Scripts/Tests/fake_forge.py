@@ -732,6 +732,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name += ".page2"
         if variables.get("number") == 404 or variables.get("iid") == "404":
             name = "NotFound"
+        # A second change request is answered by its own fixture
+        # (`<Operation>.n<number>.json`); any other number gets the plain one.
+        number = variables.get("number", variables.get("iid"))
+        if name != "NotFound" and number is not None and f"{name}.n{number}" in self.fixture_files.get(self.flavor, {}):
+            name = f"{name}.n{number}"
         path = self.fixture_for(name)
         if path is None:
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})

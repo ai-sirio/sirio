@@ -6,7 +6,7 @@ set -euo pipefail
 # real, isolated Sirio against the loopback fake forge
 # (Scripts/Tests/fake_forge.py) and real local git repositories, driven over
 # the control socket. The forge's git side is a bare repository per host
-# (origin) and one per fork (sirio-<owner>), reached through insteadOf rewrites
+# (origin) and one per fork (sirio-<owner>-<number>), reached through insteadOf rewrites
 # of the project's remote URLs, so nothing leaves the machine.
 #
 # Scenarios, each for GitHub and GitLab where the forge allows it:
@@ -17,19 +17,30 @@ set -euo pipefail
 #                   second checkout fast-forwards a clean worktree to a commit
 #                   pushed meanwhile (the forge's head moves with each push),
 #                   refuses a dirty one, leaves a worktree switched to another
-#                   branch alone, and recreates a worktree whose folder was
-#                   removed (the link is dropped).
-#   fork-push       a fork that accepts pushes: a worktree on <owner>/feat with
-#                   its own remote; a push from it lands on the fork's branch,
-#                   and origin has no such branch.
+#                   branch alone (its link no longer shows the change request),
+#                   leaves a detached one alone, and recreates a worktree whose
+#                   folder was deleted with rm -rf (git still lists it).
+#   fork-push       a fork that accepts pushes (GitHub: the head is read-only to
+#                   the viewer, the base is writable and maintainerCanModify is
+#                   set): a worktree on <owner>/feat with its own remote; a push
+#                   from it lands on the fork's branch, and origin has no such
+#                   branch.
+#   two-forks       two fork change requests (#101 feat, #102 fix) from one owner:
+#                   each has its own remote with exactly one push mapping, and a
+#                   plain push from one worktree moves only its own fork branch.
+#   own-fork        the viewer's own fork is origin and the base is upstream: the
+#                   branch is feat, tracking origin/feat, with no sirio- remote.
 #   fork-readonly   a fork that refuses pushes: a read-only worktree at the
 #                   head commit; when the forge's head moves on, a second
-#                   checkout fast-forwards it. GitLab's variant has allowCollaboration
+#                   checkout fast-forwards it; when the fork starts accepting
+#                   pushes, the same worktree gets its remote, upstream and one
+#                   push mapping. GitLab's variant has allowCollaboration
 #                   true and the target's pushCode false, so only the stricter rule
 #                   makes it read-only.
-#   gone            the source branch is gone from the forge and the change request
-#                   is CLOSED (spec §10): the checkout still completes, read-only at
-#                   the head, because refs/pull/N/head survives a closed request.
+#   gone            the source repository is gone and the change request is CLOSED
+#                   (spec §10): the checkout still completes, read-only at the head,
+#                   on the local branch pr-101, because refs/pull/N/head survives a
+#                   closed request.
 #   refusals        a branch that points at other commits, a project with no remote
 #                   for the forge, and a second checkout while one runs.
 #
@@ -246,19 +257,23 @@ if flavour == "github":
     def patch(node):
         node["baseRefOid"], node["headRefOid"] = base, head
         node["headRefName"] = "feat"
-        node["headRepositoryOwner"] = {"login": owner}
         node["isCrossRepository"] = cross
         node["maintainerCanModify"] = kind == "fork-push"
         node["headRef"] = None if kind == "gone" else {"id": "REF_1"}
-        # A closed request whose head branch was deleted (spec §10): the checkout
-        # still works, because refs/pull/N/head survives the close.
-        if kind == "gone":
+        # A closed request whose head repository was deleted (spec §10): the
+        # checkout still works, because refs/pull/N/head survives the close.
+        # The forge then drops the head owner with the repository.
+        gone = kind == "gone"
+        if gone:
             node["state"] = "CLOSED"
-        node["headRepository"] = {
+        node["headRepositoryOwner"] = None if gone else {"login": owner}
+        # The viewer reads the head fork; a maintainer's write comes from
+        # maintainerCanModify and the base's WRITE, which fork-push relies on.
+        node["headRepository"] = None if gone else {
             "nameWithOwner": f"{owner}/widgets",
             "url": f"https://ghe.test/{owner}/widgets",
             "sshUrl": f"git@ghe.test:{owner}/widgets.git",
-            "viewerPermission": "WRITE" if kind in ("same", "fork-push") else "READ",
+            "viewerPermission": "WRITE" if kind == "same" else "READ",
         }
     for name in ("ChangeRequestHeader", "ChangeRequestByNumber"):
         data = load(f"github/{name}.json")
@@ -313,6 +328,7 @@ prepare_scenario() { # flavour head-kind origin-url fork-url -- repos, fixtures,
   build_repos "$1" "$2"
   make_next_head "$1"
   render_fixtures "$1" "$2" "$(owner_of "$1" "$2")" "$BASE" "$HEAD_SHA" "$NEXT_HEAD"
+  if [ "${SECOND_CHANGE_REQUEST:-0}" = 1 ]; then add_second_change_request; fi
   start_forge "$1"
   local project=widgets
   [ "$1" = gitlab ] && project=app
@@ -324,11 +340,51 @@ open_scenario() { # host forge number -- the app, connected and on the change re
   connect_and_open "$1" "$2" "$3"
 }
 
+# add_second_change_request -- a second fork change request (#102, head branch fix)
+# from the same owner: the fork's fix branch and the forge's pull ref for #102.
+add_second_change_request() {
+  FIX_SHA=$(git -C "$SRC" commit-tree "$(git -C "$SRC" rev-parse "$BASE^{tree}")" -p "$BASE" -m "fix the sidebar")
+  git -C "$SRC" push -q "$FORK" "$FIX_SHA:refs/heads/fix"
+  git -C "$SRC" push -q "$ORIGIN" "$FIX_SHA:refs/pull/102/head"
+  python3 - "$FIXTURES_DIR" "$FIX_SHA" <<'PY'
+import json, sys
+root, sha = sys.argv[1:3]
+for name in ("ChangeRequestHeader", "ChangeRequestByNumber"):
+    data = json.load(open(f"{root}/github/{name}.json"))
+    node = data["data"]["repository"]["pullRequest"]
+    node.update(number=102, url="https://ghe.test/acme/widgets/pull/102", title="Fix the sidebar",
+                headRefName="fix", headRefOid=sha)
+    json.dump(data, open(f"{root}/github/{name}.n102.json", "w"))
+PY
+}
+
+# flip_fork_to_pushable flavour -- the fork starts accepting pushes: every header
+# fixture, the after-push overlays included (a push served before the flip),
+# now grants the maintainer write (GitHub maintainerCanModify, GitLab the target's
+# pushCode). Read per request, so the next checkout sees it.
+flip_fork_to_pushable() {
+  python3 - "$1" "$FIXTURES_DIR" <<'PY'
+import json, os, sys
+flavour, root = sys.argv[1:3]
+dir_name, prefixes = ("github", ("ChangeRequestHeader", "ChangeRequestByNumber")) if flavour == "github" else ("gitlab", ("MergeRequestHeader", "MergeRequestByNumber"))
+for entry in sorted(os.listdir(f"{root}/{dir_name}")):
+    if not entry.startswith(prefixes) or not entry.endswith(".json"):
+        continue
+    path = f"{root}/{dir_name}/{entry}"
+    data = json.load(open(path))
+    if flavour == "github":
+        data["data"]["repository"]["pullRequest"]["maintainerCanModify"] = True
+    else:
+        data["data"]["project"]["mergeRequest"]["targetProject"]["userPermissions"]["pushCode"] = True
+    json.dump(data, open(path, "w"))
+PY
+}
+
 label_of() { if [ "$1" = gitlab ]; then echo '!201'; else echo '#101'; fi; }
 
 # The fork's branch, remote and folder name for flavour (the owner path differs).
 fork_branch_of() { if [ "$1" = gitlab ]; then echo 'forks/alice/feat'; else echo 'alice/feat'; fi; }
-fork_remote_of() { if [ "$1" = gitlab ]; then echo 'sirio-forks-alice'; else echo 'sirio-alice'; fi; }
+fork_remote_of() { if [ "$1" = gitlab ]; then echo 'sirio-forks-alice-201'; else echo 'sirio-alice-101'; fi; }
 fork_dir_of() { if [ "$1" = gitlab ]; then echo 'app-forks-alice-feat'; else echo 'widgets-alice-feat'; fi; }
 
 checkout_and_wait() { # expected-state (done|failed)
@@ -442,14 +498,24 @@ scenario_same() { # flavour host forge number origin-url fork-url
   printf 'other\n' >"$NEW/other.txt"
   git -C "$NEW" add other.txt; git -C "$NEW" commit -q -m "work on other"
   OTHER=$(git -C "$NEW" rev-parse HEAD)
+  echo "link: a linked worktree switched to another branch no longer shows the change request"
+  ctl surface change-requests show >/dev/null
+  wait_for linked "-" surface change-requests read
   checkout_and_wait done
   assert_contains checkout_detail "it is on another branch, so it was left as it is" surface change-request read
   [ "$(git -C "$NEW" rev-parse other)" = "$OTHER" ] || fail "the other branch moved"
   echo "OK: the other branch did not move"
   git -C "$NEW" checkout -q feat
 
-  echo "stale link: a link whose folder was removed is dropped, and the worktree is created again"
-  git -C "$WT" worktree remove --force "$NEW"
+  echo "detached: a worktree with a detached HEAD is left alone, and says so"
+  git -C "$NEW" checkout -q --detach
+  checkout_and_wait done
+  assert_contains checkout_detail "it is on a detached HEAD, so it was left as it is" surface change-request read
+  git -C "$NEW" checkout -q feat
+  echo "OK: the detached worktree was left alone"
+
+  echo "stale folder: a worktree whose folder was deleted outside git is forgotten, and created again"
+  rm -rf "$NEW"
   checkout_and_wait done
   assert_contains checkout_detail "Created" surface change-request read
   [ -d "$NEW" ] || fail "the worktree was not created again"
@@ -474,7 +540,8 @@ scenario_fork_push() { # flavour host forge number origin-url fork-url
   [ "$(git -C "$NEW" rev-parse --abbrev-ref HEAD)" = "$branch" ] || fail "the worktree is not on $branch"
   [ "$(git -C "$WT" config --get "remote.$remote.url")" = "$6" ] || fail "the remote $remote is not the fork"
   [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = "$remote/feat" ] || fail "the upstream is not $remote/feat"
-  echo "OK: $(basename "$NEW") is on $branch, pushing to $remote"
+  [ "$(git -C "$WT" config --get-all "remote.$remote.push" | wc -l)" -eq 1 ] || fail "$remote does not carry exactly one push mapping"
+  echo "OK: $(basename "$NEW") is on $branch, pushing to $remote, with one push mapping"
 
   printf 'from the fork worktree\n' >>"$NEW/a.txt"
   git -C "$NEW" commit -q -am "from the fork worktree"
@@ -514,6 +581,14 @@ scenario_fork_readonly() { # flavour host forge number origin-url fork-url
   [ "$(git -C "$NEW" rev-parse HEAD)" = "$NEXT_HEAD" ] || fail "the read-only worktree did not follow the head"
   echo "OK: the read-only worktree is at $NEXT_HEAD"
 
+  echo "the fork accepts pushes now: the same worktree gets its remote, upstream and one push mapping"
+  flip_fork_to_pushable "$1"
+  checkout_and_wait done
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = "$remote/feat" ] || fail "the reused worktree does not track $remote/feat"
+  [ "$(git -C "$WT" config --get "remote.$remote.url")" = "$6" ] || fail "the remote $remote is not the fork after the flip"
+  [ "$(git -C "$WT" config --get-all "remote.$remote.push" | wc -l)" -eq 1 ] || fail "$remote does not carry exactly one push mapping after the flip"
+  echo "OK: the reused worktree tracks $remote/feat with one push mapping"
+
   dump_git
   quit_app; stop_forge
 }
@@ -523,14 +598,91 @@ scenario_gone() { # flavour host forge number origin-url fork-url -- a closed ch
   echo "=== $SCENARIO"
   prepare_scenario "$1" gone "$5" "$6"
   open_scenario "$2" "$3" "$4"
-  local NEW="$(dirname "$WT")/$(basename "$WT")-feat"
+  local NEW="$(dirname "$WT")/$(basename "$WT")-pr-101"
 
   checkout_and_wait done
   assert_contains cr_state closed surface change-request read
-  assert_contains checkout_detail "read-only: the source branch is gone from the forge" surface change-request read
+  assert_contains checkout_detail "read-only: the source repository is gone" surface change-request read
+  git -C "$WT" rev-parse --verify --quiet refs/heads/pr-101 >/dev/null || fail "the local branch pr-101 was not made"
+  echo "OK: the local branch is pr-101"
   [ -d "$NEW" ] || fail "the worktree $NEW was not created"
   [ "$(git -C "$NEW" rev-parse HEAD)" = "$HEAD_SHA" ] || fail "the read-only worktree is not at the head"
   echo "OK: $(basename "$NEW") is read-only at the head"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_two_forks() { # -- two fork change requests (#101 feat, #102 fix) from one owner, GitHub
+  SCENARIO="github-two-forks"
+  echo "=== $SCENARIO"
+  local NEW1 NEW2 FIX_BEFORE
+  SECOND_CHANGE_REQUEST=1
+  prepare_scenario github fork-push https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+  SECOND_CHANGE_REQUEST=0
+  open_scenario ghe.test github 101
+  NEW1="$(dirname "$WT")/widgets-alice-feat"
+  NEW2="$(dirname "$WT")/widgets-alice-fix"
+
+  checkout_and_wait done
+  [ -d "$NEW1" ] || fail "the worktree $NEW1 was not created"
+  # The checkout selected the new worktree, and the view connects to that one.
+  ctl surface change-requests show >/dev/null
+  wait_for state ready surface change-requests read
+  ctl surface change-request open 102
+  wait_for state loaded surface change-request read
+  assert_contains label "#102" surface change-request read
+  checkout_and_wait done
+  [ -d "$NEW2" ] || fail "the worktree $NEW2 was not created"
+  [ "$(git -C "$NEW2" rev-parse --abbrev-ref HEAD)" = alice/fix ] || fail "the second worktree is not on alice/fix"
+  [ "$(git -C "$WT" config --get-all remote.sirio-alice-101.push)" = "refs/heads/alice/feat:refs/heads/feat" ] || fail "remote sirio-alice-101 has the wrong push mapping"
+  [ "$(git -C "$WT" config --get-all remote.sirio-alice-102.push)" = "refs/heads/alice/fix:refs/heads/fix" ] || fail "remote sirio-alice-102 has the wrong push mapping"
+  [ "$(git -C "$WT" config --get-all remote.sirio-alice-101.push | wc -l)" -eq 1 ] || fail "sirio-alice-101 carries more than one push mapping"
+  [ "$(git -C "$WT" config --get-all remote.sirio-alice-102.push | wc -l)" -eq 1 ] || fail "sirio-alice-102 carries more than one push mapping"
+  echo "OK: each fork remote carries exactly one push mapping, for its own branch"
+
+  echo "a plain push from the feat worktree moves only the fork's feat"
+  FIX_BEFORE=$(git -C "$FORK" rev-parse refs/heads/fix)
+  printf 'from the feat worktree\n' >>"$NEW1/a.txt"
+  git -C "$NEW1" commit -q -am "from the feat worktree"
+  git -C "$NEW1" push -q
+  [ "$(git -C "$FORK" rev-parse refs/heads/feat)" = "$(git -C "$NEW1" rev-parse HEAD)" ] || fail "the push did not reach the fork's feat"
+  [ "$(git -C "$FORK" rev-parse refs/heads/fix)" = "$FIX_BEFORE" ] || fail "a push from the feat worktree moved the fork's fix"
+  echo "OK: the fork's fix is unchanged at $FIX_BEFORE"
+
+  echo "a plain push from the fix worktree moves only the fork's fix"
+  printf 'from the fix worktree\n' >>"$NEW2/a.txt"
+  git -C "$NEW2" commit -q -am "from the fix worktree"
+  git -C "$NEW2" push -q
+  [ "$(git -C "$FORK" rev-parse refs/heads/fix)" = "$(git -C "$NEW2" rev-parse HEAD)" ] || fail "the push did not reach the fork's fix"
+  [ "$(git -C "$FORK" rev-parse refs/heads/feat)" = "$(git -C "$NEW1" rev-parse HEAD)" ] || fail "a push from the fix worktree moved the fork's feat"
+  echo "OK: the fork's feat is unchanged by the fix push"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_own_fork() { # -- the viewer's own fork is origin, the base repository is upstream
+  SCENARIO="github-own-fork"
+  echo "=== $SCENARIO"
+  prepare_scenario github fork-push https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+  git -C "$WT" remote rename origin upstream
+  git -C "$WT" remote add origin https://ghe.test/alice/widgets.git
+  open_scenario ghe.test github 101
+  local NEW="$(dirname "$WT")/widgets-feat"
+
+  checkout_and_wait done
+  [ -d "$NEW" ] || fail "the worktree $NEW was not created"
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref HEAD)" = feat ] || fail "the worktree is not on feat"
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = origin/feat ] || fail "the branch does not track origin/feat"
+  [ -z "$(git -C "$WT" remote | grep '^sirio-' || true)" ] || fail "a sirio- remote was made for the viewer's own fork"
+  echo "OK: feat tracks origin/feat, and no sirio- remote was made"
+
+  printf 'from the own fork\n' >>"$NEW/a.txt"
+  git -C "$NEW" commit -q -am "from the own fork"
+  git -C "$NEW" push -q
+  [ "$(git -C "$FORK" rev-parse refs/heads/feat)" = "$(git -C "$NEW" rev-parse HEAD)" ] || fail "the push did not reach the fork's feat"
+  echo "OK: a push from the worktree lands on the own fork's feat"
 
   dump_git
   quit_app; stop_forge
@@ -549,7 +701,7 @@ scenario_refusals() { # flavour host forge number origin-url fork-url
 
   echo "collision: a local feat at other commits is refused, and nothing is created"
   checkout_and_wait failed
-  assert_contains checkout_detail "points at other commits" surface change-request read
+  assert_contains checkout_detail "has commits the change request does not" surface change-request read
   [ ! -e "$NEW" ] || fail "the refused checkout created $NEW"
   capture "checkout-$1-refused"
   git -C "$WT" branch -D feat >/dev/null
@@ -663,6 +815,8 @@ scenario_fork_readonly github ghe.test github 101 https://ghe.test/acme/widgets.
 scenario_fork_readonly gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git https://gitlab.test/forks/alice/app.git
 scenario_gone github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
 scenario_refusals github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+scenario_two_forks
+scenario_own_fork
 
 echo "artifact: $OUT_DIR"
 echo "HANDOFF E2E OK"
