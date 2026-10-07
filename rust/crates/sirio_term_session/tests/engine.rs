@@ -333,6 +333,7 @@ fn input_after_observed_exit_returns_exited() {
 fn input_after_owner_shutdown_returns_gone() {
     let session = Session::spawn(spec("pane-1", "sleep 30"), mpsc::channel().0).unwrap();
     session.close();
+    assert_eq!(session.input(b"late input".to_vec()), Err(InputError::Gone));
 }
 
 #[cfg(unix)]
