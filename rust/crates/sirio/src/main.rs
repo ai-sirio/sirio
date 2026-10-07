@@ -22702,44 +22702,110 @@ struct HostConnection(#[allow(dead_code)] Option<sirio_host_client::HostHandle>)
 impl gpui::Global for HostConnection {}
 
 /// The app's session factory: every terminal opens through the host.
+///
+/// Opening never touches the socket on the calling (GPUI) thread. The first
+/// `open` for an id records it as in flight, starts a `sirio-host-open`
+/// worker doing the blocking work (the recreate close-and-wait included,
+/// then `attach_or_create`), and answers `Pending`. When the worker finishes
+/// it stores the result in the id's slot and wakes the views: a `cx.spawn`
+/// task installed with the factory re-sets `SessionFactoryGlobal` (the same
+/// `Arc`), which is what retries every `Connecting` view (Task 9). The next
+/// `open` for that id takes the stored result out of the slot — a `Linked`
+/// link is handed out once, never to two views.
 struct HostSessions {
     client: sirio_host_client::TermClient,
     reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+    slots: Arc<Mutex<HashMap<String, HostOpenSlot>>>,
+    wake: futures::channel::mpsc::UnboundedSender<()>,
+}
+
+enum HostOpenSlot {
+    InFlight,
+    Ready(Result<Box<dyn sirio_terminal::SessionLink>, String>),
 }
 
 impl SessionFactory for HostSessions {
     fn open(&self, request: OpenRequest) -> OpenOutcome {
-        // RESTART RACE (Task 9 review): `restart` queues `Shutdown` and
-        // re-opens under the same id at once; with `HostLink` that can attach
-        // to the still-listed dying session. When restarting, close
-        // synchronously (wait for `term.close` to be answered, then for the id
-        // to leave `term.list`) before re-creating under the same id.
-        if request.recreate {
-            let _ = self.client.close(&request.session_id);
-            let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(5);
-            while start.elapsed() < timeout {
-                match self.client.list() {
-                    Ok(listed)
-                        if listed
-                            .sessions
-                            .iter()
-                            .any(|s| s.session_id == request.session_id) =>
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    _ => break,
-                }
+        let id = request.session_id.clone();
+        match self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id)
+        {
+            Some(HostOpenSlot::Ready(Ok(link))) => return OpenOutcome::Linked(link),
+            Some(HostOpenSlot::Ready(Err(reason))) => return OpenOutcome::Failed(reason),
+            Some(HostOpenSlot::InFlight) => {
+                self.slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id, HostOpenSlot::InFlight);
+                return OpenOutcome::Pending;
             }
+            None => {}
         }
-        match HostLink::attach_or_create_with_reconnect(
-            self.client.clone(),
-            &request,
-            Arc::clone(&self.reconnect),
-        ) {
-            Ok(link) => OpenOutcome::Linked(Box::new(link)),
-            Err(reason) => OpenOutcome::Failed(reason),
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), HostOpenSlot::InFlight);
+        let client = self.client.clone();
+        let reconnect = Arc::clone(&self.reconnect);
+        let slots = Arc::clone(&self.slots);
+        let worker_slots = Arc::clone(&slots);
+        let wake = self.wake.clone();
+        if std::thread::Builder::new()
+            .name("sirio-host-open".into())
+            .spawn(move || {
+                // Blocking host work stays off the GPUI thread (SP1 §7): the
+                // recreate close-and-wait and the attach-or-create round trips
+                // all run here.
+                if request.recreate {
+                    // RESTART RACE (Task 9 review): `restart` queues
+                    // `Shutdown` and re-opens under the same id at once; with
+                    // `HostLink` that can attach to the still-listed dying
+                    // session. Close synchronously (wait for `term.close` to
+                    // be answered, then for the id to leave `term.list`)
+                    // before re-creating under the same id.
+                    let _ = client.close(&request.session_id);
+                    let start = std::time::Instant::now();
+                    let timeout = std::time::Duration::from_secs(5);
+                    while start.elapsed() < timeout {
+                        match client.list() {
+                            Ok(listed)
+                                if listed.sessions.iter().any(|s| {
+                                    s.session_id == request.session_id
+                                }) =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                let result: Result<Box<dyn sirio_terminal::SessionLink>, String> =
+                    match HostLink::attach_or_create_with_reconnect(
+                        client,
+                        &request,
+                        reconnect,
+                    ) {
+                        Ok(link) => Ok(Box::new(link)),
+                        Err(reason) => Err(reason),
+                    };
+                slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(request.session_id.clone(), HostOpenSlot::Ready(result));
+                let _ = wake.unbounded_send(());
+            })
+            .is_err()
+        {
+            worker_slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            return OpenOutcome::Failed("could not start the session open".to_string());
         }
+        OpenOutcome::Pending
     }
 }
 
@@ -22810,7 +22876,21 @@ fn ensure_host_in_background(
         // sessions in SP1, and holding it would keep it from idling out
         // (spec §5.6).
         handle.previous = None;
-        Ok((handle, line))
+        // Blocking host work stays off the GPUI thread (SP1 §7): the
+        // terminal client and the single startup `term.list` (floor +
+        // orphans) are resolved here, on the ensure worker. The UI thread
+        // below only installs the factory and applies the listed sessions.
+        let term_data = handle.term().map(|client| {
+            let reconnect: Arc<
+                dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync,
+            > = handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
+            let sessions = client
+                .list()
+                .map(|list| list.sessions)
+                .unwrap_or_default();
+            (client, reconnect, sessions)
+        });
+        Ok((handle, line, term_data))
     };
     let spawned = std::thread::Builder::new()
         .name("sirio-host-ensure".into())
@@ -22829,35 +22909,39 @@ fn ensure_host_in_background(
         };
         let _ = cx.update(|cx| {
             let line = match outcome {
-                Ok((handle, line)) => {
-                    match handle.term() {
-                        Some(client) => {
-                            let reconnect: Arc<
-                                dyn Fn() -> Option<sirio_host_client::TermClient>
-                                    + Send
-                                    + Sync,
-                            > = handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
-                            // After the factory is installed, list once:
-                            // raise `next_pane_id` above every app session,
-                            // then adopt orphans.
-                            let listed: Vec<String> = client
-                                .list()
-                                .map(|list| {
-                                    list.sessions
-                                        .iter()
-                                        .map(|s| s.session_id.clone())
-                                        .collect()
-                                })
-                                .unwrap_or_default();
+                Ok((handle, line, term_data)) => {
+                    match term_data {
+                        Some((client, reconnect, sessions)) => {
+                            // No socket work below: the floor and the orphans
+                            // come from the single worker-side `list()`.
+                            let listed: Vec<String> = sessions
+                                .iter()
+                                .map(|s| s.session_id.clone())
+                                .collect();
                             let floor = host_sessions::next_pane_floor(&listed);
-                            let sessions = client
-                                .list()
-                                .map(|list| list.sessions)
-                                .unwrap_or_default();
-                            cx.set_global(SessionFactoryGlobal(Some(Arc::new(HostSessions {
-                                client: client.clone(),
+                            // One factory `Arc` (and one slot map) shared by
+                            // the installed global and the wakeup task: each
+                            // worker completion re-sets the same `Arc`, which
+                            // retries every `Connecting` view (Task 9).
+                            let (wake, mut woken) =
+                                futures::channel::mpsc::unbounded::<()>();
+                            let factory = Arc::new(HostSessions {
+                                client,
                                 reconnect,
-                            }))));
+                                slots: Arc::new(Mutex::new(HashMap::new())),
+                                wake,
+                            });
+                            cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+                            cx.spawn(async move |cx| {
+                                use futures::StreamExt as _;
+                                while woken.next().await.is_some() {
+                                    let factory = factory.clone();
+                                    let _ = cx.update(|cx| {
+                                        cx.set_global(SessionFactoryGlobal(Some(factory)));
+                                    });
+                                }
+                            })
+                            .detach();
                             cx.set_global(HostConnection(Some(handle)));
                             if let Some(workspace) = workspace_slot
                                 .lock()
@@ -41132,6 +41216,223 @@ browser  profile  "
                 .any(|window| window == needle),
             "restored terminal must contain the persisted nonce"
         );
+    }
+
+    /// Fix round 1: `HostSessions::open` never blocks the GPUI thread. This
+    /// `HostSessions`-shaped fake answers `Pending` at once while a
+    /// `sirio-host-open` worker does the (simulated) blocking work, stores
+    /// the result, and wakes the views by re-setting the same factory `Arc`
+    /// — after which the `Connecting` pane reaches `Running`. A fake worker
+    /// stands in for the host: no socket exists in this harness.
+    struct AsyncOpenFakeLink {
+        session_id: String,
+        incoming: mpsc::Receiver<sirio_terminal::LinkChunk>,
+        // Held so the channel stays open and the owner's drain blocks
+        // instead of seeing a disconnect.
+        #[allow(dead_code)]
+        keep: mpsc::Sender<sirio_terminal::LinkChunk>,
+    }
+
+    impl sirio_terminal::SessionLink for AsyncOpenFakeLink {
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+
+        fn shell_pid(&self) -> Option<u32> {
+            None
+        }
+
+        fn input(&self, _bytes: Vec<u8>) {}
+
+        fn feed(&self, _bytes: Vec<u8>) {}
+
+        fn resize(&self, _cols: u16, _rows: u16) {}
+
+        fn chunks(&self) -> &mpsc::Receiver<sirio_terminal::LinkChunk> {
+            &self.incoming
+        }
+
+        fn end(&self) {}
+
+        fn detach(&self) {}
+
+        fn survives_app(&self) -> bool {
+            false
+        }
+    }
+
+    enum AsyncOpenFakeSlot {
+        InFlight,
+        Ready(Result<Box<dyn sirio_terminal::SessionLink>, String>),
+    }
+
+    struct AsyncOpenFakeFactory {
+        slots: Arc<Mutex<HashMap<String, AsyncOpenFakeSlot>>>,
+        // Mirrors `HostSessions.wake` structurally; the fake worker never
+        // sends on it: waking a future the test executor parks trips the
+        // harness's cross-thread determinism guard (it wedges instead of
+        // merely failing). The test re-sets the same factory `Arc` by hand
+        // once the worker stored its result — exactly what production's
+        // wakeup task does on every send.
+        #[allow(dead_code)]
+        wake: futures::channel::mpsc::UnboundedSender<()>,
+        work_delay: Duration,
+    }
+
+    impl SessionFactory for AsyncOpenFakeFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            let id = request.session_id.clone();
+            match self
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id)
+            {
+                Some(AsyncOpenFakeSlot::Ready(Ok(link))) => {
+                    return OpenOutcome::Linked(link);
+                }
+                Some(AsyncOpenFakeSlot::Ready(Err(reason))) => {
+                    return OpenOutcome::Failed(reason);
+                }
+                Some(AsyncOpenFakeSlot::InFlight) => {
+                    self.slots
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(id, AsyncOpenFakeSlot::InFlight);
+                    return OpenOutcome::Pending;
+                }
+                None => {}
+            }
+            self.slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id.clone(), AsyncOpenFakeSlot::InFlight);
+            let slots = Arc::clone(&self.slots);
+            let worker_slots = Arc::clone(&slots);
+            let delay = self.work_delay;
+            if std::thread::Builder::new()
+                .name("sirio-host-open".into())
+                .spawn(move || {
+                    // Simulated blocking socket work, off the GPUI thread.
+                    // No wakeup send here (see the `wake` field doc): the
+                    // test re-sets the factory `Arc` once `slots` holds the
+                    // result, which is the wakeup's entire effect.
+                    std::thread::sleep(delay);
+                    let (keep, incoming) = mpsc::channel();
+                    let link: Box<dyn sirio_terminal::SessionLink> =
+                        Box::new(AsyncOpenFakeLink {
+                            session_id: request.session_id.clone(),
+                            incoming,
+                            keep,
+                        });
+                    worker_slots
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(
+                            request.session_id.clone(),
+                            AsyncOpenFakeSlot::Ready(Ok(link)),
+                        );
+                })
+                .is_err()
+            {
+                slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id);
+                return OpenOutcome::Failed("could not start the session open".to_string());
+            }
+            OpenOutcome::Pending
+        }
+    }
+
+    #[gpui::test]
+    async fn async_factory_opens_off_the_ui_thread(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (wake, _woken) = futures::channel::mpsc::unbounded::<()>();
+        let concrete = Arc::new(AsyncOpenFakeFactory {
+            slots: Arc::new(Mutex::new(HashMap::new())),
+            wake,
+            work_delay: Duration::from_millis(800),
+        });
+        let factory: Arc<dyn SessionFactory> = concrete.clone();
+        cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+        // The open answers `Pending` at once instead of blocking for the
+        // worker's simulated socket work.
+        let probe = OpenRequest {
+            session_id: "pane-9001".to_string(),
+            cwd: std::env::temp_dir(),
+            shell: TerminalShell::System,
+            cols: 80,
+            rows: 24,
+            prelude: Vec::new(),
+            recreate: false,
+        };
+        let started = Instant::now();
+        assert!(matches!(factory.open(probe), OpenOutcome::Pending));
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "the first open must return before its worker finishes"
+        );
+        let working_directory = std::env::temp_dir();
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-connecting").is_some(),
+            "the first open pends: the pane waits in Connecting"
+        );
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let pane_id = terminal.read_with(&cx.cx, |terminal, _| {
+            terminal.identity().pane_id().to_owned()
+        });
+        // After the worker finishes, re-setting the same factory `Arc` — what
+        // production's wakeup task does on every worker completion — retries
+        // the pane: it takes the stored link out of the slot and reaches
+        // `Running`, with no second worker for the id.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let (connecting, running) = (
+                cx.debug_bounds("terminal-connecting").is_some(),
+                terminal.read_with(&cx.cx, |terminal, _| {
+                    terminal.scrollback_source().is_some()
+                }),
+            );
+            if !connecting && running {
+                break;
+            }
+            let worker_done = matches!(
+                concrete
+                    .slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&pane_id),
+                Some(AsyncOpenFakeSlot::Ready(_))
+            );
+            if worker_done {
+                cx.update(|_, cx| {
+                    cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+                });
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pane never left Connecting after its worker completed \
+                 (connecting={connecting}, running={running})"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
     }
 
     /// F-CORE-DOM-08: `restored_scrollback_scheduled` used to be a hand-rolled

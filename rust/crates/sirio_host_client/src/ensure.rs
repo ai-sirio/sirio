@@ -325,23 +325,9 @@ impl HostHandle {
         }))
     }
 
-    /// Ends every session and the host (`host.shutdown {force: true}`, SP2
-    /// spec §3.1). Through the SP1 connection.
-    pub fn shutdown_force(&mut self) -> Result<(), String> {
-        let generation = self.primary.welcome.generation.clone();
-        self.primary
-            .connection
-            .call(
-                method::SHUTDOWN,
-                serde_json::json!({"force": true}),
-                Some(&generation),
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    }
-
     /// The diagnostic row (spec §7): version, pid, mode, verdict.
-    pub fn status_line(&mut self) -> String {        let info = self
+    pub fn status_line(&mut self) -> String {
+        let info = self
             .primary
             .connection
             .call(method::INFO, serde_json::json!({}), None)
