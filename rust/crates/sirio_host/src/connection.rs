@@ -253,6 +253,15 @@ fn read_loop(
                 conn.handle(&principal, &request)
             };
             let sent = outbound.json(FrameKind::Response, &response);
+            if !sent {
+                // The answer did not fit one frame (spec §6.1, 1 MiB payload):
+                // say so instead of leaving the client to its timeout. The
+                // error is tiny and always encodes.
+                outbound.json(
+                    FrameKind::Response,
+                    &Response::err(request.id, ErrorCode::Internal, "response too large"),
+                );
+            }
             conn.after_response(sent);
         }
     }

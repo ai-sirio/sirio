@@ -18,6 +18,12 @@ use crate::connection::Outbound;
 use crate::core::HostCore;
 use crate::sessions::{CreateError, Entry, wait_status};
 
+/// Caps for `term.read` answers, in bytes of terminal data (before base64):
+/// raw is journal bytes, so 512 KiB stays under one response frame even
+/// base64'd; text is already UTF-8, so 768 KiB. Both keep the newest bytes.
+const READ_RAW_MAX_BYTES: usize = 512 << 10;
+const READ_TEXT_MAX_BYTES: usize = 768 << 10;
+
 pub struct Router {
     core: Arc<HostCore>,
 }
@@ -359,6 +365,15 @@ impl ConnState {
         let max_bytes = params
             .max_bytes
             .map(|max_bytes| usize::try_from(max_bytes).unwrap_or(usize::MAX));
+        // A read answer must fit one response frame (1 MiB payload, spec
+        // §6.1). Raw is journal bytes, so 512 KiB stays under the limit even
+        // base64'd (≈ 683 KiB); text is already UTF-8, so 768 KiB. Both keep
+        // the newest bytes; the caller's smaller `max_bytes` wins when given.
+        let cap = match format {
+            ReadFormat::Raw => READ_RAW_MAX_BYTES,
+            ReadFormat::Text | ReadFormat::Other => READ_TEXT_MAX_BYTES,
+        };
+        let max_bytes = Some(max_bytes.unwrap_or(usize::MAX).min(cap));
         let bytes = entry.session.read(session_format, max_bytes);
         let data = match format {
             ReadFormat::Raw => b64_encode(&bytes),

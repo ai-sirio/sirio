@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::fmt::{Format as VtFormat, Formatter, FormatterOptions};
+use libghostty_vt::screen::CellWide;
+use libghostty_vt::style::{Style, StyleColor, Underline};
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 pub mod fanout;
@@ -381,7 +384,9 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::{Style, StyleColor, Underline, push_sgr};
     use super::wait_for_input_reply;
+    use libghostty_vt::style::{PaletteIndex, RgbColor};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -389,6 +394,29 @@ mod tests {
     fn input_timeout_is_accepted() {
         let (_reply, receiver) = mpsc::channel();
         assert_eq!(wait_for_input_reply(receiver, Duration::ZERO), Ok(()));
+    }
+
+    fn sgr(style: Style) -> String {
+        let mut out = Vec::new();
+        push_sgr(&style, &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn sgr_starts_from_reset_and_covers_colors_and_attributes() {
+        assert_eq!(sgr(Style::default()), "\x1b[0m");
+        let mut red_bold = Style::default();
+        red_bold.bold = true;
+        red_bold.fg_color = StyleColor::Palette(PaletteIndex(1));
+        assert_eq!(sgr(red_bold), "\x1b[0;1;31m");
+        let mut extended = Style::default();
+        extended.bg_color = StyleColor::Palette(PaletteIndex(200));
+        assert_eq!(sgr(extended), "\x1b[0;48;5;200m");
+        let mut under = Style::default();
+        under.fg_color = StyleColor::Rgb(RgbColor { r: 1, g: 2, b: 3 });
+        under.underline = Underline::Curly;
+        under.underline_color = StyleColor::Palette(PaletteIndex(4));
+        assert_eq!(sgr(under), "\x1b[0;4:3;38;2;1;2;3;58;5;4m");
     }
 }
 
@@ -504,9 +532,203 @@ pub fn render_snapshot(terminal: &Terminal<'_, '_>) -> Vec<u8> {
         .with_protection(true)
         .with_kitty_keyboard(true)
         .with_charsets(true);
-    Formatter::new(terminal, options)
+    let mut bytes = Formatter::new(terminal, options)
         .and_then(|mut formatter| formatter.format_alloc(None).map(|bytes| bytes.as_ref().to_vec()))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    restore_cursor(terminal, &mut bytes);
+    bytes
+}
+
+/// The formatter's trailing setup (tab stops) leaves the cursor wherever it
+/// ends, not where the live cursor is; a replica fed the snapshot would
+/// continue there, so the first following bytes can land on the wrong row.
+/// Worse, the formatter trims trailing blank rows, so when the live cursor
+/// sits below the last content row the replica has fewer rows: restore the
+/// run of blanks with line feeds (each scrolls content into scrollback, which
+/// is what the live screen did to get there — row counts stay identical),
+/// then put the live cursor back with CUP (1-based). Best-effort throughout:
+/// a snapshot must never fail because the cursor could not be read.
+fn restore_cursor(terminal: &Terminal<'_, '_>, bytes: &mut Vec<u8>) {
+    let (Ok(x), Ok(y)) = (terminal.cursor_x(), terminal.cursor_y()) else {
+        return;
+    };
+    for _ in 0..trailing_blank_rows(terminal, y) {
+        bytes.extend_from_slice(b"\n");
+    }
+    bytes.extend_from_slice(format!("\x1b[{};{}H", y as u32 + 1, x as u32 + 1).as_bytes());
+    if terminal.is_cursor_pending_wrap().unwrap_or(false) {
+        restore_pending_wrap(terminal, bytes, x, y);
+    }
+}
+
+/// How many blank rows the formatter trimmed below the live cursor: the run
+/// of rows with neither text nor styling ending at the cursor row. Zero when
+/// the cursor sits on content (or when nothing could be read — never recreate
+/// rows over unknown state).
+fn trailing_blank_rows(terminal: &Terminal<'_, '_>, cursor_y: u16) -> u16 {
+    let Ok(cols) = terminal.cols() else {
+        return 0;
+    };
+    let mut blanks = 0u16;
+    for row in (0..=cursor_y).rev() {
+        if !row_is_blank(terminal, cols, row) {
+            break;
+        }
+        blanks += 1;
+    }
+    // All rows down to the top are blank: the content, if any, is below the
+    // cursor (or there is none) — a CUP alone puts the replica right.
+    if blanks > cursor_y {
+        return 0;
+    }
+    blanks
+}
+
+fn row_is_blank(terminal: &Terminal<'_, '_>, cols: u16, row: u16) -> bool {
+    for col in 0..cols {
+        let Ok(grid) = terminal.grid_ref(Point::Active(PointCoordinate {
+            x: col,
+            y: row as u32,
+        })) else {
+            return false;
+        };
+        let Ok(cell) = grid.cell() else {
+            return false;
+        };
+        if cell.has_text().unwrap_or(true) || cell.has_styling().unwrap_or(true) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Re-establish a pending wrap: move to the last column and re-emit the cell
+/// there, so the next printable wraps exactly like the live screen. The cell
+/// is overwritten with its own content and style, which is a no-op visually;
+/// anything unreadable (wide spans, missing graphemes) skips the restore and
+/// keeps today's behaviour instead of guessing.
+fn restore_pending_wrap(terminal: &Terminal<'_, '_>, bytes: &mut Vec<u8>, x: u16, y: u16) {
+    let Ok(cols) = terminal.cols() else {
+        return;
+    };
+    // Pending wrap lives on the last column; anywhere else the CUP above is
+    // already the whole truth.
+    if cols == 0 || x != cols - 1 {
+        return;
+    }
+    let Ok(grid) = terminal.grid_ref(Point::Active(PointCoordinate {
+        x: cols - 1,
+        y: y as u32,
+    })) else {
+        return;
+    };
+    let Ok(cell) = grid.cell() else {
+        return;
+    };
+    if !matches!(cell.wide(), Ok(CellWide::Narrow)) {
+        return;
+    }
+    let mut cluster = vec!['\0'; 16];
+    let mut read = grid.graphemes(&mut cluster);
+    if read.is_err() {
+        cluster = vec!['\0'; 128];
+        read = grid.graphemes(&mut cluster);
+    }
+    let Ok(count) = read else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    bytes.extend_from_slice(format!("\x1b[{};{}H", y as u32 + 1, cols as u32).as_bytes());
+    push_sgr(&grid.style().unwrap_or_default(), bytes);
+    let text: String = cluster[..count].iter().collect();
+    bytes.extend_from_slice(text.as_bytes());
+    match terminal.cursor_style() {
+        Ok(current) => push_sgr(&current, bytes),
+        Err(_) => bytes.extend_from_slice(b"\x1b[0m"),
+    }
+}
+
+/// An SGR sequence for `style`, always starting from a reset so it is
+/// self-contained: the replica's current style ends up exactly `style`.
+fn push_sgr(style: &Style, out: &mut Vec<u8>) {
+    let mut params: Vec<String> = vec!["0".to_string()];
+    if style.bold {
+        params.push("1".to_string());
+    }
+    if style.faint {
+        params.push("2".to_string());
+    }
+    if style.italic {
+        params.push("3".to_string());
+    }
+    match style.underline {
+        Underline::None => {}
+        Underline::Single => params.push("4".to_string()),
+        Underline::Double => params.push("4:2".to_string()),
+        Underline::Curly => params.push("4:3".to_string()),
+        Underline::Dotted => params.push("4:4".to_string()),
+        Underline::Dashed => params.push("4:5".to_string()),
+        _ => {}
+    }
+    if style.blink {
+        params.push("5".to_string());
+    }
+    if style.inverse {
+        params.push("7".to_string());
+    }
+    if style.invisible {
+        params.push("8".to_string());
+    }
+    if style.strikethrough {
+        params.push("9".to_string());
+    }
+    if style.overline {
+        params.push("53".to_string());
+    }
+    if let Some(param) = color_param(&style.fg_color, 30, 90, 38) {
+        params.push(param);
+    }
+    if let Some(param) = color_param(&style.bg_color, 40, 100, 48) {
+        params.push(param);
+    }
+    if !matches!(style.underline, Underline::None)
+        && let Some(param) = underline_color_param(&style.underline_color)
+    {
+        params.push(param);
+    }
+    out.extend_from_slice(format!("\x1b[{}m", params.join(";")).as_bytes());
+}
+
+fn color_param(color: &StyleColor, plain: u32, bright: u32, eight_bit: u32) -> Option<String> {
+    match color {
+        StyleColor::None => None,
+        StyleColor::Palette(index) => {
+            let index = index.0 as u32;
+            Some(if index < 8 {
+                (plain + index).to_string()
+            } else if index < 16 {
+                (bright + index - 8).to_string()
+            } else {
+                format!("{eight_bit};5;{index}")
+            })
+        }
+        StyleColor::Rgb(rgb) => Some(format!(
+            "{eight_bit};2;{};{};{}",
+            rgb.r,
+            rgb.g,
+            rgb.b
+        )),
+    }
+}
+
+fn underline_color_param(color: &StyleColor) -> Option<String> {
+    match color {
+        StyleColor::None => None,
+        StyleColor::Palette(index) => Some(format!("58;5;{}", index.0)),
+        StyleColor::Rgb(rgb) => Some(format!("58;2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+    }
 }
 
 pub(crate) fn initialize_terminal(cols: u16, rows: u16) -> Terminal<'static, 'static> {

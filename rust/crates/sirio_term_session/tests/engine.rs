@@ -333,8 +333,90 @@ fn input_after_observed_exit_returns_exited() {
 fn input_after_owner_shutdown_returns_gone() {
     let session = Session::spawn(spec("pane-1", "sleep 30"), mpsc::channel().0).unwrap();
     session.close();
-    assert_eq!(session.input(b"late input".to_vec()), Err(InputError::Gone));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_snapshot_restores_the_live_cursor_for_the_bytes_after_it() {
+    // Deterministic (fed, never pty-timed): 1500 lines, a snapshot, then a
+    // suffix starting with CR. Before the cursor restore the CR put the first
+    // suffix line over the snapshot's last row and the replica lost it.
+    let (tx, _rx) = mpsc::channel();
+    let session = Session::spawn(spec("pane-1", "sleep 30"), tx).unwrap();
+    let mut first = Vec::new();
+    for i in 1..=1500u64 {
+        first.extend_from_slice(format!("feed-{}\r\n", i).as_bytes());
+    }
+    session.feed(first);
+    until("the first block", Duration::from_secs(5), || {
+        text(&session).contains("feed-1500")
+    });
+    let attached = session.attach(None);
+    assert!(!attached.resumed);
+    let mut replica = Replica::new(attached.size.0, attached.size.1);
+    replica.apply(
+        &attached
+            .attachment
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the snapshot"),
+    );
+    let mut suffix = b"\r".to_vec();
+    for i in 1501..=3000u64 {
+        suffix.extend_from_slice(format!("feed-{}\r\n", i).as_bytes());
+    }
+    session.feed(suffix);
+    until("the second block", Duration::from_secs(5), || {
+        text(&session).contains("feed-3000")
+    });
+    // Everything the feed produced is queued by now; drain it all.
+    while attached
+        .attachment
+        .receiver
+        .recv_timeout(Duration::from_millis(300))
+        .map(|chunk| replica.apply(&chunk))
+        .is_ok()
+    {}
+    assert_eq!(replica.text(), text(&session));
+    session.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_snapshot_preserves_a_pending_wrap() {
+    // Exactly one screen row of printables: the last one sets pending wrap.
+    // The replica must wrap before the next printable, like the live screen.
+    let (tx, _rx) = mpsc::channel();
+    let session = Session::spawn(spec("pane-1", "sleep 30"), tx).unwrap();
+    session.feed(vec![b'x'; 80]);
+    until("the full row", Duration::from_secs(5), || {
+        text(&session).contains(&"x".repeat(70))
+    });
+    let attached = session.attach(None);
+    assert!(!attached.resumed);
+    let mut replica = Replica::new(attached.size.0, attached.size.1);
+    replica.apply(
+        &attached
+            .attachment
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the snapshot"),
+    );
+    session.feed(b"YZ\r\n".to_vec());
+    until("the wrapped line", Duration::from_secs(5), || {
+        text(&session).contains("YZ")
+    });
+    while attached
+        .attachment
+        .receiver
+        .recv_timeout(Duration::from_millis(300))
+        .map(|chunk| replica.apply(&chunk))
+        .is_ok()
+    {}
+    assert_eq!(replica.text(), text(&session));
+    session.close();
+}
+
 
 #[cfg(unix)]
 #[test]

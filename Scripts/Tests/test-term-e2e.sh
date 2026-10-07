@@ -53,6 +53,9 @@ set -eEuo pipefail
 #                             session exists, and the session's shell holds one
 #   14. echo-latency          keystroke echo latency through the host, measured
 #                             only, never a FAIL
+#   15. bounded-read           a `term.read` bigger than one response frame is
+#                             answered, not dropped: `raw` is capped at 512 KiB,
+#                             newest bytes first
 #
 # Each case force-shuts every host in its own root and retires the root
 # afterwards, and an exit trap does the same for whatever a failing or
@@ -639,18 +642,11 @@ case_exited_then_idle() {
 case_flood() {
   fresh_root
   start_held_host
-  # Ruling (Task 8): the brief's session starts flooding at once, so the
-  # attach snapshots mid-flow. That hits an engine bug outside this task: the
-  # snapshot dump does not restore the live cursor (its trailing tab-stop
-  # setup leaves the replica at row 24 col 72), and when the first suffix
-  # bytes then start with `\r` the first suffix line overwrites the dump's
-  # last row instead of starting a new one — the replica ends up exactly one
-  # row short, deterministically (see the Task 8 report for the repro). Until
-  # the engine task fixes the dump, the attach starts during the leading
-  # sleep, so the snapshot is trivial and the whole 50 MB arrives as outputs
-  # — which is what this case is about: a client reading normally through a
-  # flood. Everything else (the flood, `--for 60000`, the `cmp`) is verbatim.
-  new_session -- sh -c 'sleep 5; yes | head -c 50000000; echo FLOOD-DONE; sleep 60'
+  # The attach lands while 50 MB are flowing, so the snapshot is taken
+  # mid-flow: the replica is rebuilt from it and then reads normally to the
+  # end of the flood. Afterwards it must agree byte-for-byte with the host's
+  # text; `lagged` may be >= 0 either way and is recorded, not asserted.
+  new_session -- sh -c 'yes | head -c 50000000; echo FLOOD-DONE; sleep 60'
   local id="$NEW_ID" reader lagged
   "$PROBE" term-attach "$id" --for 60000 --replica-text "$(native "$ROOT/r.txt")" \
     >"$ROOT/attach.out" 2>"$ROOT/attach.err" &
@@ -771,6 +767,28 @@ case_echo_latency() {
   pass
 }
 
+case_bounded_read() {
+  fresh_root
+  start_held_host
+  # A read bigger than one response frame (1 MiB payload, spec §6.1) must be
+  # answered, not dropped: `raw` is capped at 512 KiB (base64 ≈ 683 KiB) of the
+  # newest bytes, so this returns at once instead of timing out.
+  new_session -- sh -c 'head -c 3000000 /dev/zero | tr "\0" y; echo READY-MARKER; sleep 30'
+  local id="$NEW_ID" started took size
+  wait_until 30 term_read_has "$id" "READY-MARKER" \
+    || fail "the 3 MB flood never finished"
+  started="$(date +%s)"
+  "$PROBE" term-read "$id" raw >"$ROOT/capped.bin" 2>"$ROOT/capped.err" \
+    || fail "term-read raw of a 3 MB journal failed"
+  log_direct "term-read $id raw -> capped.bin"
+  took=$(( $(date +%s) - started ))
+  size="$(wc -c <"$ROOT/capped.bin" | tr -d ' ')"
+  [ "$took" -le 2 ] || fail "term-read raw took ${took}s (it must answer within 2 s)"
+  [ "$size" -le 524288 ] || fail "term-read raw returned $size bytes (cap 512 KiB)"
+  NOTE="$size bytes in ${took}s"
+  pass
+}
+
 run_case survives-client-kill case_survives_client_kill
 run_case resume               case_resume
 run_case snapshot-fidelity    case_snapshot_fidelity
@@ -784,5 +802,6 @@ run_case resize-detached      case_resize_detached      11
 run_case alt-screen           case_alt_screen           12
 run_case no-ctty              case_no_ctty              13
 run_case echo-latency         case_echo_latency         14
+run_case bounded-read           case_bounded_read           15
 
 echo "TERM E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"

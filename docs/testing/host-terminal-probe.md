@@ -67,47 +67,50 @@ This machine, local run (no CI link yet):
     CASE 3 snapshot-fidelity PASS 2s
     CASE 4 query-one-reply PASS 2s
     CASE 5 lagged PASS (the session outran its stalled client) 20s
-    CASE 6 close-kills-tree PASS 0s
+    CASE 6 close-kills-tree PASS 1s
     CASE 7 sirioctl-direct SKIP (Task 11)
     CASE 8 exited-then-idle PASS 2s
-    CASE 10 flood PASS (lagged=0, measurement only) 61s
+    CASE 10 flood PASS (lagged=0, measurement only) 60s
     CASE 11 resize-detached PASS 3s
     CASE 12 alt-screen PASS 5s
-    CASE 13 no-ctty PASS 0s
+    CASE 13 no-ctty PASS 1s
     CASE 14 echo-latency PASS (p50=4ms p95=4ms max=4ms) 0s
-    TERM E2E OK (13 cases, 102s)
+    CASE 15 bounded-read PASS (524288 bytes in 0s) 1s
+    TERM E2E OK (14 cases, 103s)
+
+(Run twice green after fix round 1; the earlier 13-case runs are superseded.)
 
 The 20 MB flood lagged the stalled client (`lagged=1` in `c5/stalled.out`)
 without blocking the session, so the flood size stays as the brief wrote it —
 per the controller ruling it is raised (e.g. to 60 MB) only if a finite flood
 ends before the client lags. The 50 MB flood is read by a client attached
-before it starts (the attach runs during a leading `sleep 5`; see the Ruling
-below): it did not lag (`lagged=0`) and the replica agreed byte-for-byte with
-the host's text. Echo latency is a measurement for the record, never a bound.
+while it is flowing: it did not lag (`lagged=0`) and the replica agreed
+byte-for-byte with the host's text. Echo latency is a measurement for the
+record, never a bound.
 
-## Ruling: case 10 attaches before the flood (engine bug)
+## Found by this E2E: the snapshot did not restore the live cursor (fixed)
 
-The brief's session floods at once, so the attach snapshots mid-flow. That
-snapshot path has an engine bug outside this task, found while proving this
-case: the snapshot dump (`sirio_term_session::render_snapshot`, ghostty-vt
-`Formatter` with cursor and tab stops) does not restore the live cursor —
-after the content rows it emits SGR reset, a `[24;1H` tab-stop anchor and HTS
-tab-stop setup, leaving the replica at row 24 col 72 with no CUP to the live
-cursor (the dump carries no save/restore/home for it). When the first suffix
-bytes then start with `\r`, the first suffix line overwrites the dump's last
-row instead of starting a new one, and the replica ends up exactly one row
-short. No lag or resync is signalled; idle snapshots (cases 3 and 12) and
-suffixes starting mid-row are unaffected, which is why only this case caught
-it. Minimal in-process repro (attach needed no host at all):
+Case 10 first ran with the attach landing before the flood (an interim
+weakening) because, as briefed, it failed intermittently: the replica ended up
+exactly one row short with no lag or resync signalled. Diagnosis (byte-level
+capture of a failing client's received stream, then deterministic in-process
+repros needing no host at all) showed the snapshot dump
+(`sirio_term_session::render_snapshot`, ghostty-vt `Formatter` with cursor and
+tab stops) never restored the live cursor — after the content rows it emits SGR
+reset, a `[24;1H` tab-stop anchor and HTS tab-stop setup, leaving the replica at
+row 24 col 72 — and worse, it trimmed the trailing blank rows, so the live
+cursor sat below the dump's last content row. When the first suffix bytes then
+started with `\r`, the first suffix line overwrote the dump's last row instead
+of starting a new one. Idle snapshots (cases 3 and 12) and suffixes starting
+mid-row were unaffected, which is why only this case caught it.
 
-```rust
-// session running `sleep 30`; feed 1500 numbered lines, attach (snapshot),
-// feed "\r" + 1500 more lines, apply snapshot + outputs to a fresh VT:
-// the replica render misses exactly one fed line, deterministically.
-```
-
-The engine task owns the fix (e.g. emit the tab stops before the cursor
-restore, or append a final CUP to the live cursor in `render_snapshot`).
-Until then case 10 attaches during the leading sleep — the dump is trivial
-and the whole flood arrives as outputs — and a mid-flow snapshot fidelity
-case belongs back in this script once the dump is fixed.
+Fix round 1 repaired `render_snapshot`: after the formatter output it recreates
+the trimmed trailing blank run with line feeds, appends a CUP to the live
+cursor, and — when `is_cursor_pending_wrap()` holds — moves to the last column
+and re-emits that cell (content plus SGR style) so the pending state comes back
+with it. Covered by two engine tests,
+`a_snapshot_restores_the_live_cursor_for_the_bytes_after_it` (feed 1500
+numbered lines, attach, feed `"\r"` + 1500 more → replica text equals the
+host's) and `a_snapshot_preserves_a_pending_wrap` (an 80-column fed line sets
+pending; the next printable must wrap), plus a unit test for the SGR encoder.
+Case 10 is back to the brief's flood command, snapshotting mid-flow.
