@@ -588,6 +588,12 @@ pub mod request {
         request("surface.change_request.read", BTreeMap::new())
     }
 
+    /// Checks the open change request out into a worktree (change requests
+    /// C1). Touches only local git, so every build serves it.
+    pub fn change_request_checkout() -> ControlRequest {
+        request("surface.change_request.checkout", BTreeMap::new())
+    }
+
     /// Shows `path` (and `line`) of the active change request in its diff — what
     /// a line comment's link does.
     pub fn change_request_reveal(path: &str, line: Option<&str>) -> ControlRequest {

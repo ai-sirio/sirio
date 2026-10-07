@@ -225,6 +225,16 @@ fn client_key(target: &ForgeTarget, means: Means) -> ClientKey {
     )
 }
 
+mod checkout;
+
+pub(crate) use checkout::{CheckoutDone, CheckoutRequest};
+
+/// The hub a workspace runs a checkout on. `set_source` keeps only the
+/// trait object, and a checkout needs the concrete hub's git steps.
+pub(crate) struct HubGlobal(pub(crate) Arc<ForgeHub>);
+
+impl gpui::Global for HubGlobal {}
+
 pub(crate) struct ForgeHub {
     settings: SessionStore,
     credentials: Option<CredentialStore>,
