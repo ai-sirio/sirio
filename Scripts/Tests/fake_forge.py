@@ -91,7 +91,8 @@ until the next `/__reset`.
 until a stage posts some.
 `POST /__ratelimit?seconds=N` rate limits every read with a reset N seconds
 ahead; `POST /__throttle` answers 429 with Retry-After and no reset until
-`/__reset`. That reset also clears both limits. `ChangeRequestSearch` keeps
+`/__reset`. That reset also clears both limits. `POST /__slowgraphql?seconds=N`
+answers every GraphQL request N seconds late (204), until `/__reset`. `ChangeRequestSearch` keeps
 only rows containing every free word of `q` (words without `:`).
 
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
@@ -266,6 +267,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # A GitLab trace answered this many seconds late, and how many traces
     # were ever being answered at once.
     slow_log = 0.0
+    graphql_delay = 0.0
     traces_at_once = 0
     traces_at_once_max = 0
     traces_lock = threading.Lock()
@@ -671,6 +673,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Every GitLab trace is answered N seconds late.
             Handler.slow_log = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "0"))
             return self.answer(200, {"slow_log": Handler.slow_log})
+        if path == "/__slowgraphql":
+            # Every GraphQL request is answered N seconds late, until /__reset.
+            Handler.graphql_delay = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "0"))
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if path == "/__throttle":
             # Every request answers 429 with no reset time, until /__reset.
             Handler.throttled = True
@@ -682,6 +691,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Handler.throttled = False
             Handler.expired = False
             Handler.slow_log = 0.0
+            Handler.graphql_delay = 0.0
             Handler.traces_at_once_max = 0
             Handler.drafts = []
             return self.answer(200, {"reset": True})
@@ -702,6 +712,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.flavor == "none" or path not in ("/graphql", "/api/graphql"):
             self.record("POST", path, None, None, None)
             return self.answer(404, {"message": "Not Found"})
+        time.sleep(Handler.graphql_delay)
         request = json.loads(raw or b"{}")
         operation = request.get("operationName") or ""
         query = request.get("query") or ""

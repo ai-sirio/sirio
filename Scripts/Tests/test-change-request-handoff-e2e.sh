@@ -1,0 +1,637 @@
+#!/bin/bash
+set -euo pipefail
+
+# End-to-end test of checking a change request out into a worktree (change
+# requests C1, spec 2026-10-07-change-request-handoff-design.md §10-§11): a
+# real, isolated Sirio against the loopback fake forge
+# (Scripts/Tests/fake_forge.py) and real local git repositories, driven over
+# the control socket. The forge's git side is a bare repository per host
+# (origin) and one per fork (sirio-<owner>), reached through insteadOf rewrites
+# of the project's remote URLs, so nothing leaves the machine.
+#
+# Scenarios, each for GitHub and GitLab where the forge allows it:
+#   same            the branch is in the project's repository: checkout creates
+#                   <project>-feat tracking origin/feat; a push from it lands on
+#                   origin; a second checkout fast-forwards a clean worktree to
+#                   a commit pushed meanwhile, refuses a dirty one, leaves a
+#                   worktree switched to another branch alone, and recreates a
+#                   worktree whose folder was removed (the link is dropped);
+#                   the tab belongs to the worktree the checkout selected.
+#   fork-push       a fork that accepts pushes: a worktree on <owner>/feat with
+#                   its own remote; a push from it lands on the fork's branch,
+#                   and origin has no such branch.
+#   fork-readonly   a fork that refuses pushes: a read-only worktree at the
+#                   head commit; when the forge's head moves on, a second
+#                   checkout fast-forwards it. GitLab's variant has allowCollaboration
+#                   true and the target's pushCode false, so only the stricter rule
+#                   makes it read-only.
+#   gone            the source branch is gone from the forge: read-only at the head.
+#   refusals        a branch that points at other commits, a project with no remote
+#                   for the forge, and a second checkout while one runs.
+#
+# The artifact: --out-dir DIR (default artifacts/handoff-e2e-<stamp>-<pid>)
+# keeps transcript.log, one app log per launch, one fake-forge request log per
+# scenario, the git state per scenario (<scenario>-git.txt) and -- unless
+# --state-only -- PID-matched window captures in frames/. Rerunning the script
+# reproduces it.
+#
+# Usage: Scripts/Tests/test-change-request-handoff-e2e.sh [--state-only] [--out-dir DIR] [--display :N]
+
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
+CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
+STATE_ONLY=0
+OUT_DIR=""
+DISPLAY_TARGET="${DISPLAY:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --state-only) STATE_ONLY=1; shift ;;
+    --out-dir) OUT_DIR="$2"; shift 2 ;;
+    --display) DISPLAY_TARGET="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+[ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/forge-diff-e2e-$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$OUT_DIR/frames"
+exec > >(tee "$OUT_DIR/transcript.log") 2>&1
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+if [ "$STATE_ONLY" -eq 0 ]; then
+  [ -n "$DISPLAY_TARGET" ] || fail "no DISPLAY; pass --display :N or --state-only"
+  for tool in import identify xwininfo xprop; do
+    command -v "$tool" >/dev/null || fail "$tool is required for captures; pass --state-only to skip them"
+  done
+fi
+command -v git >/dev/null || fail "git is required"
+command -v python3 >/dev/null || fail "python3 is required"
+command -v curl >/dev/null || fail "curl is required (the fake forge's readiness probe)"
+
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sirio-handoff-e2e-XXXXXX")
+APP_PID=""
+FORGE_PID=""
+stop_app() { [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; APP_PID=""; }; }
+stop_forge() { [ -z "$FORGE_PID" ] || { kill "$FORGE_PID" 2>/dev/null || true; wait "$FORGE_PID" 2>/dev/null || true; FORGE_PID=""; }; }
+cleanup() {
+  stop_app
+  stop_forge
+  cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
+  rm -rf "$RUN_DIR"
+}
+trap cleanup EXIT
+
+echo "building sirio and sirioctl"
+(cd "$ROOT/rust" && cargo build --quiet -p sirio --bin sirio && cargo build --quiet -p sirio_control --bin sirioctl)
+
+# ---- helpers (the shape test-forge-ui-e2e.sh uses) ---------------------------
+
+ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
+reply() { "$CTL" "$@" --json; }
+field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get(sys.argv[1], ""))' "$1"; }
+# One key of one reply, for `x=$(read_field key args...)`: a sirioctl error
+# prints a FAIL line instead of aborting the script silently inside the
+# substitution (set -e does not label it).
+read_field() { # key sirioctl-args...
+  local key=$1
+  shift
+  reply "$@" | field "$key" || fail "sirioctl $* did not answer (reading $key)"
+}
+wait_for() { # key value sirioctl-args...
+  local key=$1 want=$2
+  shift 2
+  local got=""
+  for _ in $(seq 1 100); do
+    got=$(reply "$@" | field "$key" || true)
+    [ "$got" = "$want" ] && { echo "OK: $key=$want"; return 0; }
+    sleep 0.3
+  done
+  reply "$@" || true
+  fail "$key never became '$want' (last: '$got') for: $*"
+}
+assert_contains() { # key needle sirioctl-args...
+  local key=$1 needle=$2
+  shift 2
+  local got
+  got=$(read_field "$key" "$@") || fail "assert_contains: no reply for: $*"
+  case "$got" in
+    *"$needle"*) echo "OK: $key contains '$needle'" ;;
+    *) fail "$key was '$got', expected it to contain '$needle'" ;;
+  esac
+}
+
+find_window() {
+  DISPLAY_TARGET="$DISPLAY_TARGET" APP_PID="$APP_PID" python3 - <<'PY'
+import os, re, subprocess
+display = os.environ["DISPLAY_TARGET"]
+want = int(os.environ["APP_PID"])
+listing = subprocess.run(["xwininfo", "-display", display, "-root", "-children"], capture_output=True, text=True, timeout=5).stdout
+best = None
+for line in listing.splitlines():
+    match = re.match(r"\s+(0x[0-9a-fA-F]+).*?\s(\d+)x(\d+)\+", line)
+    if not match:
+        continue
+    window, width, height = match.group(1), int(match.group(2)), int(match.group(3))
+    prop = subprocess.run(["xprop", "-display", display, "-id", window, "_NET_WM_PID"], capture_output=True, text=True, timeout=5).stdout
+    pid = re.search(r"=\s*(\d+)\s*$", prop)
+    if pid and int(pid.group(1)) == want and (best is None or width * height > best[0]):
+        best = (width * height, window)
+if best:
+    print(best[1])
+PY
+}
+capture() { # name
+  [ "$STATE_ONLY" -eq 0 ] || return 0
+  sleep 2
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID for $1"
+  import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$SCENARIO-$1.png"
+  local colours
+  colours=$(identify -format '%k' "$OUT_DIR/frames/$SCENARIO-$1.png")
+  [ "$colours" -ge 200 ] || fail "$1 is blank ($colours colours)"
+  echo "FRAME: $SCENARIO-$1 ($colours colours)"
+}
+
+
+# ---- the forge's git side and its fixtures -----------------------------------
+
+# build_repos flavour head-kind -> SRC BASE HEAD_SHA ORIGIN FORK
+#   head-kind: same | fork-push | fork-readonly | gone
+#   ORIGIN is the project's bare; it carries refs/heads/feat only for `same`,
+#   and always the forge's head ref (refs/pull/101/head or
+#   refs/merge-requests/201/head). FORK is the fork's bare with refs/heads/feat.
+build_repos() {
+  local flavour=$1 kind=$2 dir="$RUN_DIR/git-$SCENARIO"
+  rm -rf "$dir"; mkdir -p "$dir"
+  SRC="$dir/src"; ORIGIN="$dir/origin.git"; FORK="$dir/fork.git"
+  git init -q -b main "$SRC"
+  git -C "$SRC" config user.email e2e@sirio.dev; git -C "$SRC" config user.name E2E
+  echo base >"$SRC/a.txt"; git -C "$SRC" add .; git -C "$SRC" commit -q -m base
+  BASE=$(git -C "$SRC" rev-parse HEAD)
+  git -C "$SRC" checkout -q -b feat
+  echo feat >"$SRC/a.txt"; git -C "$SRC" commit -q -am feat
+  HEAD_SHA=$(git -C "$SRC" rev-parse HEAD)
+  git -C "$SRC" checkout -q main
+  echo main >"$SRC/m.txt"; git -C "$SRC" add .; git -C "$SRC" commit -q -m main-moves
+  git clone -q --bare "$SRC" "$ORIGIN"
+  git clone -q --bare "$SRC" "$FORK"
+  local pull_ref
+  pull_ref=$(pull_ref_of "$flavour")
+  git -C "$ORIGIN" update-ref "$pull_ref" "$HEAD_SHA"
+  [ "$kind" = same ] || git -C "$ORIGIN" update-ref -d refs/heads/feat
+  [ "$kind" = gone ] && git -C "$FORK" update-ref -d refs/heads/feat
+  return 0
+}
+
+pull_ref_of() { # flavour -> the forge's ref for the change request's head
+  if [ "$1" = gitlab ]; then echo refs/merge-requests/201/head; else echo refs/pull/101/head; fi
+}
+
+# owner_of flavour head-kind -> the owner the forge names for the head repository
+owner_of() {
+  case "$1:$2" in
+    github:same|github:gone) echo acme ;;
+    gitlab:same|gitlab:gone) echo team ;;
+    github:*) echo alice ;;
+    gitlab:*) echo forks/alice ;;
+  esac
+}
+
+# make_project dir origin-url fork-url -> WT: the project's main checkout,
+# its remote URLs rewritten to the local bares.
+make_project() {
+  WT=$1
+  git init -q -b main "$WT"
+  git -C "$WT" config user.email e2e@sirio.dev; git -C "$WT" config user.name E2E
+  git -C "$WT" commit -q --allow-empty -m init
+  git -C "$WT" remote add origin "$2"
+  git -C "$WT" config "url.$ORIGIN.insteadOf" "$2"
+  git -C "$WT" config "url.$FORK.insteadOf" "$3"
+}
+
+# make_next_head flavour -> NEXT_HEAD: a commit on top of HEAD_SHA, which the
+# forge's head ref moves to in the fork-readonly scenario (never before then).
+make_next_head() {
+  local scratch="$RUN_DIR/next-$SCENARIO"
+  rm -rf "$scratch"
+  git clone -q "$ORIGIN" "$scratch"
+  git -C "$scratch" fetch -q "$ORIGIN" "$(pull_ref_of "$1"):refs/heads/pr"
+  git -C "$scratch" checkout -q pr
+  git -C "$scratch" config user.email e2e@sirio.dev; git -C "$scratch" config user.name E2E
+  echo "the head moves on" >"$scratch/moved.txt"
+  git -C "$scratch" add moved.txt; git -C "$scratch" commit -q -m "the head moves on"
+  NEXT_HEAD=$(git -C "$scratch" rev-parse HEAD)
+}
+
+# render_fixtures flavour head-kind owner base head next-head -> FIXTURES_DIR
+render_fixtures() {
+  FIXTURES_DIR="$RUN_DIR/fixtures-$SCENARIO"
+  rm -rf "$FIXTURES_DIR"
+  cp -r "$ROOT/Scripts/Tests/forge-fixtures" "$FIXTURES_DIR"
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$FIXTURES_DIR" <<'PY'
+import copy, json, sys
+flavour, kind, owner, base, head, next_head, root = sys.argv[1:8]
+def load(rel):
+    return json.load(open(f"{root}/{rel}"))
+def save(rel, data):
+    json.dump(data, open(f"{root}/{rel}", "w"))
+cross = kind in ("fork-push", "fork-readonly")
+if flavour == "github":
+    def patch(node):
+        node["baseRefOid"], node["headRefOid"] = base, head
+        node["headRefName"] = "feat"
+        node["headRepositoryOwner"] = {"login": owner}
+        node["isCrossRepository"] = cross
+        node["maintainerCanModify"] = kind == "fork-push"
+        node["headRef"] = None if kind == "gone" else {"id": "REF_1"}
+        node["headRepository"] = {
+            "nameWithOwner": f"{owner}/widgets",
+            "url": f"https://ghe.test/{owner}/widgets",
+            "sshUrl": f"git@ghe.test:{owner}/widgets.git",
+            "viewerPermission": "WRITE" if kind in ("same", "fork-push") else "READ",
+        }
+    for name in ("ChangeRequestHeader", "ChangeRequestByNumber"):
+        data = load(f"github/{name}.json")
+        patch(data["data"]["repository"]["pullRequest"])
+        save(f"github/{name}.json", data)
+    data = load("github/ChangeRequestHeader.json")
+    moved = copy.deepcopy(data)
+    moved["data"]["repository"]["pullRequest"]["headRefOid"] = next_head
+    save("github/ChangeRequestHeader.after.push.json", moved)
+    data = load("github/ChangeRequestActionContext.json")
+    data["data"]["repository"]["pullRequest"]["headRefOid"] = head
+    save("github/ChangeRequestActionContext.json", data)
+else:
+    def patch(node):
+        node["diffRefs"] = {"baseSha": base, "headSha": head, "startSha": base}
+        node["diffHeadSha"] = head
+        node["sourceBranch"] = "feat"
+        node["sourceProjectId"] = 7 if kind == "same" else 8
+        node["targetProjectId"] = 7
+        node["sourceBranchExists"] = kind != "gone"
+        # A fork's collaboration is granted only with push access to the target,
+        # and the read-only fork case grants collaboration but withholds the
+        # target's push: the stricter rule is the one that must decide it.
+        node["allowCollaboration"] = kind in ("fork-push", "fork-readonly")
+        node["sourceProject"] = {
+            "fullPath": f"{owner}/app",
+            "httpUrlToRepo": f"https://gitlab.test/{owner}/app.git",
+            "sshUrlToRepo": f"git@gitlab.test:{owner}/app.git",
+            "userPermissions": {"pushCode": kind == "same"},
+        }
+        node["targetProject"] = {"userPermissions": {"pushCode": kind != "fork-readonly"}}
+    for name in ("MergeRequestHeader", "MergeRequestByNumber"):
+        data = load(f"gitlab/{name}.json")
+        patch(data["data"]["project"]["mergeRequest"])
+        save(f"gitlab/{name}.json", data)
+    data = load("gitlab/MergeRequestHeader.json")
+    moved = copy.deepcopy(data)
+    moved_node = moved["data"]["project"]["mergeRequest"]
+    moved_node["diffRefs"]["headSha"] = next_head
+    moved_node["diffHeadSha"] = next_head
+    save("gitlab/MergeRequestHeader.after.push.json", moved)
+    data = load("gitlab/MergeRequestActionContext.json")
+    data["data"]["project"]["mergeRequest"]["diffHeadSha"] = head
+    save("gitlab/MergeRequestActionContext.json", data)
+PY
+}
+
+# ---- one scenario ---------------------------------------------------------------
+
+prepare_scenario() { # flavour head-kind origin-url fork-url -- repos, fixtures, forge and project; no app yet
+  mkdir -p "$RUN_DIR/work-$SCENARIO"
+  build_repos "$1" "$2"
+  make_next_head "$1"
+  render_fixtures "$1" "$2" "$(owner_of "$1" "$2")" "$BASE" "$HEAD_SHA" "$NEXT_HEAD"
+  start_forge "$1"
+  local project=widgets
+  [ "$1" = gitlab ] && project=app
+  make_project "$RUN_DIR/work-$SCENARIO/$project" "$3" "$4"
+}
+
+open_scenario() { # host forge number -- the app, connected and on the change request
+  launch_app "$1"
+  connect_and_open "$1" "$2" "$3"
+}
+
+label_of() { if [ "$1" = gitlab ]; then echo '!201'; else echo '#101'; fi; }
+number_of() { if [ "$1" = gitlab ]; then echo 201; else echo 101; fi; }
+
+# The fork's branch, remote and folder name for flavour (the owner path differs).
+fork_branch_of() { if [ "$1" = gitlab ]; then echo 'forks/alice/feat'; else echo 'alice/feat'; fi; }
+fork_remote_of() { if [ "$1" = gitlab ]; then echo 'sirio-forks-alice'; else echo 'sirio-alice'; fi; }
+fork_dir_of() { if [ "$1" = gitlab ]; then echo 'app-forks-alice-feat'; else echo 'widgets-alice-feat'; fi; }
+
+checkout_and_wait() { # expected-state (done|failed)
+  ctl surface change-request checkout
+  wait_for checkout "$1" surface change-request read
+  DETAIL=$(read_field checkout_detail surface change-request read)
+  echo "detail: $DETAIL"
+}
+
+# push_to_origin_feat message -> the new tip of origin's feat, from a scratch clone
+push_to_origin_feat() {
+  local scratch="$RUN_DIR/scratch-$SCENARIO"
+  rm -rf "$scratch"
+  git clone -q "$ORIGIN" "$scratch"
+  git -C "$scratch" config user.email e2e@sirio.dev; git -C "$scratch" config user.name E2E
+  git -C "$scratch" checkout -q -B feat origin/feat
+  echo "$1" >>"$scratch/a.txt"
+  git -C "$scratch" commit -q -am "$1"
+  git -C "$scratch" push -q origin feat
+  git -C "$scratch" rev-parse HEAD
+}
+
+dump_git() { # -- the repository's worktrees, remotes and branches, for the artifact
+  {
+    echo "[$SCENARIO]"
+    echo "-- worktrees"; git -C "$WT" worktree list --porcelain
+    echo "-- remotes"; git -C "$WT" remote -v
+    echo "-- branches"; git -C "$WT" for-each-ref --format='%(refname) %(objectname) %(upstream)' refs/heads
+  } >"$OUT_DIR/$SCENARIO-git.txt"
+}
+
+scenario_same() { # flavour host forge number origin-url fork-url
+  SCENARIO="$1-same"
+  echo "=== $SCENARIO"
+  local label NEW X2 X3 OTHER
+  label=$(label_of "$1")
+  prepare_scenario "$1" same "$5" "$6"
+  open_scenario "$2" "$3" "$4"
+  NEW="$(dirname "$WT")/$(basename "$WT")-feat"
+
+  checkout_and_wait done
+  assert_contains checkout_detail "tracking origin/feat" surface change-request read
+  [ -d "$NEW" ] || fail "the worktree $NEW was not created"
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = origin/feat ] || fail "the new worktree does not track origin/feat"
+  echo "OK: $(basename "$NEW") tracks origin/feat"
+  assert_contains label "$label" surface change-request read
+
+  echo "a commit from the worktree pushes to origin"
+  printf 'pushed from the worktree\n' >>"$NEW/a.txt"
+  git -C "$NEW" commit -q -am "from the worktree"
+  git -C "$NEW" push -q
+  [ "$(git -C "$ORIGIN" rev-parse refs/heads/feat)" = "$(git -C "$NEW" rev-parse HEAD)" ] || fail "the push did not reach origin"
+  echo "OK: origin's feat is the worktree's HEAD"
+  ctl surface change-requests show >/dev/null
+  wait_for linked "$label" surface change-requests read
+  wait_for card "$label" surface change-requests read
+  capture "checkout-$1-same-done"
+
+  echo "reuse: a clean worktree fast-forwards to a commit pushed meanwhile"
+  X2=$(push_to_origin_feat "pushed by someone else")
+  checkout_and_wait done
+  assert_contains checkout_detail "fast-forwarded" surface change-request read
+  [ "$(git -C "$NEW" rev-parse HEAD)" = "$X2" ] || fail "the reused worktree is not at the pushed commit"
+  echo "OK: the reused worktree is at $X2"
+
+  echo "dirty: a worktree with uncommitted changes is left as it is"
+  X3=$(push_to_origin_feat "pushed while dirty")
+  echo "uncommitted" >>"$NEW/a.txt"
+  checkout_and_wait done
+  assert_contains checkout_detail "uncommitted changes" surface change-request read
+  [ "$(git -C "$NEW" rev-parse HEAD)" = "$X2" ] || fail "a dirty worktree moved"
+  git -C "$NEW" checkout -q -- a.txt
+  echo "OK: the dirty worktree did not move"
+
+  echo "another branch: a worktree switched elsewhere is left alone"
+  git -C "$NEW" checkout -q -b other
+  printf 'other\n' >"$NEW/other.txt"
+  git -C "$NEW" add other.txt; git -C "$NEW" commit -q -m "work on other"
+  OTHER=$(git -C "$NEW" rev-parse HEAD)
+  checkout_and_wait done
+  assert_contains checkout_detail "it is on another branch, so it was left as it is" surface change-request read
+  [ "$(git -C "$NEW" rev-parse other)" = "$OTHER" ] || fail "the other branch moved"
+  echo "OK: the other branch did not move"
+  git -C "$NEW" checkout -q feat
+
+  echo "stale link: a link whose folder was removed is dropped, and the worktree is created again"
+  git -C "$WT" worktree remove --force "$NEW"
+  # feat still holds X2, which the forge's head does not reach, so a plain
+  # re-create would be refused as pointing at other commits. Point the local
+  # branch at the forge's head, which the head check accepts, so this step
+  # tests the dropped link and nothing else.
+  git -C "$WT" branch -f feat "$HEAD_SHA"
+  checkout_and_wait done
+  assert_contains checkout_detail "Created" surface change-request read
+  [ -d "$NEW" ] || fail "the worktree was not created again"
+  [ "$(git -C "$NEW" rev-parse HEAD)" = "$X3" ] || fail "the recreated worktree is not at origin's feat"
+  echo "OK: the worktree was created again at origin's feat"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_fork_push() { # flavour host forge number origin-url fork-url
+  SCENARIO="$1-fork-push"
+  echo "=== $SCENARIO"
+  local label branch remote NEW
+  label=$(label_of "$1"); branch=$(fork_branch_of "$1"); remote=$(fork_remote_of "$1")
+  prepare_scenario "$1" fork-push "$5" "$6"
+  open_scenario "$2" "$3" "$4"
+  NEW="$(dirname "$WT")/$(fork_dir_of "$1")"
+
+  checkout_and_wait done
+  [ -d "$NEW" ] || fail "the worktree $NEW was not created"
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref HEAD)" = "$branch" ] || fail "the worktree is not on $branch"
+  [ "$(git -C "$WT" config --get "remote.$remote.url")" = "$6" ] || fail "the remote $remote is not the fork"
+  [ "$(git -C "$NEW" rev-parse --abbrev-ref '@{u}')" = "$remote/feat" ] || fail "the upstream is not $remote/feat"
+  echo "OK: $(basename "$NEW") is on $branch, pushing to $remote"
+
+  printf 'from the fork worktree\n' >>"$NEW/a.txt"
+  git -C "$NEW" commit -q -am "from the fork worktree"
+  git -C "$NEW" push -q
+  [ "$(git -C "$FORK" rev-parse refs/heads/feat)" = "$(git -C "$NEW" rev-parse HEAD)" ] || fail "the push did not reach the fork's feat"
+  git -C "$ORIGIN" show-ref --verify --quiet refs/heads/feat && fail "origin gained a feat branch"
+  echo "OK: the push landed on the fork's feat, and origin has no feat"
+  ctl surface change-requests show >/dev/null
+  wait_for card "$label" surface change-requests read
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_fork_readonly() { # flavour host forge number origin-url fork-url
+  SCENARIO="$1-fork-readonly"
+  echo "=== $SCENARIO"
+  local branch remote NEW
+  branch=$(fork_branch_of "$1"); remote=$(fork_remote_of "$1")
+  prepare_scenario "$1" fork-readonly "$5" "$6"
+  open_scenario "$2" "$3" "$4"
+  NEW="$(dirname "$WT")/$(fork_dir_of "$1")"
+
+  checkout_and_wait done
+  assert_contains checkout_detail "read-only: the fork does not accept pushes" surface change-request read
+  [ -d "$NEW" ] || fail "the worktree $NEW was not created"
+  if git -C "$NEW" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then fail "a read-only worktree has an upstream"; fi
+  [ "$(git -C "$NEW" rev-parse HEAD)" = "$HEAD_SHA" ] || fail "the read-only worktree is not at the head"
+  [ -z "$(git -C "$WT" config --get "remote.$remote.url" || true)" ] || fail "a read-only checkout added the remote $remote"
+  echo "OK: $(basename "$NEW") is read-only at the head, with no upstream and no $remote"
+
+  echo "the forge's head moves on: the read-only worktree follows it"
+  git -C "$RUN_DIR/next-$SCENARIO" push -q "$ORIGIN" "$NEXT_HEAD:$(pull_ref_of "$1")"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__push"
+  checkout_and_wait done
+  assert_contains checkout_detail "read-only: the fork does not accept pushes" surface change-request read
+  assert_contains checkout_detail "fast-forwarded to ${NEXT_HEAD:0:8}" surface change-request read
+  [ "$(git -C "$NEW" rev-parse HEAD)" = "$NEXT_HEAD" ] || fail "the read-only worktree did not follow the head"
+  echo "OK: the read-only worktree is at $NEXT_HEAD"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_gone() { # flavour host forge number origin-url fork-url
+  SCENARIO="$1-gone"
+  echo "=== $SCENARIO"
+  prepare_scenario "$1" gone "$5" "$6"
+  open_scenario "$2" "$3" "$4"
+  local NEW="$(dirname "$WT")/$(basename "$WT")-feat"
+
+  checkout_and_wait done
+  assert_contains checkout_detail "read-only: the source branch is gone from the forge" surface change-request read
+  [ -d "$NEW" ] || fail "the worktree $NEW was not created"
+  [ "$(git -C "$NEW" rev-parse HEAD)" = "$HEAD_SHA" ] || fail "the read-only worktree is not at the head"
+  echo "OK: $(basename "$NEW") is read-only at the head"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+scenario_refusals() { # flavour host forge number origin-url fork-url
+  SCENARIO="$1-refusals"
+  echo "=== $SCENARIO"
+  prepare_scenario "$1" same "$5" "$6"
+  # A feat that is not an ancestor of the head: the checkout must refuse it
+  # before it creates anything.
+  git -C "$WT" fetch -q origin main
+  git -C "$WT" branch feat FETCH_HEAD
+  open_scenario "$2" "$3" "$4"
+  local NEW="$(dirname "$WT")/$(basename "$WT")-feat"
+
+  echo "collision: a local feat at other commits is refused, and nothing is created"
+  checkout_and_wait failed
+  assert_contains checkout_detail "points at other commits" surface change-request read
+  [ ! -e "$NEW" ] || fail "the refused checkout created $NEW"
+  capture "checkout-$1-refused"
+  git -C "$WT" branch -D feat >/dev/null
+  echo "OK: the collision was refused and the branch deleted"
+
+  echo "no remote: a project with no remote for the forge is refused"
+  git -C "$WT" remote set-url origin https://ghe.test/other/repo.git
+  checkout_and_wait failed
+  assert_contains checkout_detail "no remote of this project points at acme/widgets" surface change-request read
+  git -C "$WT" remote set-url origin "$5"
+  echo "OK: the project with no matching remote was refused, and its URL restored"
+
+  echo "twice: a second checkout while one runs is refused"
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__slowgraphql?seconds=3"
+  ctl surface change-request checkout
+  local second
+  second=$(reply surface change-request checkout 2>&1 || true)
+  case "$second" in
+    *"a checkout is already running"*) echo "OK: the second checkout was refused while one runs" ;;
+    *) fail "the second checkout was not refused as running: $second" ;;
+  esac
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__reset"
+  wait_for checkout done surface change-request read
+  [ -d "$NEW" ] || fail "the checkout that ran did not create $NEW"
+  echo "OK: the checkout that ran finished"
+
+  dump_git
+  quit_app; stop_forge
+}
+
+start_forge() { # flavour
+  PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  python3 "$ROOT/Scripts/Tests/fake_forge.py" --flavor "$1" --port "$PORT" --fixtures "$FIXTURES_DIR" --log "$RUN_DIR/$SCENARIO-forge-requests.log" &
+  FORGE_PID=$!
+  local ready=0
+  for _ in $(seq 1 50); do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/api/v3/meta" && { ready=1; break; }
+    sleep 0.2
+  done
+  [ "$ready" -eq 1 ] || fail "the fake forge never answered on port $PORT"
+}
+
+make_worktree() { # dir remote-url fetch-url
+  mkdir -p "$1"
+  git -C "$1" init -q -b main
+  git -C "$1" config user.email t@example.com
+  git -C "$1" config user.name Tester
+  git -C "$1" config credential.helper ""
+  git -C "$1" -c commit.gpgSign=false commit -q --allow-empty -m first
+  git -C "$1" remote add origin "$2"
+  git -C "$1" config "url.$3.insteadOf" "$2"
+}
+
+launch_app() { # host [log-name]
+  local log="$RUN_DIR/${2:-$SCENARIO-app}.log"
+  export SIRIO_SOCKET="$RUN_DIR/$SCENARIO.sock"
+  export SIRIO_DB="$RUN_DIR/$SCENARIO.sqlite"
+  export SIRIO_CREDENTIALS="$RUN_DIR/$SCENARIO-credentials.json"
+  # The data root of the isolated host: without it a debug build adopts or starts a host
+  # in the real data root (CLAUDE.md, SP1 limitation).
+  export SIRIO_HOST_HOME="$RUN_DIR/$SCENARIO-host"
+  export SIRIO_FORGE_FETCH_TIMEOUT_MS=20000
+  export SIRIO_FORGE_TEST_ENDPOINTS="$1=http://127.0.0.1:$PORT"
+  export GH_CONFIG_DIR="$RUN_DIR/gh-$SCENARIO" GLAB_CONFIG_DIR="$RUN_DIR/glab-$SCENARIO"
+  mkdir -p "$GH_CONFIG_DIR" "$GLAB_CONFIG_DIR"
+  chmod 700 "$GLAB_CONFIG_DIR"
+  unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN HTTP_PROXY HTTPS_PROXY http_proxy https_proxy || true
+  rm -f "$SIRIO_SOCKET"
+  if [ "$STATE_ONLY" -eq 1 ]; then
+    (cd "$WT" && exec env -u DISPLAY -u WAYLAND_DISPLAY "$BIN" >"$log" 2>&1) &
+  else
+    (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 "$BIN" >"$log" 2>&1) &
+  fi
+  APP_PID=$!
+  for _ in $(seq 1 75); do
+    [ -S "$SIRIO_SOCKET" ] && break
+    sleep 0.2
+  done
+  [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket"
+}
+
+quit_app() { # the graceful quit a user makes, which flushes the session
+  ctl quit
+  for _ in $(seq 1 100); do
+    kill -0 "$APP_PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  ! kill -0 "$APP_PID" 2>/dev/null || fail "sirio did not exit after quit"
+  wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+  echo "OK: sirio quit"
+}
+
+connect_and_open() { # host forge number
+  ctl project add "$WT"
+  ctl select-workspace --workspace "$WT"
+  ctl surface change-requests show
+  # Let the initial host probe settle before saving a token, as the sign-in UI does.
+  if [ "$2" = github ]; then
+    wait_for state not-connected surface change-requests read
+  else
+    wait_for state unknown-forge surface change-requests read
+  fi
+  wait_for host "$1" surface change-requests read
+  local account
+  account=$(read_field account surface change-requests token --host "$1" --forge "$2" --token good) || fail "the token was not accepted"
+  [ "$account" = "fake-user" ] || fail "the token signed in as '$account'"
+  wait_for state ready surface change-requests read
+  ctl surface change-request open "$3"
+  wait_for state loaded surface change-request read
+}
+
+
+scenario_same github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+scenario_same gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git https://gitlab.test/forks/alice/app.git
+scenario_fork_push github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+scenario_fork_push gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git https://gitlab.test/forks/alice/app.git
+scenario_fork_readonly github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+scenario_fork_readonly gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git https://gitlab.test/forks/alice/app.git
+scenario_gone github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+scenario_refusals github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+
+echo "artifact: $OUT_DIR"
+echo "HANDOFF E2E OK"
