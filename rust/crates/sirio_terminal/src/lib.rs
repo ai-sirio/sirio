@@ -2176,6 +2176,10 @@ pub struct TerminalView {
     pending_prelude: Vec<u8>,
     /// The link reported `Lost` and no new session has opened since.
     session_lost: bool,
+    /// The factory-global observer, registered once while Connecting.
+    /// Replaced, never stacked: assigning drops the previous subscription,
+    /// which unsubscribes it.
+    factory_observer: Option<gpui::Subscription>,
     empty_prompt: bool,
     font_size: Pixels,
     focus_handle: gpui::FocusHandle,
@@ -2365,6 +2369,7 @@ impl TerminalView {
             fallback_reason: None,
             pending_prelude: Vec::new(),
             session_lost: false,
+            factory_observer: None,
             empty_prompt: false,
             font_size: FONT_SIZE,
             focus_handle,
@@ -2399,6 +2404,7 @@ impl TerminalView {
             fallback_reason: None,
             pending_prelude: Vec::new(),
             session_lost: false,
+            factory_observer: None,
             empty_prompt: true,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
@@ -2455,6 +2461,7 @@ impl TerminalView {
             fallback_reason: None,
             pending_prelude: Vec::new(),
             session_lost: false,
+            factory_observer: None,
             empty_prompt: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
@@ -2716,9 +2723,14 @@ impl TerminalView {
         if self.empty_prompt {
             return;
         }
-        // Only a fresh `Pending` attempts an open; a `Connecting` pane waits
-        // for the factory observer registered below to retry it.
-        if !matches!(self.terminal, TerminalState::Pending) {
+        // A fresh `Pending` opens at once; a `Connecting` pane retries on
+        // every trigger (render, factory-global change) until the factory
+        // answers `Linked` or `Failed`. A `Pending` factory outcome is
+        // side-effect-free, so re-asking it is harmless.
+        if !matches!(
+            self.terminal,
+            TerminalState::Pending | TerminalState::Connecting
+        ) {
             return;
         }
         let request = self.open_request();
@@ -2744,11 +2756,16 @@ impl TerminalView {
             }
             OpenOutcome::Pending => {
                 self.terminal = TerminalState::Connecting;
-                cx.observe_global::<SessionFactoryGlobal>(|view, cx| {
-                    view.ensure_started(cx);
-                    cx.notify();
-                })
-                .detach();
+                // Registered once per view and replaced, never stacked:
+                // assigning drops the previous subscription.
+                if self.factory_observer.is_none() {
+                    self.factory_observer = Some(
+                        cx.observe_global::<SessionFactoryGlobal>(|view, cx| {
+                            view.ensure_started(cx);
+                            cx.notify();
+                        }),
+                    );
+                }
             }
             OpenOutcome::Failed(reason) => {
                 eprintln!("[sirio] terminal on the in-process fallback: {reason}");
@@ -8250,6 +8267,106 @@ mod view_tests {
         assert!(!failed);
         assert!(running, "the fallback still opens a live local session");
         assert_eq!(reason.as_deref(), Some("host unreachable"));
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A factory that answers Pending until flipped, then opens a LocalLink
+    /// from the request — the shape the app's factory takes once the host
+    /// is known.
+    struct FlippingSessionFactory {
+        ready: Arc<AtomicBool>,
+    }
+    impl SessionFactory for FlippingSessionFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            if self.ready.load(Ordering::SeqCst) {
+                match LocalLink::open(&request) {
+                    Ok(link) => OpenOutcome::Linked(Box::new(link)),
+                    Err(message) => OpenOutcome::Failed(message),
+                }
+            } else {
+                OpenOutcome::Pending
+            }
+        }
+    }
+
+    /// A pane whose factory resolves later must open once it does: Pending
+    /// renders Connecting, and after the factory flips (published through
+    /// the factory global, which notifies the view's observer) the pane
+    /// reaches Running and shows the child's output.
+    #[gpui::test]
+    async fn connecting_pane_opens_once_its_factory_resolves(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let ready = Arc::new(AtomicBool::new(false));
+        let factory: Arc<dyn SessionFactory> = Arc::new(FlippingSessionFactory {
+            ready: ready.clone(),
+        });
+        cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-factory-resolve-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(
+                &working_directory,
+                pty_fixture_shell(
+                    "printf 'FACTORY_MARKER\\n'; exec sleep 60",
+                    &["print", "FACTORY_MARKER\\n", "--sleep", "60"],
+                ),
+                cx,
+            )
+            .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-connecting").is_some(),
+            "a pane with no session yet draws the Connecting state"
+        );
+
+        // The host is found: flip the factory and publish the global again
+        // (`set_global` notifies global observers, which is what retries a
+        // Connecting pane).
+        ready.store(true, Ordering::SeqCst);
+        cx.update(|_, cx| {
+            cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+        });
+
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let connecting = cx.debug_bounds("terminal-connecting").is_some();
+            let (running, scrollback) = terminal.read_with(&cx.cx, |terminal, _| {
+                (
+                    terminal.running_terminal().is_some(),
+                    terminal.capture_scrollback(),
+                )
+            });
+            if !connecting
+                && running
+                && String::from_utf8_lossy(&scrollback).contains("FACTORY_MARKER")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pane never left Connecting after its factory resolved \
+                 (connecting={connecting}, running={running})"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
         let _ = std::fs::remove_dir_all(working_directory);
