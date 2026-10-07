@@ -13638,7 +13638,7 @@ impl SirioWorkspace {
             .find(|project| project.id == project_id)
             .and_then(|project| project.worktrees.iter().find(|worktree| worktree.branch == done.branch))
             .map_or_else(|| done.path.clone(), |worktree| worktree.path.clone());
-        self.session.save_change_request_link(&path, &reference);
+        self.session.save_change_request_link(&path, &reference, &done.branch);
         self.select_worktree_from_sidebar(path, cx);
         self.add_change_request_tab(reference.clone(), done.title.clone(), cx);
         // The tab in the selected worktree reports the same outcome.

@@ -1981,17 +1981,21 @@ impl SessionStore {
     }
 
     /// The change request this worktree was checked out from (change
-    /// requests C1); `None` for no link, a fallback database or a read error.
-    pub fn change_request_link(&self, worktree: &Path) -> Option<sirio_forge::ChangeRef> {
+    /// requests C1), with the local branch the link was made for; `None` for
+    /// no link, a fallback database or a read error.
+    pub fn change_request_link(&self, worktree: &Path) -> Option<(sirio_forge::ChangeRef, String)> {
         let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let db = db.as_ref()?;
         match db.change_request_link(&worktree.to_string_lossy()) {
-            Ok(Some(link)) => Some(sirio_forge::ChangeRef {
-                forge: forge_from_word(&link.forge)?,
-                host: link.host,
-                project: link.project,
-                number: link.number,
-            }),
+            Ok(Some(link)) => Some((
+                sirio_forge::ChangeRef {
+                    forge: forge_from_word(&link.forge)?,
+                    host: link.host,
+                    project: link.project,
+                    number: link.number,
+                },
+                link.branch,
+            )),
             Ok(None) => None,
             Err(error) => {
                 eprintln!("[session] failed to read a change request link: {error}");
@@ -2020,7 +2024,7 @@ impl SessionStore {
         }
     }
 
-    pub fn save_change_request_link(&self, worktree: &Path, reference: &sirio_forge::ChangeRef) {
+    pub fn save_change_request_link(&self, worktree: &Path, reference: &sirio_forge::ChangeRef, branch: &str) {
         let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(db) = db.as_ref() else {
             return;
@@ -2031,6 +2035,7 @@ impl SessionStore {
             host: reference.host.clone(),
             project: reference.project.clone(),
             number: reference.number,
+            branch: branch.to_string(),
         };
         if let Err(error) = db.save_change_request_link(&link) {
             eprintln!("[session] failed to persist the link of {}: {error}", link.path);

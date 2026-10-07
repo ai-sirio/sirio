@@ -222,6 +222,8 @@ pub struct ChangeRequestLinkRecord {
     pub host: String,
     pub project: String,
     pub number: u64,
+    /// The local branch the worktree was checked out on.
+    pub branch: String,
 }
 
 /// A stored row removed from active state because its payload could not be

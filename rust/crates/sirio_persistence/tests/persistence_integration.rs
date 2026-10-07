@@ -2293,6 +2293,7 @@ fn a_change_request_link_survives_a_relaunch_and_is_found_both_ways() {
         host: host.into(),
         project: project.into(),
         number,
+        branch: "feat".into(),
     };
     {
         let db = AppDatabase::open(&path).expect("open");
@@ -2304,12 +2305,10 @@ fn a_change_request_link_survives_a_relaunch_and_is_found_both_ways() {
         ))
         .expect("save");
         // Saving again for the same worktree replaces the link.
-        db.save_change_request_link(&link(
-            "/work/widgets-feat",
-            "github.example",
-            "acme/widgets",
-            102,
-        ))
+        db.save_change_request_link(&ChangeRequestLinkRecord {
+            branch: "alice/feat".into(),
+            ..link("/work/widgets-feat", "github.example", "acme/widgets", 102)
+        })
         .expect("replace");
         // Same number, different host; same number and host, different project.
         db.save_change_request_link(&link(
@@ -2332,7 +2331,10 @@ fn a_change_request_link_survives_a_relaunch_and_is_found_both_ways() {
         db.change_request_link("/work/widgets-feat")
             .expect("read")
             .expect("present"),
-        link("/work/widgets-feat", "github.example", "acme/widgets", 102)
+        ChangeRequestLinkRecord {
+            branch: "alice/feat".into(),
+            ..link("/work/widgets-feat", "github.example", "acme/widgets", 102)
+        }
     );
     assert_eq!(
         db.change_request_links_to("github", "github.example", "acme/widgets", 102)

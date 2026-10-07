@@ -875,11 +875,11 @@ impl AppDatabase {
         link: &ChangeRequestLinkRecord,
     ) -> Result<(), PersistenceError> {
         self.conn.execute(
-            "INSERT INTO change_request_link (path, forge, host, project, number)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO change_request_link (path, forge, host, project, number, branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(path) DO UPDATE SET forge = excluded.forge, host = excluded.host,
-                 project = excluded.project, number = excluded.number",
-            params![link.path, link.forge, link.host, link.project, link.number as i64],
+                 project = excluded.project, number = excluded.number, branch = excluded.branch",
+            params![link.path, link.forge, link.host, link.project, link.number as i64, link.branch],
         )?;
         Ok(())
     }
@@ -890,7 +890,7 @@ impl AppDatabase {
         path: &str,
     ) -> Result<Option<ChangeRequestLinkRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
-            "SELECT path, forge, host, project, number FROM change_request_link WHERE path = ?1",
+            "SELECT path, forge, host, project, number, branch FROM change_request_link WHERE path = ?1",
         )?;
         let mut rows = statement.query_map([path], |row| {
             Ok(ChangeRequestLinkRecord {
@@ -899,6 +899,7 @@ impl AppDatabase {
                 host: row.get(2)?,
                 project: row.get(3)?,
                 number: row.get::<_, i64>(4)? as u64,
+                branch: row.get(5)?,
             })
         })?;
         Ok(rows.next().transpose()?)
