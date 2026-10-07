@@ -73,6 +73,10 @@ pub struct OpenRequest {
     /// (a restored tab's scrollback); ignored when an existing session is
     /// attached.
     pub prelude: Vec<u8>,
+    /// A restart re-opens under the same id: the factory must close the old
+    /// session synchronously before re-creating, or the open attaches to the
+    /// still-listed dying session (Task 9 review).
+    pub recreate: bool,
 }
 
 pub enum OpenOutcome {
@@ -359,6 +363,20 @@ impl HostLink {
         let (attached, stream_rx) = client
             .attach(&request.session_id, None)
             .map_err(|error| error.to_string())?;
+        // A racing create (`invalid_params` duplicate → attach) leaves
+        // `shell_pid` None; take the pid from `term.list` after attaching.
+        let shell_pid = created_pid.or(listed_pid).or_else(|| {
+            client
+                .list()
+                .ok()
+                .and_then(|listed| {
+                    listed
+                        .sessions
+                        .iter()
+                        .find(|summary| summary.session_id == request.session_id)
+                        .map(|summary| summary.pid)
+                })
+        });
         let events_rx = client.events().map_err(|error| error.to_string())?;
         let size = attached.size;
         let stream = attached.stream;
@@ -388,7 +406,7 @@ impl HostLink {
             .map_err(|error| error.to_string())?;
         Ok(HostLink {
             session_id: request.session_id.clone(),
-            shell_pid: created_pid.or(listed_pid),
+            shell_pid,
             incoming: chunks_rx,
             control,
             reconnect,
@@ -742,6 +760,7 @@ mod tests {
             cols: 80,
             rows: 24,
             prelude: Vec::new(),
+            recreate: false,
         }
     }
 

@@ -1725,6 +1725,7 @@ impl TerminalHandle {
             cols: 80,
             rows: 24,
             prelude: Vec::new(),
+            recreate: false,
         };
         let link = LocalLink::open(&request).map_err(|message| anyhow::anyhow!("{message}"))?;
         Ok(Self::new_with_link(Box::new(link)))
@@ -2174,6 +2175,9 @@ pub struct TerminalView {
     /// Scrollback to feed the next session as its prelude: set by
     /// `restart` after a lost session, consumed by `ensure_started`.
     pending_prelude: Vec<u8>,
+    /// A restart re-opens under the same id: carried into `OpenRequest.recreate`
+    /// so the factory closes the old session before re-creating.
+    pending_recreate: bool,
     /// The link reported `Lost` and no new session has opened since.
     session_lost: bool,
     /// The factory-global observer, registered once while Connecting.
@@ -2368,6 +2372,7 @@ impl TerminalView {
             view_mode: TerminalViewMode::default(),
             fallback_reason: None,
             pending_prelude: Vec::new(),
+            pending_recreate: false,
             session_lost: false,
             factory_observer: None,
             empty_prompt: false,
@@ -2403,6 +2408,7 @@ impl TerminalView {
             view_mode: TerminalViewMode::default(),
             fallback_reason: None,
             pending_prelude: Vec::new(),
+            pending_recreate: false,
             session_lost: false,
             factory_observer: None,
             empty_prompt: true,
@@ -2460,6 +2466,7 @@ impl TerminalView {
             view_mode: TerminalViewMode::default(),
             fallback_reason: None,
             pending_prelude: Vec::new(),
+            pending_recreate: false,
             session_lost: false,
             factory_observer: None,
             empty_prompt: false,
@@ -2487,6 +2494,14 @@ impl TerminalView {
     /// child will inherit `SIRIO_PANE_ID`.
     pub fn set_identity(&mut self, identity: TerminalIdentity) {
         self.identity = identity;
+    }
+
+    /// Sets the prelude for the next open: a restored tab's scrollback, fed
+    /// into the VT and the journal before the child's first byte when the
+    /// session is created here (SP2 spec §3.1). Ignored when an existing
+    /// session is attached.
+    pub fn set_prelude(&mut self, prelude: Vec<u8>) {
+        self.pending_prelude = prelude;
     }
 
     /// Applies the user-configured terminal font size. The terminal renderer
@@ -2527,6 +2542,12 @@ impl TerminalView {
     /// opened). The host may use this to show a distinct tab glyph.
     pub fn is_failed(&self) -> bool {
         matches!(self.terminal, TerminalState::Failed { .. })
+    }
+
+    /// Whether the host is gone while the pane keeps its scrollback (SP2 spec
+    /// §4.2). The pane draws `Session lost` with `Restart`.
+    pub fn is_session_lost(&self) -> bool {
+        self.session_lost
     }
 
     /// The message of a failed pane, if failed.
@@ -2707,6 +2728,7 @@ impl TerminalView {
             // Cloned, not taken: a `Pending` factory holds the request, and
             // the retry must carry the same prelude.
             prelude: self.pending_prelude.clone(),
+            recreate: self.pending_recreate,
         }
     }
 
@@ -2751,6 +2773,7 @@ impl TerminalView {
                 self.view_mode.survives = survives;
                 self.fallback_reason = None;
                 self.pending_prelude.clear();
+                self.pending_recreate = false;
                 self.session_lost = false;
                 self.terminal = TerminalState::Running(handle);
             }
@@ -2781,6 +2804,7 @@ impl TerminalView {
                         self.view_mode.survives = false;
                         self.fallback_reason = Some(reason);
                         self.pending_prelude.clear();
+                        self.pending_recreate = false;
                         self.session_lost = false;
                         self.terminal = TerminalState::Running(handle);
                     }
@@ -2833,6 +2857,9 @@ impl TerminalView {
         if self.session_lost {
             self.pending_prelude = self.capture_scrollback();
         }
+        // A restart re-opens under the same id: the factory closes the old
+        // host session synchronously before re-creating (see `OpenRequest.recreate`).
+        self.pending_recreate = true;
         self.shutdown();
         self.host.relaunch();
         self.terminal = TerminalState::Pending;
@@ -4295,6 +4322,7 @@ impl gpui::Render for TerminalView {
         let terminal_entity = cx.entity();
         let file_drop_entity = terminal_entity.clone();
         let external_drop_entity = terminal_entity.clone();
+        let session_lost_restart = terminal_entity.clone();
         let dropped_path = self
             .last_dropped_diff
             .as_ref()
@@ -4633,6 +4661,41 @@ impl gpui::Render for TerminalView {
                             ),
                         )
                         .priority(1),
+                    )
+                })
+                // The host is gone: the pane keeps its scrollback and offers
+                // Restart, which replays it as the new session's prelude.
+                .when(self.session_lost, move |this| {
+                    let restart_entity = session_lost_restart.clone();
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(8.0))
+                            .top(px(8.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(theme.radii.control)
+                            .bg(theme.ely.surface)
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.ely.fg)
+                            .child("Session lost")
+                            .child(
+                                div()
+                                    .id("terminal-restart")
+                                    .debug_selector(|| "terminal-restart".to_owned())
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme.ely.hover)
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(move |_, _, cx| {
+                                        restart_entity.update(cx, |view, cx| view.restart(cx));
+                                    })
+                                    .child("Restart"),
+                            ),
                     )
                 })
                 .when_some(context_menu, |this, menu| this.child(menu))

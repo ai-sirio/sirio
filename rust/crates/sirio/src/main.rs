@@ -34,10 +34,10 @@ use sirio_project::{
     is_git_repository, numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
-    TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
-    TerminalExitStatus, TerminalIdentity, TerminalLinkEvent, TerminalPaneCache,
-    TerminalPromptAction, TerminalPromptEvent, TerminalShell, TerminalView,
-    command_shell_invocation,
+    HostLink, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal, TerminalActivityEvent,
+    TerminalContextAction, TerminalContextEvent, TerminalDropEvent, TerminalExitStatus,
+    TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
+    TerminalPromptEvent, TerminalShell, TerminalView, command_shell_invocation,
 };
 use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
@@ -237,6 +237,7 @@ mod display_backend;
 mod forge;
 #[cfg(not(windows))]
 mod login_path;
+mod host_sessions;
 mod lsp;
 mod lsp_install;
 // Compiled everywhere so every platform checks it; only macOS routes to it.
@@ -1207,6 +1208,10 @@ enum ControlAction {
     /// never observes on its own — nothing re-renders it without this
     /// action nudging the GPUI-thread poll loop to call `refresh_sidebar`.
     RefreshSidebar,
+    /// Debug-only `surface.host.end_all`: performs End All without the dialog.
+    EndAllSessions {
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -2141,6 +2146,7 @@ impl ControlHandler for AppControlHandler {
                 if cfg!(debug_assertions) {
                     methods.push("surface.change_request.act");
                     methods.push("surface.changes.confirm");
+                    methods.push("surface.host.end_all");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2483,6 +2489,12 @@ impl ControlHandler for AppControlHandler {
                 let mut params = request.params.clone();
                 params.remove("action");
                 self.queue_action(request, move |reply| ControlAction::ActChangeRequest { action, params, reply })
+            }
+            // Debug-only `surface.host.end_all`: performs End All without the
+            // dialog (Task 12 drives it). Absent from a release build's
+            // `capabilities`, answered "unknown method" there.
+            "surface.host.end_all" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EndAllSessions { reply })
             }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.tabs.select" => {
@@ -4836,6 +4848,9 @@ struct SirioWorkspace {
     /// bypass this — same precedent as `project.add`: no user is present to
     /// answer a prompt.
     pending_pane_close: Option<PendingPaneClose>,
+    /// End All Terminal Sessions confirmation (SP2 spec §4.2): shown only
+    /// when some session reports `foreground.running` or an agent.
+    pending_end_all: Option<PendingEndAll>,
     /// F-WIN-10: a transient, floating, auto-dismissing notice -- distinct
     /// from `Sidebar::set_notice`'s persistent inline banner, which stays
     /// silent when the sidebar isn't the visible surface. `toast_id` tags
@@ -5005,6 +5020,12 @@ struct PendingPaneClose {
     /// just landed. `None` is the ordinary same-worktree close, whose wording
     /// is unchanged.
     from_worktree: Option<String>,
+}
+
+#[derive(Clone)]
+struct PendingEndAll {
+    focus: FocusHandle,
+    needs_focus: bool,
 }
 
 impl SirioWorkspace {
@@ -5392,6 +5413,10 @@ impl SirioWorkspace {
                                         tab.control_act(&action, &params, window, cx)
                                     }));
                                 }
+                                ControlAction::EndAllSessions { reply } => {
+                                    workspace.perform_end_all_sessions(cx);
+                                    let _ = reply.send(Ok(vec![]));
+                                }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
                                 }
@@ -5575,6 +5600,9 @@ impl SirioWorkspace {
                                 }
                                 tray::TrayRequest::Quit => {
                                     cx.quit();
+                                }
+                                tray::TrayRequest::EndAllSessions => {
+                                    workspace.request_end_all_sessions(cx);
                                 }
                             }
                         }
@@ -5788,6 +5816,7 @@ impl SirioWorkspace {
             show_settings: false,
             restore_focus_pending: false,
             pending_pane_close: None,
+            pending_end_all: None,
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
@@ -7235,6 +7264,9 @@ impl SirioWorkspace {
                 sirio_ui::settings::SettingsEvent::RequestPermission(kind) => {
                     workspace.request_permission(*kind, cx);
                 }
+                sirio_ui::settings::SettingsEvent::EndAllSessions => {
+                    workspace.request_end_all_sessions(cx);
+                }
             },
         )
         .detach();
@@ -7749,12 +7781,16 @@ impl SirioWorkspace {
                         );
                     }
                     TerminalActivityEvent::OscTitle(_)
-                    | TerminalActivityEvent::OutputSettled { .. }
-                    // The Session-lost surface (a "Session lost" row with a
-                    // Restart that replays the scrollback as prelude) is a
-                    // later SP2 task's; the view already repaints itself on
-                    // the event, so the workspace needs nothing here yet.
-                    | TerminalActivityEvent::SessionLost => {}
+                    | TerminalActivityEvent::OutputSettled { .. } => {}
+                    // The host is gone: the pane keeps its scrollback and the
+                    // view draws `Session lost` with `Restart`
+                    // (`TerminalView::restart`, prelude replay). Mark and
+                    // repaint like an exit; Layer D keeps polling `shell_pid()`,
+                    // which now comes from the link.
+                    TerminalActivityEvent::SessionLost => {
+                        workspace.mark_activity_dirty();
+                        cx.notify();
+                    }
                 }
                 if let Some(transition) = transition.as_ref() {
                     workspace.post_activity_notification(transition);
@@ -8419,10 +8455,36 @@ impl SirioWorkspace {
     }
 
     fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
+        let removed_paths: Vec<PathBuf> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         if self.project_catalog.remove(id) {
             self.session.schedule_catalog(&self.project_catalog);
             self.sync_control_state();
             self.refresh_sidebar(cx);
+            // Closing a project ends its sessions (SP2 spec §4.2).
+            for path in &removed_paths {
+                let worktree_id = path.to_string_lossy().into_owned();
+                for controller in self
+                    .terminal_pane_cache
+                    .panes_for_detach_in_worktree(&worktree_id)
+                {
+                    controller.update(cx, |terminal, _| terminal.shutdown());
+                }
+                self.terminal_pane_cache.remove_worktree(&worktree_id);
+                self.parked_worktree_tabs.remove(&worktree_id);
+                self.retained_worktree_chats.remove(&worktree_id);
+            }
             // A settings tab of a removed project has no project left to show.
             let doomed: Vec<usize> = self
                 .tabs
@@ -8438,6 +8500,22 @@ impl SirioWorkspace {
                     });
                     hosted.then_some(tab.id)
                 })
+                .collect();
+            for tab_id in doomed {
+                self.close_tab_by_id(tab_id, None, cx);
+            }
+            // Terminal tabs whose worktree belonged to the removed project.
+            let doomed: Vec<usize> = self
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    self.tab_worktree_paths.get(&tab.id).is_some_and(|path| {
+                        removed_paths
+                            .iter()
+                            .any(|removed| paths_name_the_same_document(removed, path))
+                    })
+                })
+                .map(|tab| tab.id)
                 .collect();
             for tab_id in doomed {
                 self.close_tab_by_id(tab_id, None, cx);
@@ -10342,6 +10420,15 @@ impl SirioWorkspace {
             );
         }
         let worktree_id = path.to_string_lossy().into_owned();
+        // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
+        // cached terminals before dropping them; parked layouts carry no
+        // entities themselves.
+        for controller in self
+            .terminal_pane_cache
+            .panes_for_detach_in_worktree(&worktree_id)
+        {
+            controller.update(cx, |terminal, _| terminal.shutdown());
+        }
         self.terminal_pane_cache.remove_worktree(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
@@ -11748,10 +11835,10 @@ impl SirioWorkspace {
             }
         });
         for terminal in terminals {
-            // TerminalView exposes PTY input but not a public shutdown method.
-            // Interrupt first, then send EOF so the login shell exits and the
-            // alacritty event loop observes child exit and reaps the PTY.
-            terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+            // Closing a tab ends its sessions (SP2 spec §4.2): `shutdown`
+            // terminates the host session; a tab opened by Show session
+            // (Task 11) will call `detach` instead — no such tab exists yet.
+            terminal.update(cx, |terminal, _| terminal.shutdown());
         }
         for browser in browsers {
             // F-BRW: same reason as the terminals above — `Drop` is not a close
@@ -11936,14 +12023,225 @@ impl SirioWorkspace {
     /// focus on whatever the tab-menu button last held until the user
     /// clicked back into the pane.
 
-    fn shutdown_terminals(&mut self, cx: &mut Context<Self>) {
+    /// Quit detaches and nothing else (SP2 spec §4.2): every view stops
+    /// watching, cached ones included; the host keeps the sessions.
+    fn detach_terminals(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let Some(terminal) = content.terminal() {
-                    terminal.update(cx, |terminal, _| terminal.shutdown());
+                    terminal.update(cx, |terminal, _| terminal.detach());
                 }
             });
         }
+        for pane in self.terminal_pane_cache.panes_for_detach() {
+            pane.update(cx, |terminal, _| terminal.detach());
+        }
+    }
+
+    /// Whether End All Terminal Sessions needs confirmation: some session
+    /// reports `foreground.running`, or some tab carries an agent.
+    fn end_all_needs_confirm(&self, cx: &App) -> bool {
+        if self.tabs.iter().any(|tab| tab.agent_id.is_some()) {
+            return true;
+        }
+        let Some(client) = cx
+            .try_global::<HostConnection>()
+            .and_then(|conn| conn.0.as_ref())
+            .and_then(|handle| handle.term())
+        else {
+            return false;
+        };
+        client
+            .list()
+            .map(|list| {
+                list.sessions
+                    .iter()
+                    .any(|summary| summary.foreground.running)
+            })
+            .unwrap_or(false)
+    }
+
+    /// The palette / Settings / tray entry point: asks for confirmation (an
+    /// Ely `Dialog`, like the Changes discard) only when some session reports
+    /// `foreground.running` or an agent, then `host.shutdown {force: true}`.
+    /// With no host it is disabled (the palette already disables it).
+    fn request_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        if cx
+            .try_global::<HostConnection>()
+            .is_none_or(|conn| conn.0.is_none())
+        {
+            return;
+        }
+        if self.end_all_needs_confirm(cx) {
+            self.pending_end_all = Some(PendingEndAll {
+                focus: cx.focus_handle().tab_stop(true),
+                needs_focus: true,
+            });
+            cx.notify();
+        } else {
+            self.perform_end_all_sessions(cx);
+        }
+    }
+
+    fn cancel_pending_end_all(&mut self, cx: &mut Context<Self>) {
+        self.pending_end_all = None;
+        cx.notify();
+    }
+
+    fn confirm_pending_end_all(&mut self, cx: &mut Context<Self>) {
+        self.pending_end_all = None;
+        self.perform_end_all_sessions(cx);
+        cx.notify();
+    }
+
+    /// `host.shutdown {force: true}` through the SP1 connection; every open
+    /// terminal view then shows `Process exited` via its session's exit event.
+    fn perform_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = cx
+            .try_global::<HostConnection>()
+            .and_then(|conn| conn.0.as_ref())
+            .and_then(|handle| handle.term())
+        else {
+            return;
+        };
+        if let Err(error) = client.shutdown_force() {
+            eprintln!("[sirio] end all sessions failed: {error}");
+        }
+        // The host terminates every session; the views learn it through the
+        // session events (Exited) like any other exit. Nothing else to do here.
+        let _ = cx;
+    }
+
+    /// Raises `next_pane_id` to at least `floor` (SP2 spec §4.1): a new pane
+    /// never collides with an orphan the host still lists.
+    fn raise_next_pane_id(&mut self, floor: usize) {
+        self.next_pane_id = self.next_pane_id.max(floor);
+    }
+
+    /// Adopts orphaned `origin: app` host sessions (SP2 spec §4.2): every
+    /// listed app session whose id is not a leaf of any restored tab gets a
+    /// terminal tab bound to that leaf id, whose view attaches through the
+    /// factory. Logs `orphan.adopted` with the id only.
+    fn adopt_host_orphans(
+        &mut self,
+        sessions: Vec<sirio_host_protocol::term::SessionSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        use sirio_host_protocol::term::Origin;
+        let mut leaves = HashSet::new();
+        for tab in &self.tabs {
+            for id in tab.panes.leaf_ids() {
+                leaves.insert(id);
+            }
+        }
+        let mut worktrees: Vec<(usize, PathBuf)> = Vec::new();
+        for project in self.project_catalog.projects() {
+            for worktree in &project.worktrees {
+                let id = worktrees.len();
+                worktrees.push((id, worktree.path.clone()));
+            }
+        }
+        let mut projects: Vec<(usize, PathBuf)> = Vec::new();
+        for project in self.project_catalog.projects() {
+            let id = projects.len();
+            projects.push((id, project.root_path.clone()));
+        }
+        // Map back from the adoption id to a path.
+        let worktree_path = |id: usize| {
+            worktrees
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, p)| p.clone())
+        };
+        let project_path = |id: usize| {
+            projects
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, p)| p.clone())
+        };
+        for summary in sessions {
+            if summary.origin != Origin::App {
+                continue;
+            }
+            let Some(rest) = summary.session_id.strip_prefix("pane-") else {
+                continue;
+            };
+            let Ok(leaf) = rest.parse::<usize>() else {
+                continue;
+            };
+            if leaves.contains(&leaf) {
+                continue;
+            }
+            let cwd = PathBuf::from(&summary.cwd);
+            let target = host_sessions::adoption_target(&cwd, &worktrees, &projects);
+            let tab_dir = match target {
+                host_sessions::AdoptionTarget::Worktree(id) => {
+                    worktree_path(id).unwrap_or_else(|| self.working_directory.clone())
+                }
+                host_sessions::AdoptionTarget::Project(id) => {
+                    project_path(id).unwrap_or_else(|| self.working_directory.clone())
+                }
+                host_sessions::AdoptionTarget::Active => self.working_directory.clone(),
+            };
+            eprintln!("[sirio] orphan.adopted {}", summary.session_id);
+            self.insert_orphan_terminal_tab(&summary.session_id, leaf, tab_dir, cx);
+            leaves.insert(leaf);
+        }
+    }
+
+    /// Inserts a terminal tab bound to an explicit leaf id (orphan adoption):
+    /// the view's identity becomes `pane-<leaf>`, so the factory attaches to
+    /// the listed session. A missing session is created with a plain shell.
+    fn insert_orphan_terminal_tab(
+        &mut self,
+        session_id: &str,
+        leaf: usize,
+        directory: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = session_id;
+        let title = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terminal".to_owned());
+        let terminal = cx.new(|cx| match TerminalView::with_shell(&directory, TerminalShell::System, cx)
+        {
+            Ok(view) => view,
+            Err(error) => TerminalView::failed(
+                &directory,
+                TerminalShell::System,
+                format!("{error:#}"),
+                cx,
+            ),
+        });
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_font_size(self.terminal_font_size, cx)
+        });
+        Self::bind_terminal(&terminal, tab_id, leaf, cx);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id: self.session.new_tab_id(&directory, tab_id),
+            title: title.clone(),
+            kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(leaf),
+            panes: PaneNode::leaf(leaf, TabContent::Terminal { view: terminal }),
+            focused_pane: leaf,
+            title_is_auto_named: true,
+        });
+        self.tab_worktree_paths.insert(tab_id, directory);
+        self.active_tab = self.tabs.len() - 1;
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.session.flush_now();
+        self.mark_activity_dirty();
+        cx.notify();
     }
 
     fn add_chat_tab(
@@ -12295,7 +12593,11 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
             self.rebuild_center_split();
         }
+        // A new terminal tab triggers an immediate session save (SP2 spec
+        // §4.1), not the next periodic one, so a crash right after creation
+        // rarely leaves an orphan.
         self.schedule_save(cx);
+        self.session.flush_now();
         self.mark_activity_dirty();
         cx.notify();
     }
@@ -15861,7 +16163,8 @@ impl SirioWorkspace {
                 .pane_events
                 .push(PaneEvent::Close { id: focused_pane });
             if let Some(terminal) = removed.terminal() {
-                terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+                // Closing a pane in a split ends its session (SP2 spec §4.2).
+                terminal.update(cx, |terminal, _| terminal.shutdown());
                 self.terminal_pane_cache
                     .remove_in_worktree(&worktree_id, &format!("terminal-{focused_pane}"));
             }
@@ -16326,6 +16629,55 @@ impl SirioWorkspace {
                         key_entity.update(cx, |workspace, cx| {
                             workspace.handle_pane_close_confirm_key(event, window, cx);
                         });
+                    },
+                )),
+            },
+            theme,
+        ))
+    }
+
+    /// End All Terminal Sessions confirmation (SP2 spec §4.2): an Ely
+    /// `Dialog`, like the Changes discard — only when some session reports
+    /// `foreground.running` or an agent.
+    fn render_end_all_confirm(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
+        let pending = self.pending_end_all.clone()?;
+        let confirm_entity = entity.clone();
+        let cancel_entity = entity.clone();
+        Some(render_modal(
+            ModalSpec {
+                id: "end-all-sessions-confirm",
+                title: "End all terminal sessions?".into(),
+                body: "Some sessions are running or host agents. End every terminal session and the host?".into(),
+                text_field: None,
+                buttons: vec![
+                    ModalButton::new(
+                        "cancel",
+                        "Cancel",
+                        ModalButtonTone::Plain,
+                        move |_, window, cx| {
+                            cancel_entity.update(cx, |workspace, cx| {
+                                workspace.cancel_pending_end_all(cx);
+                                let _ = window;
+                            });
+                        },
+                    ),
+                    ModalButton::new(
+                        "end-all",
+                        "End All",
+                        ModalButtonTone::Destructive,
+                        move |_, window, cx| {
+                            confirm_entity.update(cx, |workspace, cx| {
+                                workspace.confirm_pending_end_all(cx);
+                                let _ = window;
+                            });
+                        },
+                    ),
+                ],
+                focus: Some(ModalFocus::new(
+                    pending.focus.clone(),
+                    move |event, _, cx| {
+                        cx.stop_propagation();
+                        let _ = event;
                     },
                 )),
             },
@@ -19055,6 +19407,9 @@ impl SirioWorkspace {
             has_retained_chat: !self.retained_chats.is_empty(),
             sidebar_target,
             symbols_available: self.active_file_offers_symbols(cx),
+            has_host: cx
+                .try_global::<HostConnection>()
+                .is_some_and(|conn| conn.0.is_some()),
         }
     }
 
@@ -19398,6 +19753,9 @@ impl SirioWorkspace {
             PaletteCommand::GoToSymbol => {
                 self.close_command_palette(window, cx);
                 self.go_to_symbol(window, cx);
+            }
+            PaletteCommand::EndAllSessions => {
+                self.request_end_all_sessions(cx);
             }
         }
         self.close_command_palette(window, cx);
@@ -19823,7 +20181,8 @@ impl SirioWorkspace {
             self.render_pane_close_confirm(theme, entity.clone()),
             self.render_title_prompt(theme, entity.clone()),
             self.render_toast(theme, entity.clone()),
-            self.render_update_toast(theme, entity),
+            self.render_update_toast(theme, entity.clone()),
+            self.render_end_all_confirm(theme, entity),
         ]
         .into_iter()
         .flatten()
@@ -19941,6 +20300,13 @@ impl Render for SirioWorkspace {
         // target and everything typed while the banner was up reached its
         // PTY instead.
         if let Some(pending) = self.pending_pane_close.as_mut()
+            && pending.needs_focus
+        {
+            pending.needs_focus = false;
+            let focus = pending.focus.clone();
+            focus.focus(window, cx);
+        }
+        if let Some(pending) = self.pending_end_all.as_mut()
             && pending.needs_focus
         {
             pending.needs_focus = false;
@@ -21049,6 +21415,36 @@ fn restore_tabs_with_terminal_cache(
         });
         if tab.active {
             active = id;
+        }
+    }
+    // SP2 spec §4.2: a restored tab already gets its old leaf id through
+    // `bind_terminal`; `ensure_started` asks the factory with that id, so a
+    // surviving session is attached and a missing one is created with the
+    // saved scrollback as `prelude` and the agent's `resume_command` as the
+    // program. The scrollback moves from the post-spawn `replay_scrollback`
+    // into `OpenRequest.prelude` (the replay now happens inside the session's
+    // VT, so `panel.read` sees it too). An attached surviving session gets no
+    // prelude and no resume command (the factory ignores both on attach).
+    for tab in &mut tabs {
+        let pane_ids = tab.panes.leaf_ids();
+        for pane_id in pane_ids {
+            let Some(bytes) = tab.session_state.scrollback.remove(&pane_id) else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            let mut view_entity = None;
+            tab.panes.for_each(&mut |id, content| {
+                if id == pane_id
+                    && let TabContent::Terminal { view } = content
+                {
+                    view_entity = Some(view.clone());
+                }
+            });
+            if let Some(view) = view_entity {
+                view.update(cx, |terminal, _| terminal.set_prelude(bytes));
+            }
         }
     }
     (tabs, active, reused_terminal_panes)
@@ -22305,13 +22701,86 @@ fn ensure_windows_console() {
 struct HostConnection(#[allow(dead_code)] Option<sirio_host_client::HostHandle>);
 impl gpui::Global for HostConnection {}
 
+/// The app's session factory: every terminal opens through the host.
+struct HostSessions {
+    client: sirio_host_client::TermClient,
+    reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+}
+
+impl SessionFactory for HostSessions {
+    fn open(&self, request: OpenRequest) -> OpenOutcome {
+        // RESTART RACE (Task 9 review): `restart` queues `Shutdown` and
+        // re-opens under the same id at once; with `HostLink` that can attach
+        // to the still-listed dying session. When restarting, close
+        // synchronously (wait for `term.close` to be answered, then for the id
+        // to leave `term.list`) before re-creating under the same id.
+        if request.recreate {
+            let _ = self.client.close(&request.session_id);
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+            while start.elapsed() < timeout {
+                match self.client.list() {
+                    Ok(listed)
+                        if listed
+                            .sessions
+                            .iter()
+                            .any(|s| s.session_id == request.session_id) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    _ => break,
+                }
+            }
+        }
+        match HostLink::attach_or_create_with_reconnect(
+            self.client.clone(),
+            &request,
+            Arc::clone(&self.reconnect),
+        ) {
+            Ok(link) => OpenOutcome::Linked(Box::new(link)),
+            Err(reason) => OpenOutcome::Failed(reason),
+        }
+    }
+}
+
+/// The host is still being found; the view waits in `Connecting`.
+struct PendingFactory;
+
+impl SessionFactory for PendingFactory {
+    fn open(&self, _request: OpenRequest) -> OpenOutcome {
+        OpenOutcome::Pending
+    }
+}
+
+/// No host (or no `terminal` capability): every pane falls back to
+/// `LocalLink` with the reason in its banner.
+struct FailingFactory {
+    reason: String,
+}
+
+impl SessionFactory for FailingFactory {
+    fn open(&self, _request: OpenRequest) -> OpenOutcome {
+        OpenOutcome::Failed(self.reason.clone())
+    }
+}
+
 /// Finds, starts or adopts the session host on a thread of its own —
 /// `ensure_host` blocks, up to ~15 s on a host that will not answer, and a
 /// background-executor worker held that long starves every other task queued
 /// behind it — and hands its diagnostic line to Settings. When there is no
 /// host the app runs exactly as it did without one: the row says why, and
 /// nothing else changes.
-fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
+///
+/// Terminals wait in `Connecting` while the host is found (`PendingFactory`
+/// installed below before the ensure thread spawns); once the host answers,
+/// the factory flips to `HostSessions` (or `FailingFactory` with the reason),
+/// which wakes every `Connecting` view (Task 9).
+fn ensure_host_in_background(
+    settings: Entity<Settings>,
+    workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
+    cx: &mut App,
+) {
+    cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
     let environment: BTreeMap<String, String> = std::env::vars().collect();
     let current_exe = std::env::current_exe().unwrap_or_default();
     let (sender, outcome) = futures::channel::oneshot::channel();
@@ -22358,14 +22827,70 @@ fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
             }),
             Err(error) => Err(sirio_host_client::EnsureError::Io(error)),
         };
-        cx.update(|cx| {
+        let _ = cx.update(|cx| {
             let line = match outcome {
                 Ok((handle, line)) => {
-                    cx.set_global(HostConnection(Some(handle)));
-                    line
+                    match handle.term() {
+                        Some(client) => {
+                            let reconnect: Arc<
+                                dyn Fn() -> Option<sirio_host_client::TermClient>
+                                    + Send
+                                    + Sync,
+                            > = handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
+                            // After the factory is installed, list once:
+                            // raise `next_pane_id` above every app session,
+                            // then adopt orphans.
+                            let listed: Vec<String> = client
+                                .list()
+                                .map(|list| {
+                                    list.sessions
+                                        .iter()
+                                        .map(|s| s.session_id.clone())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let floor = host_sessions::next_pane_floor(&listed);
+                            let sessions = client
+                                .list()
+                                .map(|list| list.sessions)
+                                .unwrap_or_default();
+                            cx.set_global(SessionFactoryGlobal(Some(Arc::new(HostSessions {
+                                client: client.clone(),
+                                reconnect,
+                            }))));
+                            cx.set_global(HostConnection(Some(handle)));
+                            if let Some(workspace) = workspace_slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .cloned()
+                            {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.raise_next_pane_id(floor);
+                                    workspace.adopt_host_orphans(sessions, cx);
+                                });
+                            }
+                            line
+                        }
+                        None => {
+                            let reason = "the host has no terminal capability".to_string();
+                            eprintln!("[sirio] host has no terminal capability");
+                            cx.set_global(SessionFactoryGlobal(Some(Arc::new(
+                                FailingFactory {
+                                    reason: reason.clone(),
+                                },
+                            ))));
+                            cx.set_global(HostConnection(Some(handle)));
+                            line
+                        }
+                    }
                 }
                 Err(error) => {
                     eprintln!("[sirio] host unavailable: {error}");
+                    let reason = error.to_string();
+                    cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingFactory {
+                        reason,
+                    }))));
                     sirio_host_client::status_line_for_error(&error)
                 }
             };
@@ -22843,7 +23368,11 @@ fn main() {
                 // Once, for the process: this is the Settings entity the
                 // running shell keeps (`SirioWorkspace.settings`), so the
                 // host's row lands where Settings → General draws it.
-                ensure_host_in_background(settings.clone(), cx);
+                ensure_host_in_background(
+                    settings.clone(),
+                    workspace_slot.clone(),
+                    cx,
+                );
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);
@@ -23007,7 +23536,7 @@ fn main() {
                     workspace
                         .session
                         .schedule_catalog(&workspace.project_catalog);
-                    workspace.shutdown_terminals(cx);
+                    workspace.detach_terminals(cx);
                     workspace.lsp.take_all()
                 });
                 // `ForegroundExecutor::block_on` (gpui executor.rs:434) is
@@ -37310,6 +37839,7 @@ done
             | ControlAction::FocusPane { reply, .. }
             | ControlAction::SplitPane { reply, .. }
             | ControlAction::ClosePane { reply }
+            | ControlAction::EndAllSessions { reply }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -37435,6 +37965,7 @@ done
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
+            "surface.host.end_all" => request_with_params(method, &[]),
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),
@@ -40571,21 +41102,19 @@ browser  profile  "
                 cx,
             )
         });
-        let terminal = cx.update(|cx| {
-            cx.new(|cx| {
-                TerminalView::with_shell(
-                    &working_directory,
-                    pty_fixture_shell("exec sleep 1", &["sleep", "1"]),
-                    cx,
-                )
-                .expect("create deterministic restore test terminal")
-            })
+        // SP2: the persisted scrollback moves into `OpenRequest.prelude`, not
+        // a post-spawn `replay_scrollback` — the restored view carries it and
+        // the session state no longer does.
+        let mut restored_view = None;
+        tabs[0].panes.for_each(&mut |_, content| {
+            if let TabContent::Terminal { view } = content {
+                restored_view = Some(view.clone());
+            }
         });
-        tabs[0].panes = PaneNode::leaf(
-            0,
-            TabContent::Terminal {
-                view: terminal.clone(),
-            },
+        let terminal = restored_view.expect("restore builds a terminal view");
+        assert!(
+            tabs[0].session_state.scrollback.is_empty(),
+            "the persisted scrollback is consumed as prelude, not left for replay"
         );
         let window = cx.add_window({
             let terminal = terminal.clone();
@@ -40593,7 +41122,6 @@ browser  profile  "
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        cx.update(|_, app| replay_persisted_terminal_scrollback(&mut tabs, app));
         let snapshot = terminal.read_with(&cx.cx, |terminal, _| terminal.snapshot());
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();

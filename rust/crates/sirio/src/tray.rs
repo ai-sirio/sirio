@@ -72,6 +72,9 @@ pub enum TrayRequest {
     ShowWindow,
     /// "Quit Sirio".
     Quit,
+    /// "End All Terminal Sessions" (SP2, macOS tray only).
+    #[allow(dead_code)]
+    EndAllSessions,
 }
 
 pub type SharedRoster = Arc<Mutex<Vec<TrayRosterEntry>>>;
@@ -96,6 +99,8 @@ fn tray_icon_kind(roster: &[TrayRosterEntry]) -> TrayIconKind {
 
 const NO_ACTIVE_AGENTS_LABEL: &str = "No active agents";
 const OPEN_SIRIO_LABEL: &str = "Open Sirio";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const END_ALL_SESSIONS_LABEL: &str = "End All Terminal Sessions";
 const QUIT_SIRIO_LABEL: &str = "Quit Sirio";
 #[cfg(target_os = "linux")]
 const NORMAL_ICON_NAME: &str = "utilities-terminal";
@@ -414,6 +419,11 @@ mod macos {
                 self.push(TrayRequest::ShowWindow);
             }
 
+            #[method(endAllSessionsClicked:)]
+            unsafe fn end_all_sessions_clicked(&self, _sender: &NSMenuItem) {
+                self.push(TrayRequest::EndAllSessions);
+            }
+
             #[method(quitSirioClicked:)]
             unsafe fn quit_sirio_clicked(&self, _sender: &NSMenuItem) {
                 self.push(TrayRequest::Quit);
@@ -477,6 +487,12 @@ mod macos {
 
             let open = self.item(OPEN_SIRIO_LABEL, Some(sel!(openSirioClicked:)), -1);
             menu.addItem(&open);
+            let end_all = self.item(
+                END_ALL_SESSIONS_LABEL,
+                Some(sel!(endAllSessionsClicked:)),
+                -1,
+            );
+            menu.addItem(&end_all);
             menu.addItem(&NSMenuItem::separatorItem(self.ivars().mtm));
             let quit = self.item(QUIT_SIRIO_LABEL, Some(sel!(quitSirioClicked:)), -1);
             menu.addItem(&quit);

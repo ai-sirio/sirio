@@ -23,6 +23,7 @@ pub(crate) enum PaletteCommand {
     NewTab(NewTabAction),
     Sidebar(SidebarPaletteAction),
     GoToSymbol,
+    EndAllSessions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +71,9 @@ pub(crate) struct PaletteContext {
     /// Whether the active tab is a file whose server offers document
     /// symbols. Answered by the workspace, which owns the supervisor.
     pub symbols_available: bool,
+    /// Whether a host connection exists (End All Terminal Sessions disabled
+    /// without one).
+    pub has_host: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +87,7 @@ pub(crate) enum PaletteDisabledReason {
     AlreadyPrimary,
     NotPrimary,
     NoSymbolProvider,
+    NoHost,
 }
 
 impl PaletteDisabledReason {
@@ -103,6 +108,7 @@ impl PaletteDisabledReason {
             Self::AlreadyPrimary => "Already the primary worktree",
             Self::NotPrimary => "Worktree is not primary",
             Self::NoSymbolProvider => "No language server for this file",
+            Self::NoHost => "No host",
         }
     }
 }
@@ -515,6 +521,21 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         ));
     }
 
+    if context.has_host {
+        entries.push(PaletteEntry::enabled(
+            PaletteCommand::EndAllSessions,
+            "End All Terminal Sessions",
+            None,
+        ));
+    } else {
+        entries.push(PaletteEntry::disabled(
+            PaletteCommand::EndAllSessions,
+            "End All Terminal Sessions",
+            None,
+            PaletteDisabledReason::NoHost,
+        ));
+    }
+
     entries
 }
 
@@ -541,6 +562,7 @@ mod tests {
             active_tab_kind: Some(TabKind::Terminal),
             has_retained_chat: true,
             symbols_available: false,
+            has_host: true,
             sidebar_target: Some(SidebarPaletteTarget {
                 project_id: "sirio".into(),
                 project_path: PathBuf::from("/tmp/sirio"),

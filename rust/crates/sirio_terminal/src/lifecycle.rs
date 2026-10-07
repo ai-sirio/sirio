@@ -190,6 +190,26 @@ impl<T> TerminalPaneCache<T> {
             .any(|(cached_worktree, _)| cached_worktree == worktree_id)
     }
 
+    /// Every cached controller, for quit-time detach (SP2 spec §4.2).
+    pub fn panes_for_detach(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.panes.values().map(|pane| pane.controller.clone()).collect()
+    }
+
+    /// Cached controllers of one worktree, for worktree-close shutdown.
+    pub fn panes_for_detach_in_worktree(&self, worktree_id: &str) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.panes
+            .values()
+            .filter(|pane| pane.worktree_id == worktree_id)
+            .map(|pane| pane.controller.clone())
+            .collect()
+    }
+
     fn remove_by_key(
         &mut self,
         key: &(String, String),

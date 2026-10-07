@@ -16,6 +16,7 @@ use sirio_host_protocol::term::{
 use crate::connection::CallError;
 use crate::mux::{CALL_TIMEOUT, Mux, StreamReceiver, stream_channel};
 
+#[derive(Clone)]
 pub struct TermClient {
     mux: Arc<Mux>,
 }
@@ -145,6 +146,18 @@ impl TermClient {
             false,
             CALL_TIMEOUT,
         )
+    }
+
+    /// Ends every session and the host (`host.shutdown {force: true}`).
+    pub fn shutdown_force(&self) -> Result<(), CallError> {
+        self.mux
+            .call(
+                method::SHUTDOWN,
+                serde_json::json!({"force": true}),
+                true,
+                CALL_TIMEOUT,
+            )
+            .map(|_| ())
     }
 
     pub fn events(&self) -> Result<Receiver<SessionEvent>, CallError> {
