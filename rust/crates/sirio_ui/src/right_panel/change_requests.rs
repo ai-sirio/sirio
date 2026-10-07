@@ -39,6 +39,7 @@ const DEFAULT_PAUSE_SECS: i64 = 60;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeRequestListEvent {
     Open { reference: ChangeRef, title: String },
+    OpenInWorktree { reference: ChangeRef, title: String },
 }
 
 /// The filter chosen last, kept for the session like `PanelView`: the
@@ -1082,7 +1083,7 @@ impl ChangeRequestList {
             )
     }
 
-    fn row_menu(row: &ChangeSummary) -> Menu {
+    fn row_menu(row: &ChangeSummary, entity: &Entity<Self>) -> Menu {
         let (open, copy) = (row.web_url.clone(), row.web_url.clone());
         Menu::new()
             .item(
@@ -1097,6 +1098,22 @@ impl ChangeRequestList {
                     .selectors("change-request-menu-copy-link", None)
                     .on_click(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
             )
+            .item({
+                let entity = entity.clone();
+                let reference = row.reference.clone();
+                let title = row.title.clone();
+                MenuItem::new("Open in a worktree")
+                    .icon(IconName::GitBranch)
+                    .selectors("change-request-menu-open-worktree", None)
+                    .on_click(move |_, cx| {
+                        entity.update(cx, |_, cx| {
+                            cx.emit(ChangeRequestListEvent::OpenInWorktree {
+                                reference: reference.clone(),
+                                title: title.clone(),
+                            })
+                        })
+                    })
+            })
     }
 
     fn render_row(
@@ -1173,7 +1190,7 @@ impl ChangeRequestList {
                         )
                     }),
             );
-        ContextMenu::new(("change-request-menu-host", index), Self::row_menu(row)).child(line)
+        ContextMenu::new(("change-request-menu-host", index), Self::row_menu(row, entity)).child(line)
     }
 
     fn render_rows(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {

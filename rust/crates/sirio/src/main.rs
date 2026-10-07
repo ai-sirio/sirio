@@ -6910,6 +6910,8 @@ impl SirioWorkspace {
                 RightPanelActionEvent::OpenChangeRequest { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
+                // Task 7: ForgeHub::checkout.
+                RightPanelActionEvent::OpenChangeRequestInWorktree { .. } => {}
             },
         )
         .detach();
@@ -13717,6 +13719,8 @@ impl SirioWorkspace {
                             .right_panel
                             .update(cx, |panel, cx| panel.refresh_change_requests(cx));
                     }
+                    // Task 7: ForgeHub::checkout.
+                    ChangeRequestTabEvent::OpenInWorktree => {}
                 }
             },
         )
