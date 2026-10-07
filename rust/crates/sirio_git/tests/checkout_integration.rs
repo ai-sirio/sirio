@@ -98,6 +98,21 @@ fn a_remote_is_added_once_and_another_url_is_a_conflict() {
 }
 
 #[test]
+fn a_remote_whose_url_an_insteadof_rule_rewrites_is_still_ours() {
+    let (scratch, repo, bare, _feat) = fixture("remote-insteadof");
+    let url = bare.to_str().unwrap();
+    let base = scratch.0.to_str().unwrap();
+    // A rule that rewrites the prefix of the URL this test passes.
+    let rule = format!("url.file://{base}/mirror/.insteadOf");
+    git(&repo, &["config", &rule, &format!("{base}/")]);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", url).unwrap(), RemoteOutcome::Added);
+    // The rule is live: `get-url` now reads back the rewritten URL.
+    assert_ne!(git(&repo, &["remote", "get-url", "sirio-alice"]), url);
+    assert_eq!(ensure_remote(&repo, "sirio-alice", url).unwrap(), RemoteOutcome::AlreadyThere);
+    assert_eq!(git(&repo, &["config", "--get-all", "remote.sirio-alice.url"]), url);
+}
+
+#[test]
 fn a_local_branch_reports_its_commit_and_upstream() {
     let (_scratch, repo, _bare, _feat) = fixture("local");
     assert_eq!(local_branch(&repo, "feat").unwrap(), None);
@@ -137,6 +152,7 @@ fn a_fork_branch_with_another_local_name_pushes_with_a_plain_git_push() {
     // The fork: a second bare with the same `feat`.
     let fork = scratch.0.join("fork.git");
     git(&scratch.0, &["clone", "-q", "--bare", scratch.0.join("origin.git").to_str().unwrap(), fork.to_str().unwrap()]);
+    git(&repo, &["config", "push.default", "simple"]);
     assert_eq!(ensure_remote(&repo, "sirio-alice", fork.to_str().unwrap()).unwrap(), RemoteOutcome::Added);
     fetch_branch(&repo, "sirio-alice", "feat", TIMEOUT).unwrap();
     let path = scratch.0.join("repo-alice-feat");

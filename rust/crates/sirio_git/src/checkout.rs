@@ -66,7 +66,11 @@ pub enum RemoteOutcome {
 
 pub fn ensure_remote(repo: &Path, name: &str, url: &str) -> Result<RemoteOutcome, GitError> {
     // `name` comes from `handoff::fork_remote_name` and never starts with `-`.
-    let existing = git::run_accepting(&["remote", "get-url", name], repo, &[0, 2])?;
+    // The raw configured value, not `get-url`: `get-url` expands
+    // `url.<base>.insteadOf`, so a rewritten remote would read back as a
+    // different URL than the one that was added.
+    let key = format!("remote.{name}.url");
+    let existing = git::run_accepting(&["config", "--get", &key], repo, &[0, 1])?;
     let existing = existing.stdout_string().trim().to_string();
     if existing.is_empty() {
         git::run_accepting(&["remote", "add", name, url], repo, &[0])?;
