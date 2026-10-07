@@ -22724,38 +22724,72 @@ enum HostOpenSlot {
     Ready(Result<Box<dyn sirio_terminal::SessionLink>, String>),
 }
 
+/// Stored as `Failed` if the open worker unwinds before finishing: an id must
+/// never wedge in `Connecting` with no worker and no result.
+struct HostOpenWorkerGuard {
+    slots: Arc<Mutex<HashMap<String, HostOpenSlot>>>,
+    id: String,
+    wake: futures::channel::mpsc::UnboundedSender<()>,
+}
+
+impl Drop for HostOpenWorkerGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.slots.try_lock() {
+            if !matches!(slots.get(&self.id), Some(HostOpenSlot::Ready(_))) {
+                slots.insert(
+                    self.id.clone(),
+                    HostOpenSlot::Ready(Err("the host open worker panicked".to_string())),
+                );
+            }
+        }
+        let _ = self.wake.unbounded_send(());
+    }
+}
+
 impl SessionFactory for HostSessions {
     fn open(&self, request: OpenRequest) -> OpenOutcome {
         let id = request.session_id.clone();
-        match self
-            .slots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id)
-        {
-            Some(HostOpenSlot::Ready(Ok(link))) => return OpenOutcome::Linked(link),
-            Some(HostOpenSlot::Ready(Err(reason))) => return OpenOutcome::Failed(reason),
-            Some(HostOpenSlot::InFlight) => {
-                self.slots
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(id, HostOpenSlot::InFlight);
-                return OpenOutcome::Pending;
+        // One lock acquisition for the whole check-and-set: a worker storing
+        // `Ready` can never land between a `remove` and a re-`insert` and be
+        // overwritten back to `InFlight` — which wedged the id in
+        // `Connecting` with no worker left to finish it.
+        let spawn = {
+            let mut slots = self
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match slots.remove(&id) {
+                Some(HostOpenSlot::Ready(Ok(link))) => return OpenOutcome::Linked(link),
+                Some(HostOpenSlot::Ready(Err(reason))) => return OpenOutcome::Failed(reason),
+                Some(HostOpenSlot::InFlight) => {
+                    slots.insert(id.clone(), HostOpenSlot::InFlight);
+                    false
+                }
+                None => {
+                    slots.insert(id.clone(), HostOpenSlot::InFlight);
+                    true
+                }
             }
-            None => {}
+        };
+        if !spawn {
+            return OpenOutcome::Pending;
         }
-        self.slots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.clone(), HostOpenSlot::InFlight);
         let client = self.client.clone();
         let reconnect = Arc::clone(&self.reconnect);
         let slots = Arc::clone(&self.slots);
-        let worker_slots = Arc::clone(&slots);
+        let worker_id = id.clone();
         let wake = self.wake.clone();
         if std::thread::Builder::new()
             .name("sirio-host-open".into())
-            .spawn(move || {
+            .spawn({
+                let slots = Arc::clone(&slots);
+                let wake = wake.clone();
+                move || {
+                    let _guard = HostOpenWorkerGuard {
+                        slots: Arc::clone(&slots),
+                        id: worker_id.clone(),
+                        wake: wake.clone(),
+                    };
                 // Blocking host work stays off the GPUI thread (SP1 §7): the
                 // recreate close-and-wait and the attach-or-create round trips
                 // all run here.
@@ -22796,10 +22830,12 @@ impl SessionFactory for HostSessions {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(request.session_id.clone(), HostOpenSlot::Ready(result));
                 let _ = wake.unbounded_send(());
+                std::mem::forget(_guard);
+                }
             })
             .is_err()
         {
-            worker_slots
+            slots
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&id);
@@ -22808,6 +22844,8 @@ impl SessionFactory for HostSessions {
         OpenOutcome::Pending
     }
 }
+
+/// The host is still being found; the view waits in `Connecting`.
 
 /// The host is still being found; the view waits in `Connecting`.
 struct PendingFactory;
@@ -41266,6 +41304,26 @@ browser  profile  "
         Ready(Result<Box<dyn sirio_terminal::SessionLink>, String>),
     }
 
+    /// Like production's `HostOpenWorkerGuard` but without the wakeup send
+    /// (see the `wake` field doc).
+    struct AsyncOpenFakeGuard {
+        slots: Arc<Mutex<HashMap<String, AsyncOpenFakeSlot>>>,
+        id: String,
+    }
+
+    impl Drop for AsyncOpenFakeGuard {
+        fn drop(&mut self) {
+            if let Ok(mut slots) = self.slots.try_lock() {
+                if !matches!(slots.get(&self.id), Some(AsyncOpenFakeSlot::Ready(_))) {
+                    slots.insert(
+                        self.id.clone(),
+                        AsyncOpenFakeSlot::Ready(Err("the host open worker panicked".to_string())),
+                    );
+                }
+            }
+        }
+    }
+
     struct AsyncOpenFakeFactory {
         slots: Arc<Mutex<HashMap<String, AsyncOpenFakeSlot>>>,
         // Mirrors `HostSessions.wake` structurally; the fake worker never
@@ -41277,61 +41335,73 @@ browser  profile  "
         #[allow(dead_code)]
         wake: futures::channel::mpsc::UnboundedSender<()>,
         work_delay: Duration,
+        spawns: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl SessionFactory for AsyncOpenFakeFactory {
         fn open(&self, request: OpenRequest) -> OpenOutcome {
             let id = request.session_id.clone();
-            match self
-                .slots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id)
-            {
-                Some(AsyncOpenFakeSlot::Ready(Ok(link))) => {
-                    return OpenOutcome::Linked(link);
+            // Same single-acquisition check-and-set as production: a stored
+            // `Ready` is taken, `InFlight` is left alone, and only an absent
+            // id records `InFlight` and spawns.
+            let spawn = {
+                let mut slots = self
+                    .slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match slots.remove(&id) {
+                    Some(AsyncOpenFakeSlot::Ready(Ok(link))) => {
+                        return OpenOutcome::Linked(link);
+                    }
+                    Some(AsyncOpenFakeSlot::Ready(Err(reason))) => {
+                        return OpenOutcome::Failed(reason);
+                    }
+                    Some(AsyncOpenFakeSlot::InFlight) => {
+                        slots.insert(id.clone(), AsyncOpenFakeSlot::InFlight);
+                        false
+                    }
+                    None => {
+                        slots.insert(id.clone(), AsyncOpenFakeSlot::InFlight);
+                        true
+                    }
                 }
-                Some(AsyncOpenFakeSlot::Ready(Err(reason))) => {
-                    return OpenOutcome::Failed(reason);
-                }
-                Some(AsyncOpenFakeSlot::InFlight) => {
-                    self.slots
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(id, AsyncOpenFakeSlot::InFlight);
-                    return OpenOutcome::Pending;
-                }
-                None => {}
+            };
+            if !spawn {
+                return OpenOutcome::Pending;
             }
-            self.slots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(id.clone(), AsyncOpenFakeSlot::InFlight);
             let slots = Arc::clone(&self.slots);
-            let worker_slots = Arc::clone(&slots);
             let delay = self.work_delay;
+            let spawns = Arc::clone(&self.spawns);
             if std::thread::Builder::new()
                 .name("sirio-host-open".into())
-                .spawn(move || {
-                    // Simulated blocking socket work, off the GPUI thread.
-                    // No wakeup send here (see the `wake` field doc): the
-                    // test re-sets the factory `Arc` once `slots` holds the
-                    // result, which is the wakeup's entire effect.
-                    std::thread::sleep(delay);
-                    let (keep, incoming) = mpsc::channel();
-                    let link: Box<dyn sirio_terminal::SessionLink> =
-                        Box::new(AsyncOpenFakeLink {
-                            session_id: request.session_id.clone(),
-                            incoming,
-                            keep,
-                        });
-                    worker_slots
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(
-                            request.session_id.clone(),
-                            AsyncOpenFakeSlot::Ready(Ok(link)),
-                        );
+                .spawn({
+                    let slots = Arc::clone(&slots);
+                    move || {
+                        let _guard = AsyncOpenFakeGuard {
+                            slots: Arc::clone(&slots),
+                            id: request.session_id.clone(),
+                        };
+                        // Simulated blocking socket work, off the GPUI thread.
+                        // No wakeup send here (see the `wake` field doc): the
+                        // test re-sets the factory `Arc` once `slots` holds
+                        // the result, which is the wakeup's entire effect.
+                        std::thread::sleep(delay);
+                        let (keep, incoming) = mpsc::channel();
+                        let link: Box<dyn sirio_terminal::SessionLink> =
+                            Box::new(AsyncOpenFakeLink {
+                                session_id: request.session_id.clone(),
+                                incoming,
+                                keep,
+                            });
+                        slots
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(
+                                request.session_id.clone(),
+                                AsyncOpenFakeSlot::Ready(Ok(link)),
+                            );
+                        std::mem::forget(_guard);
+                    }
                 })
                 .is_err()
             {
@@ -41341,8 +41411,108 @@ browser  profile  "
                     .remove(&id);
                 return OpenOutcome::Failed("could not start the session open".to_string());
             }
+            spawns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             OpenOutcome::Pending
         }
+    }
+
+    /// Fix round 2, finding 1: the slot check-and-set is one lock acquisition,
+    /// so this interleaving is driven deterministically — a `Ready` stored
+    /// "between two calls" (here: by us, standing in for the winning worker)
+    /// is taken by the next `open`, never overwritten back to `InFlight`. No
+    /// GPUI needed: `open` is synchronous slot logic plus a spawn.
+    #[test]
+    fn async_open_slots_never_overwrite_a_finished_result() {
+        fn request(id: &str) -> OpenRequest {
+            OpenRequest {
+                session_id: id.to_string(),
+                cwd: std::env::temp_dir(),
+                shell: TerminalShell::System,
+                cols: 80,
+                rows: 24,
+                prelude: Vec::new(),
+                recreate: false,
+            }
+        }
+
+        fn fake_link(id: &str) -> Box<dyn sirio_terminal::SessionLink> {
+            let (keep, incoming) = mpsc::channel();
+            Box::new(AsyncOpenFakeLink {
+                session_id: id.to_string(),
+                incoming,
+                keep,
+            })
+        }
+
+        fn spawns_of(factory: &AsyncOpenFakeFactory) -> usize {
+            factory
+                .spawns
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        let new_factory = || AsyncOpenFakeFactory {
+            slots: Arc::new(Mutex::new(HashMap::new())),
+            wake: futures::channel::mpsc::unbounded::<()>().0,
+            // The workers below must not finish while the assertions run;
+            // they touch only their own factory's slots and exit on their own.
+            work_delay: Duration::from_secs(60),
+            spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let spawns_of = |factory: &AsyncOpenFakeFactory| {
+            factory
+                .spawns
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+
+        let factory = new_factory();
+        {
+            let mut slots = factory
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A finished link is taken, never overwritten — and takes no worker.
+            slots.insert(
+                "pane-1".to_string(),
+                AsyncOpenFakeSlot::Ready(Ok(fake_link("pane-1"))),
+            );
+            // A stored failure behaves the same (one-shot; the next retry
+            // re-spawns its worker).
+            slots.insert(
+                "pane-2".to_string(),
+                AsyncOpenFakeSlot::Ready(Err("boom".to_string())),
+            );
+            // An in-flight id stays in flight with no second worker.
+            slots.insert("pane-3".to_string(), AsyncOpenFakeSlot::InFlight);
+        }
+        assert!(matches!(
+            factory.open(request("pane-1")),
+            OpenOutcome::Linked(_)
+        ));
+        assert_eq!(spawns_of(&factory), 0);
+        assert!(matches!(
+            factory.open(request("pane-2")),
+            OpenOutcome::Failed(_)
+        ));
+        assert_eq!(spawns_of(&factory), 0);
+        assert!(matches!(
+            factory.open(request("pane-3")),
+            OpenOutcome::Pending
+        ));
+        assert_eq!(spawns_of(&factory), 0);
+        // An absent id records `InFlight` and spawns exactly one worker.
+        assert!(matches!(
+            factory.open(request("pane-4")),
+            OpenOutcome::Pending
+        ));
+        assert_eq!(spawns_of(&factory), 1);
+        assert!(matches!(
+            factory
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get("pane-4"),
+            Some(AsyncOpenFakeSlot::InFlight)
+        ));
     }
 
     #[gpui::test]
@@ -41353,6 +41523,7 @@ browser  profile  "
             slots: Arc::new(Mutex::new(HashMap::new())),
             wake,
             work_delay: Duration::from_millis(800),
+            spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         let factory: Arc<dyn SessionFactory> = concrete.clone();
         cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
