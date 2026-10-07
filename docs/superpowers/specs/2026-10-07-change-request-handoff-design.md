@@ -168,24 +168,34 @@ Settled with the user before this document was written:
 
 Reusing: Sirio fetches, then fast-forwards a clean worktree that is behind.
 A worktree with uncommitted changes, or one that has diverged, is left as it
-is and the dialog says which.
+is and the dialog says which. A read-only worktree whose fork has since begun
+to accept pushes gets its remote, its upstream and its push mapping on reuse.
+A worktree whose folder was deleted outside git is forgotten (its one git
+registration is removed) and created again. When the last worktree linked to a
+change request is removed from the sidebar, its `sirio-…-<number>` remote goes
+with it.
 
 The expected branch and push target:
 
 | Change request | Local branch | Push target |
 |---|---|---|
 | Same repository, source branch on the forge | `<source_branch>` | `<listed remote>/<source_branch>` |
-| Fork, maintainer may push | `<owner>/<source_branch>` | remote `sirio-<owner>`, URL in the listed remote's scheme (ssh or https) |
+| The viewer's own fork is a remote of the project (`origin`, usually) | `<source_branch>` | that remote, `<source_branch>` — tracks `<remote>/<source_branch>` as in the same repository |
+| Fork, maintainer may push | `<owner>/<source_branch>` | remote `sirio-<owner>-<number>` (one per change request), URL in the listed remote's scheme (ssh or https), with exactly one push mapping |
 | Fork, maintainer may not push | `<owner>/<source_branch>` | none — read-only |
-| Source branch gone, or head repository deleted | `<source_branch>`, or `<owner>/<source_branch>` for a fork | none — read-only, from the forge's head ref |
+| Source branch gone | `<owner>/<source_branch>` for a fork, `<source_branch>` otherwise | none — read-only, from the forge's head ref |
+| Head repository deleted | `pr-<number>` (GitHub) or `mr-<number>` (GitLab) | none — read-only, from the forge's head ref |
+
+A remote Sirio made for one change request is never the viewer's own fork: the
+own-fork row only looks at remotes Sirio did not name `sirio-…`.
 
 A read-only worktree starts from the head commit B1 already knows how to fetch
 (`refs/pull/N/head`, `refs/merge-requests/N/head`).
 
 Refusals, all before anything is created, each with its reason in the dialog:
 a fetch that fails; a local branch of the expected name that points elsewhere
-and is not an ancestor of the head; a `sirio-<owner>` remote with another
-URL; a target directory that already exists. No existing branch is ever
+and is not an ancestor of the head; a `sirio-<owner>-<number>` remote with
+another URL; a target directory that already exists. No existing branch is ever
 rewritten and no remote is ever changed.
 
 ## §6 The hand-off and its context (C2)
@@ -410,6 +420,39 @@ github.com `PullRequest` has `maintainerCanModify`, `isCrossRepository`,
   every field the baseline exists to omit (GitLab 12–13 against 15–16).
 - The link is keyed by the exact path string the sidebar uses, with no
   canonicalisation; the checkout saves it under the catalog row's path.
+- Ruling: C-1 — a fork's remote is `sirio-<owner>-<number>`, carrying exactly one
+  push mapping, because `remote.<name>.push` set on a shared remote makes a
+  plain `git push` from any worktree push every mapped branch (and force-push
+  them). It is removed when its last linked worktree leaves the sidebar, found
+  by the `sirio-` prefix and `-<number>` suffix (the link stores no owner; a
+  number is unique within one repository). Cost: one remote per checked-out fork
+  change request.
+- Ruling: I-1 — a read-only reuse of a fork that now accepts pushes adds the
+  remote, fetches, sets the upstream (only on the change request's branch and
+  only when it has none), then writes the mapping. Cost: none.
+- Ruling: I-2 — a worktree git lists whose folder is missing is unregistered with
+  `git worktree remove --force` on that one path, never `git worktree prune`,
+  which would touch every worktree of the repository. A branch read that fails
+  is a failure; a detached HEAD says so ("it is on a detached HEAD"). Cost: one
+  git call.
+- Ruling: I-3 — the link stores the local branch (v22, `change_request_link.branch`),
+  and `connect` honours it only while the worktree is on that branch. A later
+  checkout of the same worktree saves the link again with the change request's
+  branch, so the link is back in force once the worktree returns to it. Cost:
+  one column.
+- Ruling: I-4 — the viewer's own fork is found among the project's remotes
+  (other than `sirio-…`) by comparing normalised URLs: scheme, user, host case,
+  a trailing `/` and `.git` do not count. Its branch is `<source_branch>` and
+  it is the push target, even when it does not accept pushes from the viewer
+  (git reports that itself). Cost: the normalisation code.
+- Ruling: M-1 — the GitHub fork-push fixture gives the viewer READ on the head
+  and sets `maintainerCanModify`, so the maintainer grant is what makes it
+  pushable; the read-only fixture is the one that withholds it.
+- Ruling: M-2 — when the head repository is gone the local branch is `pr-<N>` /
+  `mr-<N>`, never the bare source branch (this overturns the earlier bare-name
+  ruling). Cost: a name the user did not pick.
+- Ruling: M-3 — the "branch has commits the change request does not" refusal
+  says to check the branch out or push it, and never to delete it. Cost: none.
 - A linked read that fails falls back to the branch match, and its rate-limit
   error still pauses every read (§9). On a detached HEAD only a linked worktree
   has a card, and its loading and error states are drawn.

@@ -14,7 +14,8 @@ It answers only what sirio_forge and the two CLIs ask:
   operationName, from <fixtures>/<flavour>/, where <fixtures> is --fixtures
   (default Scripts/Tests/forge-fixtures; test-forge-diff-e2e.sh passes a copy
   whose commit ids name a real repository's commits). A request with
-  a non-empty `after*` variable gets `<Operation>.page2.json`; number 404
+  a non-empty `after*` variable gets `<Operation>.page2.json`; a `number` (or
+  GitLab `iid`) with a `<Operation>.n<number>.json` fixture gets that one; number 404
   (GitHub) or iid "404" (GitLab) gets `NotFound.json`.
 - GET / and /user (read by `gh auth status`), GET /api/v4/user (read by
   `glab auth status`), GET /api/v3/meta (the GitHub Enterprise probe, which

@@ -372,21 +372,28 @@ are debug-only; `thread --suggest` serves every build. The `review` stage of
 opens the submit dialog without sending, for the framed test.
 
 **C1** checks a change request out into a worktree. `sirio_ui::handoff`
-decides, purely, the local branch (`<source_branch>`, or
-`<owner>/<source_branch>` for a fork), the push target (the listed remote, a
-`sirio-<owner>` remote when the viewer may push to the fork, or none —
-read-only) and whether to reuse, create or refuse. `ForgeHub::checkout`
+decides, purely, the local branch (`<source_branch>`, `<owner>/<source_branch>`
+for a fork, or `pr-<N>`/`mr-<N>` when the head repository is gone), the push
+target (the listed remote, the viewer's own fork remote when a project remote
+already names the head repository, a `sirio-<owner>-<number>` remote when the
+viewer may push to a fork, or none — read-only) and whether to reuse, create or
+refuse. Each fork change request has its own remote, because a remote's push
+mapping is per remote: two change requests sharing one would make a plain
+`git push` from either worktree push both branches. The remote is removed with
+the last linked worktree. `ForgeHub::checkout`
 (`sirio/src/forge/checkout.rs`) fetches the head through B1's
 `RevisionFetcher` first, so nothing is created before a refusal, then runs the
 `sirio_git` steps off the GPUI thread. A fork's local `<owner>/<branch>` gets
-`remote.sirio-<owner>.push = refs/heads/<owner>/<branch>:refs/heads/<branch>`,
+`remote.sirio-<owner>-<number>.push = refs/heads/<owner>/<branch>:refs/heads/<branch>`,
 because a plain `git push` under `push.default=simple` would not reach
 `<branch>`. A reused worktree is fast-forwarded only when it is clean and on
 the change request's branch; one switched elsewhere, dirty or diverged is left
-as it is and the status line says why. The link worktree → change request lives
-in `sirio_persistence` (`change_request_link`, v22, keyed by the exact path the
-sidebar uses), and the card reads it with `ForgeClient::summary` before the
-branch match. *Open in a worktree* is in the tab's action bar and the list
+as it is and the status line says why. A worktree whose folder was deleted
+outside git is unregistered (one entry, never a prune) and created again. The
+link worktree → change request lives in `sirio_persistence` (`change_request_link`,
+v22, keyed by the exact path the sidebar uses, with the branch it was made for;
+the card honours it only while the worktree is on that branch), and the card
+reads it with `ForgeClient::summary` before the branch match. *Open in a worktree* is in the tab's action bar and the list
 row's menu (which opens the tab); the outcome is the tab's checkout status
 line. `surface change-request checkout` acts on the open tab and serves every
 build because it touches only local git. `test-change-request-handoff-e2e.sh`
