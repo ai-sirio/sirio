@@ -564,3 +564,25 @@ both gates).
   first draw resizes the PTY from 80x24.
 - A chat refused for an agent (Pi has no chat transport) is reported as not
   started, never as started.
+
+*Rulings from the whole-branch review:*
+
+- A worktree C1 reuses that is on another branch, or on a detached HEAD,
+  refuses the hand-off, unless it is a review, which reads by commit; a dirty
+  or diverged one proceeds with a line in Sirio's words saying it was not
+  updated to the head. An agent must never work on, or push, the user's
+  unrelated branch.
+- `prepare` and `install_skill` read and write the worktree only through one
+  helper that refuses a symlink anywhere on the path, writes through a temp file
+  renamed into place, and reads only a regular file of at most 1 MiB. A branch
+  can commit `.claude/settings.local.json` as a link to `~/.bashrc` (a write
+  outside the worktree) or to `/dev/zero` (a read that never ends). A refusal
+  is "hooks not written"; the agent still starts.
+- The reader is a model, not a CommonMark parser. Each file carries a random
+  16-hex nonce: every block opens with `untrusted id="<nonce>"` and is followed
+  by Sirio's line `(end of untrusted block <nonce>)`, and the file says that
+  only that line ends a block. The user's instructions section is always
+  written ("None." when empty), so a forged one is never the only one.
+- Forge text loses C0 controls (but `\n` and `\t`), DEL and C1 controls, and
+  bidi controls are written as a visible `<U+…>`; a link outside a block must be
+  printable ASCII.

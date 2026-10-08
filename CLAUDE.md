@@ -413,12 +413,21 @@ C1's plan in a dry mode. `ForgeClient::context` reads what the purpose needs
 **before** git is touched, so a failed or rate-limited read creates nothing;
 then C1 checks out and `sirio_ui::handoff::context::render` writes
 `.sirio/handoff/<N>-<purpose>-<YYYYMMDD-HHMMSS>.md` (excluded through the common
-dir's `info/exclude`, ten kept, a symlinked `.sirio` refused). Every forge text
-— bodies, comments, hunks, paths, names, logs, a log's error — sits in an
-````untrusted source="…" author="@…"```` block whose fence is one backtick
-longer than the text's longest run (at least four); Sirio's own lines name no
-forge text, not even the branch to push to. The file is cut at 1 MiB, oldest
-first, and every part that cannot be dropped is bounded. A terminal agent is
+dir's `info/exclude`, ten kept, a symlinked `.sirio` refused). A worktree C1
+reuses on another branch or a detached HEAD refuses the hand-off (a review
+excepted); a dirty or diverged one gets a note. Every forge text — bodies,
+comments, hunks, paths, names, logs, a log's error — loses its control
+characters, shows bidi controls as `<U+…>`, and sits in an
+````untrusted id="<nonce>" source="…" author="@…"```` block whose fence is one
+backtick longer than the text's longest run (at least four), followed by
+Sirio's line `(end of untrusted block <nonce>)`; the nonce is random per file,
+so forge text cannot fake a block's end even to a model that miscounts. Sirio's
+own lines name no forge text, not even the branch to push to, and a link stands
+outside a block only as printable ASCII. The user's instructions section is
+always written. The file is cut at 1 MiB, oldest first, and every part that
+cannot be dropped is bounded. `prepare` and `install_skill` read and write the
+worktree only through `sirio_agents`' `safe_write`, which refuses a committed
+symlink anywhere on the path. A terminal agent is
 launched as a restored pane is, `prepare` then `command_with_prompt` (every CLI
 takes the two-line prompt as an argument; Windows folds it to one line for
 `cmd`), and `TerminalView::start` runs it before its tab is drawn; a chat gets
