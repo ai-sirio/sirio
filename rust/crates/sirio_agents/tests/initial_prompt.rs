@@ -1,5 +1,6 @@
 //! The launch prompt reaches every CLI as one argument, byte for byte,
-//! through the shell `sirio_terminal::command_shell_invocation` runs it in.
+//! through `sh -c`, which stands in for the POSIX shell (`$SHELL -lc`) a
+//! pane runs its command in.
 #![cfg(unix)]
 
 use std::process::Command;
@@ -10,19 +11,27 @@ const PROMPT: &str = "Read the file .sirio/handoff/101-comments-20261008-101500.
 
 /// The arguments the CLI would have received, as the shell parsed them.
 fn argv_of(command: &str) -> Vec<String> {
-    let shims = "claude() { printf '%s\\0' \"$@\"; }; codex() { printf '%s\\0' \"$@\"; }; \
-                 opencode() { printf '%s\\0' \"$@\"; }; pi() { printf '%s\\0' \"$@\"; }; \
-                 omp() { printf '%s\\0' \"$@\"; };";
+    // One NUL per argument: `printf '%s\0' "$@"` alone would print one empty
+    // field for a command with no arguments.
+    let shim = "() { for a in \"$@\"; do printf '%s\\0' \"$a\"; done; }";
+    let shims = format!(
+        "claude{shim}; codex{shim}; opencode{shim}; pi{shim}; omp{shim};"
+    );
     let output = Command::new("sh")
         .arg("-c")
         .arg(format!("{shims} {command}"))
         .output()
         .expect("sh runs");
     assert!(output.status.success(), "the command did not parse: {command}");
-    String::from_utf8(output.stdout)
-        .expect("utf-8")
+    let text = String::from_utf8(output.stdout).expect("utf-8");
+    if text.is_empty() {
+        return Vec::new();
+    }
+    // Every argument is printed with its NUL terminator, so drop exactly the
+    // last one; an empty argument in the middle is still an argument.
+    text.strip_suffix('\0')
+        .expect("every argument ends in NUL")
         .split('\0')
-        .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
 }

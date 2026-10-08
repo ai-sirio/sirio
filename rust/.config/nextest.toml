@@ -56,7 +56,7 @@ retries = 2
 # `gitlab_accepts_every_document_sirio_writes_with`, which send each mutation
 # Sirio writes with, against ids that name nothing, to see the live schema
 # still accepts the document.
-# The five `…initial_prompt…` tests join them for the same reason: they read the
+# The five initial-prompt tests join them for the same reason: they read the
 # installed CLI's `--help`.
 default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument)'
 
@@ -91,7 +91,7 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # once. A pull request is the last run where the developer who caused a flake
 # can still see it, so hiding it here would cost exactly what the retries
 # elsewhere are worth.
-# The five `…initial_prompt…` tests join them for the same reason: they read the
+# The five initial-prompt tests join them for the same reason: they read the
 # installed CLI's `--help`.
 default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument)'
 fail-fast = false

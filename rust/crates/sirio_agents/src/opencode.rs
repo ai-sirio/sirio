@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::GlobalHookInstall;
 use crate::error::PrepareError;
-use crate::shell_quote::{json_string_literal, shell_quote};
+use crate::shell_quote::{json_string_literal, prompt_argument, shell_quote};
 
 /// The plugin template, byte-faithful to the Swift original. `__SIRIOCTL__`
 /// and `__PANE__` are replaced by [`prepare`]; the braces in the JS template
@@ -132,7 +132,7 @@ impl super::AgentAdapter for OpenCodeAdapter {
     }
 
     fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
-        format!("{} --prompt {}", self.command(worktree_path, pane_id, sirioctl_path), shell_quote(prompt))
+        format!("{} --prompt {}", self.command(worktree_path, pane_id, sirioctl_path), prompt_argument(prompt))
     }
 
     fn resume_command(

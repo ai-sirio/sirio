@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::error::PrepareError;
-use crate::shell_quote::{json_string_literal, shell_quote};
+use crate::shell_quote::{json_string_literal, prompt_argument, shell_quote};
 
 /// The hook template, byte-faithful to the Swift original. `__SIRIOCTL__`
 /// and `__PANE__` are replaced by [`prepare`]; the JS braces are left
@@ -95,7 +95,7 @@ impl super::AgentAdapter for OhMyPiAdapter {
     }
 
     fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
-        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), shell_quote(prompt))
+        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), prompt_argument(prompt))
     }
 
     fn resume_command(

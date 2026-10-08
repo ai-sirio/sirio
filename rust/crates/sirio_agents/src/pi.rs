@@ -1,7 +1,7 @@
 //! The Pi adapter, ported from `SirioAgents/PiAdapter.swift`.
 
 use crate::error::PrepareError;
-use crate::shell_quote::shell_quote;
+use crate::shell_quote::{prompt_argument, shell_quote};
 
 /// Pi has no lifecycle hook mechanism — `prepare` is a no-op and Sirio
 /// watches the pane's exit code.
@@ -35,7 +35,7 @@ impl super::AgentAdapter for PiAdapter {
     }
 
     fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
-        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), shell_quote(prompt))
+        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), prompt_argument(prompt))
     }
 
     fn resume_command(

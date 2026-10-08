@@ -166,6 +166,8 @@ pub trait AgentAdapter {
     /// take the prompt on the command line (verified 2026-10-08 against
     /// claude 2.1.293, codex 0.159.2, opencode 1.18.33, pi 1.0.0 and omp
     /// 18.4.4; `tests/initial_prompt_live.rs` notices the day one stops).
+    /// On Windows the prompt is folded to one line first, because `cmd`
+    /// ends a command at a line break.
     fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String;
 
     /// Full shell command that relaunches the agent resuming a previously
