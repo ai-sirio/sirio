@@ -277,9 +277,14 @@ impl ChangeRequestTab {
             _ => (first, Surface::Terminal),
         };
         let chat_ok = agent.is_none_or(|id| options.agents.iter().any(|agent| agent.id == id && agent.chat));
-        let surface = if surface == Surface::Chat && !chat_ok { Surface::Terminal } else { surface };
+        // With no agent the surface has nothing to show, so it is the terminal (the dialog and the socket agree).
+        let surface = if agent.is_none() || (surface == Surface::Chat && !chat_ok) { Surface::Terminal } else { surface };
         let purpose = fixed_purpose(&scope).unwrap_or_else(|| default_purpose(ci_failed, None));
         let instructions = new_input(window, cx, "", Some((2, 6)), "Anything the agent should know…");
+        // A reopened dialog starts clean: a previous hand-off's outcome is not this one's.
+        if matches!(self.handoff, HandoffState::Done(_) | HandoffState::Failed(_)) {
+            self.handoff = HandoffState::Idle;
+        }
         self.handoff_dialog = Some(HandoffDialog {
             scope,
             purpose,
@@ -327,6 +332,7 @@ impl ChangeRequestTab {
             "agent" => {
                 if value == "none" {
                     dialog.agent = None;
+                    dialog.surface = Surface::Terminal;
                 } else {
                     let agent = dialog
                         .agents
