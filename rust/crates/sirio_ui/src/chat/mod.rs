@@ -3407,14 +3407,36 @@ impl Chat {
     /// connection already failed, or the chat is not connecting at all, there
     /// is nothing to wait for: the text goes to the composer so it is not lost.
     pub fn send_when_ready(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.trim().is_empty() {
+            return;
+        }
         if self.accepts_sends() {
-            self.control_send(text, cx);
+            // Straight to the turn, not through the composer: the user may be
+            // typing in it, and that draft must survive the message.
+            self.submit_turn(text.to_string(), Vec::new(), Vec::new(), cx);
         } else if self.connecting {
             self.pending_send = Some(text.to_string());
-        } else {
-            self.set_composer_text(text.to_string(), cx);
+        } else if self.client.is_some() && self.streaming {
+            // A turn is running: queue it like a Send during a turn, so it
+            // goes out when that turn ends.
+            self.queue.push_back(text.to_string());
             cx.notify();
+        } else {
+            self.restore_held_text(text, cx);
         }
+    }
+
+    /// Puts a message that could not be sent back in the composer. Whatever
+    /// the user has typed stays, below the message.
+    fn restore_held_text(&mut self, held: &str, cx: &mut Context<Self>) {
+        let typed = self.draft_text();
+        let text = if typed.trim().is_empty() {
+            held.to_string()
+        } else {
+            format!("{held}\n\n{typed}")
+        };
+        self.set_composer_text(text, cx);
+        cx.notify();
     }
 
     /// Resolves a rendered permission option by its protocol id and sends the
@@ -5036,7 +5058,7 @@ impl Chat {
                         chat.mode_catalog = initial_mode_catalog;
                         chat.connecting = false;
                         if let Some(text) = chat.pending_send.take() {
-                            chat.control_send(&text, cx);
+                            chat.submit_turn(text, Vec::new(), Vec::new(), cx);
                         }
                     });
 
@@ -5088,7 +5110,7 @@ impl Chat {
                         chat.client = None;
                         chat.streaming = false;
                         if let Some(text) = chat.pending_send.take() {
-                            chat.set_composer_text(text, cx);
+                            chat.restore_held_text(&text, cx);
                         }
                         chat.push_entry(Entry::Error {
                             message,
@@ -8871,6 +8893,65 @@ two"
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "Read the file."
+        );
+    }
+
+    /// C2 fix: the composer is editable while the agent connects, so a note
+    /// typed then must survive the first message going out.
+    #[gpui::test]
+    async fn a_draft_typed_while_connecting_survives_the_first_message(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command = AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain");
+            Chat::new(Some(LaunchSpec::Acp(command)), std::env::temp_dir(), cx)
+        });
+        chat.update_in(cx, |chat, _, cx| {
+            chat.start_connection(cx);
+            chat.send_when_ready("Read the file.", cx);
+            chat.set_composer_text("my note", cx);
+        });
+        pump_chat_until(cx, &chat, |chat| {
+            chat.has_completed_turn
+                && chat.entries.iter().any(|entry| {
+                    matches!(entry, Entry::User { text, .. } if text == "Read the file.")
+                })
+        });
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "my note",
+            "the first message must not overwrite what the user typed"
+        );
+    }
+
+    /// C2 fix: when the connection fails, the held message and the typed
+    /// draft are both kept in the composer, the message first.
+    #[gpui::test]
+    async fn a_failed_connection_keeps_both_the_message_and_the_typed_draft(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/nonexistent/sirio-handoff-agent",
+                ))),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        chat.update_in(cx, |chat, _, cx| {
+            chat.start_connection(cx);
+            chat.send_when_ready("Read the file.", cx);
+            chat.set_composer_text("my note", cx);
+        });
+        pump_chat_until(cx, &chat, |chat| !chat.connecting && chat.client.is_none());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "Read the file.\n\nmy note"
         );
     }
 
