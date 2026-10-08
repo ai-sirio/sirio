@@ -306,6 +306,8 @@ pub struct ChangeRequestTab {
     /// Where the hand-off stands (C2), and its dialog while it is open.
     handoff: HandoffState,
     handoff_dialog: Option<handoff::HandoffDialog>,
+    /// Bumped by every `open_handoff`: a preview answers only the dialog it was asked for.
+    handoff_generation: u64,
 }
 
 impl ChangeRequestTab {
@@ -373,6 +375,7 @@ impl ChangeRequestTab {
             checkout: CheckoutState::Idle,
             handoff: HandoffState::Idle,
             handoff_dialog: None,
+            handoff_generation: 0,
         }
     }
 

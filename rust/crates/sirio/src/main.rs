@@ -13857,11 +13857,14 @@ impl SirioWorkspace {
             }
         };
         tab.update(cx, |tab, cx| tab.open_handoff(scope, options, window, cx));
+        // The preview answers only this open: a later open bumps the generation.
+        let generation = tab.read(cx).handoff_generation();
         let hub = match Self::forge_hub(cx) {
             Ok(hub) => hub,
             Err(reason) => {
                 tab.update(cx, |tab, cx| {
                     tab.set_handoff_preview(
+                        generation,
                         sirio_ui::change_request_tab::HandoffPreview::Ready {
                             worktree: Err(reason),
                             viewer_is_author: None,
@@ -13875,7 +13878,7 @@ impl SirioWorkspace {
         let task = cx.background_executor().spawn(async move { hub.handoff_preview(&request) });
         cx.spawn(async move |_, cx| {
             let preview = task.await;
-            let _ = tab.update(cx, |tab, cx| tab.set_handoff_preview(preview, cx));
+            let _ = tab.update(cx, |tab, cx| tab.set_handoff_preview(generation, preview, cx));
         })
         .detach();
         Ok(())
@@ -14117,6 +14120,21 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
+        let scope = match &op {
+            HandoffCommand::OpenDialog(scope) | HandoffCommand::Start { scope, .. } => scope.clone(),
+        };
+        // An open dialog is never reopened or re-scoped by the socket: a
+        // different scope is refused, and the same one is used as it is.
+        if let Some(view) = self.active_change_request()
+            && let Some(open) = view.read(cx).handoff_scope()
+            && open.word() != scope.word()
+        {
+            let open = match open {
+                sirio_forge::Scope::Whole => "the whole change request".to_string(),
+                other => other.word(),
+            };
+            return Err(format!("a hand-off dialog for {open} is already open"));
+        }
         match op {
             HandoffCommand::OpenDialog(scope) => self.open_handoff_dialog(scope, window, cx)?,
             HandoffCommand::Start { scope, fields } => {
@@ -14129,7 +14147,8 @@ impl SirioWorkspace {
                 for (field, value) in &fields {
                     view.update(cx, |tab, cx| tab.set_handoff_field(field, value, cx))?;
                 }
-                view.update(cx, |tab, cx| tab.start_handoff(cx))?;
+                // Queued while the preview loads; the caller polls `handoff`.
+                view.update(cx, |tab, cx| tab.request_start(cx))?;
             }
         }
         self.control_read_change_request(cx)

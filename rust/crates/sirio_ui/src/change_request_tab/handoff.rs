@@ -154,6 +154,8 @@ pub(crate) struct HandoffDialog {
     ci_failed: bool,
     /// The reason the last *Start* was refused, or the last attempt failed.
     refusal: Option<String>,
+    /// *Start* was asked while the preview was still loading: it runs when the preview lands.
+    start_when_previewed: bool,
 }
 
 impl HandoffDialog {
@@ -216,6 +218,10 @@ fn field(
         .into_any_element()
 }
 
+/// The blocker while the worktree preview has not landed; the only one a
+/// queued start waits out.
+const PREVIEW_LOADING: &str = "the worktree is still being worked out";
+
 impl ChangeRequestTab {
     /// The reason *Start* is refused now, if it is.
     fn start_blocker(&self) -> Option<String> {
@@ -235,7 +241,7 @@ impl ChangeRequestTab {
             return Some(format!("rate limited until {}", reset_clock(until)));
         }
         if let HandoffPreview::Loading = dialog.preview {
-            return Some("the worktree is still being worked out".to_string());
+            return Some(PREVIEW_LOADING.to_string());
         }
         dialog.worktree_refusal().or_else(|| dialog.agent_refusal())
     }
@@ -262,6 +268,7 @@ impl ChangeRequestTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.handoff_generation += 1;
         let ci_failed = self
             .header
             .value()
@@ -296,13 +303,20 @@ impl ChangeRequestTab {
             preview: HandoffPreview::Loading,
             ci_failed,
             refusal: None,
+            start_when_previewed: false,
         });
         cx.notify();
     }
 
     /// The preview answers the *Worktree* line and the warning. Until the
     /// user picks a purpose, the viewer's authorship chooses it.
-    pub fn set_handoff_preview(&mut self, preview: HandoffPreview, cx: &mut Context<Self>) {
+    /// A preview asked for by dialog `generation` (see `handoff_generation`);
+    /// one from an earlier open is dropped. A start queued while the preview
+    /// loaded runs now, and its refusal fails the hand-off.
+    pub fn set_handoff_preview(&mut self, generation: u64, preview: HandoffPreview, cx: &mut Context<Self>) {
+        if generation != self.handoff_generation {
+            return;
+        }
         let Some(dialog) = self.handoff_dialog.as_mut() else {
             return;
         };
@@ -313,7 +327,39 @@ impl ChangeRequestTab {
             dialog.purpose = default_purpose(dialog.ci_failed, *viewer_is_author);
         }
         dialog.preview = preview;
+        let queued = std::mem::take(&mut dialog.start_when_previewed);
         cx.notify();
+        if queued && let Err(reason) = self.start_handoff(cx) {
+            self.set_handoff(HandoffState::Failed(reason), cx);
+        }
+    }
+
+    /// *Start* for the control socket: when the worktree preview is still
+    /// loading it is queued and runs once the preview lands; any other
+    /// blocker refuses now, as `start_handoff` does.
+    pub fn request_start(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let loading = self
+            .handoff_dialog
+            .as_ref()
+            .is_some_and(|dialog| matches!(dialog.preview, HandoffPreview::Loading));
+        if loading && self.start_blocker().as_deref() == Some(PREVIEW_LOADING) {
+            if let Some(dialog) = self.handoff_dialog.as_mut() {
+                dialog.start_when_previewed = true;
+            }
+            cx.notify();
+            return Ok(());
+        }
+        self.start_handoff(cx)
+    }
+
+    /// The open dialog's scope, if a dialog is open.
+    pub fn handoff_scope(&self) -> Option<Scope> {
+        self.handoff_dialog.as_ref().map(|dialog| dialog.scope.clone())
+    }
+
+    /// Bumped by every `open_handoff`; the host passes it back with a preview.
+    pub fn handoff_generation(&self) -> u64 {
+        self.handoff_generation
     }
 
     /// Sets one field of the open dialog, as the user would, for the control
@@ -479,6 +525,10 @@ impl ChangeRequestTab {
             ("handoff".to_string(), self.handoff.word().to_string()),
             ("handoff_detail".to_string(), self.handoff.detail().to_string()),
             ("handoff_dialog".to_string(), if dialog.is_some() { "open" } else { "" }.to_string()),
+            (
+                "handoff_queued".to_string(),
+                if dialog.is_some_and(|dialog| dialog.start_when_previewed) { "yes" } else { "no" }.to_string(),
+            ),
             ("handoff_purpose".to_string(), dialog.map_or("", |dialog| dialog.purpose.word()).to_string()),
             ("handoff_scope".to_string(), dialog.map_or(String::new(), |dialog| dialog.scope.word())),
             (
