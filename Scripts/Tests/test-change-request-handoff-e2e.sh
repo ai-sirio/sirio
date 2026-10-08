@@ -480,6 +480,18 @@ dump_git() { # -- the repository's worktrees, remotes and branches, for the arti
   } >"$OUT_DIR/$SCENARIO-git.txt"
 }
 
+# The test's own git command in a worktree the app's git also works in: the app can
+# hold that worktree's index.lock for a moment, so the command is retried. The last
+# attempt runs unhidden, so a real failure still fails the scenario.
+git_retry() {
+  local attempt
+  for attempt in 1 2 3 4 5 6; do
+    git "$@" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  git "$@"
+}
+
 scenario_same() { # flavour host forge number origin-url fork-url
   SCENARIO="$1-same"
   echo "=== $SCENARIO"
@@ -523,11 +535,11 @@ scenario_same() { # flavour host forge number origin-url fork-url
   checkout_and_wait done
   assert_contains checkout_detail "uncommitted changes" surface change-request read
   [ "$(git -C "$NEW" rev-parse HEAD)" = "$X2" ] || fail "a dirty worktree moved"
-  git -C "$NEW" checkout -q -- a.txt
+  git_retry -C "$NEW" checkout -q -- a.txt
   echo "OK: the dirty worktree did not move"
 
   echo "another branch: a worktree switched elsewhere is left alone"
-  git -C "$NEW" checkout -q -b other
+  git_retry -C "$NEW" checkout -q -b other
   printf 'other\n' >"$NEW/other.txt"
   git -C "$NEW" add other.txt; git -C "$NEW" commit -q -m "work on other"
   OTHER=$(git -C "$NEW" rev-parse HEAD)
@@ -538,13 +550,13 @@ scenario_same() { # flavour host forge number origin-url fork-url
   assert_contains checkout_detail "it is on another branch, so it was left as it is" surface change-request read
   [ "$(git -C "$NEW" rev-parse other)" = "$OTHER" ] || fail "the other branch moved"
   echo "OK: the other branch did not move"
-  git -C "$NEW" checkout -q feat
+  git_retry -C "$NEW" checkout -q feat
 
   echo "detached: a worktree with a detached HEAD is left alone, and says so"
-  git -C "$NEW" checkout -q --detach
+  git_retry -C "$NEW" checkout -q --detach
   checkout_and_wait done
   assert_contains checkout_detail "it is on a detached HEAD, so it was left as it is" surface change-request read
-  git -C "$NEW" checkout -q feat
+  git_retry -C "$NEW" checkout -q feat
   echo "OK: the detached worktree was left alone"
 
   echo "stale folder: a worktree whose folder was deleted outside git is forgotten, and created again"
@@ -895,7 +907,12 @@ mkdir -p "$STUB_PIDS" "$STUB_ARGV"
 echo $$ >"$STUB_PIDS/$name-$$"
 printf '%s\n' "$name $*" >>"$STUB_ARGV/calls.log"
 case "$1" in
-  --version|-V|version) echo "$name 0.0.0 (e2e stub)"; exit 0 ;;
+  --version|-V|version)
+    # claude's line is `<version> (Claude Code)`: claude_transport reads the first
+    # token, and 9.9.9 is above sirio_claude::MIN_CLAUDE_VERSION, so the native
+    # transport is chosen and the registry wrapper (the network) never is.
+    if [ "$name" = claude ]; then echo "9.9.9 (Claude Code)"; else echo "$name 0.0.0 (e2e stub)"; fi
+    exit 0 ;;
   --help|-h|help) echo "usage: $name (e2e stub)"; exit 0 ;;
 esac
 if [ "$name" = opencode ] && [ "$1" = acp ]; then
@@ -932,7 +949,7 @@ GUARD
   cat >"$RUN_DIR/tools/acp_proxy.py" <<'PY'
 # The chat fixture as an agent, with every JSON line it exchanges recorded (the
 # shape of test-ely-chat-ui-e2e.py's --agent-proxy).
-import json, subprocess, sys, threading
+import json, os, subprocess, sys, threading
 
 traffic, directory, fixture = sys.argv[1:4]
 child = subprocess.Popen(
@@ -941,6 +958,9 @@ child = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=open(traffic + ".stderr", "ab"),
 )
+# The fixture is a child of this proxy: its PID goes in pids/ for kill_stubs.
+with open(os.path.join(os.environ["STUB_PIDS"], f"chat-fixture-{child.pid}"), "w") as pidfile:
+    pidfile.write(str(child.pid))
 lock = threading.Lock()
 record = open(traffic, "a", buffering=1)
 
@@ -1345,7 +1365,8 @@ scenario_handoff_terminal() { # GitHub, the same repository: one hand-off per ag
     file=$(newest_file "$NEW/.sirio/handoff" "101-comments-*.md")
     rel=".sirio/handoff/$(basename "$file")"
     echo "OK: $rel is in the worktree, and the selected workspace is $NEW"
-    if git -C "$NEW" status --porcelain --untracked-files=all | grep -q -F ".sirio/handoff"; then
+    status=$(git --no-optional-locks -C "$NEW" status --porcelain --untracked-files=all) || fail "git status failed in $NEW"
+    if printf '%s\n' "$status" | grep -q -F ".sirio/handoff"; then
       fail "git status lists the hand-off file"
     fi
     echo "OK: git status does not list the hand-off file"
@@ -1479,6 +1500,11 @@ scenario_handoff_chat() { # GitHub: OpenCode's chat takes the hand-off's context
   done
   [ "$found" -eq 1 ] || fail "the chat's first user turn does not name $rel"
   echo "OK: the chat's first user turn names $rel"
+  [ "$(read_field path current-workspace)" = "$NEW" ] || fail "the chat's hand-off did not select $NEW"
+  case "$(reply surface tabs read)" in
+    *"chat|no|"*) echo "OK: the chat tab is in $NEW" ;;
+    *) fail "no chat tab in the selected worktree $NEW" ;;
+  esac
   capture chat
 
   dump_git
@@ -1496,6 +1522,7 @@ scenario_warning_cross() { # a fork change request: the dialog warns
   assert_contains handoff_warning yes surface change-request read
   capture dialog
   dump_git
+  dump_handoff
   quit_app; stop_forge
 }
 
@@ -1509,6 +1536,7 @@ scenario_warning_author() { # the same repository, the viewer is the author: no 
   wait_preview
   assert_contains handoff_warning no surface change-request read
   dump_git
+  dump_handoff
   quit_app; stop_forge
 }
 
@@ -1527,6 +1555,7 @@ scenario_refusal_taken() { # a folder where the worktree would go: refused, noth
   [ "$(git -C "$WT" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ] || fail "a refused hand-off added a worktree"
   echo "OK: the taken folder is refused, and no file or worktree was made"
   dump_git
+  dump_handoff
   quit_app; stop_forge
 }
 
@@ -1535,20 +1564,20 @@ scenario_refusal_ratelimit() { # the forge rate limits the preview: the queued s
   echo "=== $SCENARIO"
   prepare_scenario github same https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
   open_scenario ghe.test github 101
-  local before reason
+  local before
   before=$(git -C "$WT" worktree list --porcelain)
   curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__ratelimit?seconds=60"
   handoff_start --purpose comments --agent none
   wait_handoff failed
-  reason=$(read_field handoff_refusal surface change-request read)
-  echo "observed: handoff_refusal='$reason'"
-  reason=$(read_field handoff_worktree surface change-request read)
-  echo "observed: handoff_worktree='$reason'"
+  # The preview's refusal is the reason: the dialog names the rate limit.
+  assert_contains handoff_refusal "rate limited" surface change-request read
+  echo "OK: the hand-off was refused for the rate limit: $(read_field handoff_refusal surface change-request read)"
   [ "$(git -C "$WT" worktree list --porcelain)" = "$before" ] || fail "a rate-limited hand-off changed the worktrees"
   [ -z "$(find "$RUN_DIR/work-$SCENARIO" -path '*/.sirio/handoff/*' -name '*.md')" ] || fail "a rate-limited hand-off wrote a context file"
   echo "OK: the rate-limited hand-off made no worktree and no file"
   curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__reset"
   dump_git
+  dump_handoff
   quit_app; stop_forge
 }
 
@@ -1571,6 +1600,7 @@ scenario_refusal_pi_chat() { # Pi has no chat: the dialog says so, and the verb 
     *) fail "the chat for Pi was not refused in the dialog's words: $err" ;;
   esac
   dump_git
+  dump_handoff
   quit_app; stop_forge
 }
 
@@ -1588,44 +1618,65 @@ scenario_refusal_ci_passed() { # --purpose ci while CI passed is refused
   esac
   [ -z "$(find "$RUN_DIR/work-$SCENARIO" -path '*/.sirio/handoff/*' -name '*.md')" ] || fail "a refused hand-off wrote a context file"
   dump_git
+  dump_handoff
   quit_app; stop_forge
 }
 
-scenario_handoff_switch() { # the worktree is switched away while the hand-off runs; its terminal still lands there
+scenario_handoff_switch() { # the worktree is switched away while the hand-off runs; its agent still lands in the hand-off's worktree
   SCENARIO="github-handoff-switch"
   echo "=== $SCENARIO"
   prepare_scenario github same https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+  # A third worktree the app knows about: the project's scan at project add finds it.
+  local NEW="$(dirname "$WT")/widgets-feat" OTHER="$(dirname "$WT")/widgets-other" state argv
+  git -C "$WT" worktree add -q -b other "$OTHER" main
   open_scenario ghe.test github 101
-  local NEW="$(dirname "$WT")/widgets-feat" running panels
   ctl surface change-request handoff --open-dialog
   wait_preview
   # Only the hand-off's own reads are slowed: the preview has landed already.
   curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__slowgraphql?seconds=4"
   handoff_start --purpose comments --agent claude --surface terminal
-  ctl select-workspace --workspace "$WT"
-  show_change_request
-  running=$(read_field handoff surface change-request read)
-  [ "$running" = running ] || fail "the hand-off was $running before the switch: it must still run"
-  echo "OK: the worktree was switched while the hand-off ran"
-  wait_handoff done "Claude Code"
-  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__reset"
-  # The tab list is the selected worktree's: the agent's tab is in the hand-off's
-  # worktree, and the main checkout does not hold it.
+  for _ in $(seq 1 100); do
+    state=$(peek handoff surface change-request read)
+    [ "$state" = running ] && break
+    sleep 0.1
+  done
+  [ "$state" = running ] || fail "the hand-off was $state, not running, when the switch was due"
+  ctl select-workspace --workspace "$OTHER"
+  [ "$(read_field path current-workspace)" = "$OTHER" ] || fail "the switch to $OTHER did not select it"
+  echo "OK: switched to $OTHER while the hand-off was running"
+
+  # From here no change request tab is shown: the switch parks it, and the
+  # assertions read what the hand-off did in each worktree's own tab list.
   wait_selected_workspace "$NEW"
+  argv=$(newest_argv claude)
+  python3 "$RUN_DIR/tools/handoff_check.py" prompt "$argv" "$(basename "$(newest_file "$NEW/.sirio/handoff" "101-comments-*.md")")" "#101" "" >/dev/null \
+    || fail "the agent started without its hand-off prompt"
+  echo "OK: the agent started, with its hand-off prompt, once the hand-off selected $NEW"
+  # Done is read while $NEW is still selected: a worktree that is selected again
+  # restores its tabs without their state, so a later read would say idle.
+  wait_handoff done "Claude Code"
   case "$(reply surface tabs read)" in
     *"terminal|no|Claude Code"*) echo "OK: the agent's terminal is in $NEW" ;;
     *) fail "no Claude Code terminal in $NEW" ;;
+  esac
+  ctl select-workspace --workspace "$OTHER"
+  case "$(reply surface tabs read)" in
+    *"terminal|no|Claude Code"*) fail "the agent's terminal landed in $OTHER" ;;
+    *) echo "OK: $OTHER has no agent terminal" ;;
   esac
   ctl select-workspace --workspace "$WT"
   case "$(reply surface tabs read)" in
     *"terminal|no|Claude Code"*) fail "the agent's terminal landed in the main checkout" ;;
     *) echo "OK: the main checkout has no agent terminal" ;;
   esac
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/__reset"
   dump_git
   dump_handoff
   quit_app; stop_forge
 }
 
+install_stubs
+check_stub_path
 scenario_same github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
 scenario_same gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git https://gitlab.test/forks/alice/app.git
 scenario_fork_push github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
@@ -1638,8 +1689,6 @@ scenario_two_forks
 scenario_own_fork
 scenario_maint_remote
 
-install_stubs
-check_stub_path
 scenario_handoff_terminal
 scenario_handoff_purposes github ghe.test github 101 https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
 scenario_handoff_purposes gitlab gitlab.test gitlab 201 https://gitlab.test/team/app.git https://gitlab.test/forks/alice/app.git
