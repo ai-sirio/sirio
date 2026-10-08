@@ -5,9 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
-use sirio_forge::{ChangeRef, Forge};
+use sirio_forge::{ChangeHeader, ChangeRef, Forge, Revisions};
 use sirio_git::{FastForward, FetchError, RemoteOutcome};
 use sirio_ui::forge_source::ChangeRequestSource;
+use sirio_ui::handoff::context::push_words;
 use sirio_ui::handoff::{self, BranchFacts, Facts, ListedRemote, LocalSource, Plan, PushTarget, Start, Target};
 
 use super::{ForgeHub, choose_remote, fetch_timeout};
@@ -25,6 +26,16 @@ pub(crate) struct CheckoutDone {
     pub(crate) branch: String,
     pub(crate) title: String,
     pub(crate) detail: String,
+    /// Where the agent may push, in Sirio's words (`push_words`).
+    pub(crate) push: String,
+}
+
+/// What `ForgeHub::plan` decided, before any git step has run.
+pub(crate) struct Planned {
+    pub(crate) header: ChangeHeader,
+    pub(crate) revisions: Revisions,
+    pub(crate) target: Target,
+    pub(crate) plan: Plan,
 }
 
 fn fetch_message(error: FetchError) -> String {
@@ -34,78 +45,22 @@ fn fetch_message(error: FetchError) -> String {
     }
 }
 
-fn name_of(path: &Path) -> String {
+pub(super) fn name_of(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
 impl ForgeHub {
     pub(crate) fn checkout(&self, request: &CheckoutRequest) -> Result<CheckoutDone, String> {
-        let reference = &request.reference;
+        let Planned { header, revisions, target, plan } = self.plan(request, false)?;
         let repo = request.repo.as_path();
-        let client = self
-            .client_for(reference)
-            .map_err(|_| format!("Sirio is not connected to {}", reference.host))?;
-        let header = client
-            .header(reference.number)
-            .map_err(|error| format!("could not read {}: {error}", reference.label()))?;
-        let revisions = header
-            .revisions
-            .clone()
-            .ok_or_else(|| format!("{} names no head commit", reference.label()))?;
-
-        let remotes = sirio_git::list_remotes(repo);
-        let listed_name = choose_remote(&remotes, &reference.host, &reference.project)
-            .ok_or_else(|| format!("no remote of this project points at {}", reference.project))?;
-        let listed = ListedRemote {
-            url: remotes.iter().find(|(name, _)| *name == listed_name).map(|(_, url)| url.clone()).unwrap_or_default(),
-            name: listed_name,
-        };
-        let every: Vec<ListedRemote> = remotes
-            .iter()
-            .map(|(name, url)| ListedRemote { name: name.clone(), url: url.clone() })
-            .collect();
-        // The local branch when the head repository is gone (the forge drops
-        // the owner with it): the change request's own number, never a name
-        // the user may have picked for their own branch.
-        let gone_branch = match reference.forge {
-            Forge::GitHub => format!("pr-{}", reference.number),
-            Forge::GitLab => format!("mr-{}", reference.number),
-        };
-        // The local branch of the source name decides whether the viewer's own
-        // fork may take it (see `handoff::target`).
-        let local = match sirio_git::local_branch(repo, &header.summary.source_branch)
-            .map_err(|error| format!("reading the branch {} failed: {error}", header.summary.source_branch))?
-        {
-            None => LocalSource::Absent,
-            Some(local) => match local.upstream {
-                Some(upstream) => LocalSource::Tracks(format!("{}/{}", upstream.remote, upstream.branch)),
-                None => LocalSource::Untracked,
-            },
-        };
-        let target = handoff::target(
-            &header.summary.source_branch,
-            reference.number,
-            &listed,
-            &every,
-            header.head.as_ref(),
-            &gone_branch,
-            &local,
-        );
-
-        // The head commit, through B1's fetch, so ancestry can be judged
-        // before anything is created.
-        self.revisions
-            .ensure(repo, reference, &revisions, None)
-            .map_err(|error| format!("could not fetch the head of {}: {error}", reference.label()))?;
-
-        let facts = self.facts(request, &target, &remotes, &revisions.head_sha)?;
         let done = |path: PathBuf, detail: String| CheckoutDone {
             branch: target.branch.clone(),
             title: header.summary.title.clone(),
+            push: push_words(&target),
             path,
             detail,
         };
-        match handoff::decide(&target, &facts) {
+        match plan {
             Plan::Refuse(refusal) => Err(refusal.message()),
             Plan::Reuse { worktree, .. } => {
                 let detail = self.sync(repo, &worktree, &target, &revisions.head_sha)?;
@@ -170,12 +125,83 @@ impl ForgeHub {
         }
     }
 
+    /// Everything `checkout` decides before a git step runs: the forge's
+    /// header and revisions, the target, the facts git knows, and the plan.
+    /// Fetches the head through B1 (sirio's own refs, nothing a worktree
+    /// sees), so ancestry can be judged. `dry` only reads the worktree
+    /// registrations and change request links: a missing one is treated as
+    /// absent and left in place, which is what a preview wants.
+    pub(crate) fn plan(&self, request: &CheckoutRequest, dry: bool) -> Result<Planned, String> {
+        let reference = &request.reference;
+        let repo = request.repo.as_path();
+        let client = self
+            .client_for(reference)
+            .map_err(|_| format!("Sirio is not connected to {}", reference.host))?;
+        let header = client
+            .header(reference.number)
+            .map_err(|error| format!("could not read {}: {error}", reference.label()))?;
+        let revisions = header
+            .revisions
+            .clone()
+            .ok_or_else(|| format!("{} names no head commit", reference.label()))?;
+
+        let remotes = sirio_git::list_remotes(repo);
+        let listed_name = choose_remote(&remotes, &reference.host, &reference.project)
+            .ok_or_else(|| format!("no remote of this project points at {}", reference.project))?;
+        let listed = ListedRemote {
+            url: remotes.iter().find(|(name, _)| *name == listed_name).map(|(_, url)| url.clone()).unwrap_or_default(),
+            name: listed_name,
+        };
+        let every: Vec<ListedRemote> = remotes
+            .iter()
+            .map(|(name, url)| ListedRemote { name: name.clone(), url: url.clone() })
+            .collect();
+        // The local branch when the head repository is gone (the forge drops
+        // the owner with it): the change request's own number, never a name
+        // the user may have picked for their own branch.
+        let gone_branch = match reference.forge {
+            Forge::GitHub => format!("pr-{}", reference.number),
+            Forge::GitLab => format!("mr-{}", reference.number),
+        };
+        // The local branch of the source name decides whether the viewer's own
+        // fork may take it (see `handoff::target`).
+        let local = match sirio_git::local_branch(repo, &header.summary.source_branch)
+            .map_err(|error| format!("reading the branch {} failed: {error}", header.summary.source_branch))?
+        {
+            None => LocalSource::Absent,
+            Some(local) => match local.upstream {
+                Some(upstream) => LocalSource::Tracks(format!("{}/{}", upstream.remote, upstream.branch)),
+                None => LocalSource::Untracked,
+            },
+        };
+        let target = handoff::target(
+            &header.summary.source_branch,
+            reference.number,
+            &listed,
+            &every,
+            header.head.as_ref(),
+            &gone_branch,
+            &local,
+        );
+
+        // The head commit, through B1's fetch, so ancestry can be judged
+        // before anything is created.
+        self.revisions
+            .ensure(repo, reference, &revisions, None)
+            .map_err(|error| format!("could not fetch the head of {}: {error}", reference.label()))?;
+
+        let facts = self.facts(request, &target, &remotes, &revisions.head_sha, dry)?;
+        let plan = handoff::decide(&target, &facts);
+        Ok(Planned { header, revisions, target, plan })
+    }
+
     fn facts(
         &self,
         request: &CheckoutRequest,
         target: &Target,
         remotes: &[(String, String)],
         head_sha: &str,
+        dry: bool,
     ) -> Result<Facts, String> {
         let repo = request.repo.as_path();
         let mut linked = None;
@@ -184,8 +210,11 @@ impl ForgeHub {
                 linked = Some(path);
                 break;
             }
-            // A linked worktree deleted outside Sirio: forget it.
-            self.settings.drop_change_request_link(&path);
+            // A linked worktree deleted outside Sirio: forget it (a dry run
+            // only reads, so it leaves the link and treats it as absent).
+            if !dry {
+                self.settings.drop_change_request_link(&path);
+            }
         }
         let checked_out = match sirio_git::worktree_for_branch(repo, &target.branch)
             .map_err(|error| format!("reading the worktrees failed: {error}"))?
@@ -193,9 +222,11 @@ impl ForgeHub {
             // Git still lists a folder deleted outside it, on its branch: that
             // registration is removed, and the branch is free to be checked out.
             Some(path) if !path.exists() => {
-                sirio_git::remove_missing_worktree(repo, &path).map_err(|error| {
-                    format!("forgetting the deleted worktree {} failed: {error}", path.display())
-                })?;
+                if !dry {
+                    sirio_git::remove_missing_worktree(repo, &path).map_err(|error| {
+                        format!("forgetting the deleted worktree {} failed: {error}", path.display())
+                    })?;
+                }
                 None
             }
             Some(path) => {

@@ -226,8 +226,10 @@ fn client_key(target: &ForgeTarget, means: Means) -> ClientKey {
 }
 
 mod checkout;
+mod handoff;
 
 pub(crate) use checkout::{CheckoutDone, CheckoutRequest};
+pub(crate) use handoff::{HandoffAsk, HandoffDone, HandoffFailure};
 
 /// The hub a workspace runs a checkout on. `set_source` keeps only the
 /// trait object, and a checkout needs the concrete hub's git steps.
