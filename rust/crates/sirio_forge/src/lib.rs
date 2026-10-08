@@ -8,6 +8,7 @@
 
 mod action;
 mod client;
+mod context;
 mod error;
 mod github;
 mod gitlab;
@@ -24,6 +25,7 @@ mod transport;
 pub use action::{LiveProbe, live_probes};
 pub use action::{Action, ActionOutcome, RerunTarget, ReviewTarget, ReviewVerdict};
 pub use client::ForgeClient;
+pub use context::{Context, FailedJob, Purpose, Scope, failed_checks};
 pub use error::ForgeError;
 
 pub use model::{
