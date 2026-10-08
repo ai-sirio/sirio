@@ -590,11 +590,13 @@ fn cut_at(text: &str, max: usize) -> &str {
 }
 
 /// A link as Sirio may write it outside a block: plain http or https, short,
-/// with no whitespace, control character or backtick. Anything else is left out.
+/// printable ASCII only (forges percent-encode the rest) and no backtick, so
+/// no bidi, zero-width or tag character stands in Sirio's own lines.
+/// Anything else is left out.
 fn safe_url(url: &str) -> Option<&str> {
     let plain = (url.starts_with("https://") || url.starts_with("http://"))
         && url.len() <= URL_LIMIT
-        && !url.chars().any(|ch| ch.is_whitespace() || ch.is_control() || ch == '`');
+        && url.chars().all(|ch| ch.is_ascii_graphic() && ch != '`');
     plain.then_some(url)
 }
 
@@ -1097,6 +1099,11 @@ mod tests {
             "javascript:alert(1)".to_string(),
             "file:///etc/passwd".to_string(),
             format!("https://ghe.test/{}", "a".repeat(2049)),
+            // Outside a block only plain ASCII may stand: bidi overrides,
+            // zero-width and tag characters are invisible there.
+            "https://ghe.test/acme/\u{202E}gpj.exe".to_string(),
+            "https://ghe.test/acme/wid\u{200B}gets".to_string(),
+            "https://ghe.test/acme/\u{E0041}widgets".to_string(),
         ];
         for link in &bad_links {
             let mut ctx = context(vec![], vec![]);
