@@ -5,7 +5,7 @@
 
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -69,6 +69,42 @@ pub(crate) fn write_in_worktree(worktree: &Path, relative: &Path, contents: &[u8
     std::fs::rename(&tmp, &target).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// The most `read_in_worktree` reads: a settings or skill file is a few KiB.
+const READ_LIMIT: u64 = 1024 * 1024;
+
+/// Reads `relative` under `worktree` the way `write_in_worktree` writes it:
+/// a symlink anywhere on the path is refused, so a committed link to a FIFO
+/// or `/dev/zero` cannot block or exhaust the read, and only a regular file
+/// up to 1 MiB is read. `Ok(None)` when nothing stands at the path.
+pub(crate) fn read_in_worktree(worktree: &Path, relative: &Path) -> io::Result<Option<String>> {
+    let mut path = worktree.to_path_buf();
+    let mut walked = PathBuf::new();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::other(format!("not a path inside the worktree: {}", relative.display())));
+        };
+        path.push(name);
+        walked.push(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(io::Error::other(format!("refusing to read through a symlink: {}", walked.display())));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    if !std::fs::symlink_metadata(&path)?.is_file() {
+        return Err(io::Error::other(format!("{} is not a file", walked.display())));
+    }
+    let mut text = String::new();
+    std::fs::File::open(&path)?.take(READ_LIMIT + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > READ_LIMIT {
+        return Err(io::Error::other(format!("{} is larger than 1 MiB", walked.display())));
+    }
+    Ok(Some(text))
 }
 
 fn refused(path: &Path) -> io::Error {

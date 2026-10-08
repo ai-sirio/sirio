@@ -118,6 +118,48 @@ fn claude_refuses_a_symlinked_settings_folder_and_leaves_its_target_alone() {
     assert_outside_untouched(&outside, &secret);
 }
 
+/// A FIFO outside the worktree with no writer: reading it blocks for ever,
+/// the way a link to `/dev/zero` never ends. A `prepare` that reads through
+/// a committed link to it never returns.
+fn fifo(outside: &Path) -> PathBuf {
+    let fifo = outside.join("fifo");
+    let status = std::process::Command::new("mkfifo").arg(&fifo).status().expect("mkfifo runs");
+    assert!(status.success(), "mkfifo failed");
+    fifo
+}
+
+/// Runs `prepare` on a thread and reports whether it returned within a few
+/// seconds; a read through the link blocks it, and the test process ends it.
+fn prepare_returns(adapter: &'static (dyn AgentAdapter + Sync), worktree: &Path) -> bool {
+    let (done, finished) = std::sync::mpsc::channel();
+    let worktree = worktree.to_str().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = adapter.prepare(&worktree, PANE_ID, SIRIOCTL);
+        let _ = done.send(());
+    });
+    finished.recv_timeout(std::time::Duration::from_secs(5)).is_ok()
+}
+
+#[test]
+fn claude_never_reads_its_settings_through_a_committed_link() {
+    let root = TempDir::new();
+    let (worktree, outside, _secret) = layout(&root.0);
+    std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+    symlink(fifo(&outside), worktree.join(".claude/settings.local.json")).unwrap();
+
+    assert!(prepare_returns(&ClaudeCodeAdapter, &worktree), "prepare read the settings through a committed link");
+}
+
+#[test]
+fn claude_never_reads_its_skill_through_a_committed_link() {
+    let root = TempDir::new();
+    let (worktree, outside, _secret) = layout(&root.0);
+    std::fs::create_dir_all(worktree.join(".claude/skills/sirio")).unwrap();
+    symlink(fifo(&outside), worktree.join(".claude/skills/sirio/SKILL.md")).unwrap();
+
+    assert!(prepare_returns(&ClaudeCodeAdapter, &worktree), "prepare read the skill through a committed link");
+}
+
 #[test]
 fn omp_still_prepares_a_plain_worktree() {
     let root = TempDir::new();

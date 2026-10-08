@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use safe_write::write_in_worktree;
+use safe_write::{read_in_worktree, write_in_worktree};
 
 mod claude;
 mod codex;
@@ -336,12 +336,10 @@ pub fn install_skill(
         "codex" | "opencode" | "pi" | "omp" => ".agents/skills/sirio/SKILL.md",
         other => return Err(PrepareError::UnsupportedSkillAgent(other.to_string())),
     };
-    let destination = Path::new(worktree_path).join(relative);
-    if destination.exists() {
-        let existing = std::fs::read_to_string(&destination)?;
-        if !existing.contains(SKILL_MANAGED_PREFIX) {
-            return Err(PrepareError::UnmanagedSkillFile(destination));
-        }
+    if let Some(existing) = read_in_worktree(Path::new(worktree_path), Path::new(relative))?
+        && !existing.contains(SKILL_MANAGED_PREFIX)
+    {
+        return Err(PrepareError::UnmanagedSkillFile(Path::new(worktree_path).join(relative)));
     }
     write_in_worktree(Path::new(worktree_path), Path::new(relative), markdown.as_bytes())?;
     Ok(())
