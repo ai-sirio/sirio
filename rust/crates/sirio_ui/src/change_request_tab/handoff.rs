@@ -421,6 +421,16 @@ impl ChangeRequestTab {
         cx.notify();
     }
 
+    pub fn handoff_dialog_open(&self) -> bool {
+        self.handoff_dialog.is_some()
+    }
+
+    /// A hand-off read was refused by a rate limit that named its reset:
+    /// the same pause the tab's own reads take (`note_rate_limited`).
+    pub fn pause_until(&mut self, reset: i64) {
+        self.paused_until = Some(reset);
+    }
+
     /// One line under the header: the hand-off running, or what it made or why it failed.
     pub(crate) fn render_handoff_status(&self, theme: &Theme) -> Option<AnyElement> {
         let (severity, text) = match &self.handoff {

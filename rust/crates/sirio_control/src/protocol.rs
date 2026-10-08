@@ -594,6 +594,13 @@ pub mod request {
         request("surface.change_request.checkout", BTreeMap::new())
     }
 
+    /// Hands the open change request's worktree to an agent. `open_dialog`
+    /// only opens the dialog; otherwise `purpose` and `agent` are required,
+    /// and `surface`, `thread`, `job` and `instructions` are optional.
+    pub fn change_request_handoff(params: BTreeMap<String, String>) -> ControlRequest {
+        request("surface.change_request.handoff", params)
+    }
+
     /// Shows `path` (and `line`) of the active change request in its diff — what
     /// a line comment's link does.
     pub fn change_request_reveal(path: &str, line: Option<&str>) -> ControlRequest {
