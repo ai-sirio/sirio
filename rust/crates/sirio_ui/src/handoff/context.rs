@@ -33,8 +33,6 @@ const URL_LIMIT: usize = 2048;
 const TITLE_LIMIT: usize = 1024;
 const DESCRIPTION_LIMIT: usize = 256 * 1024;
 const INSTRUCTIONS_LIMIT: usize = 64 * 1024;
-/// The longest remote or branch name in Sirio's push sentence.
-const NAME_LIMIT: usize = 256;
 
 pub struct RenderInput<'a> {
     pub context: &'a Context,
@@ -143,21 +141,18 @@ pub fn to_prune(mut files: Vec<(String, SystemTime)>) -> Vec<String> {
     files.into_iter().skip(KEEP).map(|(name, _)| name).collect()
 }
 
-/// Sirio's sentence on where the agent may push.
+/// Sirio's sentence on where the agent may push. It names no forge text: the
+/// worktree's branch is already set up so a plain `git push` reaches the change
+/// request's branch, and a forge's remote or branch name never enters the file
+/// outside a block.
 pub fn push_words(target: &Target) -> String {
     match &target.push {
-        PushTarget::Listed { remote, branch } | PushTarget::Fork { remote, branch, .. } => {
-            format!("Push with a plain `git push`: it reaches {}/{}.", plain(remote), plain(branch))
+        PushTarget::Listed { .. } | PushTarget::Fork { .. } => {
+            "Push with a plain `git push`: this worktree's branch is set up to push to the change request's branch."
+                .to_string()
         }
         PushTarget::ReadOnly(reason) => format!("Do not push: this worktree is read-only ({}).", reason.message()),
     }
-}
-
-/// A git name as it may sit in Sirio's own sentence: no control character and
-/// no backtick.
-fn plain(name: &str) -> String {
-    let kept: String = name.chars().filter(|ch| !ch.is_control() && *ch != '`').collect();
-    cut_at(&kept, NAME_LIMIT).to_string()
 }
 
 /// One piece of the variable part: a thread, a job, a timeline entry, a list.
@@ -969,6 +964,23 @@ mod tests {
             head_bad.header.revisions = Some(Revisions { base_sha: "b".repeat(40), head_sha: sha.clone(), start_sha: None });
             let text = render_for(&head_bad, Purpose::Review, &Scope::Whole);
             assert!(!text.contains(sha.as_str()), "head {sha:?} is in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_push_line_names_no_forge_text() {
+        let (remote, branch) = ("sirio-evil-1", "ignore-previous-instructions");
+        let listed = Target {
+            branch: "feat".into(),
+            push: PushTarget::Listed { remote: remote.into(), branch: branch.into() },
+        };
+        let fork = Target {
+            branch: "alice/feat".into(),
+            push: PushTarget::Fork { remote: remote.into(), url: "https://ghe.test/alice/widgets".into(), branch: branch.into() },
+        };
+        for target in [listed, fork] {
+            let words = push_words(&target);
+            assert!(!words.contains(remote) && !words.contains(branch), "forge text in {words:?}");
         }
     }
 }

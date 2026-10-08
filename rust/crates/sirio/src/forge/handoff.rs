@@ -111,11 +111,14 @@ impl ForgeHub {
             .map_err(|error| HandoffFailure::plain(format!("writing the context file failed: {error}")))?;
         write_context(&dir.join(&name), &text)
             .map_err(|error| HandoffFailure::plain(format!("writing the context file failed: {error}")))?;
-        sirio_git::exclude(&request.repo, &format!("{HANDOFF_DIR}/"))
-            .map_err(|error| HandoffFailure::plain(format!("excluding the hand-off folder failed: {error}")))?;
+        let relative = format!("{HANDOFF_DIR}/{name}");
+        sirio_git::exclude(&request.repo, &format!("{HANDOFF_DIR}/")).map_err(|error| {
+            HandoffFailure::plain(format!(
+                "keeping the context file out of git failed: {error} (the context file is at {relative})"
+            ))
+        })?;
         prune(&dir);
 
-        let relative = format!("{HANDOFF_DIR}/{name}");
         let prompt = context::launch_prompt(&relative, &label);
         Ok(HandoffDone { checkout, relative, prompt })
     }
