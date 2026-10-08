@@ -26,6 +26,15 @@ pub const HANDOFF_DIR: &str = ".sirio/handoff";
 const HUNK_LINES: usize = 12;
 /// The newest timeline entries a resume reads.
 const TIMELINE_ENTRIES: usize = 20;
+/// The longest link Sirio writes into the file.
+const URL_LIMIT: usize = 2048;
+/// What is left of a title, and of a description, once it is cut. Head and
+/// tail are bounded too, so the file always fits once the units are gone.
+const TITLE_LIMIT: usize = 1024;
+const DESCRIPTION_LIMIT: usize = 256 * 1024;
+const INSTRUCTIONS_LIMIT: usize = 64 * 1024;
+/// The longest remote or branch name in Sirio's push sentence.
+const NAME_LIMIT: usize = 256;
 
 pub struct RenderInput<'a> {
     pub context: &'a Context,
@@ -147,7 +156,8 @@ pub fn push_words(target: &Target) -> String {
 /// A git name as it may sit in Sirio's own sentence: no control character and
 /// no backtick.
 fn plain(name: &str) -> String {
-    name.chars().filter(|ch| !ch.is_control() && *ch != '`').collect()
+    let kept: String = name.chars().filter(|ch| !ch.is_control() && *ch != '`').collect();
+    cut_at(&kept, NAME_LIMIT).to_string()
 }
 
 /// One piece of the variable part: a thread, a job, a timeline entry, a list.
@@ -199,10 +209,11 @@ impl Section {
 fn title_section(context: &Context) -> Section {
     let summary = &context.header.summary;
     let mut section = Section::new("Title", ("title", "titles"));
-    section.units.push(Unit {
-        age: Some(i64::MAX),
-        text: untrusted("title", Some(&summary.author), &summary.title),
-    });
+    let mut text = untrusted("title", Some(&summary.author), cut_at(&summary.title, TITLE_LIMIT));
+    if summary.title.len() > TITLE_LIMIT {
+        text += "(Title cut at 1 KiB.)\n";
+    }
+    section.units.push(Unit { age: Some(i64::MAX), text });
     section
 }
 
@@ -212,8 +223,8 @@ fn head_text(input: &RenderInput) -> String {
     let mut text = format!("# {} — change request {}\n\n", input.purpose.label(), input.label);
     text += &format!("{}\n\n", task_sentence(input.purpose, &input.context.header));
     text += &format!("- Change request: {}", input.label);
-    if safe_url(&header.summary.web_url) {
-        text += &format!(", {}", header.summary.web_url);
+    if let Some(url) = safe_url(&header.summary.web_url) {
+        text += &format!(", {url}");
     }
     text.push('\n');
     if let Some(head) = header.revisions.as_ref().map(|revisions| revisions.head_sha.as_str()) {
@@ -339,7 +350,7 @@ fn job_text(number: usize, job: &FailedJob, logged: Option<&(String, Option<Stri
         name += &format!("\nstage: {group}");
     }
     text += &untrusted("check", None, &name);
-    if let Some(url) = job.check.url.as_deref().filter(|url| safe_url(url)) {
+    if let Some(url) = job.check.url.as_deref().and_then(safe_url) {
         text += &format!("- Job: {url}\n");
     }
     text += "\n";
@@ -414,7 +425,11 @@ fn description_section(body: &str) -> Section {
     if body.trim().is_empty() {
         section.fixed = "The description is empty.\n".to_string();
     } else {
-        section.units.push(Unit { age: Some(i64::MAX), text: untrusted("description", None, body) });
+        let mut text = untrusted("description", None, cut_at(body, DESCRIPTION_LIMIT));
+        if body.len() > DESCRIPTION_LIMIT {
+            text += "(Description cut at 256 KiB.)\n";
+        }
+        section.units.push(Unit { age: Some(i64::MAX), text });
     }
     section
 }
@@ -501,16 +516,32 @@ fn event_word(kind: &EventKind) -> String {
 }
 
 fn instructions_text(instructions: &str) -> String {
-    if instructions.trim().is_empty() {
-        String::new()
-    } else {
-        format!("## Instructions from the user\n\n{}\n", instructions.trim_end())
+    let text = instructions.trim_end();
+    if text.trim().is_empty() {
+        return String::new();
     }
+    if text.len() <= INSTRUCTIONS_LIMIT {
+        return format!("## Instructions from the user\n\n{text}\n");
+    }
+    format!("## Instructions from the user\n\n{}\n\n(Instructions cut at 64 KiB.)\n", cut_at(text, INSTRUCTIONS_LIMIT))
 }
 
-fn safe_url(url: &str) -> bool {
-    (url.starts_with("https://") || url.starts_with("http://"))
-        && !url.chars().any(|ch| ch.is_whitespace() || ch == '`')
+/// The longest prefix of `text` of at most `max` bytes that ends on a character.
+fn cut_at(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A link as Sirio may write it outside a block: plain http or https, short,
+/// with no whitespace, control character or backtick. Anything else is left out.
+fn safe_url(url: &str) -> Option<&str> {
+    let plain = (url.starts_with("https://") || url.starts_with("http://"))
+        && url.len() <= URL_LIMIT
+        && !url.chars().any(|ch| ch.is_whitespace() || ch.is_control() || ch == '`');
+    plain.then_some(url)
 }
 
 /// A commit id as the forge gives it: 40 hex digits (SHA-1) or 64 (SHA-256).
@@ -630,28 +661,55 @@ mod tests {
     fn render_for(context: &Context, purpose: Purpose, scope: &Scope) -> String {
         render(&RenderInput { context, purpose, scope, label: "#101", push: "Push with `git push`.", instructions: "", flavor: ansi_log::LogFlavor::GitHub })
     }
-    /// Splits `text` into (inside an untrusted block, outside any) lines. A
-    /// block opens on a line of N ≥ 4 backticks followed by `untrusted`, and
-    /// closes on a line that is exactly those N backticks.
+    /// Splits `text` into (inside an untrusted block, outside any) lines, the
+    /// way CommonMark reads fences. An opener is up to three spaces, a run of
+    /// at least three backticks and an info string; an info string that holds
+    /// a backtick is no fence at all. A closer is up to three spaces, then only
+    /// backticks, in a run at least as long as the opener's.
     fn split_fenced(text: &str) -> (Vec<String>, Vec<String>) {
         let (mut inside, mut outside) = (Vec::new(), Vec::new());
-        let mut open: Option<String> = None;
+        let mut open: Option<usize> = None;
         for line in text.lines() {
-            match &open {
-                Some(fence) if line == fence => open = None,
+            match open {
+                Some(run) if closes(line, run) => open = None,
                 Some(_) => inside.push(line.to_string()),
-                None => {
-                    let ticks: String = line.chars().take_while(|ch| *ch == '`').collect();
-                    if ticks.len() >= 4 && line[ticks.len()..].starts_with("untrusted") {
-                        open = Some(ticks);
-                    } else {
-                        outside.push(line.to_string());
-                    }
-                }
+                None => match opener(line) {
+                    Some(run) => open = Some(run),
+                    None => outside.push(line.to_string()),
+                },
             }
         }
         assert!(open.is_none(), "a block was never closed:\n{text}");
         (inside, outside)
+    }
+    /// The run length of a fence that opens an untrusted block, or `None` for a
+    /// line that is not a fence.
+    fn opener(line: &str) -> Option<usize> {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent > 3 {
+            return None;
+        }
+        let rest = line.trim_start_matches(' ');
+        let run = rest.chars().take_while(|ch| *ch == '`').count();
+        if run < 3 {
+            return None;
+        }
+        let info = &rest[run..];
+        if info.contains('`') {
+            assert!(!info.starts_with("untrusted"), "an untrusted opener has a backtick in its info string: {line}");
+            return None;
+        }
+        // Only an untrusted block is a block here; any other run is text, and
+        // the behavioural assertions are what see forge text it hides.
+        if !info.starts_with("untrusted") {
+            return None;
+        }
+        Some(run)
+    }
+    fn closes(line: &str, run: usize) -> bool {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let rest = line.trim_start_matches(' ').trim_end_matches(' ');
+        indent <= 3 && !rest.is_empty() && rest.chars().all(|ch| ch == '`') && rest.len() >= run
     }
     fn fenced_lines(text: &str) -> Vec<String> {
         split_fenced(text).0
@@ -821,5 +879,96 @@ mod tests {
     #[test]
     fn file_names_carry_number_purpose_and_stamp() {
         assert_eq!(file_name(201, Purpose::Comments, "20261008-101500"), "201-comments-20261008-101500.md");
+    }
+
+    /// A value far past a mebibyte, of three-byte characters, so that a cut
+    /// through one of them would panic.
+    fn huge(unit: &str, bytes: usize) -> String {
+        unit.repeat(bytes / unit.len())
+    }
+
+    fn render_with_instructions(instructions: &str) -> String {
+        let ctx = context(vec![], vec![]);
+        render(&RenderInput { context: &ctx, purpose: Purpose::Resume, scope: &Scope::Whole, label: "#101",
+            push: "Push with `git push`.", instructions, flavor: ansi_log::LogFlavor::GitHub })
+    }
+
+    #[test]
+    fn instructions_of_a_mebibyte_and_a_half_fit_and_say_they_were_cut() {
+        let text = render_with_instructions(&huge("日", 1_500_000));
+        assert!(text.len() <= CONTEXT_LIMIT, "{} bytes", text.len());
+        assert!(text.contains("(Instructions cut at 64 KiB.)"));
+        assert!(unfenced(&text).contains("(Instructions cut at 64 KiB.)"));
+    }
+
+    #[test]
+    fn a_web_url_of_a_mebibyte_and_a_half_is_left_out_and_the_file_fits() {
+        let mut ctx = context(vec![], vec![]);
+        ctx.header.summary.web_url = format!("https://ghe.test/{}", huge("a", 1_500_000));
+        let text = render_for(&ctx, Purpose::Resume, &Scope::Whole);
+        assert!(text.len() <= CONTEXT_LIMIT, "{} bytes", text.len());
+        assert!(!text.contains(&"a".repeat(100)), "the url is in the file");
+    }
+
+    #[test]
+    fn a_title_of_a_mebibyte_and_a_half_is_cut_and_the_file_fits() {
+        let mut ctx = context(vec![], vec![]);
+        ctx.header.summary.title = huge("日", 1_500_000);
+        let text = render_for(&ctx, Purpose::Comments, &Scope::Whole);
+        assert!(text.len() <= CONTEXT_LIMIT, "{} bytes", text.len());
+        assert!(text.contains("(Title cut at 1 KiB.)"));
+    }
+
+    #[test]
+    fn a_description_of_a_mebibyte_and_a_half_fits_for_review_and_for_resume() {
+        for purpose in [Purpose::Review, Purpose::Resume] {
+            let mut ctx = context(vec![], vec![]);
+            ctx.header.body = huge("日", 1_500_000);
+            let text = render_for(&ctx, purpose, &Scope::Whole);
+            assert!(text.len() <= CONTEXT_LIMIT, "{purpose:?}: {} bytes", text.len());
+            assert!(text.contains("(Description cut at 256 KiB.)"), "{purpose:?}");
+        }
+    }
+
+    #[test]
+    fn forge_links_that_are_not_plain_web_links_stay_out_of_the_file() {
+        let bad_links = [
+            "https://ghe.test/acme/widgets/pull/101 injected".to_string(),
+            "https://ghe.test/acme/`widgets".to_string(),
+            "https://ghe.test/acme/\x1b[31mwidgets".to_string(),
+            "javascript:alert(1)".to_string(),
+            "file:///etc/passwd".to_string(),
+            format!("https://ghe.test/{}", "a".repeat(2049)),
+        ];
+        for link in &bad_links {
+            let mut ctx = context(vec![], vec![]);
+            ctx.header.summary.web_url = link.clone();
+            let text = render_for(&ctx, Purpose::Resume, &Scope::Whole);
+            assert!(!text.contains(link.as_str()), "web url {link:?} is in:\n{text}");
+
+            let job = FailedJob {
+                check: Check { name: "test".into(), status: CheckStatus::Failed, group: None, duration_secs: None,
+                    url: Some(link.clone()), job: Some(CheckJob { job_id: 2, run_id: None, retryable: true }) },
+                log: None,
+            };
+            let text = render_for(&context(vec![], vec![job]), Purpose::Ci, &Scope::Whole);
+            assert!(!text.contains(link.as_str()), "job url {link:?} is in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn forge_shas_that_are_not_commit_ids_stay_out_of_the_file() {
+        let bad_shas = ["e".repeat(39), "e".repeat(41), format!("{}g", "e".repeat(39)), "g".repeat(40)];
+        for sha in &bad_shas {
+            let mut base_bad = context(vec![], vec![]);
+            base_bad.header.revisions = Some(Revisions { base_sha: sha.clone(), head_sha: "a".repeat(40), start_sha: None });
+            let text = render_for(&base_bad, Purpose::Review, &Scope::Whole);
+            assert!(!text.contains(sha.as_str()), "base {sha:?} is in:\n{text}");
+
+            let mut head_bad = context(vec![], vec![]);
+            head_bad.header.revisions = Some(Revisions { base_sha: "b".repeat(40), head_sha: sha.clone(), start_sha: None });
+            let text = render_for(&head_bad, Purpose::Review, &Scope::Whole);
+            assert!(!text.contains(sha.as_str()), "head {sha:?} is in:\n{text}");
+        }
     }
 }
