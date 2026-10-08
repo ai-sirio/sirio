@@ -62,8 +62,9 @@ set -euo pipefail
 #   handoff-chat      GitHub, OpenCode's chat: the first user turn names the file.
 #   handoff-warning   the dialog's warning: a fork (cross-repository) warns, and
 #                     the same repository with the viewer as author does not.
-#   handoff-refusals  a taken folder, a rate limit, a chat for an agent with none,
-#                     and a CI purpose while CI passed: each refused, no file made.
+#   handoff-refusals  a taken folder, a worktree switched to another branch, a rate
+#                     limit, a chat for an agent with none, and a CI purpose while CI
+#                     passed: each refused, no file made.
 #   handoff-switch    the worktree is switched away while the hand-off is slowed:
 #                     the agent's terminal still lands in the hand-off's worktree.
 #
@@ -1559,6 +1560,24 @@ scenario_refusal_taken() { # a folder where the worktree would go: refused, noth
   quit_app; stop_forge
 }
 
+scenario_refusal_other_branch() { # the worktree was switched to another branch: a comments hand-off is refused, nothing written
+  SCENARIO="github-refusal-other-branch"
+  echo "=== $SCENARIO"
+  prepare_scenario github same https://ghe.test/acme/widgets.git https://ghe.test/alice/widgets.git
+  open_scenario ghe.test github 101
+  local NEW="$(dirname "$WT")/widgets-feat"
+  checkout_and_wait done
+  git_retry -C "$NEW" switch -q -c elsewhere
+  handoff_start --purpose comments --agent none
+  wait_handoff failed
+  assert_contains handoff_refusal "the worktree widgets-feat is on elsewhere, not on feat" surface change-request read
+  [ -z "$(find "$RUN_DIR/work-$SCENARIO" -path '*/.sirio/handoff/*' -name '*.md')" ] || fail "a hand-off to another branch wrote a context file"
+  echo "OK: the worktree on another branch is refused, and no context file was written"
+  dump_git
+  dump_handoff
+  quit_app; stop_forge
+}
+
 scenario_refusal_ratelimit() { # the forge rate limits the preview: the queued start fails, nothing is made
   SCENARIO="github-refusal-ratelimit"
   echo "=== $SCENARIO"
@@ -1696,6 +1715,7 @@ scenario_handoff_chat
 scenario_warning_cross
 scenario_warning_author
 scenario_refusal_taken
+scenario_refusal_other_branch
 scenario_refusal_ratelimit
 scenario_refusal_pi_chat
 scenario_refusal_ci_passed

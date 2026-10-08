@@ -101,6 +101,15 @@ const FILES_WATCH_PENDING_LIMIT: usize = 4096;
 /// `target/`, `node_modules/` -- and none of it changes the tree the panel
 /// draws, so it must not buy a walk. With no snapshot yet nothing is known
 /// and the path is kept: the first walk is about to run regardless.
+/// A hand-off's Done text, with Sirio's note on the worktree after it when the
+/// file carries one. The note is the file's line without its list marker.
+fn with_note(text: String, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("{text} · {}", note.trim_start_matches("- ")),
+        None => text,
+    }
+}
+
 fn files_watch_path_is_relevant(
     root: &Path,
     changed: &Path,
@@ -1432,6 +1441,7 @@ enum WorkspaceAction {
         surface: Surface,
         prompt: String,
         relative: String,
+        note: Option<&'static str>,
         asked: Entity<ChangeRequestTab>,
     },
     InstallSkill(sirio_project::SkillInstallCommand),
@@ -5269,10 +5279,11 @@ impl SirioWorkspace {
                                     surface,
                                     prompt,
                                     relative,
+                                    note,
                                     asked,
                                 } => {
                                     workspace.start_handoff_agent(
-                                        path, agent, surface, prompt, relative, asked, window, cx,
+                                        path, agent, surface, prompt, relative, note, asked, window, cx,
                                     );
                                 }
                                 WorkspaceAction::InstallSkill(command) => {
@@ -13950,11 +13961,11 @@ impl SirioWorkspace {
             }
             Ok(done) => done,
         };
-        let forge::HandoffDone { checkout, relative, prompt } = done;
+        let forge::HandoffDone { checkout, relative, prompt, note } = done;
         let path = self.finish_checkout_into(asked.clone(), reference, &project_id, checkout, cx);
         match agent {
             None => {
-                let text = format!("context written to {relative}");
+                let text = with_note(format!("context written to {relative}"), note);
                 Self::report_handoff(&asked, self.active_change_request().as_ref(), text, cx);
             }
             // The agent starts from the drain, which reports the outcome.
@@ -13966,6 +13977,7 @@ impl SirioWorkspace {
                     surface,
                     prompt,
                     relative,
+                    note,
                     asked,
                 });
             }
@@ -13975,6 +13987,7 @@ impl SirioWorkspace {
     /// Starts the hand-off's agent in `path`, the worktree it was checked out
     /// to. It never starts anywhere else: when `path` cannot be selected, the
     /// reason goes on the asking tab.
+    #[allow(clippy::too_many_arguments)]
     fn start_handoff_agent(
         &mut self,
         path: PathBuf,
@@ -13982,12 +13995,13 @@ impl SirioWorkspace {
         surface: Surface,
         prompt: String,
         relative: String,
+        note: Option<&'static str>,
         asked: Entity<ChangeRequestTab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(found) = AGENT_CATALOG.iter().find(|adapter| adapter.id() == agent) else {
-            let text = format!("context written to {relative} · the agent did not start: no adapter for {agent}");
+            let text = with_note(format!("context written to {relative} · the agent did not start: no adapter for {agent}"), note);
             Self::report_handoff(&asked, None, text, cx);
             return;
         };
@@ -14006,7 +14020,7 @@ impl SirioWorkspace {
             }
         });
         if let Err(reason) = selected {
-            let text = format!("context written to {relative} · {name} did not start: {reason}");
+            let text = with_note(format!("context written to {relative} · {name} did not start: {reason}"), note);
             Self::report_handoff(&asked, None, text, cx);
             return;
         }
@@ -14045,7 +14059,7 @@ impl SirioWorkspace {
                 }
             }
         };
-        Self::report_handoff(&asked, opened.as_ref(), text, cx);
+        Self::report_handoff(&asked, opened.as_ref(), with_note(text, note), cx);
     }
 
     /// Sets the hand-off's line on the asking tab and, when there is one, the

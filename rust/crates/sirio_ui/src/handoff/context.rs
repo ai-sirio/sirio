@@ -44,8 +44,19 @@ pub struct RenderInput<'a> {
     pub push: &'a str,
     /// The user's own instructions, verbatim.
     pub instructions: &'a str,
+    /// Sirio's words on the worktree, when it was not brought to the head.
+    pub worktree_note: Option<&'a str>,
     pub flavor: LogFlavor,
 }
+
+/// Sirio's words on a reused worktree that was not updated to the head: it
+/// has uncommitted changes, or its branch has diverged.
+pub const NOTE_DIRTY: &str = "- This worktree was not updated to that head: it has uncommitted changes.";
+pub const NOTE_DIVERGED: &str =
+    "- This worktree was not updated to that head: its branch has diverged from the change request.";
+/// A review on another branch reads the change request by its commits.
+pub const NOTE_OTHER_BRANCH_REVIEW: &str =
+    "- This worktree is on another branch; read the change request by the commits above.";
 
 /// The file's text. Forge text is only ever inside an untrusted block.
 pub fn render(input: &RenderInput) -> String {
@@ -226,6 +237,9 @@ fn head_text(input: &RenderInput) -> String {
         if hex_sha(head) {
             text += &format!("- Head: {head} (at hand-off time)\n");
         }
+    }
+    if let Some(note) = input.worktree_note {
+        text += &format!("{note}\n");
     }
     text += &format!("- {}\n\n", input.push);
     text
@@ -654,7 +668,7 @@ mod tests {
         Context { header: header(), viewer: Some("bob".into()), threads, threads_truncated: false, failed, commits: vec![], files: vec![] }
     }
     fn render_for(context: &Context, purpose: Purpose, scope: &Scope) -> String {
-        render(&RenderInput { context, purpose, scope, label: "#101", push: "Push with `git push`.", instructions: "", flavor: ansi_log::LogFlavor::GitHub })
+        render(&RenderInput { context, purpose, scope, label: "#101", push: "Push with `git push`.", instructions: "", worktree_note: None, flavor: ansi_log::LogFlavor::GitHub })
     }
     /// Splits `text` into (inside an untrusted block, outside any) lines, the
     /// way CommonMark reads fences. An opener is up to three spaces, a run of
@@ -851,8 +865,21 @@ mod tests {
     fn the_user_instructions_are_outside_any_fence() {
         let ctx = context(vec![], vec![]);
         let text = render(&RenderInput { context: &ctx, purpose: Purpose::Resume, scope: &Scope::Whole, label: "#101",
-            push: "Push with `git push`.", instructions: "Keep the public API.", flavor: ansi_log::LogFlavor::GitHub });
+            push: "Push with `git push`.", instructions: "Keep the public API.", worktree_note: None, flavor: ansi_log::LogFlavor::GitHub });
         assert!(unfenced(&text).contains("Keep the public API."));
+    }
+
+    #[test]
+    fn a_worktree_note_follows_the_head_line_outside_any_fence() {
+        let ctx = context(vec![], vec![]);
+        for note in [NOTE_DIRTY, NOTE_DIVERGED, NOTE_OTHER_BRANCH_REVIEW] {
+            let text = render(&RenderInput { context: &ctx, purpose: Purpose::Review, scope: &Scope::Whole, label: "#101",
+                push: "Do not push: this is a review.", instructions: "", worktree_note: Some(note), flavor: ansi_log::LogFlavor::GitHub });
+            let lines: Vec<&str> = text.lines().collect();
+            let head = lines.iter().position(|line| line.starts_with("- Head: ")).expect("a head line");
+            assert_eq!(lines.get(head + 1), Some(&note), "the note is not right after the head line:\n{text}");
+            assert!(unfenced(&text).lines().any(|line| line == note), "the note is inside a block:\n{text}");
+        }
     }
 
     #[test]
@@ -885,7 +912,7 @@ mod tests {
     fn render_with_instructions(instructions: &str) -> String {
         let ctx = context(vec![], vec![]);
         render(&RenderInput { context: &ctx, purpose: Purpose::Resume, scope: &Scope::Whole, label: "#101",
-            push: "Push with `git push`.", instructions, flavor: ansi_log::LogFlavor::GitHub })
+            push: "Push with `git push`.", instructions, worktree_note: None, flavor: ansi_log::LogFlavor::GitHub })
     }
 
     #[test]

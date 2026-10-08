@@ -15,7 +15,7 @@ use sirio_ui::forge_source::ChangeRequestSource;
 use sirio_ui::handoff::context::{self, HANDOFF_DIR, RenderInput};
 
 use super::ForgeHub;
-use super::checkout::{CheckoutDone, CheckoutRequest, name_of};
+use super::checkout::{CheckoutDone, CheckoutRequest, WorktreeState, name_of};
 
 /// What the dialog asked for: the purpose, its narrowing, and the user's own words.
 pub(crate) struct HandoffAsk {
@@ -30,6 +30,8 @@ pub(crate) struct HandoffDone {
     pub(crate) relative: String,
     /// The two-line prompt the agent is started with.
     pub(crate) prompt: String,
+    /// Sirio's note on the worktree, when the file says one (see `worktree_note`).
+    pub(crate) note: Option<&'static str>,
 }
 
 /// A hand-off that did not finish. `rate_limited_until` is the forge's reset
@@ -89,6 +91,7 @@ impl ForgeHub {
         })?;
 
         let checkout = self.checkout(request).map_err(HandoffFailure::plain)?;
+        let note = worktree_note(&checkout, ask.purpose)?;
 
         let flavor = match reference.forge {
             Forge::GitHub => LogFlavor::GitHub,
@@ -102,6 +105,7 @@ impl ForgeHub {
             label: &label,
             push,
             instructions: &ask.instructions,
+            worktree_note: note,
             flavor,
         });
 
@@ -120,7 +124,29 @@ impl ForgeHub {
         prune(&dir);
 
         let prompt = context::launch_prompt(&relative, &label);
-        Ok(HandoffDone { checkout, relative, prompt })
+        Ok(HandoffDone { checkout, relative, prompt, note })
+    }
+}
+
+/// Sirio's note on the worktree the agent starts in, or the refusal when the
+/// agent would work on a branch that is not the change request's. A review
+/// reads by commit and never pushes, so another branch is fine for it.
+fn worktree_note(checkout: &CheckoutDone, purpose: Purpose) -> Result<Option<&'static str>, HandoffFailure> {
+    let dir = name_of(&checkout.path);
+    let branch = &checkout.branch;
+    match &checkout.state {
+        WorktreeState::Current => Ok(None),
+        WorktreeState::Dirty => Ok(Some(context::NOTE_DIRTY)),
+        WorktreeState::Diverged => Ok(Some(context::NOTE_DIVERGED)),
+        WorktreeState::OtherBranch(_) | WorktreeState::Detached if purpose == Purpose::Review => {
+            Ok(Some(context::NOTE_OTHER_BRANCH_REVIEW))
+        }
+        WorktreeState::OtherBranch(other) => Err(HandoffFailure::plain(format!(
+            "the worktree {dir} is on {other}, not on {branch}: switch it back first"
+        ))),
+        WorktreeState::Detached => Err(HandoffFailure::plain(format!(
+            "the worktree {dir} is on a detached HEAD, not on {branch}: switch it back first"
+        ))),
     }
 }
 
