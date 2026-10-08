@@ -92,6 +92,10 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
         "claude".to_string()
     }
 
+    fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
+        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), shell_quote(prompt))
+    }
+
     fn resume_command(
         &self,
         _worktree_path: &str,

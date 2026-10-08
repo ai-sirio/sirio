@@ -161,6 +161,13 @@ pub trait AgentAdapter {
     /// with its cwd already set to the worktree.
     fn command(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str) -> String;
 
+    /// `command`, plus the prompt the agent starts on, as the CLI's own
+    /// initial-prompt argument. Every adapter states its form: all five
+    /// take the prompt on the command line (verified 2026-10-08 against
+    /// claude 2.1.293, codex 0.159.2, opencode 1.18.33, pi 1.0.0 and omp
+    /// 18.4.4; `tests/initial_prompt_live.rs` notices the day one stops).
+    fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String;
+
     /// Full shell command that relaunches the agent resuming a previously
     /// captured native session, or `None` when the agent cannot resume by
     /// reference. `session_ref` comes from the agent session table.

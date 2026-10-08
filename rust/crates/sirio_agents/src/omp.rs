@@ -94,6 +94,10 @@ impl super::AgentAdapter for OhMyPiAdapter {
         format!("omp --hook {}", shell_quote(&hook_path))
     }
 
+    fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
+        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), shell_quote(prompt))
+    }
+
     fn resume_command(
         &self,
         worktree_path: &str,
