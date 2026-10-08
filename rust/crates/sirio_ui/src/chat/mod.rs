@@ -1950,6 +1950,10 @@ pub struct Chat {
     /// holds for the life of the surface and is not persisted.
     queue_expanded: bool,
     connecting: bool,
+    /// A message handed over while the agent was not yet connected and idle
+    /// (`send_when_ready`). Sent when the connection comes up, or put back in
+    /// the composer if it fails.
+    pending_send: Option<String>,
     has_completed_turn: bool,
     /// How many of `ChatClient::mcp_warnings()` have already been seen.
     /// `mcp_warnings()` returns the whole running list each call (it doesn't
@@ -2320,6 +2324,7 @@ impl Chat {
             queue: VecDeque::new(),
             queue_expanded: true,
             connecting: false,
+            pending_send: None,
             has_completed_turn: false,
             mcp_warnings_shown: 0,
             available_models: Vec::new(),
@@ -3233,6 +3238,16 @@ impl Chat {
         })
     }
 
+    /// Connected and between turns: the state in which a normal send is
+    /// accepted. `send_when_ready` asks the same question, so a message held
+    /// for a starting agent goes out under the same rule as a typed one.
+    fn accepts_sends(&self) -> bool {
+        !self.streaming
+            && !self.connecting
+            && !self.is_offline()
+            && self.pending_question().is_none()
+    }
+
     fn can_send(&self) -> bool {
         // F-CHAT-05: an unresolved permission/plan question must block Send
         // in its own right, not merely ride along with `streaming` (a
@@ -3243,11 +3258,7 @@ impl Chat {
         // same contract row: the reference disables Send while disconnected
         // too, it just never needed a separate flag for it because
         // `.disabled(!canInteract)` covers the whole editor at once.
-        !self.streaming
-            && !self.connecting
-            && !self.is_offline()
-            && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
-            && self.pending_question().is_none()
+        self.accepts_sends() && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
     }
 
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
@@ -3388,6 +3399,22 @@ impl Chat {
     pub fn control_send(&mut self, text: &str, cx: &mut Context<Self>) {
         self.control_compose(text, cx);
         self.send(cx);
+    }
+
+    /// Sends `text` as a turn once the agent is connected and idle, the same
+    /// as a typed send. While the agent is still starting it is held in
+    /// `pending_send` and goes out when the connection comes up. If the
+    /// connection already failed, or the chat is not connecting at all, there
+    /// is nothing to wait for: the text goes to the composer so it is not lost.
+    pub fn send_when_ready(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.accepts_sends() {
+            self.control_send(text, cx);
+        } else if self.connecting {
+            self.pending_send = Some(text.to_string());
+        } else {
+            self.set_composer_text(text.to_string(), cx);
+            cx.notify();
+        }
     }
 
     /// Resolves a rendered permission option by its protocol id and sends the
@@ -4993,7 +5020,7 @@ impl Chat {
                 Ok((client, events)) => {
                     let initial_catalog = client.model_catalog();
                     let initial_mode_catalog = client.mode_catalog();
-                    let _ = this.update(cx, |chat, _| {
+                    let _ = this.update(cx, |chat, cx| {
                         chat.clear_recovered_connection_errors();
                         chat.client = Some(client);
                         if let Some(ModelCatalog {
@@ -5008,6 +5035,9 @@ impl Chat {
                         }
                         chat.mode_catalog = initial_mode_catalog;
                         chat.connecting = false;
+                        if let Some(text) = chat.pending_send.take() {
+                            chat.control_send(&text, cx);
+                        }
                     });
 
                     while let Ok(event) = events.recv().await {
@@ -5057,6 +5087,9 @@ impl Chat {
                         chat.connecting = false;
                         chat.client = None;
                         chat.streaming = false;
+                        if let Some(text) = chat.pending_send.take() {
+                            chat.set_composer_text(text, cx);
+                        }
                         chat.push_entry(Entry::Error {
                             message,
                             retryable: true,
@@ -8783,6 +8816,61 @@ two"
              true (the turn genuinely ended) but no ChatEvent ever reaches a \
              subscriber, which is exactly why request_auto_rename was structurally \
              unreachable from a real chat turn"
+        );
+    }
+
+    /// C2: a hand-off opens a chat and hands it the launch prompt at once,
+    /// while the agent is still starting. The prompt must become the first
+    /// turn, not be dropped by `can_send`'s `connecting` guard.
+    #[gpui::test]
+    async fn a_message_sent_while_connecting_is_the_first_turn(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command = AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain");
+            Chat::new(Some(LaunchSpec::Acp(command)), std::env::temp_dir(), cx)
+        });
+        // Start and send in one update: the launch has not run yet, so the
+        // message is handed over while the agent is still connecting.
+        chat.update_in(cx, |chat, _, cx| {
+            chat.start_connection(cx);
+            chat.send_when_ready("Read the file.", cx);
+        });
+        pump_chat_until(cx, &chat, |chat| {
+            chat.has_completed_turn
+                && chat.entries.iter().any(|entry| {
+                    matches!(entry, Entry::User { text, .. } if text == "Read the file.")
+                })
+        });
+    }
+
+    /// C2: when the agent never comes up, the prompt waits in the composer
+    /// for the user rather than vanishing.
+    #[gpui::test]
+    async fn a_message_for_an_agent_that_fails_to_start_stays_in_the_composer(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(
+                Some(LaunchSpec::Acp(AgentCommand::new(
+                    "/nonexistent/sirio-handoff-agent",
+                ))),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        chat.update_in(cx, |chat, _, cx| {
+            chat.start_connection(cx);
+            chat.send_when_ready("Read the file.", cx);
+        });
+        pump_chat_until(cx, &chat, |chat| !chat.connecting && chat.client.is_none());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "Read the file."
         );
     }
 
