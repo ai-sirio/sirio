@@ -59,8 +59,8 @@ pub use actions::{GitActions, discard, discard_all, stage, stage_all, unstage};
 pub use branches::{GitBranches, list_branches};
 pub use checkout::{
     FastForward, LocalBranch, RemoteOutcome, create_worktree_at, create_worktree_tracking,
-    ensure_push_refspec, ensure_remote, fast_forward, fetch_branch, is_ancestor, local_branch,
-    remove_fork_remotes, set_upstream,
+    ensure_push_refspec, ensure_remote, exclude, fast_forward, fetch_branch, is_ancestor,
+    local_branch, remove_fork_remotes, set_upstream,
 };
 pub use clone::{GitClone, clone_repository};
 pub use diff::{

@@ -236,3 +236,34 @@ pub fn fast_forward(worktree: &Path, target: &str) -> Result<FastForward, GitErr
     git::run_accepting(&["merge", "--ff-only", "--quiet", &wanted], worktree, &[0])?;
     Ok(FastForward::Advanced { to: wanted })
 }
+
+/// Keeps `pattern` out of `git status` in every worktree of `repo`, by
+/// appending it to the common dir's `info/exclude` (shared by linked
+/// worktrees, never committed). A pattern already on its own line is left
+/// alone, so calling this again changes nothing.
+pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
+    let output = git::run_accepting(&["rev-parse", "--git-common-dir"], repo, &[0])
+        .map_err(|error| error.to_string())?;
+    // Relative to `repo` in the main worktree, absolute in a linked one.
+    let common = repo.join(output.stdout_string().trim());
+    let info = common.join("info");
+    let file = info.join("exclude");
+    let existing = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("could not read {}: {error}", file.display())),
+    };
+    if existing.lines().any(|line| line == pattern) {
+        return Ok(());
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(pattern);
+    text.push('\n');
+    std::fs::create_dir_all(&info)
+        .map_err(|error| format!("could not create {}: {error}", info.display()))?;
+    std::fs::write(&file, text)
+        .map_err(|error| format!("could not write {}: {error}", file.display()))
+}

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use sirio_git::{
     FastForward, FetchError, RemoteOutcome, create_worktree_at, create_worktree_tracking,
-    ensure_push_refspec, ensure_remote, fast_forward, fetch_branch, is_ancestor, local_branch,
-    remove_fork_remotes, set_upstream, upstream_of, worktree_for_branch,
+    ensure_push_refspec, ensure_remote, exclude, fast_forward, fetch_branch, is_ancestor,
+    local_branch, remove_fork_remotes, set_upstream, upstream_of, worktree_for_branch,
 };
 
 struct Scratch(PathBuf);
@@ -289,4 +289,31 @@ fn removing_fork_remotes_takes_only_the_ones_that_map_the_branch() {
     assert!(remaining.contains(&"sirio-bob-101".to_string()), "{remaining:?}");
     assert!(remaining.contains(&"sirio-alice-102".to_string()), "{remaining:?}");
     assert!(!remaining.contains(&"sirio-alice-101".to_string()), "{remaining:?}");
+}
+
+#[test]
+fn an_excluded_folder_is_written_once_to_the_common_exclude_and_hidden_in_every_worktree() {
+    let (_scratch, repo, _bare, _feat) = fixture("exclude");
+    let worktree = repo.parent().unwrap().join("repo-feat");
+    git(&repo, &["worktree", "add", "-q", worktree.to_str().unwrap(), "-b", "side"]);
+    // From the linked worktree: its info/exclude is the common dir's.
+    exclude(&worktree, ".sirio/handoff/").expect("first");
+    exclude(&worktree, ".sirio/handoff/").expect("second");
+    let common = repo.join(".git/info/exclude");
+    let lines = std::fs::read_to_string(&common).unwrap();
+    assert_eq!(lines.lines().filter(|line| *line == ".sirio/handoff/").count(), 1, "{lines}");
+    std::fs::create_dir_all(worktree.join(".sirio/handoff")).unwrap();
+    std::fs::write(worktree.join(".sirio/handoff/101-ci-20261008-101500.md"), "context\n").unwrap();
+    std::fs::write(worktree.join("visible.txt"), "seen\n").unwrap();
+    let status = git(&worktree, &["status", "--porcelain", "--untracked-files=all"]);
+    assert!(status.contains("visible.txt") && !status.contains(".sirio/handoff"), "{status}");
+}
+
+#[test]
+fn an_exclude_file_without_a_trailing_newline_gets_its_own_line() {
+    let (_scratch, repo, _bare, _feat) = fixture("exclude-newline");
+    std::fs::write(repo.join(".git/info/exclude"), "*.log").unwrap();
+    exclude(&repo, ".sirio/handoff/").expect("exclude");
+    let lines = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+    assert_eq!(lines, "*.log\n.sirio/handoff/\n");
 }
