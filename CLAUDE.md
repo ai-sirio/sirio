@@ -72,7 +72,10 @@ Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
 # Checking a change request out into a worktree (change requests C1): same
 # repository, forks that accept and refuse pushes, a gone branch and a closed
 # request, reuse with fast-forward, refusals and the pinned card, against bare
-# repositories and the fake forge; same flags as the other forge E2Es.
+# repositories and the fake forge; then handing it to an agent (C2): stub CLIs
+# on PATH for every adapter, every purpose on GitHub and GitLab, the chat, the
+# warning, the refusals and a worktree switch mid-hand-off; same flags as the
+# other forge E2Es.
 Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
 
 # Ely's Tabs and git badges with Sirio's theme, on a private Xvfb with
@@ -400,6 +403,33 @@ row's menu (which opens the tab); the outcome is the tab's checkout status
 line. `surface change-request checkout` acts on the open tab and serves every
 build because it touches only local git. `test-change-request-handoff-e2e.sh`
 proves it.
+
+**C2** hands that worktree to an agent. *Hand off to an agent* (the tab's
+action bar and the list row's menu), a thread card's *Fix with agent* and a
+failed check's open one Ely dialog (`change_request_tab/handoff.rs`): purpose
+(`comments`, `ci` — only when CI failed —, `review`, `resume`), agent or none,
+terminal or chat, instructions, and the worktree C1 would use, previewed with
+C1's plan in a dry mode. `ForgeClient::context` reads what the purpose needs
+**before** git is touched, so a failed or rate-limited read creates nothing;
+then C1 checks out and `sirio_ui::handoff::context::render` writes
+`.sirio/handoff/<N>-<purpose>-<YYYYMMDD-HHMMSS>.md` (excluded through the common
+dir's `info/exclude`, ten kept, a symlinked `.sirio` refused). Every forge text
+— bodies, comments, hunks, paths, names, logs, a log's error — sits in an
+````untrusted source="…" author="@…"```` block whose fence is one backtick
+longer than the text's longest run (at least four); Sirio's own lines name no
+forge text, not even the branch to push to. The file is cut at 1 MiB, oldest
+first, and every part that cannot be dropped is bounded. A terminal agent is
+launched as a restored pane is, `prepare` then `command_with_prompt` (every CLI
+takes the two-line prompt as an argument; Windows folds it to one line for
+`cmd`), and `TerminalView::start` runs it before its tab is drawn; a chat gets
+the prompt through `Chat::send_when_ready`. The agent starts in the hand-off's
+worktree even if the user switched meanwhile. Agent and surface are remembered
+per project (`handoff_choice`, v23). `surface change-request handoff` serves
+every build and acts on the open tab; a start sent while the preview loads is
+queued (`handoff_queued`). The C2 scenarios of
+`test-change-request-handoff-e2e.sh` prove it with stub CLIs on PATH, and
+`sirio_agents/tests/initial_prompt_live.rs` notices the day a CLI stops taking
+the prompt.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and
