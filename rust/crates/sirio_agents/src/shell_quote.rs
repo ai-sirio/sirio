@@ -130,6 +130,7 @@ pub fn json_string_literal(value: &str) -> String {
 /// Windows runs a pane's command through `cmd /C`, which ends a command at a
 /// line break, so a multi-line prompt would be cut after its first line.
 /// Compiled on every platform so the rule is tested where CI runs.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn one_line(prompt: &str) -> String {
     let mut folded = String::with_capacity(prompt.len());
     let mut in_break = false;

@@ -94,13 +94,6 @@ use std::time::{Duration, Instant, SystemTime};
 /// keeps a build from growing the buffer without bound.
 const FILES_WATCH_PENDING_LIMIT: usize = 4096;
 
-/// Whether one watcher path is worth a repository walk.
-///
-/// `ignored` is the checkout's ignore set from the last completed walk, when
-/// there is one. Ignored output is the bulk of what a recursive watch sees --
-/// `target/`, `node_modules/` -- and none of it changes the tree the panel
-/// draws, so it must not buy a walk. With no snapshot yet nothing is known
-/// and the path is kept: the first walk is about to run regardless.
 /// A hand-off's Done text, with Sirio's note on the worktree after it when the
 /// file carries one. The note is the file's line without its list marker.
 fn with_note(text: String, note: Option<&str>) -> String {
@@ -110,6 +103,13 @@ fn with_note(text: String, note: Option<&str>) -> String {
     }
 }
 
+/// Whether one watcher path is worth a repository walk.
+///
+/// `ignored` is the checkout's ignore set from the last completed walk, when
+/// there is one. Ignored output is the bulk of what a recursive watch sees --
+/// `target/`, `node_modules/` -- and none of it changes the tree the panel
+/// draws, so it must not buy a walk. With no snapshot yet nothing is known
+/// and the path is kept: the first walk is about to run regardless.
 fn files_watch_path_is_relevant(
     root: &Path,
     changed: &Path,
