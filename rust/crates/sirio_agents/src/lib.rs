@@ -5,6 +5,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use safe_write::write_in_worktree;
+
 mod claude;
 mod codex;
 mod error;
@@ -12,6 +14,7 @@ mod hook_migrator;
 mod omp;
 mod opencode;
 mod pi;
+mod safe_write;
 mod session_validator;
 mod shell_quote;
 mod transcript;
@@ -340,10 +343,7 @@ pub fn install_skill(
             return Err(PrepareError::UnmanagedSkillFile(destination));
         }
     }
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&destination, markdown)?;
+    write_in_worktree(Path::new(worktree_path), Path::new(relative), markdown.as_bytes())?;
     Ok(())
 }
 

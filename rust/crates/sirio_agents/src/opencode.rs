@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::GlobalHookInstall;
 use crate::error::PrepareError;
+use crate::safe_write::write_in_worktree;
 use crate::shell_quote::{json_string_literal, prompt_argument, shell_quote};
 
 /// The plugin template, byte-faithful to the Swift original. `__SIRIOCTL__`
@@ -83,14 +84,15 @@ impl super::AgentAdapter for OpenCodeAdapter {
         if let Some(markdown) = self.skill_markdown() {
             crate::install_skill(markdown, self.id(), worktree_path)?;
         }
-        let dir = Path::new(worktree_path).join(".opencode/plugin");
-        std::fs::create_dir_all(&dir)?;
-
         let plugin = PLUGIN_TEMPLATE
             .replace("__SIRIOCTL__", &json_string_literal(sirioctl_path))
             .replace("__PANE__", pane_id);
 
-        std::fs::write(dir.join("sirio-session.js"), plugin)?;
+        write_in_worktree(
+            Path::new(worktree_path),
+            Path::new(".opencode/plugin/sirio-session.js"),
+            plugin.as_bytes(),
+        )?;
         Ok(())
     }
 

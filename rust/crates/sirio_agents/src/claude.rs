@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::error::PrepareError;
 use crate::shell_quote::{prompt_argument, shell_quote};
+use crate::safe_write::write_in_worktree;
 use crate::{GlobalHookInstall, NativeChat, write_atomic};
 
 /// Adapter for Anthropic's Claude Code CLI.
@@ -60,12 +61,13 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
         if let Some(markdown) = self.skill_markdown() {
             crate::install_skill(markdown, self.id(), worktree_path)?;
         }
-        let claude_dir = Path::new(worktree_path).join(".claude");
-        std::fs::create_dir_all(&claude_dir)?;
-        merge_sirio_hooks(
-            &claude_dir.join(SETTINGS_FILE_NAME),
+        let settings = Path::new(".claude").join(SETTINGS_FILE_NAME);
+        let merged = merged_settings(
+            &Path::new(worktree_path).join(&settings),
             sirio_hooks(sirioctl_path, Some(pane_id)),
-        )
+        )?;
+        write_in_worktree(Path::new(worktree_path), &settings, merged.as_bytes())?;
+        Ok(())
     }
 
     fn install_global_hooks(
@@ -148,6 +150,13 @@ fn sirio_hooks(sirioctl_path: &str, session: Option<&str>) -> Value {
 /// key in the file. Like the Swift original: a file that is missing,
 /// unreadable or not a JSON object is replaced wholesale.
 fn merge_sirio_hooks(settings_path: &Path, hooks: Value) -> Result<(), PrepareError> {
+    let output = merged_settings(settings_path, hooks)?;
+    write_atomic(settings_path, output.as_bytes())
+}
+
+/// The settings file at `settings_path` with Sirio's hook arrays merged in,
+/// as the text to write. Nothing is written here.
+fn merged_settings(settings_path: &Path, hooks: Value) -> Result<String, PrepareError> {
     let mut root: Value = std::fs::read_to_string(settings_path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -169,6 +178,5 @@ fn merge_sirio_hooks(settings_path: &Path, hooks: Value) -> Result<(), PrepareEr
 
     // serde_json's default map is a BTreeMap, so keys serialize sorted —
     // matching `JSONSerialization`'s `.prettyPrinted, .sortedKeys`.
-    let output = serde_json::to_string_pretty(&root)?;
-    write_atomic(settings_path, output.as_bytes())
+    Ok(serde_json::to_string_pretty(&root)?)
 }

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::error::PrepareError;
+use crate::safe_write::write_in_worktree;
 use crate::shell_quote::{json_string_literal, prompt_argument, shell_quote};
 
 /// The hook template, byte-faithful to the Swift original. `__SIRIOCTL__`
@@ -78,14 +79,11 @@ impl super::AgentAdapter for OhMyPiAdapter {
         if let Some(markdown) = self.skill_markdown() {
             crate::install_skill(markdown, self.id(), worktree_path)?;
         }
-        let dir = Path::new(worktree_path).join(".sirio");
-        std::fs::create_dir_all(&dir)?;
-
         let hook = HOOK_TEMPLATE
             .replace("__SIRIOCTL__", &json_string_literal(sirioctl_path))
             .replace("__PANE__", pane_id);
 
-        std::fs::write(dir.join("omp-hook.ts"), hook)?;
+        write_in_worktree(Path::new(worktree_path), Path::new(".sirio/omp-hook.ts"), hook.as_bytes())?;
         Ok(())
     }
 
