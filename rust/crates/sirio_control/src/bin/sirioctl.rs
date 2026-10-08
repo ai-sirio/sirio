@@ -142,6 +142,7 @@ fn usage() {
          \x20 surface change-requests token --host h --forge github|gitlab --token t\n\
          \x20 surface change-request open <number>|tab <name>|read\n\
          \x20 surface change-request checkout  check the open change request out into a worktree\n\
+         \x20 surface change-request handoff [--open-dialog] | --purpose P --agent A|none [--surface terminal|chat] [--thread ID|--job N] [--instructions TEXT]\n\
          \x20 surface ci-log open --job N|read|view [--toggle N] [--jump-error] [--refresh] [--copy all|N]\n\
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
            \x20 surface change-request thread --reveal ID|--toggle ID|--compose PATH:SIDE:LINE[-LAST]|--suggest|--cancel\n\
@@ -849,6 +850,18 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         }
         ("change-request", "checkout") => {
             require_ok(socket, &sirio_control::protocol::request::change_request_checkout())
+        }
+        ("change-request", "handoff") => {
+            let mut params = BTreeMap::new();
+            if parsed.flag("open-dialog") {
+                params.insert("open_dialog".to_string(), "true".to_string());
+            }
+            for key in ["purpose", "agent", "surface", "thread", "job", "instructions"] {
+                if let Some(value) = parsed.value(key) {
+                    params.insert(key.to_string(), value.to_string());
+                }
+            }
+            require_ok(socket, &sirio_control::protocol::request::change_request_handoff(params))
         }
         ("change-request", "reveal") => {
             let path = parsed.positional.get(2).ok_or_else(|| "Missing path".to_string())?;

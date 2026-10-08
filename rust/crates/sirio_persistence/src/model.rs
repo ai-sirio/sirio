@@ -226,6 +226,16 @@ pub struct ChangeRequestLinkRecord {
     pub branch: String,
 }
 
+/// The agent and surface a project's last change request hand-off used
+/// (change requests C2). `agent` is empty for no agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffChoiceRecord {
+    pub project_id: String,
+    pub agent: String,
+    /// `terminal` or `chat`.
+    pub surface: String,
+}
+
 /// A stored row removed from active state because its payload could not be
 /// materialized. The original bytes remain available for diagnosis or recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]

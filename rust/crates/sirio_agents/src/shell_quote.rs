@@ -125,6 +125,42 @@ pub fn json_string_literal(value: &str) -> String {
     serde_json::to_string(value).expect("serializing a string literal cannot fail")
 }
 
+/// Folds every run of carriage returns and line feeds into one space.
+///
+/// Windows runs a pane's command through `cmd /C`, which ends a command at a
+/// line break, so a multi-line prompt would be cut after its first line.
+/// Compiled on every platform so the rule is tested where CI runs.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn one_line(prompt: &str) -> String {
+    let mut folded = String::with_capacity(prompt.len());
+    let mut in_break = false;
+    for ch in prompt.chars() {
+        if ch == '\r' || ch == '\n' {
+            if !in_break {
+                folded.push(' ');
+            }
+            in_break = true;
+        } else {
+            in_break = false;
+            folded.push(ch);
+        }
+    }
+    folded
+}
+
+/// The launch prompt as one shell argument. On Windows it is folded to one
+/// line first (see [`one_line`]); everywhere else it is quoted as it is.
+#[cfg(windows)]
+pub fn prompt_argument(prompt: &str) -> String {
+    shell_quote(&one_line(prompt))
+}
+
+/// The launch prompt as one shell argument, quoted as it is.
+#[cfg(not(windows))]
+pub fn prompt_argument(prompt: &str) -> String {
+    shell_quote(prompt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +345,25 @@ mod tests {
         let literal = json_string_literal("/Users/me/sirio");
         assert!(!literal.contains("\\/"));
         assert!(literal.starts_with('"') && literal.ends_with('"'));
+    }
+
+    #[test]
+    fn one_line_folds_every_line_break_run_into_one_space() {
+        assert_eq!(one_line("a\nb"), "a b");
+        assert_eq!(one_line("a\r\nb"), "a b");
+        // A blank line between two lines folds into the one space too.
+        assert_eq!(one_line("a\n\nb"), "a b");
+        assert_eq!(one_line("a\r\n\r\nb"), "a b");
+    }
+
+    #[test]
+    fn one_line_leaves_a_prompt_without_a_break_unchanged() {
+        assert_eq!(one_line("read the file"), "read the file");
+        assert_eq!(one_line("  padded  "), "  padded  ");
+    }
+
+    #[test]
+    fn one_line_keeps_quotes_and_dollars() {
+        assert_eq!(one_line("it's \"x\"\n$HOME"), "it's \"x\" $HOME");
     }
 }

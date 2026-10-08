@@ -3,7 +3,9 @@
 //! branch is reused, a new one created, or the checkout refused. Pure: the
 //! host gathers the facts from git and the forge.
 
-use std::path::PathBuf;
+pub mod context;
+
+use std::path::{Path, PathBuf};
 
 use sirio_forge::HeadRepository;
 
@@ -321,6 +323,20 @@ pub fn decide(target: &Target, facts: &Facts) -> Plan {
         },
     };
     Plan::Create { path: facts.new_path.clone(), branch: target.branch.clone(), start, add_remote }
+}
+
+/// The dialog's *Worktree* line: what the plan does with the worktree, with a
+/// read-only target named, or the refusal the plan gives instead.
+pub fn describe(target: &Target, plan: &Plan, name_of: impl Fn(&Path) -> String) -> Result<String, String> {
+    let action = match plan {
+        Plan::Reuse { worktree, .. } => format!("reuse {}", name_of(worktree)),
+        Plan::Create { path, .. } => format!("create {}", name_of(path)),
+        Plan::Refuse(refusal) => return Err(refusal.message()),
+    };
+    Ok(match &target.push {
+        PushTarget::ReadOnly(reason) => format!("{action} · read-only: {}", reason.message()),
+        PushTarget::Listed { .. } | PushTarget::Fork { .. } => action,
+    })
 }
 
 #[cfg(test)]
@@ -695,5 +711,20 @@ mod tests {
         for reason in [ReadOnlyReason::ForkRefusesPush, ReadOnlyReason::BranchGone, ReadOnlyReason::HeadRepositoryGone] {
             assert!(!reason.message().is_empty());
         }
+    }
+
+    #[test]
+    fn describe_names_what_the_plan_will_do() {
+        let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        let listed = Target { branch: "feat".into(), push: PushTarget::Listed { remote: "origin".into(), branch: "feat".into() } };
+        let reuse = Plan::Reuse { worktree: PathBuf::from("/p/sirio-fix-login"), record_link: false };
+        assert_eq!(describe(&listed, &reuse, name), Ok("reuse sirio-fix-login".to_string()));
+        let create = Plan::Create { path: PathBuf::from("/p/widgets-alice-feat"), branch: "alice/feat".into(),
+            start: Start::At { commit: "a".repeat(40) }, add_remote: None };
+        let readonly = Target { branch: "alice/feat".into(), push: PushTarget::ReadOnly(ReadOnlyReason::ForkRefusesPush) };
+        assert_eq!(describe(&readonly, &create, name),
+            Ok("create widgets-alice-feat · read-only: the fork does not accept pushes".to_string()));
+        let refuse = Plan::Refuse(Refusal::PathTaken { path: PathBuf::from("/p/x") });
+        assert_eq!(describe(&listed, &refuse, name), Err("/p/x already exists".to_string()));
     }
 }

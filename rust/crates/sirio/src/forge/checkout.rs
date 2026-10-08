@@ -5,9 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
-use sirio_forge::{ChangeRef, Forge};
+use sirio_forge::{ChangeHeader, ChangeRef, Forge, Revisions};
 use sirio_git::{FastForward, FetchError, RemoteOutcome};
 use sirio_ui::forge_source::ChangeRequestSource;
+use sirio_ui::handoff::context::push_words;
 use sirio_ui::handoff::{self, BranchFacts, Facts, ListedRemote, LocalSource, Plan, PushTarget, Start, Target};
 
 use super::{ForgeHub, choose_remote, fetch_timeout};
@@ -25,6 +26,50 @@ pub(crate) struct CheckoutDone {
     pub(crate) branch: String,
     pub(crate) title: String,
     pub(crate) detail: String,
+    /// Where the agent may push, in Sirio's words (`push_words`).
+    pub(crate) push: String,
+    /// Where the worktree stands against the change request's branch and head.
+    pub(crate) state: WorktreeState,
+}
+
+/// Where a checked-out worktree stands once C1 has done what it does to a
+/// reused one. Only `Current` is a worktree a hand-off can name as the head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorktreeState {
+    /// On the change request's branch, at the head (or ahead of it).
+    Current,
+    /// On another local branch, named.
+    OtherBranch(String),
+    /// On no branch at all.
+    Detached,
+    /// On the change request's branch, behind the head, but with uncommitted
+    /// changes that stopped the update.
+    Dirty,
+    /// On the change request's branch, and its commits are not the head's.
+    Diverged,
+}
+
+/// The state of a worktree that is on the change request's branch, once
+/// `fast_forward` has said what it did.
+fn after_update(moved: &FastForward) -> WorktreeState {
+    match moved {
+        FastForward::UpToDate | FastForward::Advanced { .. } => WorktreeState::Current,
+        FastForward::Dirty => WorktreeState::Dirty,
+        FastForward::Diverged => WorktreeState::Diverged,
+    }
+}
+
+/// The state of a worktree that is not on the change request's branch.
+fn not_on_target(current: Option<String>) -> WorktreeState {
+    current.map_or(WorktreeState::Detached, WorktreeState::OtherBranch)
+}
+
+/// What `ForgeHub::plan` decided, before any git step has run.
+pub(crate) struct Planned {
+    pub(crate) header: ChangeHeader,
+    pub(crate) revisions: Revisions,
+    pub(crate) target: Target,
+    pub(crate) plan: Plan,
 }
 
 fn fetch_message(error: FetchError) -> String {
@@ -34,12 +79,95 @@ fn fetch_message(error: FetchError) -> String {
     }
 }
 
-fn name_of(path: &Path) -> String {
+pub(super) fn name_of(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
 impl ForgeHub {
     pub(crate) fn checkout(&self, request: &CheckoutRequest) -> Result<CheckoutDone, String> {
+        let Planned { header, revisions, target, plan } = self.plan(request, false)?;
+        let repo = request.repo.as_path();
+        let done = |path: PathBuf, detail: String, state: WorktreeState| CheckoutDone {
+            branch: target.branch.clone(),
+            title: header.summary.title.clone(),
+            push: push_words(&target),
+            path,
+            detail,
+            state,
+        };
+        match plan {
+            Plan::Refuse(refusal) => Err(refusal.message()),
+            Plan::Reuse { worktree, .. } => {
+                let (detail, state) = self.sync(repo, &worktree, &target, &revisions.head_sha)?;
+                Ok(done(worktree, detail, state))
+            }
+            Plan::Create { path, branch, start, add_remote } => {
+                if let Some((name, url)) = &add_remote {
+                    let fork_branch = match &target.push {
+                        PushTarget::Fork { branch, .. } => branch.as_str(),
+                        _ => "",
+                    };
+                    match sirio_git::ensure_remote(repo, name, url, fork_branch) {
+                        Ok(RemoteOutcome::Added | RemoteOutcome::AlreadyThere) => {}
+                        Ok(RemoteOutcome::Conflict { existing }) => {
+                            return Err(format!("the remote {name} already points at {existing}"));
+                        }
+                        Err(error) => return Err(format!("adding the remote {name} failed: {error}")),
+                    }
+                }
+                if let Some((remote, remote_branch)) = target.remote_and_branch() {
+                    sirio_git::fetch_branch(repo, remote, remote_branch, fetch_timeout())
+                        .map_err(|error| format!("fetching {remote}/{remote_branch} failed: {}", fetch_message(error)))?;
+                }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| format!("creating {} failed: {error}", parent.display()))?;
+                }
+                let (detail, state) = match &start {
+                    Start::Track { upstream } => {
+                        sirio_git::create_worktree_tracking(repo, &branch, &path, upstream)
+                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
+                        (format!("Created {} on {branch}, tracking {upstream}", name_of(&path)), WorktreeState::Current)
+                    }
+                    Start::At { commit } => {
+                        sirio_git::create_worktree_at(repo, &branch, &path, commit)
+                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
+                        let reason = match &target.push {
+                            PushTarget::ReadOnly(reason) => reason.message(),
+                            _ => "",
+                        };
+                        (format!("Created {} on {branch} (read-only: {reason})", name_of(&path)), WorktreeState::Current)
+                    }
+                    Start::Existing { set_upstream } => {
+                        // The upstream first: git sets it on a branch no
+                        // worktree has checked out, so a failure here leaves
+                        // nothing new behind for a retry to refuse.
+                        if let Some(upstream) = set_upstream {
+                            sirio_git::set_upstream(repo, &branch, upstream)
+                                .map_err(|error| format!("setting the upstream failed: {error}"))?;
+                        }
+                        sirio_git::create_worktree(repo, &branch, &path, None)
+                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
+                        let to = target.upstream().unwrap_or_else(|| revisions.head_sha.clone());
+                        let moved = sirio_git::fast_forward(&path, &to)
+                            .map_err(|error| format!("fast-forwarding failed: {error}"))?;
+                        let detail = format!("Created {} on the existing {branch}{}", name_of(&path), sync_words(&moved, &to));
+                        (detail, after_update(&moved))
+                    }
+                };
+                self.map_fork_push(repo, &target)?;
+                Ok(done(path, detail, state))
+            }
+        }
+    }
+
+    /// Everything `checkout` decides before a git step runs: the forge's
+    /// header and revisions, the target, the facts git knows, and the plan.
+    /// Fetches the head through B1 (sirio's own refs, nothing a worktree
+    /// sees), so ancestry can be judged. `dry` only reads the worktree
+    /// registrations and change request links: a missing one is treated as
+    /// absent and left in place, which is what a preview wants.
+    pub(crate) fn plan(&self, request: &CheckoutRequest, dry: bool) -> Result<Planned, String> {
         let reference = &request.reference;
         let repo = request.repo.as_path();
         let client = self
@@ -98,76 +226,9 @@ impl ForgeHub {
             .ensure(repo, reference, &revisions, None)
             .map_err(|error| format!("could not fetch the head of {}: {error}", reference.label()))?;
 
-        let facts = self.facts(request, &target, &remotes, &revisions.head_sha)?;
-        let done = |path: PathBuf, detail: String| CheckoutDone {
-            branch: target.branch.clone(),
-            title: header.summary.title.clone(),
-            path,
-            detail,
-        };
-        match handoff::decide(&target, &facts) {
-            Plan::Refuse(refusal) => Err(refusal.message()),
-            Plan::Reuse { worktree, .. } => {
-                let detail = self.sync(repo, &worktree, &target, &revisions.head_sha)?;
-                Ok(done(worktree, detail))
-            }
-            Plan::Create { path, branch, start, add_remote } => {
-                if let Some((name, url)) = &add_remote {
-                    let fork_branch = match &target.push {
-                        PushTarget::Fork { branch, .. } => branch.as_str(),
-                        _ => "",
-                    };
-                    match sirio_git::ensure_remote(repo, name, url, fork_branch) {
-                        Ok(RemoteOutcome::Added | RemoteOutcome::AlreadyThere) => {}
-                        Ok(RemoteOutcome::Conflict { existing }) => {
-                            return Err(format!("the remote {name} already points at {existing}"));
-                        }
-                        Err(error) => return Err(format!("adding the remote {name} failed: {error}")),
-                    }
-                }
-                if let Some((remote, remote_branch)) = target.remote_and_branch() {
-                    sirio_git::fetch_branch(repo, remote, remote_branch, fetch_timeout())
-                        .map_err(|error| format!("fetching {remote}/{remote_branch} failed: {}", fetch_message(error)))?;
-                }
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| format!("creating {} failed: {error}", parent.display()))?;
-                }
-                let detail = match &start {
-                    Start::Track { upstream } => {
-                        sirio_git::create_worktree_tracking(repo, &branch, &path, upstream)
-                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
-                        format!("Created {} on {branch}, tracking {upstream}", name_of(&path))
-                    }
-                    Start::At { commit } => {
-                        sirio_git::create_worktree_at(repo, &branch, &path, commit)
-                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
-                        let reason = match &target.push {
-                            PushTarget::ReadOnly(reason) => reason.message(),
-                            _ => "",
-                        };
-                        format!("Created {} on {branch} (read-only: {reason})", name_of(&path))
-                    }
-                    Start::Existing { set_upstream } => {
-                        // The upstream first: git sets it on a branch no
-                        // worktree has checked out, so a failure here leaves
-                        // nothing new behind for a retry to refuse.
-                        if let Some(upstream) = set_upstream {
-                            sirio_git::set_upstream(repo, &branch, upstream)
-                                .map_err(|error| format!("setting the upstream failed: {error}"))?;
-                        }
-                        sirio_git::create_worktree(repo, &branch, &path, None)
-                            .map_err(|error| format!("creating the worktree failed: {error}"))?;
-                        let to = target.upstream().unwrap_or_else(|| revisions.head_sha.clone());
-                        let moved = sirio_git::fast_forward(&path, &to)
-                            .map_err(|error| format!("fast-forwarding failed: {error}"))?;
-                        format!("Created {} on the existing {branch}{}", name_of(&path), sync_words(&moved, &to))
-                    }
-                };
-                self.map_fork_push(repo, &target)?;
-                Ok(done(path, detail))
-            }
-        }
+        let facts = self.facts(request, &target, &remotes, &revisions.head_sha, dry)?;
+        let plan = handoff::decide(&target, &facts);
+        Ok(Planned { header, revisions, target, plan })
     }
 
     fn facts(
@@ -176,6 +237,7 @@ impl ForgeHub {
         target: &Target,
         remotes: &[(String, String)],
         head_sha: &str,
+        dry: bool,
     ) -> Result<Facts, String> {
         let repo = request.repo.as_path();
         let mut linked = None;
@@ -184,8 +246,11 @@ impl ForgeHub {
                 linked = Some(path);
                 break;
             }
-            // A linked worktree deleted outside Sirio: forget it.
-            self.settings.drop_change_request_link(&path);
+            // A linked worktree deleted outside Sirio: forget it (a dry run
+            // only reads, so it leaves the link and treats it as absent).
+            if !dry {
+                self.settings.drop_change_request_link(&path);
+            }
         }
         let checked_out = match sirio_git::worktree_for_branch(repo, &target.branch)
             .map_err(|error| format!("reading the worktrees failed: {error}"))?
@@ -193,9 +258,11 @@ impl ForgeHub {
             // Git still lists a folder deleted outside it, on its branch: that
             // registration is removed, and the branch is free to be checked out.
             Some(path) if !path.exists() => {
-                sirio_git::remove_missing_worktree(repo, &path).map_err(|error| {
-                    format!("forgetting the deleted worktree {} failed: {error}", path.display())
-                })?;
+                if !dry {
+                    sirio_git::remove_missing_worktree(repo, &path).map_err(|error| {
+                        format!("forgetting the deleted worktree {} failed: {error}", path.display())
+                    })?;
+                }
                 None
             }
             Some(path) => {
@@ -246,7 +313,7 @@ impl ForgeHub {
     /// target, to the change request's head) when it is clean and behind.
     /// Only the branch the worktree has checked out is ever moved, and only
     /// when it is `target.branch`: a worktree switched elsewhere is left alone.
-    fn sync(&self, repo: &Path, worktree: &Path, target: &Target, head_sha: &str) -> Result<String, String> {
+    fn sync(&self, repo: &Path, worktree: &Path, target: &Target, head_sha: &str) -> Result<(String, WorktreeState), String> {
         let name = name_of(worktree);
         // A read that fails is a failure, not "another branch": the worktree
         // may well be on the target.
@@ -259,14 +326,13 @@ impl ForgeHub {
                 _ => "",
             };
             if !on_target {
-                return Ok(format!("Reused {name} (read-only: {reason}){}", left_alone(current.as_deref())));
+                let detail = format!("Reused {name} (read-only: {reason}){}", left_alone(current.as_deref()));
+                return Ok((detail, not_on_target(current)));
             }
             let moved = sirio_git::fast_forward(worktree, head_sha)
                 .map_err(|error| format!("fast-forwarding failed: {error}"))?;
-            return Ok(format!(
-                "Reused {name} (read-only: {reason}){}",
-                sync_words(&moved, "the change request's head")
-            ));
+            let detail = format!("Reused {name} (read-only: {reason}){}", sync_words(&moved, "the change request's head"));
+            return Ok((detail, after_update(&moved)));
         };
         // A fork that accepts pushes now, though the worktree was made read-only:
         // its remote is added, fetched, and the branch gets its upstream before
@@ -293,12 +359,13 @@ impl ForgeHub {
         }
         self.map_fork_push(repo, target)?;
         if !on_target {
-            return Ok(format!("Reused {name}{}", left_alone(current.as_deref())));
+            let detail = format!("Reused {name}{}", left_alone(current.as_deref()));
+            return Ok((detail, not_on_target(current)));
         }
         let upstream = format!("{remote}/{branch}");
         let moved = sirio_git::fast_forward(worktree, &upstream)
             .map_err(|error| format!("fast-forwarding failed: {error}"))?;
-        Ok(format!("Reused {name}{}", sync_words(&moved, &upstream)))
+        Ok((format!("Reused {name}{}", sync_words(&moved, &upstream)), after_update(&moved)))
     }
 
     /// A fork's local branch is `<owner>/<branch>`: map it so a plain

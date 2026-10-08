@@ -529,6 +529,19 @@ fn migrate_v22(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v23 — the agent and surface a project's last change request hand-off
+/// used (change requests C2), so the dialog opens on them. `agent` is the
+/// adapter id, or empty for no agent.
+fn migrate_v23(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE handoff_choice (
+             project_id TEXT PRIMARY KEY NOT NULL,
+             agent TEXT NOT NULL,
+             surface TEXT NOT NULL
+         );",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -554,6 +567,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v20,
     migrate_v21,
     migrate_v22,
+    migrate_v23,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already

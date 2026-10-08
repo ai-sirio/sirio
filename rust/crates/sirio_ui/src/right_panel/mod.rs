@@ -62,6 +62,12 @@ pub enum RightPanelActionEvent {
         reference: sirio_forge::ChangeRef,
         title: String,
     },
+    /// Hand a change request to an agent (C2). The host opens its tab and
+    /// the hand-off dialog on it.
+    HandOffChangeRequest {
+        reference: sirio_forge::ChangeRef,
+        title: String,
+    },
 }
 
 /// Which view the right panel is showing.
@@ -727,6 +733,12 @@ impl RightPanel {
                 }
                 ChangeRequestListEvent::OpenInWorktree { reference, title } => {
                     cx.emit(RightPanelActionEvent::OpenChangeRequestInWorktree {
+                        reference: reference.clone(),
+                        title: title.clone(),
+                    })
+                }
+                ChangeRequestListEvent::HandOff { reference, title } => {
+                    cx.emit(RightPanelActionEvent::HandOffChangeRequest {
                         reference: reference.clone(),
                         title: title.clone(),
                     })

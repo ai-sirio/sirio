@@ -463,3 +463,126 @@ github.com `PullRequest` has `maintainerCanModify`, `isCrossRepository`,
 - `ensure_remote` compares the configured URL (`remote.<name>.url`), not the
   one `git remote get-url` returns after `url.<base>.insteadOf`, so a rewrite
   never reads as a conflicting remote.
+
+## §15 Revised while planning and building C2 (2026-10-08)
+
+*Facts verified while planning* (the installed CLIs' `--help`, 2026-10-08):
+
+| Agent | Version | Initial prompt |
+|---|---|---|
+| Claude Code | 2.1.293 | `claude [options] [command] [prompt]` |
+| Codex | 0.159.2 | `codex [OPTIONS] [PROMPT]` |
+| OpenCode | 1.18.33 | `--prompt <prompt>` |
+| Pi | 1.0.0 | `pi [options] [--] [@files...] [messages...]` |
+| Oh-My-Pi | 18.4.4 | `omp "<prompt>"` |
+
+Every adapter takes the prompt as an argument, so §4's "type it after start"
+fallback has no implementer: `AgentAdapter::command_with_prompt` is a required
+method returning the command line, and `sirio_agents/tests/initial_prompt_live.rs`
+notices the day a CLI stops listing it (it SKIPs without the binary and is off
+both gates).
+
+*Revisions decided while planning:*
+
+- `command_with_prompt` takes `command`'s arguments plus the prompt, because
+  Codex and omp build their command line from the pane and the worktree.
+- `surface.change_request.handoff` acts on the open change request tab and
+  takes no `{number}`, like C1's `checkout`; the list's *Hand off to an agent…*
+  opens the tab first.
+- The context is read before the checkout (§9: a failed or rate-limited read
+  touches no git); the checkout then reads the header again.
+- *No agent* still checks the change request out and writes the context file.
+- The per-project choice lives in a v23 table `handoff_choice(project_id,
+  agent, surface)`, not in `ProjectRecord`, whose literals span crates.
+- `viewer_is_author` compares `ForgeClient::viewer()` with the summary's author,
+  case-insensitively; it is read during the dialog's preview. A viewer read that
+  fails for any reason but a rate limit leaves it unknown.
+- *Fix failing CI* is offered only when the summary's CI state is failed. The
+  default purpose is `ci` when CI failed, else `review` when the viewer is known
+  not to be the author, else `resume`.
+- C2's context file names no `sirioctl change-request context` command; that
+  verb is C3.
+- A thread card's *Fix with agent* scopes `comments` to that thread even when it
+  is resolved.
+- `prepare` failing does not stop the agent; the status line says the hooks were
+  not written.
+
+*Rulings from the slice ledger:*
+
+- Windows runs a pane's command through `cmd /C`, which ends a command at a line
+  break, so there the launch prompt is folded to one line
+  (`shell_quote::one_line`); elsewhere it is passed as written. Cost: a Windows
+  agent reads the two lines as one.
+- `ForgeClient::context` returns every review thread; the renderer narrows a
+  `Scope::Thread` to that one thread (resolved or not) and otherwise keeps the
+  unresolved ones. A resume reads nothing extra: the description, the timeline
+  and the CI state come with the header.
+- A job log that could not be read carries its reason, which may be `gh` or
+  `glab` stderr, so the reason is written inside an untrusted block
+  (`source="log error"`), never as Sirio's words.
+- The 1 MiB bound holds for every input. The droppable parts (threads, jobs,
+  timeline entries, the commit and file lists, the description, the title) go
+  oldest first, and a job too large on its own has its log halved and is then
+  dropped. What is never dropped is bounded: a link is written only when it is
+  `http(s)`, at most 2048 bytes and free of whitespace, backticks and control
+  characters; a sha only when it is 40 or 64 hex digits; the user's
+  instructions are cut at 64 KiB with a note; the title at 1 KiB and the
+  description at 256 KiB, each with a note.
+- The push line names no forge text: "Push with a plain `git push`: this
+  worktree's branch is set up to push to the change request's branch." C1 has
+  already set the upstream or the push mapping, and a branch name is
+  forge-controlled text that would otherwise sit outside a fence. A read-only
+  worktree says "Do not push", with Sirio's own reason.
+- `.sirio` and `.sirio/handoff` are refused when either is not a real directory
+  (a branch can commit a symlink there); the file is refused when a symlink
+  stands at its name; pruning removes only regular `*.md` files directly in
+  the folder, the ones beyond the ten newest.
+- Failing to add `.sirio/handoff/` to `info/exclude` fails the hand-off, after
+  the file is written, and the message says where the file is: an agent could
+  otherwise commit it.
+- The dialog's preview runs C1's plan with a dry flag: it neither drops a
+  missing link nor unregisters a missing worktree, and it may fetch the head
+  into `refs/sirio/change-requests/…`, as *Files* does. Each preview carries the
+  generation of the open that asked for it, so a late one cannot overwrite a
+  newer dialog's.
+- Without an agent the surface is the terminal, in the dialog, the socket and
+  the remembered choice; reopening the dialog clears the last hand-off's outcome.
+  Ely's `RadioGroup` draws no `Choice::note`, so each disabled choice's reason is
+  written beside its group.
+- A chat's first message waits for the connection (`Chat::send_when_ready`):
+  it goes straight to the turn, leaving whatever the user typed meanwhile in the
+  composer; while a turn runs it joins the send queue; when the connection
+  fails it is put in the composer above what was typed.
+- A socket start sent while the preview is loading is queued and runs when the
+  preview lands (`handoff_queued`); a refused preview fails it. A socket start
+  whose scope differs from the open dialog's is refused rather than retargeted.
+- The hand-off's agent starts in the hand-off's worktree, carried with the
+  queued action; if that worktree cannot be selected, nothing starts elsewhere.
+- A terminal pane starts its process on first draw, so the hand-off's agent
+  would not run while its tab was undrawn (another worktree, a hidden window).
+  `TerminalView::start` starts it at once; every other pane stays lazy. Its
+  first draw resizes the PTY from 80x24.
+- A chat refused for an agent (Pi has no chat transport) is reported as not
+  started, never as started.
+
+*Rulings from the whole-branch review:*
+
+- A worktree C1 reuses that is on another branch, or on a detached HEAD,
+  refuses the hand-off, unless it is a review, which reads by commit; a dirty
+  or diverged one proceeds with a line in Sirio's words saying it was not
+  updated to the head. An agent must never work on, or push, the user's
+  unrelated branch.
+- `prepare` and `install_skill` read and write the worktree only through one
+  helper that refuses a symlink anywhere on the path, writes through a temp file
+  renamed into place, and reads only a regular file of at most 1 MiB. A branch
+  can commit `.claude/settings.local.json` as a link to `~/.bashrc` (a write
+  outside the worktree) or to `/dev/zero` (a read that never ends). A refusal
+  is "hooks not written"; the agent still starts.
+- The reader is a model, not a CommonMark parser. Each file carries a random
+  16-hex nonce: every block opens with `untrusted id="<nonce>"` and is followed
+  by Sirio's line `(end of untrusted block <nonce>)`, and the file says that
+  only that line ends a block. The user's instructions section is always
+  written ("None." when empty), so a forged one is never the only one.
+- Forge text loses C0 controls (but `\n` and `\t`), DEL and C1 controls, and
+  bidi controls are written as a visible `<U+…>`; a link outside a block must be
+  printable ASCII.

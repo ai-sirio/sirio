@@ -2063,6 +2063,36 @@ impl SessionStore {
         }
     }
 
+    /// The agent and surface this project last handed a change request to,
+    /// `None` for no choice yet or a read error.
+    pub fn handoff_choice(&self, project_id: &str) -> Option<(String, String)> {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let db = db.as_ref()?;
+        match db.handoff_choice(project_id) {
+            Ok(Some(choice)) => Some((choice.agent, choice.surface)),
+            Ok(None) => None,
+            Err(error) => {
+                eprintln!("[session] failed to read the hand-off choice of {project_id}: {error}");
+                None
+            }
+        }
+    }
+
+    pub fn save_handoff_choice(&self, project_id: &str, agent: &str, surface: &str) {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        let choice = sirio_persistence::HandoffChoiceRecord {
+            project_id: project_id.to_string(),
+            agent: agent.to_string(),
+            surface: surface.to_string(),
+        };
+        if let Err(error) = db.save_handoff_choice(&choice) {
+            eprintln!("[session] failed to persist the hand-off choice of {project_id}: {error}");
+        }
+    }
+
     pub fn drop_change_request_link(&self, worktree: &Path) {
         let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(db) = db.as_ref() else {

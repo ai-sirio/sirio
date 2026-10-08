@@ -20,7 +20,7 @@ use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord,
-    ChatSessionSummary, ChatTranscript,
+    ChatSessionSummary, HandoffChoiceRecord, ChatTranscript,
     ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
@@ -928,6 +928,35 @@ impl AppDatabase {
         self.conn
             .execute("DELETE FROM change_request_link WHERE path = ?1", [path])?;
         Ok(())
+    }
+
+    /// Saves the agent and surface of a project's hand-off, replacing its
+    /// earlier choice.
+    pub fn save_handoff_choice(&self, record: &HandoffChoiceRecord) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO handoff_choice (project_id, agent, surface) VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_id) DO UPDATE SET agent = excluded.agent, surface = excluded.surface",
+            params![record.project_id, record.agent, record.surface],
+        )?;
+        Ok(())
+    }
+
+    /// The agent and surface a project last handed a change request to.
+    pub fn handoff_choice(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<HandoffChoiceRecord>, PersistenceError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT project_id, agent, surface FROM handoff_choice WHERE project_id = ?1")?;
+        let mut rows = statement.query_map([project_id], |row| {
+            Ok(HandoffChoiceRecord {
+                project_id: row.get(0)?,
+                agent: row.get(1)?,
+                surface: row.get(2)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
     }
 
     // ------------------------------------------------------------------

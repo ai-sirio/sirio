@@ -16,7 +16,7 @@ use gpui::{
 use sirio_forge::{
     Action, ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
     FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
-    ReviewThread, RerunTarget, TimelineItem,
+    ReviewThread, RerunTarget, Scope, TimelineItem,
 };
 use sirio_theme::Theme;
 
@@ -24,11 +24,14 @@ mod actions;
 mod compose;
 mod composer;
 mod edit;
+mod handoff;
 mod merge;
 mod people;
 mod review;
 mod suggestion;
 mod threads;
+
+pub use handoff::{HandoffAgent, HandoffOptions, HandoffPreview, HandoffRequest, HandoffState, Surface};
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -119,6 +122,10 @@ pub enum ChangeRequestTabEvent {
     Changed,
     /// The user asked to check this change request out into a worktree (C1); the host runs it and answers with `set_checkout`.
     OpenInWorktree,
+    /// A button asked for the hand-off dialog on this scope (C2); the host answers with `open_handoff`.
+    HandoffAsked(Scope),
+    /// *Start* in the hand-off dialog (C2); the host runs it and answers with `set_handoff`.
+    Handoff(HandoffRequest),
 }
 
 /// Where *Open in a worktree* stands (change requests C1).
@@ -296,6 +303,11 @@ pub struct ChangeRequestTab {
     review: review::ReviewUi,
     /// Where *Open in a worktree* stands (C1).
     checkout: CheckoutState,
+    /// Where the hand-off stands (C2), and its dialog while it is open.
+    handoff: HandoffState,
+    handoff_dialog: Option<handoff::HandoffDialog>,
+    /// Bumped by every `open_handoff`: a preview answers only the dialog it was asked for.
+    handoff_generation: u64,
 }
 
 impl ChangeRequestTab {
@@ -361,6 +373,9 @@ impl ChangeRequestTab {
             actions: actions::ActionsState::new(),
             review: Default::default(),
             checkout: CheckoutState::Idle,
+            handoff: HandoffState::Idle,
+            handoff_dialog: None,
+            handoff_generation: 0,
         }
     }
 
@@ -1223,6 +1238,7 @@ impl ChangeRequestTab {
             ),
         ];
         report.extend(self.thread_report(cx));
+        report.extend(self.handoff_fields());
         report
     }
 }
@@ -1528,6 +1544,7 @@ impl ChangeRequestTab {
             .when_some(self.render_people_row(theme, entity), |this, row| this.child(row))
             .when_some(self.render_action_status(theme), |this, status| this.child(status))
             .when_some(self.render_checkout_status(theme), |this, status| this.child(status))
+            .when_some(self.render_handoff_status(theme), |this, status| this.child(status))
     }
 
     fn inner_count(&self, inner: InnerTab) -> Option<String> {
@@ -2071,6 +2088,18 @@ impl ChangeRequestTab {
                             )),
                         );
                     }
+                    if check.status == CheckStatus::Failed {
+                        let entity = entity.clone();
+                        row = row.child(
+                            div().id(("change-request-check-handoff", index)).child(ely_ui::icon_button(
+                                "change-request-check-handoff",
+                                IconName::Bot,
+                                "Fix with agent",
+                                !busy,
+                                move |_, cx| entity.update(cx, |tab, cx| tab.ask_handoff(Scope::Job(job_id), cx)),
+                            )),
+                        );
+                    }
                     if let Some(url) = check.url.clone() {
                         row = row.child(
                             div().id(("change-request-check-browser", index)).child(ely_ui::icon_button(
@@ -2396,6 +2425,7 @@ impl Render for ChangeRequestTab {
             .child(body)
             .children(self.render_merge_dialog(&theme, &entity))
             .children(self.render_review_dialog(&theme, &entity))
+            .children(self.render_handoff_dialog(&theme, &entity))
     }
 }
 

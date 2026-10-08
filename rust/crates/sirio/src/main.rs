@@ -67,7 +67,10 @@ use sirio_ui::{
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
-use sirio_ui::change_request_tab::{ChangeRequestTab, ChangeRequestTabEvent, CheckoutState, InnerTab};
+use sirio_ui::change_request_tab::{
+    ChangeRequestTab, ChangeRequestTabEvent, CheckoutState, HandoffAgent, HandoffOptions, HandoffRequest,
+    HandoffState, InnerTab, Surface,
+};
 use sirio_ui::ci_log_tab::{CiLogTab, CiLogTabEvent};
 use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
@@ -90,6 +93,15 @@ use std::time::{Duration, Instant, SystemTime};
 /// point add nothing a drain would act on differently, and dropping them
 /// keeps a build from growing the buffer without bound.
 const FILES_WATCH_PENDING_LIMIT: usize = 4096;
+
+/// A hand-off's Done text, with Sirio's note on the worktree after it when the
+/// file carries one. The note is the file's line without its list marker.
+fn with_note(text: String, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("{text} · {}", note.trim_start_matches("- ")),
+        None => text,
+    }
+}
 
 /// Whether one watcher path is worth a repository walk.
 ///
@@ -997,6 +1009,46 @@ enum ThreadCommand {
     Cancel,
 }
 
+/// `surface.change_request.handoff`, parsed: the dialog only opens, or the
+/// dialog's fields are set in order and *Start* is pressed.
+enum HandoffCommand {
+    OpenDialog(sirio_forge::Scope),
+    Start {
+        scope: sirio_forge::Scope,
+        fields: Vec<(&'static str, String)>,
+    },
+}
+
+/// The hand-off verb's parameters, checked before the request is queued: a
+/// refusal here is the verb's error, with no change to the tab.
+fn handoff_command_from_params(params: &BTreeMap<String, String>) -> Result<HandoffCommand, String> {
+    let given = |key: &str| params.get(key).filter(|value| !value.trim().is_empty());
+    let scope = match (given("thread"), given("job")) {
+        (Some(_), Some(_)) => return Err("thread and job cannot both be given".to_string()),
+        (Some(thread), None) => sirio_forge::Scope::Thread(thread.clone()),
+        (None, Some(job)) => sirio_forge::Scope::Job(
+            job.parse::<u64>().map_err(|_| format!("job must be a number, not {job}"))?,
+        ),
+        (None, None) => sirio_forge::Scope::Whole,
+    };
+    if params.contains_key("open_dialog") {
+        return Ok(HandoffCommand::OpenDialog(scope));
+    }
+    let purpose = given("purpose")
+        .ok_or_else(|| "surface.change_request.handoff requires purpose (or open_dialog)".to_string())?;
+    let agent = given("agent")
+        .ok_or_else(|| "surface.change_request.handoff requires agent: none or an agent id".to_string())?;
+    let mut fields = vec![("purpose", purpose.clone()), ("agent", agent.clone())];
+    // With no agent the surface has nothing to show, so it is not set.
+    if agent != "none" {
+        fields.push(("surface", given("surface").cloned().unwrap_or_else(|| "terminal".to_string())));
+    }
+    if let Some(instructions) = params.get("instructions") {
+        fields.push(("instructions", instructions.clone()));
+    }
+    Ok(HandoffCommand::Start { scope, fields })
+}
+
 enum ControlAction {
     Quit {
         reply: ControlReply,
@@ -1105,6 +1157,11 @@ enum ControlAction {
     },
     /// Checks the active change request out into a worktree. Every build.
     CheckoutChangeRequest {
+        reply: ControlReply,
+    },
+    /// `surface.change_request.handoff`. Every build.
+    ChangeRequestHandoff {
+        op: HandoffCommand,
         reply: ControlReply,
     },
     ChangeRequestThread {
@@ -1372,6 +1429,21 @@ enum WorkspaceAction {
     /// the right-clicked worktree for the same F-SID-14 reason as
     /// `NewTabForWorktree`.
     NewChatAgentForWorktree(PathBuf, &'static str),
+    /// The hand-off dialog of the active change request tab, for `scope`
+    /// (`ChangeRequestTabEvent::HandoffAsked`, the right panel's *Hand off*,
+    /// and the control socket's `open_dialog`).
+    OpenHandoffDialog(sirio_forge::Scope),
+    /// A hand-off's agent, started in `path` (the worktree it was checked out
+    /// to). `asked` is the tab that asked, which reports the outcome.
+    StartHandoffAgent {
+        path: PathBuf,
+        agent: &'static str,
+        surface: Surface,
+        prompt: String,
+        relative: String,
+        note: Option<&'static str>,
+        asked: Entity<ChangeRequestTab>,
+    },
     InstallSkill(sirio_project::SkillInstallCommand),
     /// Settings → Install Hooks: the host writes every agent's user-global
     /// sirioctl hooks (`sirio_agents::install_global_hooks`) off the UI
@@ -2122,6 +2194,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.change_request.tab",
                     "surface.change_request.read",
                     "surface.change_request.checkout",
+                    "surface.change_request.handoff",
                     "surface.ci_log.open",
                     "surface.ci_log.read",
                     "surface.ci_log.view",
@@ -2441,6 +2514,13 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.change_request.checkout" => {
                 self.queue_action(request, |reply| ControlAction::CheckoutChangeRequest { reply })
+            }
+            "surface.change_request.handoff" => {
+                let op = match handoff_command_from_params(&request.params) {
+                    Ok(op) => op,
+                    Err(reason) => return ControlResponse::failure(&request.id, &reason),
+                };
+                self.queue_action(request, move |reply| ControlAction::ChangeRequestHandoff { op, reply })
             }
             "surface.change_request.reveal" => {
                 let Some(path) = request.params.get("path").cloned() else {
@@ -5190,6 +5270,22 @@ impl SirioWorkspace {
                                     }
                                     workspace.open_chat_agent(id, window, cx);
                                 }
+                                WorkspaceAction::OpenHandoffDialog(scope) => {
+                                    let _ = workspace.open_handoff_dialog(scope, window, cx);
+                                }
+                                WorkspaceAction::StartHandoffAgent {
+                                    path,
+                                    agent,
+                                    surface,
+                                    prompt,
+                                    relative,
+                                    note,
+                                    asked,
+                                } => {
+                                    workspace.start_handoff_agent(
+                                        path, agent, surface, prompt, relative, note, asked, window, cx,
+                                    );
+                                }
                                 WorkspaceAction::InstallSkill(command) => {
                                     workspace.open_skill_install_terminal(command, cx);
                                 }
@@ -5364,6 +5460,9 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::ReadChangeRequest { reply } => {
                                     let _ = reply.send(workspace.control_read_change_request(cx));
+                                }
+                                ControlAction::ChangeRequestHandoff { op, reply } => {
+                                    let _ = reply.send(workspace.control_handoff(op, window, cx));
                                 }
                                 ControlAction::CheckoutChangeRequest { reply } => {
                                     let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
@@ -6922,6 +7021,12 @@ impl SirioWorkspace {
                 }
                 RightPanelActionEvent::OpenChangeRequest { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
+                }
+                RightPanelActionEvent::HandOffChangeRequest { reference, title } => {
+                    // `add_change_request_tab` selects the tab it opens or
+                    // finds; the dialog opens on that tab when the drain runs.
+                    workspace.add_change_request_tab(reference.clone(), title.clone(), cx);
+                    workspace.queue_workspace_action(WorkspaceAction::OpenHandoffDialog(sirio_forge::Scope::Whole));
                 }
                 RightPanelActionEvent::OpenChangeRequestInWorktree { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx);
@@ -12254,7 +12359,7 @@ impl SirioWorkspace {
         agent_icon: Option<Icon>,
         agent_id: Option<String>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Entity<TerminalView> {
         let working_directory = self.working_directory.clone();
         let terminal = cx.new(
             |cx| match TerminalView::with_shell(&working_directory, shell, cx) {
@@ -12270,7 +12375,8 @@ impl SirioWorkspace {
                 ),
             },
         );
-        self.insert_terminal_tab_with_agent(title, terminal, agent_icon, agent_id, cx);
+        self.insert_terminal_tab_with_agent(title, terminal.clone(), agent_icon, agent_id, cx);
+        terminal
     }
 
     fn insert_terminal_tab(
@@ -13640,6 +13746,20 @@ impl SirioWorkspace {
             }
             Ok(done) => done,
         };
+        self.finish_checkout_into(tab, reference, &project_id, done, cx);
+    }
+
+    /// The bookkeeping a checkout ends with, shared with a hand-off: the
+    /// link, the worktree selected, its change request tab, and the checkout
+    /// outcome on both tabs. Returns the catalog's path of the worktree.
+    fn finish_checkout_into(
+        &mut self,
+        tab: Entity<ChangeRequestTab>,
+        reference: sirio_forge::ChangeRef,
+        project_id: &str,
+        done: forge::CheckoutDone,
+        cx: &mut Context<Self>,
+    ) -> PathBuf {
         // The catalog's own spelling of the path (the sidebar's and
         // `working_directory`'s), which is what the link is looked up by.
         let path = self
@@ -13650,7 +13770,7 @@ impl SirioWorkspace {
             .and_then(|project| project.worktrees.iter().find(|worktree| worktree.branch == done.branch))
             .map_or_else(|| done.path.clone(), |worktree| worktree.path.clone());
         self.session.save_change_request_link(&path, &reference, &done.branch);
-        self.select_worktree_from_sidebar(path, cx);
+        self.select_worktree_from_sidebar(path.clone(), cx);
         self.add_change_request_tab(reference.clone(), done.title.clone(), cx);
         // The tab in the selected worktree reports the same outcome.
         // `add_change_request_tab` selects the tab it opens or finds.
@@ -13658,6 +13778,398 @@ impl SirioWorkspace {
             opened.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Done(done.detail.clone()), cx));
         }
         tab.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Done(done.detail.clone()), cx));
+        path
+    }
+
+    /// The checkout request for `reference`, and the id of the project that
+    /// holds `working_directory` (the project C1 checks out into).
+    fn change_request_checkout_request(
+        &self,
+        reference: &sirio_forge::ChangeRef,
+    ) -> Result<(forge::CheckoutRequest, String), String> {
+        let project = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.worktrees.iter().any(|worktree| worktree.path == self.working_directory))
+            .cloned()
+            .ok_or_else(|| "this worktree is not part of a project".to_string())?;
+        let request = forge::CheckoutRequest {
+            reference: reference.clone(),
+            repo: project.root_path.clone(),
+            project_name: project.name.clone(),
+            location_override: self
+                .project_catalog
+                .project_settings(&project.id)
+                .worktree_location_override
+                .map(PathBuf::from),
+        };
+        Ok((request, project.id.clone()))
+    }
+
+    /// The hub that runs a hand-off, or the reason there is none.
+    fn forge_hub(cx: &App) -> Result<Arc<forge::ForgeHub>, String> {
+        cx.try_global::<forge::HubGlobal>()
+            .map(|hub| hub.0.clone())
+            .ok_or_else(|| "Sirio is not connected to a forge".to_string())
+    }
+
+    /// What the hand-off dialog offers: each agent with its CLI on PATH and
+    /// its chat transport, and the project's remembered choice.
+    fn handoff_options(&self, project_id: &str) -> HandoffOptions {
+        let agents = AGENT_CATALOG
+            .iter()
+            .map(|adapter| HandoffAgent {
+                id: adapter.id(),
+                name: adapter.display_name(),
+                terminal: if adapter.availability().is_available() {
+                    Ok(())
+                } else {
+                    Err(adapter.executable_name().to_string())
+                },
+                chat: agent_launch_for(&self.launch, adapter.id()).is_some(),
+            })
+            .collect();
+        let remembered = self.session.handoff_choice(project_id).and_then(|(agent, surface)| {
+            let surface = Surface::parse(&surface).unwrap_or(Surface::Terminal);
+            if agent.is_empty() {
+                return Some((None, surface));
+            }
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent)
+                .map(|adapter| (Some(adapter.id()), surface))
+        });
+        HandoffOptions { agents, remembered }
+    }
+
+    /// Opens the hand-off dialog on the active change request tab, then asks
+    /// the forge what the worktree would be (off the GPUI thread).
+    fn open_handoff_dialog(
+        &mut self,
+        scope: sirio_forge::Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let tab = self
+            .active_change_request()
+            .ok_or_else(|| "the active tab is not a change request".to_string())?;
+        if tab.read(cx).handoff_dialog_open() {
+            return Ok(());
+        }
+        let reference = tab.read(cx).reference().clone();
+        let prepared = self
+            .change_request_checkout_request(&reference)
+            .and_then(|(request, project_id)| Ok((request, self.handoff_options(&project_id))));
+        let (request, options) = match prepared {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                tab.update(cx, |tab, cx| tab.set_handoff(HandoffState::Failed(reason.clone()), cx));
+                return Err(reason);
+            }
+        };
+        tab.update(cx, |tab, cx| tab.open_handoff(scope, options, window, cx));
+        // The preview answers only this open: a later open bumps the generation.
+        let generation = tab.read(cx).handoff_generation();
+        let hub = match Self::forge_hub(cx) {
+            Ok(hub) => hub,
+            Err(reason) => {
+                tab.update(cx, |tab, cx| {
+                    tab.set_handoff_preview(
+                        generation,
+                        sirio_ui::change_request_tab::HandoffPreview::Ready {
+                            worktree: Err(reason),
+                            viewer_is_author: None,
+                        },
+                        cx,
+                    )
+                });
+                return Ok(());
+            }
+        };
+        let task = cx.background_executor().spawn(async move { hub.handoff_preview(&request) });
+        cx.spawn(async move |_, cx| {
+            let preview = task.await;
+            let _ = tab.update(cx, |tab, cx| tab.set_handoff_preview(generation, preview, cx));
+        })
+        .detach();
+        Ok(())
+    }
+
+    /// *Start* from the dialog: saves the project's choice, then checks the
+    /// worktree out and writes the context off the GPUI thread. The outcome
+    /// comes back to `finish_handoff`.
+    fn run_handoff(&mut self, asked: Entity<ChangeRequestTab>, request: HandoffRequest, cx: &mut Context<Self>) {
+        let reference = asked.read(cx).reference().clone();
+        let prepared = self.change_request_checkout_request(&reference);
+        let (checkout, project_id) = match prepared {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                asked.update(cx, |tab, cx| tab.set_handoff(HandoffState::Failed(reason), cx));
+                return;
+            }
+        };
+        let hub = match Self::forge_hub(cx) {
+            Ok(hub) => hub,
+            Err(reason) => {
+                asked.update(cx, |tab, cx| tab.set_handoff(HandoffState::Failed(reason), cx));
+                return;
+            }
+        };
+        // With no agent the surface is the terminal, whatever the dialog showed.
+        let surface = if request.agent.is_none() { Surface::Terminal } else { request.surface };
+        self.session.save_handoff_choice(&project_id, request.agent.unwrap_or(""), surface.word());
+        let agent = request.agent;
+        let ask = forge::HandoffAsk {
+            purpose: request.purpose,
+            scope: request.scope,
+            instructions: request.instructions,
+        };
+        let task = cx.background_executor().spawn(async move { hub.handoff(&checkout, &ask) });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.finish_handoff(asked, reference, project_id, agent, surface, outcome, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The hand-off's outcome: a failure is shown on the asking tab (a rate
+    /// limit also pauses it); a success finishes C1's checkout bookkeeping,
+    /// then starts the agent in that worktree or reports the context written.
+    fn finish_handoff(
+        &mut self,
+        asked: Entity<ChangeRequestTab>,
+        reference: sirio_forge::ChangeRef,
+        project_id: String,
+        agent: Option<&'static str>,
+        surface: Surface,
+        outcome: Result<forge::HandoffDone, forge::HandoffFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        // Before the outcome is read: a step after `git worktree add` can
+        // fail with the worktree already on disk, and it must show up.
+        self.refresh_catalog_project(&project_id, None, cx);
+        let done = match outcome {
+            Err(failure) => {
+                if let Some(reset) = failure.rate_limited_until {
+                    asked.update(cx, |tab, _| tab.pause_until(reset));
+                }
+                asked.update(cx, |tab, cx| tab.set_handoff(HandoffState::Failed(failure.message), cx));
+                return;
+            }
+            Ok(done) => done,
+        };
+        let forge::HandoffDone { checkout, relative, prompt, note } = done;
+        let path = self.finish_checkout_into(asked.clone(), reference, &project_id, checkout, cx);
+        match agent {
+            None => {
+                let text = with_note(format!("context written to {relative}"), note);
+                Self::report_handoff(&asked, self.active_change_request().as_ref(), text, cx);
+            }
+            // The agent starts from the drain, which reports the outcome.
+            // Until then the asking tab reads Running.
+            Some(agent) => {
+                self.queue_workspace_action(WorkspaceAction::StartHandoffAgent {
+                    path,
+                    agent,
+                    surface,
+                    prompt,
+                    relative,
+                    note,
+                    asked,
+                });
+            }
+        }
+    }
+
+    /// Starts the hand-off's agent in `path`, the worktree it was checked out
+    /// to. It never starts anywhere else: when `path` cannot be selected, the
+    /// reason goes on the asking tab.
+    #[allow(clippy::too_many_arguments)]
+    fn start_handoff_agent(
+        &mut self,
+        path: PathBuf,
+        agent: &'static str,
+        surface: Surface,
+        prompt: String,
+        relative: String,
+        note: Option<&'static str>,
+        asked: Entity<ChangeRequestTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(found) = AGENT_CATALOG.iter().find(|adapter| adapter.id() == agent) else {
+            let text = with_note(format!("context written to {relative} · the agent did not start: no adapter for {agent}"), note);
+            Self::report_handoff(&asked, None, text, cx);
+            return;
+        };
+        let adapter: &'static dyn sirio_agents::AgentAdapter = *found;
+        let name = adapter.display_name();
+        let selected = if paths_name_the_same_document(&self.working_directory, &path) {
+            Ok(())
+        } else {
+            self.select_worktree(path.clone(), Some(window), cx)
+        };
+        let selected = selected.and_then(|()| {
+            if paths_name_the_same_document(&self.working_directory, &path) {
+                Ok(())
+            } else {
+                Err("the worktree is not the selected one".to_string())
+            }
+        });
+        if let Err(reason) = selected {
+            let text = with_note(format!("context written to {relative} · {name} did not start: {reason}"), note);
+            Self::report_handoff(&asked, None, text, cx);
+            return;
+        }
+        // Read before the agent's own tab becomes the active one.
+        let opened = self.active_change_request();
+        let text = match surface {
+            Surface::Terminal => {
+                let warning = self.add_agent_terminal_tab(adapter, &prompt, cx);
+                match warning {
+                    Some(warning) => format!("{name} started in a terminal with {relative} · {warning}"),
+                    None => format!("{name} started in a terminal with {relative}"),
+                }
+            }
+            Surface::Chat => {
+                if let Some(reason) = self.chat_refusal(adapter.id()) {
+                    format!("context written to {relative} · {name} did not start: {reason}")
+                } else {
+                    let before = self.tabs.len();
+                    self.add_chat_tab(window, Some(adapter), cx);
+                    if self.tabs.len() == before {
+                        format!("context written to {relative} · {name} did not start: the chat did not open")
+                    } else {
+                        let mut chat = None;
+                        if let Some(tab) = self.tabs.last() {
+                            tab.panes.for_each(&mut |_, content| {
+                                if let TabContent::Chat(view) = content {
+                                    chat = Some(view.clone());
+                                }
+                            });
+                        }
+                        if let Some(chat) = chat {
+                            chat.update(cx, |chat, cx| chat.send_when_ready(&prompt, cx));
+                        }
+                        format!("{name} started in a chat with {relative}")
+                    }
+                }
+            }
+        };
+        Self::report_handoff(&asked, opened.as_ref(), with_note(text, note), cx);
+    }
+
+    /// Sets the hand-off's line on the asking tab and, when there is one, the
+    /// tab in the worktree it started in.
+    fn report_handoff(
+        asked: &Entity<ChangeRequestTab>,
+        opened: Option<&Entity<ChangeRequestTab>>,
+        text: String,
+        cx: &mut App,
+    ) {
+        asked.update(cx, |tab, cx| tab.set_handoff(HandoffState::Done(text.clone()), cx));
+        if let Some(opened) = opened {
+            opened.update(cx, |tab, cx| tab.set_handoff(HandoffState::Done(text), cx));
+        }
+    }
+
+    /// Why a chat cannot open for `agent_id`, or `None` when it can.
+    fn chat_refusal(&self, agent_id: &str) -> Option<String> {
+        agent_launch_for(&self.launch, agent_id)
+            .is_none()
+            .then(|| launch_refusal_reason(&self.launch_source_for(agent_id)))
+    }
+
+    /// A terminal running `adapter` on `prompt`, launched the way a restored
+    /// agent pane is (`restored_agent_shell`): `prepare` writes the
+    /// worktree's hooks for this pane, then the adapter's own command line.
+    fn add_agent_terminal_tab(
+        &mut self,
+        adapter: &'static dyn sirio_agents::AgentAdapter,
+        prompt: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let pane_key = format!("pane-{}", self.next_pane_id);
+        let worktree = self.working_directory.to_string_lossy().into_owned();
+        let mut warning = None;
+        let sirioctl = match resolve_sirioctl_for_process() {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                warning = Some(format!("hooks not written: {error}"));
+                String::new()
+            }
+        };
+        if warning.is_none()
+            && let Err(error) = adapter.prepare(&worktree, &pane_key, &sirioctl)
+        {
+            warning = Some(format!("hooks not written: {error}"));
+        }
+        let command = adapter.command_with_prompt(&worktree, &pane_key, &sirioctl, prompt);
+        let (program, args) = command_shell_invocation(&command);
+        let terminal = self.add_terminal_tab_with_shell_and_agent(
+            adapter.display_name(),
+            TerminalShell::WithArguments { program, args },
+            Icon::for_agent_id(adapter.id()),
+            Some(adapter.id().to_string()),
+            cx,
+        );
+        // The agent works whether or not its tab is drawn (a hidden window,
+        // another worktree), so it starts now rather than on first render.
+        terminal.update(cx, |terminal, cx| terminal.start(cx));
+        warning
+    }
+
+    /// Queues `action` for the drain that runs with a window.
+    fn queue_workspace_action(&self, action: WorkspaceAction) {
+        if let Ok(mut actions) = self.pending_actions.lock() {
+            actions.push(action);
+        }
+    }
+
+    /// `surface.change_request.handoff`, on the active change request tab.
+    /// `open_dialog` only opens the dialog; otherwise the dialog is opened if
+    /// it is not, its fields are set and *Start* is pressed.
+    fn control_handoff(
+        &mut self,
+        op: HandoffCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let scope = match &op {
+            HandoffCommand::OpenDialog(scope) | HandoffCommand::Start { scope, .. } => scope.clone(),
+        };
+        // An open dialog is never reopened or re-scoped by the socket: a
+        // different scope is refused, and the same one is used as it is.
+        if let Some(view) = self.active_change_request()
+            && let Some(open) = view.read(cx).handoff_scope()
+            && open.word() != scope.word()
+        {
+            let open = match open {
+                sirio_forge::Scope::Whole => "the whole change request".to_string(),
+                other => other.word(),
+            };
+            return Err(format!("a hand-off dialog for {open} is already open"));
+        }
+        match op {
+            HandoffCommand::OpenDialog(scope) => self.open_handoff_dialog(scope, window, cx)?,
+            HandoffCommand::Start { scope, fields } => {
+                let view = self
+                    .active_change_request()
+                    .ok_or_else(|| "the active tab is not a change request".to_string())?;
+                if !view.read(cx).handoff_dialog_open() {
+                    self.open_handoff_dialog(scope, window, cx)?;
+                }
+                for (field, value) in &fields {
+                    view.update(cx, |tab, cx| tab.set_handoff_field(field, value, cx))?;
+                }
+                // Queued while the preview loads; the caller polls `handoff`.
+                view.update(cx, |tab, cx| tab.request_start(cx))?;
+            }
+        }
+        self.control_read_change_request(cx)
     }
 
     fn add_change_request_tab(&mut self, reference: sirio_forge::ChangeRef, title: String, cx: &mut Context<Self>) {
@@ -13835,6 +14347,12 @@ impl SirioWorkspace {
                     }
                     ChangeRequestTabEvent::OpenInWorktree => {
                         workspace.open_change_request_in_worktree(emitter.clone(), cx)
+                    }
+                    ChangeRequestTabEvent::HandoffAsked(scope) => {
+                        workspace.queue_workspace_action(WorkspaceAction::OpenHandoffDialog(scope.clone()))
+                    }
+                    ChangeRequestTabEvent::Handoff(request) => {
+                        workspace.run_handoff(emitter.clone(), request.clone(), cx)
                     }
                 }
             },
@@ -37479,6 +37997,7 @@ done
             | ControlAction::SelectChangeRequestTab { reply, .. }
             | ControlAction::ReadChangeRequest { reply }
             | ControlAction::CheckoutChangeRequest { reply }
+            | ControlAction::ChangeRequestHandoff { reply, .. }
             | ControlAction::CiLogOpen { reply, .. }
             | ControlAction::CiLogRead { reply }
             | ControlAction::CiLogView { reply, .. }

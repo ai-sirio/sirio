@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CLOSED_CHAT_LIMIT,
-    CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChangeRequestLinkRecord, ChatEntry,
+    CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChangeRequestLinkRecord, ChatEntry, HandoffChoiceRecord,
     ChatPermissionOption,
     ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, SidebarView, TabRecord,
@@ -2362,4 +2362,24 @@ fn a_change_request_link_survives_a_relaunch_and_is_found_both_ways() {
         db.change_request_link("/work/widgets-feat").expect("read"),
         None
     );
+}
+
+#[test]
+fn a_projects_handoff_choice_survives_a_relaunch_and_is_replaced_whole() {
+    let dir = TempDir::new();
+    let path = dir.db_path("app");
+    let choice = |project: &str, agent: &str, surface: &str| HandoffChoiceRecord {
+        project_id: project.into(),
+        agent: agent.into(),
+        surface: surface.into(),
+    };
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        assert_eq!(db.handoff_choice("p1").expect("read"), None);
+        db.save_handoff_choice(&choice("p1", "codex", "chat")).expect("save");
+        db.save_handoff_choice(&choice("p1", "", "terminal")).expect("replace");
+    }
+    let db = AppDatabase::open(&path).expect("reopen");
+    assert_eq!(db.handoff_choice("p1").expect("read"), Some(choice("p1", "", "terminal")));
+    assert_eq!(db.handoff_choice("p2").expect("read"), None);
 }
