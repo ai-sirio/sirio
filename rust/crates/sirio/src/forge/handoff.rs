@@ -92,6 +92,9 @@ impl ForgeHub {
 
         let checkout = self.checkout(request).map_err(HandoffFailure::plain)?;
         let note = worktree_note(&checkout, ask.purpose)?;
+        let nonce = new_nonce().map_err(|error| {
+            HandoffFailure::plain(format!("making the context file's nonce failed: {error}"))
+        })?;
 
         let flavor = match reference.forge {
             Forge::GitHub => LogFlavor::GitHub,
@@ -105,6 +108,7 @@ impl ForgeHub {
             label: &label,
             push,
             instructions: &ask.instructions,
+            nonce: &nonce,
             worktree_note: note,
             flavor,
         });
@@ -125,6 +129,28 @@ impl ForgeHub {
 
         let prompt = context::launch_prompt(&relative, &label);
         Ok(HandoffDone { checkout, relative, prompt, note })
+    }
+}
+
+/// A new nonce for one file's untrusted blocks: 16 lowercase hex digits from
+/// the operating system's random source. A forge cannot know it, so it cannot
+/// write a block end that the file counts.
+fn new_nonce() -> Result<String, getrandom::Error> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_nonce;
+    use sirio_ui::handoff::context::is_nonce;
+
+    #[test]
+    fn a_nonce_is_sixteen_lowercase_hex_digits_and_differs_per_file() {
+        let (first, second) = (new_nonce().unwrap(), new_nonce().unwrap());
+        assert!(is_nonce(&first) && is_nonce(&second), "{first} {second}");
+        assert_ne!(first, second);
     }
 }
 

@@ -1007,7 +1007,8 @@ def classify(lines):
     states, inside = [], None
     for line in lines:
         if inside is None:
-            opening = re.match(r"^(`{4,})untrusted\b", line)
+            # The info string opens with the file's nonce: 16 lowercase hex digits.
+            opening = re.match(r'^(`{4,})untrusted id="[0-9a-f]{16}" source=', line)
             if opening:
                 inside = len(opening.group(1))
                 states.append("fence")
