@@ -208,6 +208,15 @@ fn run(args: &Args) -> Result<(), Failure> {
                 None => println!("BRANCH none"),
             }
         }
+        "summary" => {
+            let summary = client.summary(number(args)?)?;
+            println!(
+                "SUMMARY {} {} branch={}",
+                summary.reference.label(),
+                state_word(summary.state),
+                summary.source_branch
+            );
+        }
         "header" => {
             let header = client.header(number(args)?)?;
             println!(
@@ -227,6 +236,19 @@ fn run(args: &Args) -> Result<(), Failure> {
                     &revisions.head_sha[..7]
                 ),
                 None => println!("REVISIONS none"),
+            }
+            match &header.head {
+                Some(head) => println!(
+                    "HEAD owner={} project={} cross={} branch={} push={} http={} ssh={}",
+                    head.owner,
+                    head.project,
+                    yes_no(head.cross_repository),
+                    yes_no(head.branch_exists),
+                    yes_no(head.can_push),
+                    head.http_url,
+                    head.ssh_url,
+                ),
+                None => println!("HEAD none"),
             }
             match &header.draft {
                 Some(draft) => println!("DRAFT {} {}", draft.id.as_deref().unwrap_or("-"), draft.comments),

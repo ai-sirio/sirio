@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CLOSED_CHAT_LIMIT,
-    CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChatEntry, ChatPermissionOption,
+    CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChangeRequestLinkRecord, ChatEntry,
+    ChatPermissionOption,
     ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, SidebarView, TabRecord,
     TabStateRecord, WorktreeRecord, migrate_up_to,
@@ -2280,4 +2281,85 @@ fn the_sidebar_view_round_trips_and_defaults_to_projects() {
     assert_eq!(db.sidebar_view().expect("default"), SidebarView::Projects);
     db.set_sidebar_view(SidebarView::Sessions).expect("save");
     assert_eq!(db.sidebar_view().expect("load"), SidebarView::Sessions);
+}
+
+#[test]
+fn a_change_request_link_survives_a_relaunch_and_is_found_both_ways() {
+    let dir = TempDir::new();
+    let path = dir.db_path("app");
+    let link = |path: &str, host: &str, project: &str, number: u64| ChangeRequestLinkRecord {
+        path: path.into(),
+        forge: "github".into(),
+        host: host.into(),
+        project: project.into(),
+        number,
+        branch: "feat".into(),
+    };
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_change_request_link(&link(
+            "/work/widgets-feat",
+            "github.example",
+            "acme/widgets",
+            101,
+        ))
+        .expect("save");
+        // Saving again for the same worktree replaces the link.
+        db.save_change_request_link(&ChangeRequestLinkRecord {
+            branch: "alice/feat".into(),
+            ..link("/work/widgets-feat", "github.example", "acme/widgets", 102)
+        })
+        .expect("replace");
+        // Same number, different host; same number and host, different project.
+        db.save_change_request_link(&link(
+            "/work/other-host",
+            "other.example",
+            "acme/widgets",
+            102,
+        ))
+        .expect("other host");
+        db.save_change_request_link(&link(
+            "/work/other-project",
+            "github.example",
+            "acme/gadgets",
+            102,
+        ))
+        .expect("other project");
+    }
+    let db = AppDatabase::open(&path).expect("reopen");
+    assert_eq!(
+        db.change_request_link("/work/widgets-feat")
+            .expect("read")
+            .expect("present"),
+        ChangeRequestLinkRecord {
+            branch: "alice/feat".into(),
+            ..link("/work/widgets-feat", "github.example", "acme/widgets", 102)
+        }
+    );
+    assert_eq!(
+        db.change_request_links_to("github", "github.example", "acme/widgets", 102)
+            .expect("lookup"),
+        vec!["/work/widgets-feat".to_string()]
+    );
+    assert_eq!(
+        db.change_request_links_to("github", "other.example", "acme/widgets", 102)
+            .expect("lookup other host"),
+        vec!["/work/other-host".to_string()]
+    );
+    assert_eq!(
+        db.change_request_links_to("github", "github.example", "acme/gadgets", 102)
+            .expect("lookup other project"),
+        vec!["/work/other-project".to_string()]
+    );
+    assert!(
+        db.change_request_links_to("github", "github.example", "acme/widgets", 101)
+            .expect("lookup")
+            .is_empty()
+    );
+    db.delete_change_request_link("/work/widgets-feat")
+        .expect("delete");
+    assert_eq!(
+        db.change_request_link("/work/widgets-feat").expect("read"),
+        None
+    );
 }

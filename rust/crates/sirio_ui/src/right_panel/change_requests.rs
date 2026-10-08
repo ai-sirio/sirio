@@ -39,6 +39,7 @@ const DEFAULT_PAUSE_SECS: i64 = 60;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeRequestListEvent {
     Open { reference: ChangeRef, title: String },
+    OpenInWorktree { reference: ChangeRef, title: String },
 }
 
 /// The filter chosen last, kept for the session like `PanelView`: the
@@ -112,6 +113,9 @@ pub(crate) struct ChangeRequestList {
     /// The branch the card is about. `connect` reads it once and the panel
     /// stays open across `git switch`, so every card load reads it again.
     pub(crate) card_branch: Option<String>,
+    /// The change request this worktree was checked out from; the card reads
+    /// it first. Set by every card load.
+    pub(crate) linked: Option<ChangeRef>,
     to_review: Option<u32>,
     /// A rate limit's reset: no request before it (spec §9).
     paused_until: Option<i64>,
@@ -146,6 +150,7 @@ impl ChangeRequestList {
             list_error: None,
             card: Card::Hidden,
             card_branch: None,
+            linked: None,
             to_review: None,
             paused_until: None,
             search: None,
@@ -410,24 +415,53 @@ impl ChangeRequestList {
         }
         let client = ready.client;
         let owner = ready.source_owner;
+        let linked = ready.linked;
+        self.linked = linked.clone();
         let worktree = self.worktree.clone();
         let generation = self.generation;
         self.card_task = Some(cx.spawn(async move |this, cx| {
             // The branch is read here, not taken from `ready`: `connect`
             // read it once, and the worktree may have switched since.
-            let mut result = cx
+            let (mut result, mut linked_error) = cx
                 .background_spawn(async move {
-                    let Some(branch) = source.current_branch(&worktree) else {
-                        return Ok(None);
+                    let branch = source.current_branch(&worktree);
+                    // A link is read by number first. If that fails, the
+                    // branch lookup below decides, as it always did; the
+                    // link's error still reaches the rate-limit pause.
+                    let linked_result = linked.as_ref().map(|reference| client.summary(reference.number));
+                    let mut linked_error = None;
+                    match linked_result {
+                        Some(Ok(summary)) => {
+                            let create_url = branch
+                                .as_deref()
+                                .map(|branch| client.creation_url(branch))
+                                .unwrap_or_default();
+                            return (Ok(Some((Some(summary), create_url, branch))), None);
+                        }
+                        Some(Err(error)) => linked_error = Some(error),
+                        None => {}
+                    }
+                    let Some(branch) = branch else {
+                        // A detached HEAD has no branch to look up: only a
+                        // link can have a card, and its failure is reported.
+                        let result = match linked_error {
+                            Some(error) => Err(error),
+                            None => Ok(None),
+                        };
+                        return (result, None);
                     };
-                    client
+                    let result = client
                         .for_branch(&branch, owner.as_deref())
-                        .map(|found| Some((found, client.creation_url(&branch), branch)))
+                        .map(|found| Some((found, client.creation_url(&branch), Some(branch))));
+                    (result, linked_error)
                 })
                 .await;
             let _ = this.update(cx, |list, cx| {
                 if list.generation != generation {
                     return;
+                }
+                if let Some(error) = &mut linked_error {
+                    list.note_rate_limited(error, cx);
                 }
                 if let Err(error) = &mut result {
                     list.note_rate_limited(error, cx);
@@ -438,10 +472,13 @@ impl ChangeRequestList {
                         Card::Hidden
                     }
                     Ok(Some((found, create_url, branch))) => {
-                        list.card_branch = Some(branch.clone());
-                        match found {
-                            Some(found) => Card::Found(found),
-                            None => Card::Missing { branch, create_url },
+                        list.card_branch = branch.clone();
+                        match (found, branch) {
+                            (Some(found), _) => Card::Found(found),
+                            (None, Some(branch)) => Card::Missing { branch, create_url },
+                            // Only a link is found without a branch, so a
+                            // branchless result is always a summary.
+                            (None, None) => Card::Hidden,
                         }
                     }
                     Err(error) => Card::Failed(error),
@@ -715,6 +752,12 @@ impl ChangeRequestList {
             ),
             ("card".to_string(), card),
             (
+                "linked".to_string(),
+                self.linked
+                    .as_ref()
+                    .map_or("-".to_string(), |reference| reference.label()),
+            ),
+            (
                 "toReview".to_string(),
                 self.to_review
                     .map_or("-".to_string(), |count| count.to_string()),
@@ -922,7 +965,11 @@ impl ChangeRequestList {
         theme: &Theme,
         entity: &Entity<Self>,
     ) -> Option<AnyElement> {
-        let branch = self.card_branch.clone()?;
+        let branch = self.card_branch.clone();
+        // A detached HEAD has no branch; only a linked change request has a card there.
+        if branch.is_none() && self.linked.is_none() {
+            return None;
+        }
         let noun = ready.client.forge().change_noun();
         let body: AnyElement = match &self.card {
             Card::Found(found) => div()
@@ -994,7 +1041,10 @@ impl ChangeRequestList {
                         .text_size(theme.typography.caption2)
                         .text_color(theme.ely.fg_subtle)
                         .child(EIcon::new(IconName::GitBranch).size(EIconSize::Xs).color(theme.ely.fg_subtle))
-                        .child(format!("THIS WORKTREE · {branch}")),
+                        .child(match &branch {
+                            Some(branch) => format!("THIS WORKTREE · {branch}"),
+                            None => "THIS WORKTREE".to_string(),
+                        }),
                 )
                 .child(body)
                 .into_any_element(),
@@ -1033,7 +1083,7 @@ impl ChangeRequestList {
             )
     }
 
-    fn row_menu(row: &ChangeSummary) -> Menu {
+    fn row_menu(row: &ChangeSummary, entity: &Entity<Self>) -> Menu {
         let (open, copy) = (row.web_url.clone(), row.web_url.clone());
         Menu::new()
             .item(
@@ -1048,6 +1098,22 @@ impl ChangeRequestList {
                     .selectors("change-request-menu-copy-link", None)
                     .on_click(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
             )
+            .item({
+                let entity = entity.clone();
+                let reference = row.reference.clone();
+                let title = row.title.clone();
+                MenuItem::new("Open in a worktree")
+                    .icon(IconName::GitBranch)
+                    .selectors("change-request-menu-open-worktree", None)
+                    .on_click(move |_, cx| {
+                        entity.update(cx, |_, cx| {
+                            cx.emit(ChangeRequestListEvent::OpenInWorktree {
+                                reference: reference.clone(),
+                                title: title.clone(),
+                            })
+                        })
+                    })
+            })
     }
 
     fn render_row(
@@ -1124,7 +1190,7 @@ impl ChangeRequestList {
                         )
                     }),
             );
-        ContextMenu::new(("change-request-menu-host", index), Self::row_menu(row)).child(line)
+        ContextMenu::new(("change-request-menu-host", index), Self::row_menu(row, entity)).child(line)
     }
 
     fn render_rows(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {

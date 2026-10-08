@@ -225,6 +225,16 @@ fn client_key(target: &ForgeTarget, means: Means) -> ClientKey {
     )
 }
 
+mod checkout;
+
+pub(crate) use checkout::{CheckoutDone, CheckoutRequest};
+
+/// The hub a workspace runs a checkout on. `set_source` keeps only the
+/// trait object, and a checkout needs the concrete hub's git steps.
+pub(crate) struct HubGlobal(pub(crate) Arc<ForgeHub>);
+
+impl gpui::Global for HubGlobal {}
+
 pub(crate) struct ForgeHub {
     settings: SessionStore,
     credentials: Option<CredentialStore>,
@@ -343,12 +353,27 @@ impl ChangeRequestSource for ForgeHub {
             Resolution::Ready { forge, means } => {
                 let origin = origin.as_deref().and_then(parse_remote_url);
                 let source_owner = source_owner(forge, &target, origin.as_ref());
+                // A link lasts only while the worktree is on the branch it was
+                // made for: a worktree switched to other work is no longer that
+                // change request's checkout.
+                let branch = self.current_branch(worktree);
+                let linked = self
+                    .settings
+                    .change_request_link(worktree)
+                    .filter(|(reference, linked_branch)| {
+                        reference.forge == forge
+                            && reference.host == target.host
+                            && reference.project == target.project
+                            && branch.as_deref() == Some(linked_branch.as_str())
+                    })
+                    .map(|(reference, _)| reference);
                 match self.client(forge, means, target) {
                     Ok(client) => Connection::Ready(ReadyConnection {
                         client,
                         means,
-                        branch: self.current_branch(worktree),
+                        branch,
                         source_owner,
+                        linked,
                     }),
                     Err(connection) => connection,
                 }

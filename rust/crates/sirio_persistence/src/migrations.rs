@@ -508,6 +508,27 @@ fn migrate_v21(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v22 — the worktree a change request was checked out into (change requests
+/// C1). `path` is the worktree's exact path, the key a tab is found by; the
+/// reference is the forge's identity of the change request; `branch` is the
+/// local branch it was made for, so a link expires when the worktree moves to
+/// another branch. The index serves the reverse lookup: every worktree linked
+/// to one change request.
+fn migrate_v22(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE change_request_link (
+             path TEXT PRIMARY KEY NOT NULL,
+             forge TEXT NOT NULL,
+             host TEXT NOT NULL,
+             project TEXT NOT NULL,
+             number INTEGER NOT NULL,
+             branch TEXT NOT NULL
+         );
+         CREATE INDEX change_request_link_by_reference
+             ON change_request_link (forge, host, project, number);",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -532,6 +553,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v19,
     migrate_v20,
     migrate_v21,
+    migrate_v22,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already

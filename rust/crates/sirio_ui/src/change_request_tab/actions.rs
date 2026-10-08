@@ -102,6 +102,7 @@ impl ActionsState {
 enum HeaderAction {
     Edit,
     Do(Action),
+    OpenInWorktree,
 }
 
 /// What the user reads when a write fails: the forge's own reason where it
@@ -341,6 +342,12 @@ impl ChangeRequestTab {
         let caps = &header.capabilities;
         let state = header.summary.state;
         let mut items: Vec<(&'static str, IconName, &'static str, HeaderAction)> = Vec::new();
+        items.push((
+            "change-request-open-worktree",
+            IconName::GitBranch,
+            "Open in a worktree",
+            HeaderAction::OpenInWorktree,
+        ));
         if caps.can_edit {
             items.push((
                 "change-request-edit",
@@ -387,6 +394,7 @@ impl ChangeRequestTab {
             return None;
         }
         let enabled = !self.action_busy() && self.actions.edit.is_none();
+        let checking_out = self.checkout == CheckoutState::Running;
         Some(
             div()
                 .flex()
@@ -394,11 +402,18 @@ impl ChangeRequestTab {
                 .gap(px(4.0))
                 .children(items.into_iter().map(|(id, icon, tooltip, what)| {
                     let entity = entity.clone();
+                    let enabled = match &what {
+                        HeaderAction::OpenInWorktree => enabled && !checking_out,
+                        HeaderAction::Edit | HeaderAction::Do(_) => enabled,
+                    };
                     crate::ely_ui::icon_button(id, icon, tooltip, enabled, move |window, cx| {
                         entity.update(cx, |tab, cx| match &what {
                             HeaderAction::Edit => tab.start_edit(window, cx),
                             HeaderAction::Do(action) => {
                                 let _ = tab.perform(action.clone(), cx);
+                            }
+                            HeaderAction::OpenInWorktree => {
+                                let _ = tab.open_in_worktree(cx);
                             }
                         })
                     })
@@ -430,6 +445,23 @@ impl ChangeRequestTab {
             div()
                 .id("change-request-action-status")
                 .debug_selector(|| "change-request-action-status".into())
+                .child(crate::ely_ui::message(severity, text, theme))
+                .into_any_element(),
+        )
+    }
+
+    /// One line under the header: the checkout running, or what it made or why it failed.
+    pub(crate) fn render_checkout_status(&self, theme: &Theme) -> Option<AnyElement> {
+        let (severity, text) = match &self.checkout {
+            CheckoutState::Idle => return None,
+            CheckoutState::Running => (Severity::Info, "Opening in a worktree…".to_string()),
+            CheckoutState::Done(detail) => (Severity::Info, detail.clone()),
+            CheckoutState::Failed(detail) => (Severity::Danger, detail.clone()),
+        };
+        Some(
+            div()
+                .id("change-request-checkout-status")
+                .debug_selector(|| "change-request-checkout-status".into())
                 .child(crate::ely_ui::message(severity, text, theme))
                 .into_any_element(),
         )

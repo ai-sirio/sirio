@@ -67,7 +67,7 @@ use sirio_ui::{
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
-use sirio_ui::change_request_tab::{ChangeRequestTab, ChangeRequestTabEvent, InnerTab};
+use sirio_ui::change_request_tab::{ChangeRequestTab, ChangeRequestTabEvent, CheckoutState, InnerTab};
 use sirio_ui::ci_log_tab::{CiLogTab, CiLogTabEvent};
 use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
@@ -1103,6 +1103,10 @@ enum ControlAction {
     ReadChangeRequest {
         reply: ControlReply,
     },
+    /// Checks the active change request out into a worktree. Every build.
+    CheckoutChangeRequest {
+        reply: ControlReply,
+    },
     ChangeRequestThread {
         op: ThreadCommand,
         reply: ControlReply,
@@ -2117,6 +2121,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.change_request.open",
                     "surface.change_request.tab",
                     "surface.change_request.read",
+                    "surface.change_request.checkout",
                     "surface.ci_log.open",
                     "surface.ci_log.read",
                     "surface.ci_log.view",
@@ -2433,6 +2438,9 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.change_request.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadChangeRequest { reply })
+            }
+            "surface.change_request.checkout" => {
+                self.queue_action(request, |reply| ControlAction::CheckoutChangeRequest { reply })
             }
             "surface.change_request.reveal" => {
                 let Some(path) = request.params.get("path").cloned() else {
@@ -5357,6 +5365,11 @@ impl SirioWorkspace {
                                 ControlAction::ReadChangeRequest { reply } => {
                                     let _ = reply.send(workspace.control_read_change_request(cx));
                                 }
+                                ControlAction::CheckoutChangeRequest { reply } => {
+                                    let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
+                                        tab.open_in_worktree(cx)
+                                    }));
+                                }
                                 ControlAction::RevealChangeRequestFile { path, line, reply } => {
                                     let _ = reply.send(workspace.control_change_request(window, cx, |tab, _window, cx| {
                                         tab.reveal(PathBuf::from(&path), line, cx);
@@ -6910,6 +6923,16 @@ impl SirioWorkspace {
                 RightPanelActionEvent::OpenChangeRequest { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
+                RightPanelActionEvent::OpenChangeRequestInWorktree { reference, title } => {
+                    workspace.add_change_request_tab(reference.clone(), title.clone(), cx);
+                    // `add_change_request_tab` selects the tab it opens or
+                    // finds; its own event then starts the run.
+                    if let Some(tab) = workspace.active_change_request() {
+                        tab.update(cx, |tab, cx| {
+                            let _ = tab.open_in_worktree(cx);
+                        });
+                    }
+                }
             },
         )
         .detach();
@@ -8294,6 +8317,18 @@ impl SirioWorkspace {
                 let removed_current = paths_name_the_same_document(&self.working_directory, path);
                 let selector = path.to_string_lossy().into_owned();
                 let _ = self.close_workspace(&selector, cx);
+                // The link is read before it is dropped: a change request whose
+                // last linked worktree this was loses the fork remote Sirio
+                // made for it, with that remote's tracking refs.
+                let link = self.session.change_request_link(path);
+                self.session.drop_change_request_link(path);
+                if let Some((reference, branch)) = link
+                    && !self.session.change_request_remains_linked(&reference)
+                    && let Some(project) = self.project_catalog.projects().iter().find(|project| project.id == *project_id)
+                    && let Err(error) = sirio_git::remove_fork_remotes(&project.root_path, reference.number, &branch)
+                {
+                    eprintln!("[sirio] failed to remove the fork remotes of {}: {error}", reference.label());
+                }
                 self.refresh_catalog_project(project_id, Some(path), cx);
 
                 if removed_current {
@@ -13544,6 +13579,87 @@ impl SirioWorkspace {
 
     /// Opens `reference` in the Secondary half, or focuses the tab that
     /// already shows it: one tab per change request per worktree (spec §8).
+    /// Runs the checkout of `tab`'s change request off the GPUI thread; the
+    /// tab reads Running until `finish_change_request_checkout` reports.
+    fn open_change_request_in_worktree(&mut self, tab: Entity<ChangeRequestTab>, cx: &mut Context<Self>) {
+        let reference = tab.read(cx).reference().clone();
+        let project = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.worktrees.iter().any(|worktree| worktree.path == self.working_directory))
+            .cloned();
+        let Some(project) = project else {
+            tab.update(cx, |tab, cx| {
+                tab.set_checkout(CheckoutState::Failed("this worktree is not part of a project".into()), cx)
+            });
+            return;
+        };
+        let Some(hub) = cx.try_global::<forge::HubGlobal>().map(|hub| hub.0.clone()) else {
+            tab.update(cx, |tab, cx| {
+                tab.set_checkout(CheckoutState::Failed("Sirio is not connected to a forge".into()), cx)
+            });
+            return;
+        };
+        let request = forge::CheckoutRequest {
+            reference: reference.clone(),
+            repo: project.root_path.clone(),
+            project_name: project.name.clone(),
+            location_override: self
+                .project_catalog
+                .project_settings(&project.id)
+                .worktree_location_override
+                .map(PathBuf::from),
+        };
+        let project_id = project.id.clone();
+        let task = cx.background_executor().spawn(async move { hub.checkout(&request) });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.finish_change_request_checkout(tab, reference, project_id, outcome, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn finish_change_request_checkout(
+        &mut self,
+        tab: Entity<ChangeRequestTab>,
+        reference: sirio_forge::ChangeRef,
+        project_id: String,
+        outcome: Result<forge::CheckoutDone, String>,
+        cx: &mut Context<Self>,
+    ) {
+        // Before the outcome is read: a step after `git worktree add` can
+        // fail with the worktree already on disk, and it must show up.
+        self.refresh_catalog_project(&project_id, None, cx);
+        let done = match outcome {
+            Err(reason) => {
+                tab.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Failed(reason), cx));
+                return;
+            }
+            Ok(done) => done,
+        };
+        // The catalog's own spelling of the path (the sidebar's and
+        // `working_directory`'s), which is what the link is looked up by.
+        let path = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.worktrees.iter().find(|worktree| worktree.branch == done.branch))
+            .map_or_else(|| done.path.clone(), |worktree| worktree.path.clone());
+        self.session.save_change_request_link(&path, &reference, &done.branch);
+        self.select_worktree_from_sidebar(path, cx);
+        self.add_change_request_tab(reference.clone(), done.title.clone(), cx);
+        // The tab in the selected worktree reports the same outcome.
+        // `add_change_request_tab` selects the tab it opens or finds.
+        if let Some(opened) = self.active_change_request() {
+            opened.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Done(done.detail.clone()), cx));
+        }
+        tab.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Done(done.detail.clone()), cx));
+    }
+
     fn add_change_request_tab(&mut self, reference: sirio_forge::ChangeRef, title: String, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| {
             let mut shows_it = false;
@@ -13716,6 +13832,9 @@ impl SirioWorkspace {
                         workspace
                             .right_panel
                             .update(cx, |panel, cx| panel.refresh_change_requests(cx));
+                    }
+                    ChangeRequestTabEvent::OpenInWorktree => {
+                        workspace.open_change_request_in_worktree(emitter.clone(), cx)
                     }
                 }
             },
@@ -22604,6 +22723,7 @@ fn main() {
             session_store_for_settings.clone(),
             sirio_usage::CredentialStore::from_env().ok(),
         ));
+        cx.set_global(forge::HubGlobal(forge_hub.clone()));
         sirio_ui::forge_source::set_source(forge_hub, cx);
         let session_store_for_update_enabled = session_store.clone();
         let session_store_for_browser_revoke = session_store.clone();
@@ -35403,6 +35523,80 @@ done
     }
 
     #[gpui::test]
+    async fn removing_a_change_request_worktree_removes_its_fork_remote_only(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("sidebar-remove-fork-remote");
+        let branch = "alice/feat";
+        let removed_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-sidebar-remove-fork-remote-worktree");
+        let _ = std::fs::remove_dir_all(&removed_path);
+        sirio_git::create_worktree(&repo, branch, &removed_path, None)
+            .expect("create the fixture worktree");
+        // The fork remote of this change request, and the one of another change
+        // request from the same owner: removing the first worktree leaves the second.
+        git_test(&repo, &["remote", "add", "sirio-alice-101", "https://forge.example/alice/widgets.git"]);
+        git_test(&repo, &["config", "--add", "remote.sirio-alice-101.push", "refs/heads/alice/feat:refs/heads/feat"]);
+        git_test(&repo, &["remote", "add", "sirio-alice-102", "https://forge.example/alice/widgets.git"]);
+        git_test(&repo, &["config", "--add", "remote.sirio-alice-102.push", "refs/heads/alice/fix:refs/heads/fix"]);
+        // A remote a user named like a Sirio one, for the same number, that Sirio did not make.
+        git_test(&repo, &["remote", "add", "sirio-x-101", "https://forge.example/x/widgets.git"]);
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: branch.into(),
+                        path: removed_path.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+        let reference = sirio_forge::ChangeRef {
+            forge: sirio_forge::Forge::GitHub,
+            host: "forge.example".into(),
+            project: "acme/widgets".into(),
+            number: 101,
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.session.save_change_request_link(&removed_path, &reference, branch);
+            workspace
+                .select_worktree(removed_path.clone(), None, cx)
+                .expect("select the worktree before removing it");
+            git_test(
+                &repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    removed_path.to_str().expect("fixture path is utf-8"),
+                ],
+            );
+            workspace.handle_sidebar_event(
+                &SidebarEvent::WorktreeRemoved {
+                    project_id: "worktree-state-project".into(),
+                    path: removed_path.clone(),
+                },
+                cx,
+            );
+        });
+
+        let names: Vec<String> = sirio_git::list_remotes(&repo).into_iter().map(|(name, _)| name).collect();
+        assert!(!names.iter().any(|name| name == "sirio-alice-101"), "{names:?}");
+        assert!(names.iter().any(|name| name == "sirio-alice-102"), "{names:?}");
+        assert!(names.iter().any(|name| name == "sirio-x-101"), "{names:?}");
+    }
+
+    #[gpui::test]
     async fn sidebar_remove_worktree_refreshes_catalog_and_control_state(cx: &mut TestAppContext) {
         let repo = committed_test_repo("sidebar-remove-state");
         let branch = "sidebar-removed";
@@ -37284,6 +37478,7 @@ done
             | ControlAction::OpenChangeRequest { reply, .. }
             | ControlAction::SelectChangeRequestTab { reply, .. }
             | ControlAction::ReadChangeRequest { reply }
+            | ControlAction::CheckoutChangeRequest { reply }
             | ControlAction::CiLogOpen { reply, .. }
             | ControlAction::CiLogRead { reply }
             | ControlAction::CiLogView { reply, .. }
@@ -37420,6 +37615,7 @@ done
             "surface.change_request.open" => request::change_request_open("1"),
             "surface.change_request.tab" => request::change_request_tab("checks"),
             "surface.change_request.read" => request::change_request_read(),
+            "surface.change_request.checkout" => request::change_request_checkout(),
             "surface.ci_log.open" => request::ci_log_open("2"),
             "surface.ci_log.read" => request::ci_log_read(),
             "surface.ci_log.view" => request::ci_log_view(None, true, false, None),

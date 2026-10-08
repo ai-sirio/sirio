@@ -1,0 +1,5 @@
+query MergeRequestByNumber($fullPath: ID!, $iid: String!) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) { ...MergeRequestSummary }
+  }
+}

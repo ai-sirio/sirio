@@ -38,6 +38,9 @@ pub struct ReadyConnection {
     /// For `ForgeClient::for_branch`: set only when the list reads another
     /// project (`upstream`) than the user's `origin` fork (spec §6.5).
     pub source_owner: Option<String>,
+    /// The change request this worktree was checked out from (spec C §4);
+    /// the card reads it by number before trying the branch name.
+    pub linked: Option<ChangeRef>,
 }
 
 /// Whether the token Sirio holds for a host may write, as far as the forge
@@ -450,6 +453,7 @@ pub(crate) mod testing {
                 means: Means::Token,
                 branch: branch.map(str::to_string),
                 source_owner: None,
+                linked: None,
             }))
         }
 

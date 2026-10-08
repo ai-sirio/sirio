@@ -120,6 +120,8 @@ fn exercise(client: &ForgeClient) {
         .expect("for_branch");
     let header = client.header(merged.reference.number).expect("header");
     assert_eq!(header.summary.reference, merged.reference);
+    let summary = client.summary(merged.reference.number).expect("summary");
+    assert_eq!(summary.reference, merged.reference);
     assert!(!header.summary.title.is_empty());
     client.commits(merged.reference.number).expect("commits");
     client.checks(merged.reference.number).expect("checks");

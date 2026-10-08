@@ -1716,6 +1716,21 @@ struct SessionInner {
     interval: Duration,
 }
 
+fn forge_word(forge: sirio_forge::Forge) -> &'static str {
+    match forge {
+        sirio_forge::Forge::GitHub => "github",
+        sirio_forge::Forge::GitLab => "gitlab",
+    }
+}
+
+fn forge_from_word(word: &str) -> Option<sirio_forge::Forge> {
+    match word {
+        "github" => Some(sirio_forge::Forge::GitHub),
+        "gitlab" => Some(sirio_forge::Forge::GitLab),
+        _ => None,
+    }
+}
+
 impl SessionStore {
     /// Opens (or fails into fallback mode) the database at `path` and spawns
     /// the flusher thread. The database file's parent directory is created.
@@ -1962,6 +1977,100 @@ impl SessionStore {
             Err(error) => {
                 eprintln!("[session] failed to read the worktree row for {path}: {error}");
             }
+        }
+    }
+
+    /// The change request this worktree was checked out from (change
+    /// requests C1), with the local branch the link was made for; `None` for
+    /// no link, a fallback database or a read error.
+    pub fn change_request_link(&self, worktree: &Path) -> Option<(sirio_forge::ChangeRef, String)> {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let db = db.as_ref()?;
+        match db.change_request_link(&worktree.to_string_lossy()) {
+            Ok(Some(link)) => Some((
+                sirio_forge::ChangeRef {
+                    forge: forge_from_word(&link.forge)?,
+                    host: link.host,
+                    project: link.project,
+                    number: link.number,
+                },
+                link.branch,
+            )),
+            Ok(None) => None,
+            Err(error) => {
+                eprintln!("[session] failed to read a change request link: {error}");
+                None
+            }
+        }
+    }
+
+    /// Whether any worktree is still linked to this change request. A read
+    /// error answers yes: when it is unknown, nothing is removed.
+    pub fn change_request_remains_linked(&self, reference: &sirio_forge::ChangeRef) -> bool {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return true;
+        };
+        match db.change_request_links_to(
+            forge_word(reference.forge),
+            &reference.host,
+            &reference.project,
+            reference.number,
+        ) {
+            Ok(paths) => !paths.is_empty(),
+            Err(error) => {
+                eprintln!("[session] failed to read the links of {}: {error}", reference.label());
+                true
+            }
+        }
+    }
+
+    /// Every worktree linked to this change request.
+    pub fn linked_worktrees(&self, reference: &sirio_forge::ChangeRef) -> Vec<PathBuf> {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return Vec::new();
+        };
+        match db.change_request_links_to(
+            forge_word(reference.forge),
+            &reference.host,
+            &reference.project,
+            reference.number,
+        ) {
+            Ok(paths) => paths.into_iter().map(PathBuf::from).collect(),
+            Err(error) => {
+                eprintln!("[session] failed to read the links of {}: {error}", reference.label());
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn save_change_request_link(&self, worktree: &Path, reference: &sirio_forge::ChangeRef, branch: &str) {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        let link = sirio_persistence::ChangeRequestLinkRecord {
+            path: worktree.to_string_lossy().into_owned(),
+            forge: forge_word(reference.forge).to_string(),
+            host: reference.host.clone(),
+            project: reference.project.clone(),
+            number: reference.number,
+            branch: branch.to_string(),
+        };
+        if let Err(error) = db.save_change_request_link(&link) {
+            eprintln!("[session] failed to persist the link of {}: {error}", link.path);
+        }
+    }
+
+    pub fn drop_change_request_link(&self, worktree: &Path) {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        let path = worktree.to_string_lossy();
+        if let Err(error) = db.delete_change_request_link(&path) {
+            eprintln!("[session] failed to drop the link of {path}: {error}");
         }
     }
 

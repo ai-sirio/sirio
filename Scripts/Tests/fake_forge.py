@@ -14,7 +14,8 @@ It answers only what sirio_forge and the two CLIs ask:
   operationName, from <fixtures>/<flavour>/, where <fixtures> is --fixtures
   (default Scripts/Tests/forge-fixtures; test-forge-diff-e2e.sh passes a copy
   whose commit ids name a real repository's commits). A request with
-  a non-empty `after*` variable gets `<Operation>.page2.json`; number 404
+  a non-empty `after*` variable gets `<Operation>.page2.json`; a `number` (or
+  GitLab `iid`) with a `<Operation>.n<number>.json` fixture gets that one; number 404
   (GitHub) or iid "404" (GitLab) gets `NotFound.json`.
 - GET / and /user (read by `gh auth status`), GET /api/v4/user (read by
   `glab auth status`), GET /api/v3/meta (the GitHub Enterprise probe, which
@@ -91,7 +92,8 @@ until the next `/__reset`.
 until a stage posts some.
 `POST /__ratelimit?seconds=N` rate limits every read with a reset N seconds
 ahead; `POST /__throttle` answers 429 with Retry-After and no reset until
-`/__reset`. That reset also clears both limits. `ChangeRequestSearch` keeps
+`/__reset`. That reset also clears both limits. `POST /__slowgraphql?seconds=N`
+answers every GraphQL request N seconds late (204), until `/__reset`. `ChangeRequestSearch` keeps
 only rows containing every free word of `q` (words without `:`).
 
 Both CLIs send request bodies with Transfer-Encoding: chunked (checked with gh
@@ -131,7 +133,7 @@ def load_fixtures(root):
 
 
 # Operations that have a baseline variant, and the fields those variants omit.
-BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestActionContext", "MergeRequestThreads"}
+BASELINE_OPERATIONS = {"MergeRequestList", "MergeRequestUnion", "MergeRequestForBranch", "MergeRequestHeader", "MergeRequestByNumber", "MergeRequestActionContext", "MergeRequestThreads"}
 NEWER_GITLAB_FIELDS = {"mergeRequestInteraction", "finished", "diffStatsSummary", "commitCount", "canApprove",
                        "canMerge", "detailedMergeStatus", "squashOnMerge", "squashReadOnly", "autoMergeEnabled",
                        "availableAutoMergeStrategies", "shouldRemoveSourceBranch", "truncatedDiffLines"}
@@ -266,6 +268,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # A GitLab trace answered this many seconds late, and how many traces
     # were ever being answered at once.
     slow_log = 0.0
+    graphql_delay = 0.0
     traces_at_once = 0
     traces_at_once_max = 0
     traces_lock = threading.Lock()
@@ -671,6 +674,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Every GitLab trace is answered N seconds late.
             Handler.slow_log = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "0"))
             return self.answer(200, {"slow_log": Handler.slow_log})
+        if path == "/__slowgraphql":
+            # Every GraphQL request is answered N seconds late, until /__reset.
+            Handler.graphql_delay = float(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)).get("seconds", "0"))
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if path == "/__throttle":
             # Every request answers 429 with no reset time, until /__reset.
             Handler.throttled = True
@@ -682,6 +692,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Handler.throttled = False
             Handler.expired = False
             Handler.slow_log = 0.0
+            Handler.graphql_delay = 0.0
             Handler.traces_at_once_max = 0
             Handler.drafts = []
             return self.answer(200, {"reset": True})
@@ -702,6 +713,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.flavor == "none" or path not in ("/graphql", "/api/graphql"):
             self.record("POST", path, None, None, None)
             return self.answer(404, {"message": "Not Found"})
+        time.sleep(Handler.graphql_delay)
         request = json.loads(raw or b"{}")
         operation = request.get("operationName") or ""
         query = request.get("query") or ""
@@ -721,6 +733,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name += ".page2"
         if variables.get("number") == 404 or variables.get("iid") == "404":
             name = "NotFound"
+        # A second change request is answered by its own fixture
+        # (`<Operation>.n<number>.json`); any other number gets the plain one.
+        number = variables.get("number", variables.get("iid"))
+        if name != "NotFound" and number is not None and f"{name}.n{number}" in self.fixture_files.get(self.flavor, {}):
+            name = f"{name}.n{number}"
         path = self.fixture_for(name)
         if path is None:
             return self.answer(500, {"message": f"fake forge has no fixture {self.flavor}/{name}.json"})
