@@ -12348,7 +12348,7 @@ impl SirioWorkspace {
         agent_icon: Option<Icon>,
         agent_id: Option<String>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Entity<TerminalView> {
         let working_directory = self.working_directory.clone();
         let terminal = cx.new(
             |cx| match TerminalView::with_shell(&working_directory, shell, cx) {
@@ -12364,7 +12364,8 @@ impl SirioWorkspace {
                 ),
             },
         );
-        self.insert_terminal_tab_with_agent(title, terminal, agent_icon, agent_id, cx);
+        self.insert_terminal_tab_with_agent(title, terminal.clone(), agent_icon, agent_id, cx);
+        terminal
     }
 
     fn insert_terminal_tab(
@@ -14094,13 +14095,16 @@ impl SirioWorkspace {
         }
         let command = adapter.command_with_prompt(&worktree, &pane_key, &sirioctl, prompt);
         let (program, args) = command_shell_invocation(&command);
-        self.add_terminal_tab_with_shell_and_agent(
+        let terminal = self.add_terminal_tab_with_shell_and_agent(
             adapter.display_name(),
             TerminalShell::WithArguments { program, args },
             Icon::for_agent_id(adapter.id()),
             Some(adapter.id().to_string()),
             cx,
         );
+        // The agent works whether or not its tab is drawn (a hidden window,
+        // another worktree), so it starts now rather than on first render.
+        terminal.update(cx, |terminal, cx| terminal.start(cx));
         warning
     }
 

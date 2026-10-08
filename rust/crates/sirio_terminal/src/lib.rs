@@ -3144,6 +3144,15 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Starts the process now, without waiting for the pane to be drawn. An
+    /// owner that needs the process working before the pane is shown (a change
+    /// request's hand-off agent) starts it here; every other pane still starts
+    /// on its first render.
+    pub fn start(&mut self, cx: &mut gpui::Context<Self>) {
+        self.ensure_started(cx);
+        cx.notify();
+    }
+
     /// F-TERM-PTY-07 (`TerminalSurfaceHost::relaunch`): tears down the live
     /// process (if any) and starts a fresh one in place, in the *same*
     /// `Entity<TerminalView>` and therefore the same pane/split -- the host
