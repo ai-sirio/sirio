@@ -6923,6 +6923,8 @@ impl SirioWorkspace {
                 RightPanelActionEvent::OpenChangeRequest { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
+                // Task 7: open the change request's tab and its hand-off dialog.
+                RightPanelActionEvent::HandOffChangeRequest { .. } => {}
                 RightPanelActionEvent::OpenChangeRequestInWorktree { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx);
                     // `add_change_request_tab` selects the tab it opens or
@@ -13836,6 +13838,8 @@ impl SirioWorkspace {
                     ChangeRequestTabEvent::OpenInWorktree => {
                         workspace.open_change_request_in_worktree(emitter.clone(), cx)
                     }
+                    // Task 7: answer the dialog's ask with `open_handoff`, and run `Handoff`.
+                    ChangeRequestTabEvent::HandoffAsked(_) | ChangeRequestTabEvent::Handoff(_) => {}
                 }
             },
         )

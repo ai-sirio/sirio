@@ -40,6 +40,7 @@ const DEFAULT_PAUSE_SECS: i64 = 60;
 pub(crate) enum ChangeRequestListEvent {
     Open { reference: ChangeRef, title: String },
     OpenInWorktree { reference: ChangeRef, title: String },
+    HandOff { reference: ChangeRef, title: String },
 }
 
 /// The filter chosen last, kept for the session like `PanelView`: the
@@ -1108,6 +1109,22 @@ impl ChangeRequestList {
                     .on_click(move |_, cx| {
                         entity.update(cx, |_, cx| {
                             cx.emit(ChangeRequestListEvent::OpenInWorktree {
+                                reference: reference.clone(),
+                                title: title.clone(),
+                            })
+                        })
+                    })
+            })
+            .item({
+                let entity = entity.clone();
+                let reference = row.reference.clone();
+                let title = row.title.clone();
+                MenuItem::new("Hand off to an agent…")
+                    .icon(IconName::Bot)
+                    .selectors("change-request-menu-handoff", None)
+                    .on_click(move |_, cx| {
+                        entity.update(cx, |_, cx| {
+                            cx.emit(ChangeRequestListEvent::HandOff {
                                 reference: reference.clone(),
                                 title: title.clone(),
                             })

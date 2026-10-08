@@ -103,6 +103,7 @@ enum HeaderAction {
     Edit,
     Do(Action),
     OpenInWorktree,
+    HandOff,
 }
 
 /// What the user reads when a write fails: the forge's own reason where it
@@ -348,6 +349,12 @@ impl ChangeRequestTab {
             "Open in a worktree",
             HeaderAction::OpenInWorktree,
         ));
+        items.push((
+            "change-request-handoff",
+            IconName::Bot,
+            "Hand off to an agent",
+            HeaderAction::HandOff,
+        ));
         if caps.can_edit {
             items.push((
                 "change-request-edit",
@@ -395,6 +402,7 @@ impl ChangeRequestTab {
         }
         let enabled = !self.action_busy() && self.actions.edit.is_none();
         let checking_out = self.checkout == CheckoutState::Running;
+        let handing_off = self.handoff == HandoffState::Running;
         Some(
             div()
                 .flex()
@@ -404,6 +412,7 @@ impl ChangeRequestTab {
                     let entity = entity.clone();
                     let enabled = match &what {
                         HeaderAction::OpenInWorktree => enabled && !checking_out,
+                        HeaderAction::HandOff => enabled && !checking_out && !handing_off,
                         HeaderAction::Edit | HeaderAction::Do(_) => enabled,
                     };
                     crate::ely_ui::icon_button(id, icon, tooltip, enabled, move |window, cx| {
@@ -415,6 +424,7 @@ impl ChangeRequestTab {
                             HeaderAction::OpenInWorktree => {
                                 let _ = tab.open_in_worktree(cx);
                             }
+                            HeaderAction::HandOff => tab.ask_handoff(Scope::Whole, cx),
                         })
                     })
                 }))
