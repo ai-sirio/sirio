@@ -210,10 +210,19 @@ proc_start_time() {
 }
 
 # sirio-host processes whose working directory is the root (a detached host
-# is started with the data root as its cwd). Linux only: macOS and Windows
-# have no /proc to ask, and callers rely on the log there.
+# is started with the data root as its cwd). Linux only reads the cwd: macOS
+# has no /proc to ask, and callers rely on the log there. Windows cannot ask a
+# process for its cwd either, so it counts every sirio-host: the cases run one
+# after another and each ends its hosts, so those are this case's.
 count_hosts_for_root() {
   local real d n=0
+  if [ "$OS" = windows ]; then
+    n="$(powershell.exe -NoProfile -NonInteractive -Command \
+      "(Get-Process -Name sirio-host -ErrorAction SilentlyContinue | Measure-Object).Count" \
+      2>/dev/null | tr -d '\r')"
+    echo "${n:-0}"
+    return
+  fi
   real="$(cd "$1" && pwd -P)"
   for d in /proc/[0-9]*; do
     [ -r "$d/comm" ] || continue
@@ -480,8 +489,13 @@ case_concurrent_start() {
   [ "$(count_event 1 start.ready)" = 1 ] || fail "expected exactly one start.ready, saw $(count_event 1 start.ready)"
   [ "$(state_pid 1)" = "$first" ] || fail "the state file names pid $(state_pid 1), not the host $first"
   # A start that lost the race may still be in its lock retry; it leaves by itself (exit 3).
-  if [ "$OS" = linux ]; then
-    wait_until 5 exactly_one_host_for_root "$ROOT" || fail "expected exactly one sirio-host process for the root, found $(count_hosts_for_root "$ROOT")"
+  # Each client spawned a host of its own before it connected, so every one of
+  # them exists already. On Windows, where creating a process is slow, a loser
+  # may be several hundred milliseconds from running at all: the case must not
+  # end -- shut the winner down and remove the root, which a host holds as its
+  # cwd, or take the lock the winner leaves -- until the losers have gone.
+  if [ "$OS" != macos ]; then
+    wait_until 10 exactly_one_host_for_root "$ROOT" || fail "expected exactly one sirio-host process for the root, found $(count_hosts_for_root "$ROOT")"
   fi
   NOTE="$(count_event 1 start.lost_lock) start(s) lost the lock"
   pass
