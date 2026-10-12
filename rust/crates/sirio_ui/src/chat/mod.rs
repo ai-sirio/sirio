@@ -2275,6 +2275,8 @@ impl Chat {
             TextField::new(cx)
                 .with_shape(bezel::ui::input::Shape::Grow { min: 3, max: 12 })
                 .with_key_context("ChatComposer")
+                // The composer's shell paints the fill; see `render_composer`.
+                .with_transparent_fill()
         });
         // Both content and caret changes notify, and the mention behind the
         // caret changes when either does.

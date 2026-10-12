@@ -71,6 +71,7 @@ pub struct SendButton {
     ready: bool,
     on_send: Run,
     on_stop: Option<Run>,
+    variant: ButtonVariant,
 }
 
 impl SendButton {
@@ -84,7 +85,15 @@ impl SendButton {
             ready,
             on_send: Rc::new(on_send),
             on_stop: None,
+            variant: ButtonVariant::Primary,
         }
+    }
+
+    /// Draws send and stop in a quieter variant than `Primary`, for a shell
+    /// whose fill already carries the theme's colour.
+    pub fn variant(mut self, variant: ButtonVariant) -> Self {
+        self.variant = variant;
+        self
     }
 
     /// While an answer streams: the button stops it.
@@ -101,7 +110,7 @@ impl RenderOnce for SendButton {
                 // Solid like send: a Secondary square on the composer's
                 // sunken card is a faint outline on a near-equal fill.
                 IconButton::new(self.id, IconName::Square)
-                    .variant(ButtonVariant::Primary)
+                    .variant(self.variant)
                     .size(ControlSize::Sm)
                     .tooltip("Stop")
                     .on_click(move |_, window, cx| {
@@ -114,7 +123,7 @@ impl RenderOnce for SendButton {
                 let send = self.on_send;
                 (
                     IconButton::new(self.id, IconName::ArrowUp)
-                        .variant(ButtonVariant::Primary)
+                        .variant(self.variant)
                         .size(ControlSize::Sm)
                         .tooltip("Send")
                         .disabled(!self.ready)
@@ -338,8 +347,8 @@ impl PromptInput {
     }
 
     /// Ely's visual shell around the host's own editor. The host decides when
-    /// sending is possible (`ready`) and whether the shell shows focus
-    /// (`focused`); the shell takes no Enter action and offers no completion
+    /// sending is possible (`ready`); the shell draws the same border focused
+    /// or not, takes no Enter action and offers no completion
     /// rows of its own, so the host's keyboard, IME and popups stay in charge.
     /// The tool row wraps, so a narrow pane never clips the send control.
     pub fn custom(
@@ -363,12 +372,6 @@ impl PromptInput {
             context: (Vec::new(), None),
             on_drop: None,
         }
-    }
-
-    /// Whether the shell draws its focused border; only a custom editor needs it said.
-    pub fn focused(mut self, focused: bool) -> Self {
-        self.focused = Some(focused);
-        self
     }
 
     /// A tool that travels with the send control at the end of the row.
@@ -445,6 +448,14 @@ impl RenderOnce for PromptInput {
         let button = SendButton::new((self.id.clone(), "send"), ready, move |window, cx| {
             send(window, cx)
         });
+        // A host's editor sits on the theme's surface: a solid accent square
+        // there is the one off-palette mark on the card, so send and stop take
+        // the theme's own hover fill instead.
+        let button = if custom {
+            button.variant(ButtonVariant::Subtle)
+        } else {
+            button
+        };
         let button = match self.on_stop.clone() {
             Some(stop) => button.busy(move |window, cx| stop(window, cx)),
             None => button,
@@ -499,20 +510,17 @@ impl RenderOnce for PromptInput {
             .rounded(radius)
             .border_1()
             .border_color(match (focused, custom) {
-                // A host's editor keeps the composer's own rule: the border is
-                // always there and only brightens a step on focus, never to
-                // the ring colour.
-                (true, true) => colors.fg_muted,
+                // A host's editor keeps the theme's quiet rule in both states:
+                // the caret already says where focus is, and a brighter outline
+                // read as a white frame around the card.
+                (_, true) => colors.border,
                 (true, false) => colors.focus,
-                (false, _) => colors.border_strong,
+                (false, false) => colors.border_strong,
             })
-            // A host's editor paints its own input fill; the shell wears the
-            // same one, so the two read as a single surface.
-            .bg(if custom {
-                colors.sunken
-            } else {
-                colors.surface
-            })
+            // A host's editor paints no fill of its own (bezel's
+            // `with_transparent_fill`); the shell's `surface` is the one
+            // surface both read as, the same card fill as the rest of the theme.
+            .bg(colors.surface)
             // Text below inherits this: attachment names and the like carry no
             // colour of their own, and gpui's default is black.
             .text_color(colors.fg)
