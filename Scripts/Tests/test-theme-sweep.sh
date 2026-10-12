@@ -18,7 +18,7 @@ while (($# > 0)); do
     esac
 done
 [[ -n "$OUT_DIR" ]] || { echo "--out-dir is required" >&2; exit 2; }
-for base in neutral stone zinc gray slate notte onice; do
+for base in neutral stone zinc gray slate notte onice argilla grafite; do
     for appearance in dark light; do
         "$ROOT/Scripts/visual-sweep.sh" "${PASS[@]}" --out-dir "$OUT_DIR/$base-$appearance" \
             --setting "appearance.theme=\"$appearance\"" \

@@ -11,7 +11,7 @@ const fn c(h: f32, s: f32, l: f32, a: f32) -> Hsla {
     Hsla { h, s, l, a }
 }
 
-/// Fields equal across all seven base colours, per appearance.
+/// Fields equal across all nine base colours, per appearance.
 struct Semantic {
     ely_active: Hsla,
     ely_border: Hsla,
@@ -674,6 +674,130 @@ const LADDER_ONICE_LIGHT: Ladder = Ladder {
     sirio_on_solid: c(0.0, 0.0, 0.980256, 1.0),
 };
 
+/// Argilla, dark: `base_color.rs`'s `ARGILLA_DARK`, read through `paint_grey_ladder`.
+const LADDER_ARGILLA_DARK: Ladder = Ladder {
+    ely_bg: c(0.166666667, 0.027027027, 0.145098039, 1.0),
+    ely_surface: c(0.166666667, 0.0212765957, 0.184313725, 1.0),
+    ely_sunken: c(0.166666667, 0.0212765957, 0.184313725, 1.0),
+    ely_overlay: c(0.166666667, 0.0212765957, 0.184313725, 1.0),
+    ely_hover: c(0.125, 0.0357142857, 0.219607843, 1.0),
+    ely_fg: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    ely_fg_muted: c(0.138888889, 0.0895522388, 0.737254902, 1.0),
+    ely_fg_subtle: c(0.133333333, 0.0480769231, 0.592156863, 1.0),
+    ely_fg_disabled: c(0.133333333, 0.0480769231, 0.592156863, 1.0),
+    ely_accent: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    ely_accent_hover: c(0.138888889, 0.0895522388, 0.737254902, 1.0),
+    ely_on_accent: c(0.166666667, 0.027027027, 0.145098039, 1.0),
+    ely_focus: c(0.582857143, 0.708502024, 0.515686275, 1.0),
+    ely_link: c(0.583333333, 0.654761905, 0.670588235, 1.0),
+    ely_tooltip_bg: c(0.166666667, 0.0212765957, 0.184313725, 1.0),
+    ely_tooltip_fg: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    sirio_canvas: c(0.0833333333, 0.0333333333, 0.117647059, 1.0),
+    sirio_frame_surface: c(0.0833333333, 0.0333333333, 0.117647059, 0.85),
+    sirio_terminal_surface: c(0.0833333333, 0.0333333333, 0.117647059, 1.0),
+    sirio_dialog_surface: c(0.166666667, 0.027027027, 0.145098039, 1.0),
+    sirio_floating_surface: c(0.166666667, 0.0212765957, 0.184313725, 1.0),
+    sirio_overlay: c(0.125, 0.0357142857, 0.219607843, 1.0),
+    sirio_overlay_strong: c(0.125, 0.0357142857, 0.219607843, 1.0),
+    sirio_text_dim: c(0.136363636, 0.0718954248, 0.7, 1.0),
+    sirio_quantity: c(0.136363636, 0.0718954248, 0.7, 1.0),
+    sirio_solid: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    sirio_on_solid: c(0.0833333333, 0.0333333333, 0.117647059, 1.0),
+};
+
+/// Argilla, light: `base_color.rs`'s `ARGILLA_LIGHT`, read through `paint_grey_ladder`.
+const LADDER_ARGILLA_LIGHT: Ladder = Ladder {
+    ely_bg: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    ely_surface: c(0.0, 0.0, 1.0, 1.0),
+    ely_sunken: c(0.0, 0.0, 1.0, 1.0),
+    ely_overlay: c(0.0, 0.0, 1.0, 1.0),
+    ely_hover: c(0.133333333, 0.25, 0.921568627, 1.0),
+    ely_fg: c(0.166666667, 0.0256410256, 0.0764705882, 1.0),
+    ely_fg_muted: c(0.166666667, 0.025210084, 0.233333333, 1.0),
+    ely_fg_subtle: c(0.142857143, 0.0313901345, 0.437254902, 1.0),
+    ely_fg_disabled: c(0.142857143, 0.0313901345, 0.437254902, 1.0),
+    ely_accent: c(0.166666667, 0.0256410256, 0.0764705882, 1.0),
+    ely_accent_hover: c(0.166666667, 0.025210084, 0.233333333, 1.0),
+    ely_on_accent: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    ely_focus: c(0.582857143, 0.708502024, 0.515686275, 1.0),
+    ely_link: c(0.582781457, 0.736585366, 0.401960784, 1.0),
+    ely_tooltip_bg: c(0.0, 0.0, 1.0, 1.0),
+    ely_tooltip_fg: c(0.166666667, 0.0256410256, 0.0764705882, 1.0),
+    sirio_canvas: c(0.145833333, 0.285714286, 0.945098039, 1.0),
+    sirio_frame_surface: c(0.145833333, 0.285714286, 0.945098039, 0.8),
+    sirio_terminal_surface: c(0.145833333, 0.285714286, 0.945098039, 1.0),
+    sirio_dialog_surface: c(0.133333333, 0.333333333, 0.970588235, 1.0),
+    sirio_floating_surface: c(0.0, 0.0, 1.0, 1.0),
+    sirio_overlay: c(0.133333333, 0.25, 0.921568627, 1.0),
+    sirio_overlay_strong: c(0.133333333, 0.25, 0.921568627, 1.0),
+    sirio_text_dim: c(0.166666667, 0.0277777778, 0.282352941, 1.0),
+    sirio_quantity: c(0.166666667, 0.0277777778, 0.282352941, 1.0),
+    sirio_solid: c(0.166666667, 0.0256410256, 0.0764705882, 1.0),
+    sirio_on_solid: c(0.145833333, 0.285714286, 0.945098039, 1.0),
+};
+
+/// Grafite, dark: `base_color.rs`'s `GRAFITE_DARK`, read through `paint_grey_ladder`.
+const LADDER_GRAFITE_DARK: Ladder = Ladder {
+    ely_bg: c(0.166666667, 0.0196078431, 0.1, 1.0),
+    ely_surface: c(0.166666667, 0.0158730159, 0.123529412, 1.0),
+    ely_sunken: c(0.166666667, 0.0158730159, 0.123529412, 1.0),
+    ely_overlay: c(0.166666667, 0.0158730159, 0.123529412, 1.0),
+    ely_hover: c(0.166666667, 0.0120481928, 0.162745098, 1.0),
+    ely_fg: c(0.125, 0.117647059, 0.933333333, 1.0),
+    ely_fg_muted: c(0.152777778, 0.0909090909, 0.741176471, 1.0),
+    ely_fg_subtle: c(0.125, 0.0327868852, 0.521568627, 1.0),
+    ely_fg_disabled: c(0.125, 0.0327868852, 0.521568627, 1.0),
+    ely_accent: c(0.125, 0.117647059, 0.933333333, 1.0),
+    ely_accent_hover: c(0.152777778, 0.0909090909, 0.741176471, 1.0),
+    ely_on_accent: c(0.166666667, 0.0196078431, 0.1, 1.0),
+    ely_focus: c(0.591085271, 0.677165354, 0.501960784, 1.0),
+    ely_link: c(0.590551181, 0.76969697, 0.676470588, 1.0),
+    ely_tooltip_bg: c(0.166666667, 0.0158730159, 0.123529412, 1.0),
+    ely_tooltip_fg: c(0.125, 0.117647059, 0.933333333, 1.0),
+    sirio_canvas: c(0.0, 0.0, 0.0823529412, 1.0),
+    sirio_frame_surface: c(0.0, 0.0, 0.0823529412, 0.85),
+    sirio_terminal_surface: c(0.0, 0.0, 0.0823529412, 1.0),
+    sirio_dialog_surface: c(0.166666667, 0.0196078431, 0.1, 1.0),
+    sirio_floating_surface: c(0.166666667, 0.0158730159, 0.123529412, 1.0),
+    sirio_overlay: c(0.166666667, 0.0120481928, 0.162745098, 1.0),
+    sirio_overlay_strong: c(0.166666667, 0.0120481928, 0.162745098, 1.0),
+    sirio_text_dim: c(0.15, 0.0625, 0.68627451, 1.0),
+    sirio_quantity: c(0.15, 0.0625, 0.68627451, 1.0),
+    sirio_solid: c(0.125, 0.117647059, 0.933333333, 1.0),
+    sirio_on_solid: c(0.0, 0.0, 0.0823529412, 1.0),
+};
+
+/// Grafite, light: `base_color.rs`'s `GRAFITE_LIGHT`, read through `paint_grey_ladder`.
+const LADDER_GRAFITE_LIGHT: Ladder = Ladder {
+    ely_bg: c(0.0, 0.0, 1.0, 1.0),
+    ely_surface: c(0.0, 0.0, 1.0, 1.0),
+    ely_sunken: c(0.0, 0.0, 1.0, 1.0),
+    ely_overlay: c(0.0, 0.0, 1.0, 1.0),
+    ely_hover: c(0.166666667, 0.0666666667, 0.941176471, 1.0),
+    ely_fg: c(0.0, 0.0, 0.0431372549, 1.0),
+    ely_fg_muted: c(0.125, 0.025, 0.31372549, 1.0),
+    ely_fg_subtle: c(0.125, 0.0327868852, 0.521568627, 1.0),
+    ely_fg_disabled: c(0.125, 0.0327868852, 0.521568627, 1.0),
+    ely_accent: c(0.0, 0.0, 0.0431372549, 1.0),
+    ely_accent_hover: c(0.125, 0.025, 0.31372549, 1.0),
+    ely_on_accent: c(0.0, 0.0, 1.0, 1.0),
+    ely_focus: c(0.591085271, 0.677165354, 0.501960784, 1.0),
+    ely_link: c(0.593333333, 0.722543353, 0.339215686, 1.0),
+    ely_tooltip_bg: c(0.0, 0.0, 1.0, 1.0),
+    ely_tooltip_fg: c(0.0, 0.0, 0.0431372549, 1.0),
+    sirio_canvas: c(0.166666667, 0.142857143, 0.98627451, 1.0),
+    sirio_frame_surface: c(0.166666667, 0.142857143, 0.98627451, 0.8),
+    sirio_terminal_surface: c(0.166666667, 0.142857143, 0.98627451, 1.0),
+    sirio_dialog_surface: c(0.0, 0.0, 1.0, 1.0),
+    sirio_floating_surface: c(0.0, 0.0, 1.0, 1.0),
+    sirio_overlay: c(0.166666667, 0.0666666667, 0.941176471, 1.0),
+    sirio_overlay_strong: c(0.166666667, 0.0666666667, 0.941176471, 1.0),
+    sirio_text_dim: c(0.1, 0.0267379679, 0.366666667, 1.0),
+    sirio_quantity: c(0.1, 0.0267379679, 0.366666667, 1.0),
+    sirio_solid: c(0.0, 0.0, 0.0431372549, 1.0),
+    sirio_on_solid: c(0.166666667, 0.142857143, 0.98627451, 1.0),
+};
+
 /// The palette Ely holds and Sirio's own tokens, for one base colour and appearance.
 pub(crate) fn preset(base: BaseColor, appearance: Appearance) -> (Palette, SirioColors) {
     let s = match appearance {
@@ -695,6 +819,10 @@ pub(crate) fn preset(base: BaseColor, appearance: Appearance) -> (Palette, Sirio
         (BaseColor::Notte, Appearance::Light) => &LADDER_NOTTE_LIGHT,
         (BaseColor::Onice, Appearance::Dark) => &LADDER_ONICE_DARK,
         (BaseColor::Onice, Appearance::Light) => &LADDER_ONICE_LIGHT,
+        (BaseColor::Argilla, Appearance::Dark) => &LADDER_ARGILLA_DARK,
+        (BaseColor::Argilla, Appearance::Light) => &LADDER_ARGILLA_LIGHT,
+        (BaseColor::Grafite, Appearance::Dark) => &LADDER_GRAFITE_DARK,
+        (BaseColor::Grafite, Appearance::Light) => &LADDER_GRAFITE_LIGHT,
     };
     let palette = Palette {
         bg: l.ely_bg,

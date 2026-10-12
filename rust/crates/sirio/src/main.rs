@@ -4209,6 +4209,8 @@ fn theme_base_color(base: BaseColor) -> sirio_theme::BaseColor {
         BaseColor::Slate => sirio_theme::BaseColor::Slate,
         BaseColor::Notte => sirio_theme::BaseColor::Notte,
         BaseColor::Onice => sirio_theme::BaseColor::Onice,
+        BaseColor::Argilla => sirio_theme::BaseColor::Argilla,
+        BaseColor::Grafite => sirio_theme::BaseColor::Grafite,
     }
 }
 
@@ -4222,6 +4224,8 @@ fn persisted_base_color(base: sirio_theme::BaseColor) -> BaseColor {
         sirio_theme::BaseColor::Slate => BaseColor::Slate,
         sirio_theme::BaseColor::Notte => BaseColor::Notte,
         sirio_theme::BaseColor::Onice => BaseColor::Onice,
+        sirio_theme::BaseColor::Argilla => BaseColor::Argilla,
+        sirio_theme::BaseColor::Grafite => BaseColor::Grafite,
     }
 }
 

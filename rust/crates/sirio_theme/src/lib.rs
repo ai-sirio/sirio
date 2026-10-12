@@ -4,10 +4,11 @@
 //! a translucent frame surrounds opaque panel surfaces, selected rows, and
 //! shell borders. Within that hierarchy, generic hover, pressed, and divider
 //! washes remain neutral veils; focus and active chrome are spelled with
-//! contrast rather than hue, and semantic hues retain their existing state
-//! meanings. Colour is spent on two things only: data (a diff, a git status, an
-//! agent's brand) and attention (needs-input, error). The brand coral no longer
-//! has a role — see [`SirioColors::brand_coral`].
+//! contrast rather than hue (except in Argilla and Grafite, which keep the
+//! blue focus and links of Claude's app they copy), and semantic hues retain
+//! their existing state meanings. Colour is spent on two things only: data (a
+//! diff, a git status, an agent's brand) and attention (needs-input, error).
+//! The brand coral no longer has a role — see [`SirioColors::brand_coral`].
 //!
 //! Where each value comes from is recorded in
 //! `docs/THEME-PROVENANCE.md`. The re-runnable
@@ -281,8 +282,9 @@ fn paint_notte_ladder(theme: &mut bezel_theme::Theme) {
     theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
 }
 
-/// The solid grey ladders of `Neutral` and `Onice`, same mechanism as
-/// [`paint_notte_ladder`]. These `base_color.rs` values feed only
+/// The solid grey ladders of `Neutral`, `Onice`, `Argilla` and `Grafite`,
+/// same mechanism as [`paint_notte_ladder`]; a ladder that brings its own
+/// text rungs paints them over bezel's tinted ones too. These `base_color.rs` values feed only
 /// `to_bezel_theme`; Sirio's matching values are hand-maintained in
 /// `presets.rs`. Keep both copies aligned until sub-project 7.
 fn paint_grey_ladder(theme: &mut bezel_theme::Theme, ladder: base_color::GreyLadder) {
@@ -295,6 +297,12 @@ fn paint_grey_ladder(theme: &mut bezel_theme::Theme, ladder: base_color::GreyLad
     theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
     theme.input_bg = opaque_hsla(ladder.input);
     theme.element_hover = opaque_hsla(ladder.hover);
+    if let Some(text) = ladder.text {
+        theme.text = opaque_hsla(text.text);
+        theme.text_muted = opaque_hsla(text.muted);
+        theme.text_faint = opaque_hsla(text.faint);
+        theme.text_dim = opaque_hsla(text.dim);
+    }
 }
 
 /// Opaque `0xRRGGBB` as the `Hsla` bezel's tokens are stored in.
@@ -1891,7 +1899,7 @@ mod tests {
         for base in BaseColor::ALL {
             let theme = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, base);
 
-            if matches!(base, BaseColor::Neutral | BaseColor::Onice) {
+            if base.grey_ladder(Appearance::Dark).is_some() {
                 // The grey ladders' central panes are their own plane, darker
                 // than the sidebars.
                 assert_eq!(
@@ -2089,11 +2097,21 @@ mod tests {
             for appearance in [Appearance::Light, Appearance::Dark] {
                 let (ely, sirio) = presets::preset(base, appearance);
                 let bezel = bezel_theme_for(base, appearance);
-                let softened_body = Hsla::from(toward(
-                    Rgba::from(bezel.text),
-                    Rgba::from(bezel.surface),
-                    TEXT_SOFTENING,
-                ));
+                // A preset that brings its own text ladder (Argilla, Grafite)
+                // copies an app's text as it is, so it is exempt from the
+                // softening every other base's body text takes.
+                let own_text = base
+                    .grey_ladder(appearance)
+                    .is_some_and(|ladder| ladder.text.is_some());
+                let softened_body = if own_text {
+                    bezel.text
+                } else {
+                    Hsla::from(toward(
+                        Rgba::from(bezel.text),
+                        Rgba::from(bezel.surface),
+                        TEXT_SOFTENING,
+                    ))
+                };
                 let pairs = [
                     ("ely.bg", ely.bg, bezel.surface),
                     ("ely.surface", ely.surface, bezel.surface_raised),
