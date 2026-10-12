@@ -1898,6 +1898,10 @@ struct AppControlHandler {
     /// tests, which matches the pre-existing "runtime only" behavior for
     /// them.
     database_path: Option<PathBuf>,
+    /// The host's terminal client, once the host has answered (SP2 §5).
+    /// Filled on the GPUI thread when the factory is installed; read on the
+    /// control thread, where its blocking calls belong, never on GPUI's.
+    host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>>,
 }
 
 impl AppControlHandler {
@@ -1920,7 +1924,157 @@ impl AppControlHandler {
             session_store,
             socket_info,
             database_path: None,
+            host_terminal: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Shares the slot the host factory fills (see `ensure_host_in_background`).
+    fn with_host_terminal(
+        mut self,
+        host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>>,
+    ) -> Self {
+        self.host_terminal = host_terminal;
+        self
+    }
+
+    /// `panel.*` (SP2 §5). The host answers for the terminal sessions it owns;
+    /// the app answers for the panes it renders (its own tabs), and adds the
+    /// layout only it knows to `panel.list`.
+    fn panel(&self, request: &ControlRequest) -> ControlResponse {
+        let host = self
+            .host_terminal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(sirio_control::host_panels::HostPanels::new);
+        match request.method.as_str() {
+            "panel.create" | "panel.split" => {
+                let Some(host) = host else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "cannot spawn pane: the host is not running",
+                    );
+                };
+                let mut request = request.clone();
+                if request.method == "panel.create" && !request.params.contains_key("cwd") {
+                    let Some(working_directory) = self
+                        .state()
+                        .working_directory(request.params.get("worktree").map(String::as_str))
+                    else {
+                        return ControlResponse::failure(&request.id, "unknown worktree");
+                    };
+                    request.params.insert(
+                        "cwd".to_string(),
+                        working_directory.to_string_lossy().into_owned(),
+                    );
+                }
+                host.handle(&request)
+            }
+            "panel.list" => self.panel_list(request, host.as_ref()),
+            method => {
+                let Some(id) = request.params.get("id").cloned() else {
+                    return ControlResponse::failure(&request.id, format!("{method} requires id"));
+                };
+                if self.panes.is_external(&id) {
+                    return self.app_pane(request, &id);
+                }
+                match host {
+                    Some(host) => host.handle(request),
+                    None => Self::pane_error(request, self.panes.missing_pane_error(&id)),
+                }
+            }
+        }
+    }
+
+    /// A `panel.*` call on one of the app's own panes: read and state come
+    /// from the GPUI side; the rest is refused as it always was for these.
+    fn app_pane(&self, request: &ControlRequest, id: &str) -> ControlResponse {
+        match request.method.as_str() {
+            "panel.read" => match self.panes.read(id) {
+                Ok(output) => {
+                    Self::success(&request.id, [("data".to_string(), base64_encode(&output))])
+                }
+                Err(error) => Self::pane_error(request, error),
+            },
+            "panel.state" => {
+                let id = id.to_string();
+                self.queue_action(request, move |reply| ControlAction::ReadPane {
+                    id,
+                    query: PaneQuery::State,
+                    reply,
+                })
+            }
+            "panel.scrollback" => {
+                let max_bytes = match request.params.get("maxBytes") {
+                    Some(value) => match value.parse::<usize>() {
+                        Ok(value) => Some(value),
+                        Err(_) => {
+                            return ControlResponse::failure(
+                                &request.id,
+                                "maxBytes must be a nonnegative integer",
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                let id = id.to_string();
+                self.queue_action(request, move |reply| ControlAction::ReadPane {
+                    id,
+                    query: PaneQuery::Scrollback(max_bytes),
+                    reply,
+                })
+            }
+            _ => Self::pane_error(request, self.panes.missing_pane_error(id)),
+        }
+    }
+
+    /// `panel.list`: the app's panes of the worktree, then the control-owned
+    /// host sessions in that worktree that the app does not render.
+    fn panel_list(
+        &self,
+        request: &ControlRequest,
+        host: Option<&sirio_control::host_panels::HostPanels>,
+    ) -> ControlResponse {
+        let Some(working_directory) = self
+            .state()
+            .working_directory(request.params.get("worktree").map(String::as_str))
+        else {
+            return ControlResponse::failure(&request.id, "unknown worktree");
+        };
+        let mut panes = match self.panes.list_for(&working_directory) {
+            Ok(panes) => panes,
+            Err(error) => return Self::pane_error(request, error),
+        };
+        if let Some(host) = host {
+            let directory = working_directory.to_string_lossy();
+            match host.control_panes(Some(&directory)) {
+                Ok(sessions) => panes.extend(
+                    sessions
+                        .into_iter()
+                        .filter(|pane| !self.panes.is_external(&pane.id)),
+                ),
+                Err(error) => return ControlResponse::failure(&request.id, error),
+            }
+        }
+        let rows: Vec<BTreeMap<String, String>> = panes
+            .into_iter()
+            .map(|pane| {
+                BTreeMap::from([
+                    ("id".to_string(), pane.id),
+                    ("tab".to_string(), pane.tab),
+                    ("title".to_string(), pane.title),
+                    ("agent".to_string(), pane.agent),
+                    ("active".to_string(), pane.active.to_string()),
+                ])
+            })
+            .collect();
+        Self::success(
+            &request.id,
+            [(
+                "panels".to_string(),
+                sirio_control::protocol::rows::encode(&rows),
+            )],
+        )
     }
 
     /// F-CTRL-WORK-01: wires the database path used to persist
@@ -2743,183 +2897,9 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat { action, reply })
             }
-            "panel.create" => {
-                let Some(working_directory) = self
-                    .state()
-                    .working_directory(request.params.get("worktree").map(String::as_str))
-                else {
-                    return ControlResponse::failure(&request.id, "unknown worktree");
-                };
-                let command = request.params.get("cmd").map(String::as_str);
-                let title = command
-                    .and_then(|value| value.split_whitespace().next())
-                    .unwrap_or("Panel");
-                match self.panes.create(working_directory, command, title) {
-                    Ok(pane) => Self::success(&request.id, [("id".to_string(), pane.id)]),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.split" => {
-                let Some(source) = request.params.get("from") else {
-                    return ControlResponse::failure(&request.id, "panel.split requires from");
-                };
-                let Some(direction) = request.params.get("direction") else {
-                    return ControlResponse::failure(&request.id, "panel.split requires direction");
-                };
-                match self.panes.split(
-                    source,
-                    direction,
-                    request.params.get("cmd").map(String::as_str),
-                ) {
-                    Ok(pane) => Self::success(&request.id, [("id".to_string(), pane.id)]),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.list" => {
-                let working_directory = if let Some(working_directory) = self
-                    .state()
-                    .working_directory(request.params.get("worktree").map(String::as_str))
-                {
-                    working_directory
-                } else {
-                    return ControlResponse::failure(&request.id, "unknown worktree");
-                };
-                match self.panes.list_for(&working_directory) {
-                    Ok(panes) => {
-                        let rows: Vec<BTreeMap<String, String>> = panes
-                            .into_iter()
-                            .map(|pane| {
-                                BTreeMap::from([
-                                    ("id".to_string(), pane.id),
-                                    ("tab".to_string(), pane.tab),
-                                    ("title".to_string(), pane.title),
-                                    ("agent".to_string(), pane.agent),
-                                    ("active".to_string(), pane.active.to_string()),
-                                ])
-                            })
-                            .collect();
-                        Self::success(
-                            &request.id,
-                            [(
-                                "panels".to_string(),
-                                sirio_control::protocol::rows::encode(&rows),
-                            )],
-                        )
-                    }
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.write" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.write requires id");
-                };
-                let Some(input) = request.params.get("input") else {
-                    return ControlResponse::failure(&request.id, "panel.write requires input");
-                };
-                match self.panes.write(id, input.as_bytes()) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.key" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.key requires id");
-                };
-                let Some(key) = request.params.get("key") else {
-                    return ControlResponse::failure(&request.id, "panel.key requires key");
-                };
-                match self.panes.key(id, key) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.read" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.read requires id");
-                };
-                match self.panes.read(id) {
-                    Ok(output) => {
-                        Self::success(&request.id, [("data".to_string(), base64_encode(&output))])
-                    }
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.state" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.state requires id");
-                };
-                let id = id.clone();
-                self.queue_action(request, move |reply| ControlAction::ReadPane {
-                    id,
-                    query: PaneQuery::State,
-                    reply,
-                })
-            }
-            "panel.scrollback" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.scrollback requires id");
-                };
-                let max_bytes = match request.params.get("maxBytes") {
-                    Some(value) => match value.parse::<usize>() {
-                        Ok(value) => Some(value),
-                        Err(_) => {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "maxBytes must be a nonnegative integer",
-                            );
-                        }
-                    },
-                    None => None,
-                };
-                let id = id.clone();
-                self.queue_action(request, move |reply| ControlAction::ReadPane {
-                    id,
-                    query: PaneQuery::Scrollback(max_bytes),
-                    reply,
-                })
-            }
-            "panel.wait" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.wait requires id");
-                };
-                let timeout = match request.params.get("timeoutMs") {
-                    Some(value) => match value.parse::<u64>() {
-                        Ok(milliseconds) => Some(Duration::from_millis(milliseconds)),
-                        Err(_) => {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "timeoutMs must be a nonnegative integer",
-                            );
-                        }
-                    },
-                    None => None,
-                };
-                match self.panes.wait(id, timeout) {
-                    Ok(exit_code) => Self::success(
-                        &request.id,
-                        [("exitCode".to_string(), exit_code.to_string())],
-                    ),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.close" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.close requires id");
-                };
-                match self.panes.close(id) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.focus" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.focus requires id");
-                };
-                match self.panes.focus(id) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
+            "panel.create" | "panel.split" | "panel.list" | "panel.write" | "panel.key"
+            | "panel.read" | "panel.state" | "panel.scrollback" | "panel.wait"
+            | "panel.close" | "panel.focus" => self.panel(request),
             "pane.split" => {
                 let Some(direction) = request.params.get("direction") else {
                     return ControlResponse::failure(&request.id, "pane.split requires direction");
@@ -3907,6 +3887,8 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot, scrollback: &[u8]) -> Vec<(St
             "workingDirectory".to_string(),
             display_absolute_path(&snapshot.working_directory),
         ),
+        // An app pane's process dies with the app: it does not survive a quit.
+        ("survives".to_string(), "false".to_string()),
         ("scrollback".to_string(), base64_encode(scrollback)),
         ("scrollbackBytes".to_string(), scrollback.len().to_string()),
     ];
@@ -23519,6 +23501,7 @@ impl SessionFactory for FailingFactory {
 fn ensure_host_in_background(
     settings: Entity<Settings>,
     workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
+    host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>>,
     cx: &mut App,
 ) {
     cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
@@ -23600,6 +23583,9 @@ fn ensure_host_in_background(
                             // retries every `Connecting` view (Task 9).
                             let (wake, mut woken) =
                                 futures::channel::mpsc::unbounded::<()>();
+                            if let Ok(mut slot) = host_terminal.lock() {
+                                *slot = Some(client.clone());
+                            }
                             let factory = Arc::new(HostSessions {
                                 client,
                                 reconnect,
@@ -23854,6 +23840,8 @@ fn main() {
         }
         let control_state = Arc::new(Mutex::new(control_state_seed));
         let panes = Arc::new(PaneRegistry::new());
+        let host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>> =
+            Arc::new(Mutex::new(None));
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
@@ -23882,7 +23870,8 @@ fn main() {
                 Some(session_store.clone()),
                 socket_info.clone(),
             )
-            .with_database_path(database_path.clone()),
+            .with_database_path(database_path.clone())
+            .with_host_terminal(host_terminal.clone()),
         );
         let control_socket = Arc::new(ControlSocketController::new(
             socket_info.clone(),
@@ -24131,6 +24120,7 @@ fn main() {
                 ensure_host_in_background(
                     settings.clone(),
                     workspace_slot.clone(),
+                    host_terminal.clone(),
                     cx,
                 );
                 let workspace = cx.new(|cx| {
@@ -28935,12 +28925,21 @@ done
         // snapshot, so it belongs to that worktree independently of whatever
         // this window happens to be showing.
         let third = worktrees[2].clone();
-        let errored_pane = workspace.read_with(&cx.cx, |workspace, _| {
+        let errored_pane = "pane-ui-errored".to_string();
+        workspace.read_with(&cx.cx, |workspace, _| {
             workspace
                 .panes
-                .create(&third, Some("sleep 60"), "Claude Code")
-                .expect("register a control pane on the third worktree")
-                .id
+                .set_external(
+                    &third,
+                    vec![PaneInfo {
+                        id: errored_pane.clone(),
+                        tab: "Terminal".to_string(),
+                        title: "Claude Code".to_string(),
+                        agent: "claude".to_string(),
+                        active: true,
+                    }],
+                )
+                .expect("register an app pane on the third worktree");
         });
         workspace.update(&mut cx.cx, |workspace, cx| {
             let now = Instant::now();
@@ -29000,7 +28999,7 @@ done
         );
 
         workspace.read_with(&cx.cx, |workspace, _| {
-            let _ = workspace.panes.close(&errored_pane);
+            let _ = workspace.panes.shutdown_for(&third);
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);

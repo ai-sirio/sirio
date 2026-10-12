@@ -15,7 +15,7 @@ use sirio_host_protocol::term::{
     CreateParams, ExitStatus, Origin, ReadFormat, SessionSummary, TermCommand, TermSize, b64_encode,
 };
 
-use crate::panel::{PaneError, terminal_key_bytes};
+use crate::panel::{PaneError, PaneInfo, terminal_key_bytes};
 use crate::protocol::{ControlRequest, ControlResponse};
 
 /// The size a control-owned session starts with; nothing draws it.
@@ -79,21 +79,16 @@ impl HostPanels {
                 Ok(one("id", created.session_id))
             }
             "panel.list" => {
-                let listed = self
-                    .client
-                    .list()
-                    .map_err(|error| host_error("", error))?;
-                let rows: Vec<BTreeMap<String, String>> = listed
-                    .sessions
+                let panes = self.control_panes(None)?;
+                let rows: Vec<BTreeMap<String, String>> = panes
                     .into_iter()
-                    .filter(|session| session.origin == Origin::Control)
-                    .map(|session| {
+                    .map(|pane| {
                         BTreeMap::from([
-                            ("id".to_string(), session.session_id),
-                            ("tab".to_string(), String::new()),
-                            ("title".to_string(), session.title),
-                            ("agent".to_string(), String::new()),
-                            ("active".to_string(), "false".to_string()),
+                            ("id".to_string(), pane.id),
+                            ("tab".to_string(), pane.tab),
+                            ("title".to_string(), pane.title),
+                            ("agent".to_string(), pane.agent),
+                            ("active".to_string(), pane.active.to_string()),
                         ])
                     })
                     .collect();
@@ -194,6 +189,25 @@ impl HostPanels {
             )),
             other => Err(format!("unknown method: {other}")),
         }
+    }
+
+    /// The control-owned sessions, in the shape `panel.list` reports. With
+    /// `cwd`, only the sessions whose working directory is exactly that path.
+    pub fn control_panes(&self, cwd: Option<&str>) -> Result<Vec<PaneInfo>, String> {
+        let listed = self.client.list().map_err(|error| host_error("", error))?;
+        Ok(listed
+            .sessions
+            .into_iter()
+            .filter(|session| session.origin == Origin::Control)
+            .filter(|session| cwd.is_none_or(|cwd| session.cwd == cwd))
+            .map(|session| PaneInfo {
+                id: session.session_id,
+                tab: String::new(),
+                title: session.title,
+                agent: String::new(),
+                active: false,
+            })
+            .collect())
     }
 
     fn session(&self, id: &str) -> Result<SessionSummary, String> {
