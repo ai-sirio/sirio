@@ -1,7 +1,7 @@
 # Terminal sessions in the host — SP2
 
 **Date:** 2026-10-06
-**Status:** proposed
+**Status:** implemented (PR pending)
 **Programme:** SP2 of seven. The programme, its decisions and SP1 (the host
 foundation) are `docs/superpowers/specs/2026-10-05-host-foundation-design.md`
 — referred to below as *SP1* with its section numbers. SP2 moves every PTY

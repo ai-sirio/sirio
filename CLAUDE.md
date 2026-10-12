@@ -39,6 +39,18 @@ Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
 # Whether a detached process survives its parent's world, row by row.
 Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"
 
+# The host's terminal sessions (SP2) with a real sirio-host held by a real client,
+# driven only through the term.* verbs; one fresh data root per case. --out-dir DIR
+# keeps each case's host logs, state files and transcript; SIRIO_TERM_E2E_VERBOSE=1
+# prints each probe call.
+Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
+# The app end to end: a debug sirio on an isolated display adopting or starting a
+# real host, killed, quit and relaunched, observed through sirioctl and the host's
+# probe. --out-dir DIR keeps logs, state and PID-matched captures; --state-only takes
+# no captures (macOS runs that way); --xvfb or --display :N picks the display (Linux);
+# --only N[,N...] runs some cases and prints "HOST SESSIONS E2E PARTIAL" instead.
+Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
+
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
 # transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1
@@ -132,7 +144,8 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
-sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol
+sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol,
+sirio_term_session
                                 (leaves — no local deps beyond sirio_perf;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
@@ -156,14 +169,19 @@ sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol
                                  sirio_control so the host shares it;
                                  sirio_host_protocol is the host's wire as
                                  types and pure functions — frames, version
-                                 negotiation, the liveness verdict — no I/O)
+                                 negotiation, the liveness verdict — no I/O;
+                                 sirio_term_session is the terminal session
+                                 engine — PTYs, one resident `libghostty-vt`
+                                 terminal per session, the journal a resume
+                                 reads — with no GPUI; it takes `sirio_perf`,
+                                 `libghostty-vt` and `portable-pty`)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
 sirio_acp        (-> sirio_persistence, sirio_claude)
-sirio_terminal    (-> sirio_project, sirio_theme, and `bezel` directly for its scrollbar)
-sirio_control    (-> sirio_acp, sirio_persistence, sirio_ipc)
-sirio_host       (-> sirio_ipc, sirio_host_protocol; the `sirio-host` binary)
+sirio_terminal    (-> sirio_project, sirio_theme, sirio_ui, sirio_host_client, sirio_host_protocol, sirio_term_session, and `bezel` directly for its scrollbar)
+sirio_control    (-> sirio_acp, sirio_persistence, sirio_ipc, sirio_host_client, sirio_host_protocol)
+sirio_host       (-> sirio_ipc, sirio_host_protocol, sirio_term_session; the `sirio-host` binary)
 sirio_host_client (-> sirio_ipc, sirio_host_protocol)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
@@ -584,25 +602,27 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 ### Control socket (`sirio_control`)
 
-`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
+`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. `panel.*` is also answered by the host (SP2): the app forwards every `panel.*` to the host, `sirio_control::host_panels` is the translation both sides share, and the app adds only the layout fields it alone knows. `sirioctl` asks the app first and goes to the host only when the app's socket is missing or refuses (`sirio_control::route`); a socket that accepts and stays silent is waited for, never bypassed to the host, because loss of contact is not evidence of death. With no app and no host it prints "Sirio is not running and no host is up" and never starts one; `--worktree` needs the app. Debug builds also serve `surface.host.end_all` and `surface.terminal.open`, which release `capabilities` omits. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
 
 ### Pane hierarchy
 
-`SirioWorkspace` (`rust/crates/sirio/src/main.rs`, the `gpui::Render` root) holds the open tabs/panes and a `Vec` of workspace rows (project/worktree/branch/path, each with a `mounted` bool) — the Rust equivalent of Swift's `Project -> [Worktree]` plus `openWorktreeIds`. A worktree's `mounted` flag tracks whether its terminal hosts stay mounted (PTYs alive) across sidebar selection changes; this is a live contract other code depends on; see the `tab_has_live_foreground_process` comment in `main.rs` for a case where an activity-model shortcut nearly broke it. On app quit (`cx.on_app_quit`), `PaneRegistry::shutdown` tears every pane down; a plain window close only flushes session state (`cx.on_window_closed`) and does not call `shutdown` — closing the window is not wired to kill agent PTYs, matching the original app's behavior of quitting only ending everything.
+`SirioWorkspace` (`rust/crates/sirio/src/main.rs`, the `gpui::Render` root) holds the open tabs/panes and a `Vec` of workspace rows (project/worktree/branch/path, each with a `mounted` bool) — the Rust equivalent of Swift's `Project -> [Worktree]` plus `openWorktreeIds`. A worktree's `mounted` flag tracks whether its terminal hosts stay mounted (attached to their sessions) across sidebar selection changes; this is a live contract other code depends on; see the `tab_has_live_foreground_process` comment in `main.rs` for a case where an activity-model shortcut nearly broke it. Terminals are host sessions (SP2): the PTY, the resident VT and the journal live in `sirio-host`, and a `TerminalView` holds a `HostLink` to one. **Quit detaches.** `PaneRegistry` (`sirio_control::panel`) owns no PTYs; it keeps the app's own panes — the in-process `LocalLink` fallback — and the control-session entries that feed sidebar status. On app quit (`cx.on_app_quit`), `PaneRegistry::shutdown` forgets the app's panes and ends nothing, and the host's sessions keep running. A plain window close only flushes session state (`cx.on_window_closed`). Dropping a `TerminalView` **detaches** (its `Drop` calls `detach`, never `end`), and so does eviction of an unmounted worktree from `TerminalPaneCache`. Closing a tab, a worktree or a project ends its sessions: closing a worktree or project `term.close`s the control sessions whose cwd it contains, the deepest worktree winning (`PaneRegistry::shutdown_for`, then `end_control_sessions`). A **Show session** tab (palette "Show Session: …", `sirioctl panel show <id>`, app only) is attached, not owned: it never creates or closes a session, its close detaches, it shows *Session lost* without Restart if the session vanishes, and it is never written to the saved layout (a parked worktree keeps it).
 
 ### A host behind the app (`sirio_host`, `sirio_host_client`)
 
-`sirio-host` is a detached process that is to own everything that runs, so that agents survive a crash, a Force Quit, a Quit or an update of the app. It is a programme of seven sub-projects and this is **SP1**, the foundation (`docs/superpowers/specs/2026-10-05-host-foundation-design.md`; the programme is its §2). SP1 hosts no sessions: it serves `host.ping`, `host.info`, `host.shutdown` and the `host.state` topic, and `protocol/host-v1/` holds the capability ledger, the generated schema and the conformance cases the E2E replays against a real host. The app shows the host's status in Settings → General and nothing else depends on it: without a host the app runs as it always did.
+`sirio-host` is a detached process that owns everything that runs, so that agents survive a crash, a Force Quit, a Quit or an update of the app. It is a programme of seven sub-projects. **SP1** is the foundation (`docs/superpowers/specs/2026-10-05-host-foundation-design.md`; the programme is its §2): `host.ping`, `host.info`, `host.shutdown` and the `host.state` topic. **SP2** (`docs/superpowers/specs/2026-10-06-host-terminal-sessions-design.md`) puts every PTY Sirio owns in the host: the `term.*` verbs and the `term.sessions` topic serve sessions from the `sirio_term_session` engine (a PTY, one resident `libghostty-vt` terminal per session, and a journal a resume reads from), and the `terminal` capability in `protocol/host-v1/` (its ledger, the generated schema and the conformance cases the E2E replays against a real host) is how a client learns the host has them. The app shows the host's status in Settings → General. Without a host the app runs as it always did, and its terminals fall back as described below.
+
+A terminal tab runs `term.create` then `term.attach`, and on relaunch attaches to each persisted `session_id` the host still lists (a snapshot when the ring has moved on). A session the host holds with `origin` `app` that no tab references is adopted into the worktree whose path holds its cwd, the deepest one, so an agent never disappears silently. An exited session stays with its last screen until it is closed. A host that dies while the app runs leaves its tabs *Session lost*, with Restart, and `ensure_host` starts a host again. **`LocalLink`** is the fallback when no host or no `terminal` capability is there: an in-process session that dies with the app. Its tab shows *This terminal will not survive closing Sirio* with the reason, and the reason is logged (`[sirio] terminal on the in-process fallback`). It exists for the release that introduces host sessions and is removed in the first cycle after a stable release that shipped them with no report against the host's sessions (spec §10): a `refactor:` commit deletes `LocalLink`, the banner and its E2E case.
 
 The boundary is one dependency edge: `sirio` → `sirio_host_client`, **never** `sirio_host`. At startup `ensure_host` (off the GPUI thread) observes the host's state, adopts a live host or stages the packaged `sirio-host` into the data root and starts it from there, detached from the app's process group — a systemd scope or `setsid` on Linux, a launchd job on macOS, a breakaway process on Windows (`Scripts/Tests/probe-host-detach.sh` is how each arm is proven: its macOS and Windows rows run in CI and Force Quit by hand, and `docs/testing/host-detach-probe.md` records which rows are done). There is at most one host per protocol major per data root, and a client speaks majors N and N−1, so an older host drains instead of being replaced.
 
-The data root is `$SIRIO_HOST_HOME` if absolute, else `<XDG_DATA_HOME | ~/.local/share | %LOCALAPPDATA%>/Sirio/host` — **no temp-dir fallback**, a host on tmpfs loses its state. Per major N it holds `host-v<N>.sock` (a named pipe on Windows), `host-v<N>.lock` (held for the host's whole life), `host-v<N>.json` (pid, start time, version, generation), `log/host-v<N>.log` (4 MiB, two generations; names and ids, never session content, the `sirio_perf` rule), `bin/<version>/sirio-host`, and on macOS `launchd/`.
+The data root is `$SIRIO_HOST_HOME` if absolute; else, when `SIRIO_DB` is absolute, a `host` directory beside it, so an isolated Sirio gets an isolated host and its terminals; else `<XDG_DATA_HOME | ~/.local/share | %LOCALAPPDATA%>/Sirio/host`, where a debug build names the leaf `host-debug` so it never adopts the release host. **No temp-dir fallback**, a host on tmpfs loses its state. Per major N it holds `host-v<N>.sock` (a named pipe on Windows), `host-v<N>.lock` (held for the host's whole life), `host-v<N>.json` (pid, start time, version, generation), `log/host-v<N>.log` (4 MiB, two generations; names and ids, never session content, the `sirio_perf` rule), `bin/<version>/sirio-host`, and on macOS `launchd/`.
 
-**Nothing kills a host on the strength of a failed connection.** A host that holds its lock and does not answer reads `Unverifiable` and is waited for, never replaced or signalled; a recorded pid counts only with its start time. Only `host.shutdown` ends a host, and it refuses with `sessions_live` unless `force`. The idle exit (60 s with no client and no session, only in `on-demand` mode) is the host's own decision.
+**Nothing kills a host on the strength of a failed connection.** A host that holds its lock and does not answer reads `Unverifiable` and is waited for, never replaced or signalled; a recorded pid counts only with its start time. Only `host.shutdown` ends a host, and it refuses with `sessions_live` unless `force`. The idle exit (60 s with no client and no live session, only in `on-demand` mode) is the host's own decision.
 
-The debug-only knobs — `SIRIO_HOST_PROTOCOL_MAJOR`, `SIRIO_HOST_IDLE_GRACE_MS`, `SIRIO_HOST_BIN` and the method `host.debug.hold_session` — are compiled out of release builds with `cfg!(debug_assertions)`, which is why `Scripts/Tests/test-host-e2e.sh` drives debug builds only. **Known SP1 limitation:** `SIRIO_HOST_HOME` is the one variable that isolates a host's data root. `SIRIO_DB` and `SIRIO_SOCKET` do not move it, and a debug build does not either, so a debug build or an isolated Sirio run without it adopts or starts a host in the user's real root.
+The debug-only knobs — `SIRIO_HOST_PROTOCOL_MAJOR`, `SIRIO_HOST_IDLE_GRACE_MS`, `SIRIO_HOST_BIN` and the methods `host.debug.hold_session` and the debug-only `surface.*` verbs of the app — are compiled out of release builds with `cfg!(debug_assertions)`, which is why `Scripts/Tests/test-host-e2e.sh` and `Scripts/Tests/test-term-e2e.sh` drive debug builds only.
 
-Quit is unchanged until SP2: `PaneRegistry::shutdown` still ends every pane (see Pane hierarchy), because there are no host sessions yet. SP2 turns Quit into detach.
+Quit detaches (see Pane hierarchy): the host keeps its sessions, and `host.shutdown` is still the only thing that ends a host.
 
 ## Conventions
 

@@ -15,8 +15,7 @@ reading it names) shows it working.
 `--out-dir` keeps each case's directory: the host logs and state files, the
 attach outputs (`victim.out`, `stalled.out`, `attach.out`), the replicas and
 host reads (`r.txt`, `h.txt`, `r2.txt`, `h2.txt`), the recorded offsets
-(`off.txt`), and `transcript.log` with every probe call and its answer. Case
-7 (`sirioctl-direct`) prints SKIP until Task 11 turns it on; case 9
+(`off.txt`), and `transcript.log` with every probe call and its answer. Case 9
 (conformance) is not repeated here — `test-host-e2e.sh` case 8 runs it.
 
 ## What each row proves
@@ -27,9 +26,10 @@ host reads (`r.txt`, `h.txt`, `r2.txt`, `h2.txt`), the recorded offsets
 | Windows | ConPTY inside a `DETACHED_PROCESS` host with no console | Probe: cases 1–6 create, attach, read and close real sessions on exactly such a host | Not yet run — confirmed when `windows-check` runs cases 1–6 |
 | Windows | Killing descendants is a no-op today | A job object per session with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; `term.close` closes it. Nested jobs (Windows 8+) make it work inside a `WindowsNoBreakaway` host too | Not yet run — case 6 on Windows |
 | Windows | The "Running" pill is always false today | Stays false: the owner tick publishes `foreground = false` unconditionally on Windows (`#[cfg(windows)]` in `sirio_term_session/src/owner.rs`) — no `tcgetpgrp` equivalent is consulted and the ConPTY process list is not used | Code fact 2026-10-06; no probe planned |
-| macOS | **TCC**: agents become children of a launchd job, not of Sirio.app; privacy prompts may name `sirio-host`, and permissions granted to Sirio may not apply | A probe with `sirio_privacy`'s `permissions` example run inside a host session, on the runner and on a real Mac (manual, Task 13) | Not yet run |
+| macOS | **TCC**: agents become children of a launchd job, not of Sirio.app; privacy prompts may name `sirio-host`, and permissions granted to Sirio may not apply | A probe with `sirio_privacy`'s `permissions` example run inside a host session, on the runner and on a real Mac (manual, Task 13) | Not yet run. Deferred by the user on 2026-10-12; owed before SP2 is called done on that platform |
 | Linux, macOS | PTYs opened by a host that is a session leader | `O_NOCTTY` on every master and slave the host opens, plus `drop_acquired_controlling_terminal` giving up a PTY that became the host's terminal anyway; case 13 checks both sides | 2026-10-06, this machine (Linux): PASS; macOS, Windows: not yet run |
 | Linux | The host's systemd scope also holds its sessions | Intended: stopping the scope stops everything in it | Not yet run |
+| Windows | The app itself: a Windows Sirio adopts or starts the host, a terminal tab's session survives a relaunch, and Show session attaches without owning. `test-host-sessions-e2e.sh` runs on Linux and macOS only, so this is a manual run on a Windows desktop | Manual check, not in CI. Deferred by the user on 2026-10-12; owed before SP2 is called done on that platform | Not yet run |
 
 ## The Windows inheritance reading, 2026-10-06
 
