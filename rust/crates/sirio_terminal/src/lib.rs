@@ -4409,14 +4409,17 @@ impl gpui::Render for TerminalView {
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
-            let items = match split_pane_size {
-                Some((width, height)) => context_menu::items_with_split_availability(
-                    width,
-                    height,
-                    self.sole_tab_in_group,
-                ),
-                None => context_menu::items().to_vec(),
-            };
+            let items = context_menu::offered_items(
+                match split_pane_size {
+                    Some((width, height)) => context_menu::items_with_split_availability(
+                        width,
+                        height,
+                        self.sole_tab_in_group,
+                    ),
+                    None => context_menu::items().to_vec(),
+                },
+                attached,
+            );
             for (index, item) in items.iter().enumerate() {
                 let action = item.action;
                 let item_entity = entity.clone();
@@ -8339,6 +8342,69 @@ mod view_tests {
     fn attached_view_offers_no_restart_on_a_lost_session() {
         assert!(!lost_overlay_offers_restart(true));
         assert!(lost_overlay_offers_restart(false));
+    }
+
+    /// A factory that counts the opens it is asked for and always fails over.
+    struct CountingFailingFactory {
+        opens: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        reason: &'static str,
+    }
+    impl SessionFactory for CountingFailingFactory {
+        fn open(&self, _request: OpenRequest) -> OpenOutcome {
+            self.opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            OpenOutcome::Failed(self.reason.to_string())
+        }
+    }
+
+    /// Restart on an attached view that has lost its session is refused: it
+    /// reaches no host (no factory open, so no create and no close) and the
+    /// view stays in Session lost (spec §5).
+    #[gpui::test]
+    async fn restart_on_an_attached_lost_view_reaches_no_host(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reason = "Session lost: pane-c000000000000 is no longer on the host";
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(CountingFailingFactory {
+            opens: opens.clone(),
+            reason,
+        }))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-attached-restart-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal");
+            view.identity = TerminalIdentity::new("pane-c000000000000", "terminal-restart");
+            view.set_attached();
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let opens_before = opens.load(std::sync::atomic::Ordering::SeqCst);
+        cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            terminal.update(cx, |terminal, cx| terminal.restart(cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            opens.load(std::sync::atomic::Ordering::SeqCst),
+            opens_before,
+            "restart on an attached view must reach no host"
+        );
+        let (failed, message) = cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            let terminal = terminal.read(cx);
+            (
+                terminal.is_failed(),
+                terminal.failure_message().unwrap_or_default().to_string(),
+            )
+        });
+        assert!(failed, "the view stays in Session lost");
+        assert_eq!(message, reason);
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// A factory that never resolves: the pane waits in Connecting until the

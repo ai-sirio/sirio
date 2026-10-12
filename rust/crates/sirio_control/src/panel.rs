@@ -517,4 +517,48 @@ mod containment_tests {
             Some(&root.join("wt/nested"))
         );
     }
+
+    fn pane(id: &str) -> PaneInfo {
+        PaneInfo {
+            id: id.to_string(),
+            tab: "tab".to_string(),
+            title: "title".to_string(),
+            agent: String::new(),
+            active: false,
+        }
+    }
+
+    /// Closing a worktree returns only the control sessions it contains: a
+    /// subdirectory session ends with its own worktree and survives a sibling's
+    /// close, and an app pane of the closed worktree is forgotten but never
+    /// returned for the host to end.
+    #[test]
+    fn closing_a_worktree_ends_only_the_control_sessions_it_contains() {
+        let root = tree("control-only");
+        let (wt, wt2) = (root.join("wt"), root.join("wt2"));
+        let worktrees = vec![wt.clone(), wt2.clone()];
+        let registry = PaneRegistry::new();
+        registry.set_external(&wt, vec![pane("app-tab")]).expect("app tab");
+        registry
+            .set_control_sessions(vec![ControlSession {
+                info: pane("pane-c000000000001"),
+                working_directory: root.join("wt/sub"),
+            }])
+            .expect("control session");
+
+        let sibling_close = registry
+            .shutdown_for(&wt2, &worktrees)
+            .expect("close sibling");
+        assert!(
+            sibling_close.is_empty(),
+            "a sibling's close must not end wt's control session: {sibling_close:?}"
+        );
+
+        let own_close = registry.shutdown_for(&wt, &worktrees).expect("close wt");
+        assert_eq!(own_close, vec!["pane-c000000000001".to_string()]);
+        assert!(
+            registry.list().expect("list").is_empty(),
+            "the closed worktree's app tab is forgotten too"
+        );
+    }
 }

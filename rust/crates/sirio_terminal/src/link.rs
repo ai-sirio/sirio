@@ -94,6 +94,27 @@ pub enum OpenOutcome {
 pub struct SessionFactoryGlobal(pub Option<Arc<dyn SessionFactory>>);
 impl gpui::Global for SessionFactoryGlobal {}
 
+/// What a host open does, decided before any host call (spec §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenPlan {
+    /// The host lists the session: attach to it.
+    Attach,
+    /// Not listed, owned open: create it, then attach.
+    Create,
+    /// Not listed, attach-only: the session is lost. Never created.
+    Lost,
+}
+
+/// The open decision: a listed session is attached; a missing one is lost
+/// for an attach-only open and created otherwise.
+fn open_plan(listed: bool, attach_only: bool) -> OpenPlan {
+    match (listed, attach_only) {
+        (true, _) => OpenPlan::Attach,
+        (false, true) => OpenPlan::Lost,
+        (false, false) => OpenPlan::Create,
+    }
+}
+
 /// The in-process engine: the temporary fallback (SP2 spec §1, §10).
 pub struct LocalLink {
     session_id: String,
@@ -339,13 +360,14 @@ impl HostLink {
             .iter()
             .find(|summary| summary.session_id == request.session_id)
             .map(|summary| summary.pid);
-        if listed_pid.is_none() && request.attach_only {
+        let plan = open_plan(listed_pid.is_some(), request.attach_only);
+        if plan == OpenPlan::Lost {
             return Err(format!(
                 "Session lost: {} is no longer on the host",
                 request.session_id
             ));
         }
-        let created_pid = if listed_pid.is_none() {
+        let created_pid = if plan == OpenPlan::Create {
             let params = CreateParams {
                 session_id: Some(request.session_id.clone()),
                 cwd: request.cwd.to_string_lossy().into_owned(),
@@ -980,6 +1002,18 @@ mod tests {
 #[cfg(test)]
 mod attach_only_tests {
     use super::*;
+
+    /// Every way a host open can go, decided before any host call: an
+    /// attach-only open whose session the host does not list is `Lost` and
+    /// is never created (spec §5); an owned open of a missing session
+    /// creates it; a listed session is attached whichever kind of open.
+    #[test]
+    fn an_attach_only_open_of_a_missing_session_is_lost_and_never_created() {
+        assert_eq!(open_plan(false, true), OpenPlan::Lost);
+        assert_eq!(open_plan(false, false), OpenPlan::Create);
+        assert_eq!(open_plan(true, true), OpenPlan::Attach);
+        assert_eq!(open_plan(true, false), OpenPlan::Attach);
+    }
 
     /// An attach-only open never starts a local shell: with no host to attach
     /// to it fails, and nothing is spawned under the session's id.

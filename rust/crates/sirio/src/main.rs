@@ -94,6 +94,26 @@ use std::time::{Duration, Instant, SystemTime};
 /// keeps a build from growing the buffer without bound.
 const FILES_WATCH_PENDING_LIMIT: usize = 4096;
 
+/// The tabs a layout saves: `tabs` without those `attached` names. The save
+/// path and its test share this one filter, so the rule cannot drift.
+fn persisted_tabs<T>(tabs: Vec<T>, attached: impl Fn(&T) -> bool) -> Vec<T> {
+    tabs.into_iter().filter(|tab| !attached(tab)).collect()
+}
+
+/// Whether a tab shows a host session another client owns: any terminal
+/// pane of it is attached (`TerminalView::attached`).
+fn tab_shows_attached_session(tab: &OpenTab, cx: &App) -> bool {
+    let mut attached = false;
+    tab.panes.for_each(&mut |_, content| {
+        if let TabContent::Terminal { view } = content
+            && view.read(cx).attached()
+        {
+            attached = true;
+        }
+    });
+    attached
+}
+
 /// A hand-off's Done text, with Sirio's note on the worktree after it when the
 /// file carries one. The note is the file's line without its list marker.
 fn with_note(text: String, note: Option<&str>) -> String {
@@ -6457,7 +6477,7 @@ impl SirioWorkspace {
 
     /// The shell's current layout, in the shape persistence understands.
     fn layout(&self, cx: &App) -> SessionLayout {
-        let owned_tabs: Vec<&OpenTab> = self
+        let worktree_tabs: Vec<&OpenTab> = self
             .tabs
             .iter()
             .filter(|tab| {
@@ -6470,6 +6490,11 @@ impl SirioWorkspace {
                 )
             })
             .collect();
+        // An attached tab (Show session) is a view onto a session another
+        // client owns: it is never saved, so a relaunch cannot restore it as
+        // an owned tab (spec §5). The session lives on in the host.
+        let owned_tabs: Vec<&OpenTab> =
+            persisted_tabs(worktree_tabs, |tab| tab_shows_attached_session(tab, cx));
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         SessionLayout {
             working_directory: self.working_directory.clone(),
@@ -44324,5 +44349,27 @@ browser  profile  "
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod persisted_tabs_tests {
+    use super::persisted_tabs;
+
+    /// A Show-session tab (attached) is left out of the saved layout and an
+    /// owned tab is kept, in order: a relaunch never restores an attached
+    /// tab as owned (spec §5).
+    #[test]
+    fn an_attached_tab_is_never_saved_and_an_owned_one_is() {
+        let tabs = vec![
+            ("owned-shell", false),
+            ("shown-session", true),
+            ("owned-chat", false),
+        ];
+        let saved: Vec<&str> = persisted_tabs(tabs, |tab| tab.1)
+            .into_iter()
+            .map(|tab| tab.0)
+            .collect();
+        assert_eq!(saved, vec!["owned-shell", "owned-chat"]);
     }
 }
