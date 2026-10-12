@@ -849,7 +849,7 @@ case_duplicate_id() {
   new_world c12
   app_start
   select_repo "$W/repo"
-  local first next pidfile control_pid control_clients dup dup_pid
+  local first next pidfile control_pid control_clients dup
   first=$(open_terminal "sleep 300")
   [ -n "$first" ] || fail "the first terminal has no pane id"
   next="pane-$(( ${first#pane-} + 1 ))"
@@ -866,11 +866,11 @@ case_duplicate_id() {
   [ "$(session_clients "$next")" = "$control_clients" ] || fail "the new terminal attached to the control session $next (clients $(session_clients "$next"), expected $control_clients)"
   [ "$(session_pid "$next")" = "$control_pid" ] || fail "the held id $next now names another session"
   pid_alive "$control_pid" || fail "the control session pid $control_pid is not alive"
-  wait_until 10 pid_written "$pidfile" || fail "the new terminal never wrote its pid"
-  dup_pid=$(pid_in "$pidfile")
-  [ "$dup_pid" != "$control_pid" ] || fail "the new terminal runs the control session's pid $control_pid"
+  # The duplicate open fails and shows why; it runs no command at all, on the
+  # held session or on a local shell (finding 7: no fallback for a host open).
+  ! pid_written "$pidfile" || fail "the new terminal ran its command beside the control session"
   [ "$(session_origin "$next")" = control ] || fail "the control session $next changed origin"
-  NOTE="held $next (pid $control_pid, clients $control_clients) untouched; new terminal pid $dup_pid"
+  NOTE="held $next (pid $control_pid, clients $control_clients) untouched; the new terminal failed, ran nothing"
 }
 
 case_close_worktree() {
