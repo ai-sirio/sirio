@@ -16603,7 +16603,6 @@ impl SirioWorkspace {
         self.control_read_change_request(cx)
     }
 
-    /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
     /// Debug-only `surface.terminal.open`. It goes through the path a
     /// terminal launched by an agent takes: a tab, then `start` (no render
     /// needed). The reply names the pane, `pane-<n>`, which is the session id
@@ -16626,6 +16625,7 @@ impl SirioWorkspace {
         Ok(vec![("pane".to_string(), pane)])
     }
 
+    /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
     fn control_read_tabs(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let mut report = vec![
             ("count".to_string(), self.tabs.len().to_string()),

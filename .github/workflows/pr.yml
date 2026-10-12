@@ -170,8 +170,8 @@ jobs:
       # Xvfb, its host adopted and killed around, the control socket driving it.
       # The display tools are the ones the window captures and the echo
       # measurement use (Xvfb with Mesa's lavapipe, xdotool, X11 utils,
-      # ImageMagick's import and identify). Like the Ely probe, it runs under
-      # Xvfb; Windows does not run it (the app builds there only in the release job).
+      # ImageMagick's import and identify). It runs under its own Xvfb; Windows
+      # does not run it (the app builds there only in the release job).
       - name: Install the display tools for the host sessions E2E
         run: |
           sudo apt-get install -y -q --no-install-recommends \

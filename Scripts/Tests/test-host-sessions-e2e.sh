@@ -188,6 +188,13 @@ use_world() {
   export SIRIO_CREDENTIALS="$W/cred.json"
   export SIRIO_HOST_HOME="$W/host"
   export SIRIO_HOST_BIN="$HOST_BIN"
+  # Every XDG directory the app or a tool may write to is this world's own, so
+  # no run can touch the user's real state, data, config or cache.
+  export XDG_STATE_HOME="$W/xdg/state" XDG_DATA_HOME="$W/xdg/data"
+  export XDG_CONFIG_HOME="$W/xdg/config" XDG_CACHE_HOME="$W/xdg/cache"
+  export XDG_RUNTIME_DIR="$W/xdg/runtime"
+  mkdir -p "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
   unset SIRIO_HOST_START_DELAY_MS SIRIO_HOST_IDLE_GRACE_MS SIRIO_HOST_PROTOCOL_MAJOR
 }
 
@@ -254,18 +261,21 @@ probe() {
 }
 
 # The host's session list (term-list) of the current world, in TERM_LIST.
+# Succeeds only when the host answered. A probe that failed leaves TERM_LIST
+# empty and says so by its status: it is never read as "no sessions".
 term_list() {
   probe term-list
   TERM_LIST="$OUT"
+  [ "$RC" -eq 0 ]
 }
 session_line() { # id -> its term-list line, if any
   printf '%s\n' "$TERM_LIST" | grep "^session=$1 " || true
 }
-session_listed() { term_list; [ -n "$(session_line "$1")" ]; }
-session_gone() { ! session_listed "$1"; }
-session_pid() { term_list; session_line "$1" | sed -n 's/.* pid=\([0-9][0-9]*\).*/\1/p'; }
-session_clients() { term_list; session_line "$1" | sed -n 's/.* clients=\([0-9][0-9]*\).*/\1/p'; }
-session_origin() { term_list; session_line "$1" | sed -n 's/.* origin=\([a-z]*\).*/\1/p'; }
+session_listed() { term_list && [ -n "$(session_line "$1")" ]; }
+session_gone() { term_list && [ -z "$(session_line "$1")" ]; }
+session_pid() { term_list || true; session_line "$1" | sed -n 's/.* pid=\([0-9][0-9]*\).*/\1/p'; }
+session_clients() { term_list || true; session_line "$1" | sed -n 's/.* clients=\([0-9][0-9]*\).*/\1/p'; }
+session_origin() { term_list || true; session_line "$1" | sed -n 's/.* origin=\([a-z]*\).*/\1/p'; }
 
 # The host of the current world has left once its state file is gone.
 host_gone() { ! ls "$W"/host/host-v*.json >/dev/null 2>&1; }
@@ -548,6 +558,8 @@ case_fallback() {
   probe term-list
   export SIRIO_HOST_BIN="$HOST_BIN"
   [ "$RC" -ne 0 ] || fail "term-list reached a host with no host binary and no host running"
+  grep -q 'terminal host connection' "$W/probe.err" \
+    || fail "term-list failed, but not for want of a host: $(head -c 200 "$W/probe.err")"
   APP_EXE="$APP_BIN"
   # A keystroke echo on the same path, for case 10's comparison.
   local shell_pane
@@ -555,16 +567,22 @@ case_fallback() {
   wait_until 10 pane_known "$shell_pane" || fail "the cat terminal is unknown"
   sleep 1
   LOCAL_ECHO=$(echo_typed "$shell_pane" 10)
-  NOTE="local echo mean/median ms: $LOCAL_ECHO; local pid $pid"
+  if [ "$LOCAL_ECHO" = "none none" ]; then
+    NOTE="local echo NOT MEASURED (no echo showed); local pid $pid"
+  else
+    NOTE="local echo mean/median ms: $LOCAL_ECHO; local pid $pid"
+  fi
   kill -9 "$pid" 2>/dev/null || true
 }
 
 # A host session with no tab (an orphan: origin app, not in the saved layout)
 # is adopted by the app on launch: a tab for it appears, attached to the
 # session, which keeps its pid. The orphan is made on the host directly, with
-# host_probe, because the app writes its layout as soon as a terminal opens:
-# the kill-after-open race the spec names could not be reproduced in five
-# tries (Ruling, see the report).
+# host_probe. Spec §4.1 deliberately shrinks the kill-before-save window: a new
+# terminal tab is saved at once, so an app killed between opening a tab and its
+# save is rare by design, and killing the app at that instant cannot be made to
+# happen reliably. What this case proves is the adoption path (§4.2): a host
+# session with no saved tab gets one on launch (Ruling, accepted in review).
 case_orphan() {
   new_world c6
   local pane pidfile pid
@@ -663,7 +681,15 @@ print(int((os.stat(sock).st_mtime - os.stat(lock).st_mtime) * 1000))' "$W/host/h
   wait_until 30 pane_known "$pane" || fail "the restored $pane is unknown"
   wait_until 30 session_listed "$pane" || fail "the restored $pane was not created on the host"
   [ "$(session_origin "$pane")" = app ] || fail "the restored $pane is not an app session on the host"
-  wait_until 30 [ "$(pane_state "$pane" survives)" = true ] || fail "the restored $pane fell back to LocalLink"
+  # Pending is false by design until the session is attached, so the check
+  # starts once the host lists the pane: from then on survives must reach
+  # true and then stay true for three seconds of samples. A LocalLink fallback
+  # at any sample fails the case, not only the end state.
+  wait_until 10 [ "$(pane_state "$pane" survives)" = true ] || fail "the restored $pane never reached the host"
+  for _ in $(seq 1 30); do
+    [ "$(pane_state "$pane" survives)" = true ] || fail "the restored $pane fell back to LocalLink after the host listed it"
+    sleep 0.1
+  done
   unset SIRIO_HOST_START_DELAY_MS
   NOTE="host bound ${delay_ms} ms after its lock; $pane created on the host with origin=app"
   capture slow-host
@@ -691,11 +717,11 @@ case_isolation() {
   use_world "$a_dir"
   session_listed "$a_pane" || fail "world A's host does not list its own $a_pane"
   [ "$(session_pid "$a_pane")" = "$pid_a" ] || fail "world A's host lists another pid for $a_pane"
-  term_list
+  term_list || fail "world A's host did not answer term-list"
   [ -z "$(printf '%s\n' "$TERM_LIST" | grep "pid=$pid_b ")" ] || fail "world A's host lists world B's pid $pid_b"
   use_world "$b_dir"
   session_listed "$b_pane" || fail "world B's host does not list its own $b_pane"
-  term_list
+  term_list || fail "world B's host did not answer term-list"
   [ -z "$(printf '%s\n' "$TERM_LIST" | grep "pid=$pid_a ")" ] || fail "world B's host lists world A's pid $pid_a"
   [ "$(pane_state "$b_pane" survives)" = true ] || fail "world B's $b_pane is not on its own host"
   use_world "$a_dir"
@@ -718,7 +744,7 @@ case_echo_latency() {
   probe_out="$OUT"
   echo "echo-latency: host (sirioctl loop, mean median ms) $HOST_ECHO; host_probe term-echo-latency: $(printf '%s' "$probe_out" | tr '\n' ' ')"
   echo "echo-latency: LocalLink (case 5, mean median ms) ${LOCAL_ECHO:-not measured}"
-  NOTE="host ${HOST_ECHO} ms; LocalLink ${LOCAL_ECHO:-n/a} ms, mean median; recorded, not judged"
+  NOTE="host ${HOST_ECHO} ms, LocalLink ${LOCAL_ECHO:-n/a} ms (mean median; 'none' = NOT MEASURED, no echo showed); recorded, not judged"
 }
 
 # Closing a worktree ends the control sessions inside it. A control session in
@@ -845,4 +871,8 @@ run_case 9 isolation case_isolation
 run_case 10 echo-latency case_echo_latency
 run_case 11 close-worktree case_close_worktree
 
-echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
+if [ -n "$ONLY" ]; then
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 11 cases)"
+else
+  echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
+fi
