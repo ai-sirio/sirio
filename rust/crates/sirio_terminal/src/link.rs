@@ -91,7 +91,13 @@ pub enum OpenOutcome {
     Linked(Box<dyn SessionLink>),
     /// The host is still being found; ask again on `SessionFactoryReady`.
     Pending,
+    /// The host open failed. A restored or fresh terminal shows the reason
+    /// with Retry and never falls back to a local shell: the session may be
+    /// live on a host that is only slow or unverifiable (spec §8, finding 7).
     Failed(String),
+    /// No host is available (absent, or without the `terminal` capability):
+    /// the only case that falls back to `LocalLink` (spec §8).
+    NoHost(String),
 }
 
 #[derive(Clone)]

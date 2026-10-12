@@ -2828,6 +2828,9 @@ impl TerminalView {
                 self.terminal = TerminalState::Running(handle);
             }
             OpenOutcome::Pending => {
+                // Waiting on the host: no local shell exists, so the session
+                // is not a LocalLink (finding 7).
+                self.view_mode.survives = true;
                 self.terminal = TerminalState::Connecting;
                 // Registered once per view and replaced, never stacked:
                 // assigning drops the previous subscription.
@@ -2848,7 +2851,20 @@ impl TerminalView {
                 self.terminal = TerminalState::Failed { message: reason };
                 self.host.teardown();
             }
+            // A host that is there but failed the open (unverifiable, a
+            // transient error, a dead connection) is not "no host": the
+            // session may be live, so no local shell is started beside it.
+            // Retry re-attempts the open (spec §8).
             OpenOutcome::Failed(reason) => {
+                eprintln!("[sirio] terminal open failed, not falling back: {reason}");
+                // No local shell was started; the session is the host's.
+                self.view_mode.survives = true;
+                self.fallback_reason = None;
+                self.session_lost = true;
+                self.terminal = TerminalState::Failed { message: reason };
+                self.host.teardown();
+            }
+            OpenOutcome::NoHost(reason) => {
                 eprintln!("[sirio] terminal on the in-process fallback: {reason}");
                 match LocalLink::open(&request) {
                     Ok(link) => {
@@ -4802,7 +4818,7 @@ impl gpui::Render for TerminalView {
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.ely.warning)
-                            .child(if self.attached {
+                            .child(if self.attached || self.restored {
                                 "Session lost"
                             } else {
                                 "Terminal failed to start"
@@ -8445,6 +8461,14 @@ mod view_tests {
         }
     }
 
+    /// No host at all: the one case that falls back to a local shell.
+    struct NoHostSessionFactory(&'static str);
+    impl SessionFactory for NoHostSessionFactory {
+        fn open(&self, _request: OpenRequest) -> OpenOutcome {
+            OpenOutcome::NoHost(self.0.to_string())
+        }
+    }
+
     #[gpui::test]
     async fn pending_factory_leaves_the_pane_connecting(cx: &mut gpui::TestAppContext) {
         cx.set_global(Theme::light());
@@ -8482,12 +8506,55 @@ mod view_tests {
         let _ = std::fs::remove_dir_all(working_directory);
     }
 
+    /// Finding 7: a failed open of a host that is there (unverifiable, a
+    /// transient error) shows the failure with Retry; no local shell starts
+    /// beside the session the host may still hold.
     #[gpui::test]
-    async fn failed_factory_falls_back_to_a_local_link_with_a_banner(
+    async fn a_failed_host_open_never_runs_a_local_shell(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingSessionFactory(
+            "host is unverifiable",
+        )))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-no-fallback-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(
+                &working_directory,
+                pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
+                cx,
+            )
+            .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let (failed, running, survives) = terminal.read_with(&cx.cx, |terminal, _| {
+            (
+                terminal.is_failed(),
+                terminal.running_terminal().is_some(),
+                terminal.survives_app(),
+            )
+        });
+        assert!(failed, "a failed host open shows the failure");
+        assert!(!running, "no local shell starts beside the host's session");
+        assert!(survives, "the session is the host's, never a local one");
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    #[gpui::test]
+    async fn no_host_falls_back_to_a_local_link_with_a_banner(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.set_global(Theme::light());
-        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingSessionFactory(
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(NoHostSessionFactory(
             "host unreachable",
         )))));
         let working_directory = std::env::temp_dir().join(format!(

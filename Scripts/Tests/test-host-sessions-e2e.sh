@@ -35,6 +35,9 @@ set -eEuo pipefail
 #                       a fresh app terminal never attaches to it (finding 11)
 #   13. adopt-two-worktrees  a terminal in each of two worktrees survives kill -9;
 #                       the relaunch adds no tab and both pids keep running
+#   14. unverifiable-no-fallback  the host holds its lock but does not answer: a
+#                       restored tab runs no local shell and reports no
+#                       survives=false; SIGCONT, and it attaches (finding 7)
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -756,6 +759,38 @@ case_echo_latency() {
 
 # Closing a worktree ends the control sessions inside it. A control session in
 # a directory outside it survives.
+# Finding 7 (spec §8): a host that holds its lock and does not answer is
+# Unverifiable, never Absent. A restored tab must not run a local shell beside
+# the session, must not report survives=false, and attaches once the host
+# answers again.
+case_unverifiable_no_fallback() {
+  new_world c14
+  local pane pidfile pid host_pid i kids
+  app_start
+  select_repo "$W/repo"
+  pidfile="$W/pid.txt"
+  pane=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 10 pid_written "$pidfile" || fail "the terminal never wrote its pid"
+  pid=$(pid_in "$pidfile")
+  app_quit
+  host_pid=$(python3 -c 'import glob, json, sys; print(json.load(open(glob.glob(sys.argv[1] + "/host-v*.json")[0]))["pid"])' "$W/host")
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  app_start
+  for i in $(seq 1 60); do
+    # A local shell is what a fallback would start; other children (the
+    # app's own usage requests, say) are not the session's business.
+    kids=$(ps -o comm= --ppid "$APP_PID" | grep -cE '^(sh|bash|zsh|fish|dash)$' || true)
+    [ "$kids" -eq 0 ] || fail "the app runs $kids local shell(s) while the host is unverifiable"
+    [ "$(pane_state "$pane" survives 2>/dev/null)" = false ] && fail "pane $pane reports survives=false while the host is unverifiable"
+    sleep 0.5
+  done
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  wait_until 60 [ "$(pane_state "$pane" survives 2>/dev/null)" = true ] || fail "the restored tab $pane is not attached after SIGCONT (survives $(pane_state "$pane" survives 2>/dev/null))"
+  [ "$(session_pid "$pane")" = "$pid" ] || fail "the restored tab $pane is another session (pid $(session_pid "$pane"), expected $pid)"
+  wait_until 20 clients_are 1 "$pane" || fail "the restored tab $pane has $(session_clients "$pane") clients, expected 1"
+  NOTE="restored $pane (pid $pid): no local child while unverifiable; attached after SIGCONT"
+}
+
 # The id of the worktree at path $1 in the project catalog.
 worktree_id_at() { # path
   ctl_json project list | python3 -c '
@@ -961,6 +996,7 @@ run_case 10 echo-latency case_echo_latency
 run_case 11 close-worktree case_close_worktree
 run_case 12 duplicate-id case_duplicate_id
 run_case 13 adopt-two-worktrees case_adopt_two_worktrees
+run_case 14 unverifiable-no-fallback case_unverifiable_no_fallback
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 11 cases)"

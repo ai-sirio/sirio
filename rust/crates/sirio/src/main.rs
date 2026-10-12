@@ -23800,11 +23800,21 @@ impl gpui::Global for HostConnection {}
 /// `open` for that id takes the stored result out of the slot — a `Linked`
 /// link is handed out once, never to two views.
 struct HostSessions {
-    client: sirio_host_client::TermClient,
-    reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+    /// Yields the terminal client and its reconnect closure. Off the GPUI
+    /// thread, once per open: a fixed client when the host answered at
+    /// startup, and a fresh `ensure_host` when it did not (finding 7).
+    connect: HostConnect,
     slots: Arc<Mutex<HashMap<String, HostOpenSlot>>>,
     wake: futures::channel::mpsc::UnboundedSender<()>,
 }
+
+/// The terminal client and reconnect closure of a host, obtained off the GPUI
+/// thread.
+type HostConnectResult = (
+    sirio_host_client::TermClient,
+    Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+);
+type HostConnect = Arc<dyn Fn() -> Result<HostConnectResult, String> + Send + Sync>;
 
 enum HostOpenSlot {
     InFlight,
@@ -23861,8 +23871,7 @@ impl SessionFactory for HostSessions {
         if !spawn {
             return OpenOutcome::Pending;
         }
-        let client = self.client.clone();
-        let reconnect = Arc::clone(&self.reconnect);
+        let connect = Arc::clone(&self.connect);
         let slots = Arc::clone(&self.slots);
         let worker_id = id.clone();
         let wake = self.wake.clone();
@@ -23872,52 +23881,59 @@ impl SessionFactory for HostSessions {
                 let slots = Arc::clone(&slots);
                 let wake = wake.clone();
                 move || {
-                    let _guard = HostOpenWorkerGuard {
+                    let guard = HostOpenWorkerGuard {
                         slots: Arc::clone(&slots),
                         id: worker_id.clone(),
                         wake: wake.clone(),
                     };
-                // Blocking host work stays off the GPUI thread (SP1 §7): the
-                // recreate close-and-wait and the attach-or-create round trips
-                // all run here.
-                if request.recreate {
-                    // RESTART RACE (Task 9 review): `restart` queues
-                    // `Shutdown` and re-opens under the same id at once; with
-                    // `HostLink` that can attach to the still-listed dying
-                    // session. Close synchronously (wait for `term.close` to
-                    // be answered, then for the id to leave `term.list`)
-                    // before re-creating under the same id.
-                    let _ = client.close(&request.session_id);
-                    let start = std::time::Instant::now();
-                    let timeout = std::time::Duration::from_secs(5);
-                    while start.elapsed() < timeout {
-                        match client.list() {
-                            Ok(listed)
-                                if listed.sessions.iter().any(|s| {
-                                    s.session_id == request.session_id
-                                }) =>
-                            {
-                                std::thread::sleep(std::time::Duration::from_millis(50));
+                    // Blocking host work stays off the GPUI thread (SP1 §7):
+                    // reaching the host, the recreate close-and-wait and the
+                    // attach-or-create round trips all run here.
+                    let result: Result<Box<dyn sirio_terminal::SessionLink>, String> =
+                        match connect() {
+                            Err(reason) => Err(reason),
+                            Ok((client, reconnect)) => {
+                                if request.recreate {
+                                    // RESTART RACE (Task 9 review): `restart` queues
+                                    // `Shutdown` and re-opens under the same id at
+                                    // once; with `HostLink` that can attach to the
+                                    // still-listed dying session. Close synchronously
+                                    // (wait for `term.close` to be answered, then for
+                                    // the id to leave `term.list`) before re-creating.
+                                    let _ = client.close(&request.session_id);
+                                    let start = std::time::Instant::now();
+                                    let timeout = std::time::Duration::from_secs(5);
+                                    while start.elapsed() < timeout {
+                                        match client.list() {
+                                            Ok(listed)
+                                                if listed.sessions.iter().any(|s| {
+                                                    s.session_id == request.session_id
+                                                }) =>
+                                            {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_millis(50),
+                                                );
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                }
+                                match HostLink::attach_or_create_with_reconnect(
+                                    client,
+                                    &request,
+                                    reconnect,
+                                ) {
+                                    Ok(link) => Ok(Box::new(link)),
+                                    Err(reason) => Err(reason),
+                                }
                             }
-                            _ => break,
-                        }
-                    }
-                }
-                let result: Result<Box<dyn sirio_terminal::SessionLink>, String> =
-                    match HostLink::attach_or_create_with_reconnect(
-                        client,
-                        &request,
-                        reconnect,
-                    ) {
-                        Ok(link) => Ok(Box::new(link)),
-                        Err(reason) => Err(reason),
-                    };
-                slots
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(request.session_id.clone(), HostOpenSlot::Ready(result));
-                let _ = wake.unbounded_send(());
-                std::mem::forget(_guard);
+                        };
+                    slots
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(request.session_id.clone(), HostOpenSlot::Ready(result));
+                    let _ = wake.unbounded_send(());
+                    std::mem::forget(guard);
                 }
             })
             .is_err()
@@ -23951,8 +23967,98 @@ struct FailingFactory {
 
 impl SessionFactory for FailingFactory {
     fn open(&self, _request: OpenRequest) -> OpenOutcome {
-        OpenOutcome::Failed(self.reason.clone())
+        OpenOutcome::NoHost(self.reason.clone())
     }
+}
+
+/// The host options `ensure_host` needs, from the environment the app runs
+/// in. The one place both the startup ensure and a later re-ensure build them.
+fn host_ensure_options(
+    environment: BTreeMap<String, String>,
+    current_exe: PathBuf,
+) -> Result<sirio_host_client::EnsureOptions, sirio_host_client::EnsureError> {
+    let Some(paths) = sirio_host_protocol::paths::HostPaths::from_environment(&environment)
+    else {
+        return Err(sirio_host_client::EnsureError::NoDataRoot);
+    };
+    let major = if cfg!(debug_assertions) {
+        sirio_host_protocol::version::effective_major(
+            environment
+                .get("SIRIO_HOST_PROTOCOL_MAJOR")
+                .map(String::as_str),
+        )
+    } else {
+        sirio_host_protocol::version::PROTOCOL_MAJOR
+    };
+    Ok(sirio_host_client::EnsureOptions {
+        paths,
+        client_version: sirio_control::VERSION.to_string(),
+        current_exe,
+        environment,
+        major,
+    })
+}
+
+/// A client already in hand, for the host that answered at startup.
+fn fixed_connect(
+    client: sirio_host_client::TermClient,
+    reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+) -> HostConnect {
+    Arc::new(move || Ok((client.clone(), Arc::clone(&reconnect))))
+}
+
+/// Re-ensures the host on each open, for a host that held its lock but did
+/// not answer at startup (finding 7). Each open re-attempts the host: a host
+/// that answers now is attached, one that still does not fails the open (never
+/// a local shell). A host that is absent or refused is not retried here.
+fn retry_connect(environment: BTreeMap<String, String>, current_exe: PathBuf) -> HostConnect {
+    const ATTEMPTS: usize = 3;
+    Arc::new(move || {
+        let mut last = String::from("the host did not answer");
+        for _ in 0..ATTEMPTS {
+            let options = host_ensure_options(environment.clone(), current_exe.clone())
+                .map_err(|error| error.to_string())?;
+            match sirio_host_client::ensure_host(&options) {
+                Ok(handle) => {
+                    let client = handle
+                        .term()
+                        .ok_or_else(|| "the host has no terminal capability".to_string())?;
+                    let reconnect = handle
+                        .term_reconnect()
+                        .unwrap_or_else(|| Arc::new(|| None));
+                    return Ok((client, reconnect));
+                }
+                Err(error @ sirio_host_client::EnsureError::Unverifiable { .. }) => {
+                    last = error.to_string();
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err(last)
+    })
+}
+
+/// Installs the terminals' session factory over `connect`, and re-sets the
+/// global whenever an open worker finishes, which wakes every `Connecting`
+/// view (Task 9).
+fn install_host_sessions(connect: HostConnect, cx: &mut App) {
+    let (wake, mut woken) = futures::channel::mpsc::unbounded::<()>();
+    let factory = Arc::new(HostSessions {
+        connect,
+        slots: Arc::new(Mutex::new(HashMap::new())),
+        wake,
+    });
+    cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+    cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        while woken.next().await.is_some() {
+            let factory = factory.clone();
+            let _ = cx.update(|cx| {
+                cx.set_global(SessionFactoryGlobal(Some(factory)));
+            });
+        }
+    })
+    .detach();
 }
 
 /// Finds, starts or adopts the session host on a thread of its own —
@@ -23976,28 +24082,12 @@ fn ensure_host_in_background(
     cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
     let environment: BTreeMap<String, String> = std::env::vars().collect();
     let current_exe = std::env::current_exe().unwrap_or_default();
+    let retry_environment = environment.clone();
+    let retry_exe = current_exe.clone();
     let (sender, outcome) = futures::channel::oneshot::channel();
     let ensure = move || {
-        let Some(paths) = sirio_host_protocol::paths::HostPaths::from_environment(&environment)
-        else {
-            return Err(sirio_host_client::EnsureError::NoDataRoot);
-        };
-        let major = if cfg!(debug_assertions) {
-            sirio_host_protocol::version::effective_major(
-                environment
-                    .get("SIRIO_HOST_PROTOCOL_MAJOR")
-                    .map(String::as_str),
-            )
-        } else {
-            sirio_host_protocol::version::PROTOCOL_MAJOR
-        };
-        let mut handle = sirio_host_client::ensure_host(&sirio_host_client::EnsureOptions {
-            paths,
-            client_version: sirio_control::VERSION.to_string(),
-            current_exe,
-            environment,
-            major,
-        })?;
+        let options = host_ensure_options(environment, current_exe)?;
+        let mut handle = sirio_host_client::ensure_host(&options)?;
         let line = handle.status_line();
         // An N−1 host is named in the line and then let go: it has no
         // sessions in SP1, and holding it would keep it from idling out
@@ -24050,30 +24140,12 @@ fn ensure_host_in_background(
                             // the installed global and the wakeup task: each
                             // worker completion re-sets the same `Arc`, which
                             // retries every `Connecting` view (Task 9).
-                            let (wake, mut woken) =
-                                futures::channel::mpsc::unbounded::<()>();
                             host_terminal.set(client.clone(), Some(reconnect.clone()));
                             cx.set_global(HostTerminalGlobal(host_terminal.clone()));
                             let _ = panes.set_control_sessions(
                                 sirio_control::host_panels::control_sessions_from(&sessions),
                             );
-                            let factory = Arc::new(HostSessions {
-                                client,
-                                reconnect,
-                                slots: Arc::new(Mutex::new(HashMap::new())),
-                                wake,
-                            });
-                            cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
-                            cx.spawn(async move |cx| {
-                                use futures::StreamExt as _;
-                                while woken.next().await.is_some() {
-                                    let factory = factory.clone();
-                                    let _ = cx.update(|cx| {
-                                        cx.set_global(SessionFactoryGlobal(Some(factory)));
-                                    });
-                                }
-                            })
-                            .detach();
+                            install_host_sessions(fixed_connect(client, reconnect), cx);
                             cx.set_global(HostConnection(Some(handle)));
                             if let Some(workspace) = workspace_slot
                                 .lock()
@@ -24103,11 +24175,22 @@ fn ensure_host_in_background(
                 }
                 Err(error) => {
                     eprintln!("[sirio] host unavailable: {error}");
-                    let reason = error.to_string();
-                    cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingFactory {
-                        reason,
-                    }))));
-                    sirio_host_client::status_line_for_error(&error)
+                    let line = sirio_host_client::status_line_for_error(&error);
+                    if matches!(error, sirio_host_client::EnsureError::Unverifiable { .. }) {
+                        // A host that holds its lock is not absent: its
+                        // terminals re-attempt it, and never fall back to a
+                        // local shell (finding 7).
+                        install_host_sessions(
+                            retry_connect(retry_environment.clone(), retry_exe.clone()),
+                            cx,
+                        );
+                    } else {
+                        let reason = error.to_string();
+                        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingFactory {
+                            reason,
+                        }))));
+                    }
+                    line
                 }
             };
             settings.update(cx, |settings, cx| settings.set_host_status(Some(line), cx));
