@@ -105,6 +105,14 @@ pub struct LocalLink {
 
 impl LocalLink {
     pub fn open(request: &OpenRequest) -> Result<LocalLink, String> {
+        // An attached tab never starts a shell of its own (spec §5): with no
+        // host session to attach to, there is nothing to show.
+        if request.attach_only {
+            return Err(format!(
+                "Session lost: {} is no longer on the host",
+                request.session_id
+            ));
+        }
         let program = match &request.shell {
             TerminalShell::System => None,
             TerminalShell::WithArguments { program, args } => {
@@ -966,5 +974,32 @@ mod tests {
             LinkChunk::Exited(_) => "Exited",
             LinkChunk::Lost => "Lost",
         }
+    }
+}
+
+#[cfg(test)]
+mod attach_only_tests {
+    use super::*;
+
+    /// An attach-only open never starts a local shell: with no host to attach
+    /// to it fails, and nothing is spawned under the session's id.
+    #[test]
+    fn a_local_link_refuses_an_attach_only_open() {
+        let request = OpenRequest {
+            session_id: "pane-c000000000000".to_string(),
+            cwd: std::env::temp_dir(),
+            shell: TerminalShell::System,
+            cols: 80,
+            rows: 24,
+            prelude: Vec::new(),
+            recreate: false,
+            attach_only: true,
+        };
+        let refused = LocalLink::open(&request);
+        assert!(
+            matches!(&refused, Err(message) if message.starts_with("Session lost")),
+            "an attach-only open must not start a shell: {:?}",
+            refused.as_ref().err()
+        );
     }
 }

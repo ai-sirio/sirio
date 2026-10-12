@@ -327,9 +327,19 @@ impl PaneRegistry {
     /// Returns the ids of the control sessions it forgot, which the caller
     /// must end on the host (spec §4.2: a closed worktree's sessions end).
     /// Makes no host call itself: the caller runs it off the GPUI thread.
-    pub fn shutdown_for(&self, working_directory: impl AsRef<Path>) -> Result<Vec<String>, PaneError> {
+    pub fn shutdown_for(
+        &self,
+        working_directory: impl AsRef<Path>,
+        worktrees: &[PathBuf],
+    ) -> Result<Vec<String>, PaneError> {
         let requested = working_directory.as_ref();
         let canonical = requested.canonicalize().ok();
+        // Every worktree the app knows, the one closing included: a control
+        // session belongs to the deepest worktree that contains its cwd.
+        let mut candidates = worktrees.to_vec();
+        if !candidates.iter().any(|worktree| worktree == requested) {
+            candidates.push(requested.to_path_buf());
+        }
         let mut external = self
             .external
             .lock()
@@ -337,10 +347,15 @@ impl PaneRegistry {
         let forgotten: Vec<(String, bool)> = external
             .iter()
             .filter(|(_, pane)| {
-                pane.working_directory == requested
-                    || canonical
-                        .as_ref()
-                        .is_some_and(|directory| pane.working_directory == *directory)
+                if pane.control {
+                    owning_worktree(&pane.working_directory, &candidates)
+                        .is_some_and(|owner| owner.as_path() == requested)
+                } else {
+                    pane.working_directory == requested
+                        || canonical
+                            .as_ref()
+                            .is_some_and(|directory| pane.working_directory == *directory)
+                }
             })
             .map(|(id, pane)| (id.clone(), pane.control))
             .collect();
@@ -446,4 +461,60 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     output
+}
+
+/// The worktree that owns a session whose working directory is `cwd`: the
+/// deepest of `worktrees` that contains it, component-wise, so `/a/wt` does
+/// not contain `/a/wt2` and a nested worktree keeps its own sessions (the
+/// orphan-adoption rule, spec §4.2). Paths are compared canonicalised when
+/// they exist.
+pub fn owning_worktree<'a>(cwd: &Path, worktrees: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    let cwd = canonical_or_raw(cwd);
+    worktrees
+        .iter()
+        .filter(|worktree| cwd.starts_with(canonical_or_raw(worktree)))
+        .max_by_key(|worktree| canonical_or_raw(worktree).components().count())
+}
+
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::*;
+
+    /// A scratch tree under `$TMPDIR`: wt, wt2, wt/sub, wt/nested, wt/nested/deep.
+    fn tree(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("sirio-contain-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["wt", "wt2", "wt/sub", "wt/nested/deep"] {
+            std::fs::create_dir_all(root.join(dir)).expect("scratch directory");
+        }
+        root
+    }
+
+    #[test]
+    fn a_subdirectory_of_a_worktree_belongs_to_it() {
+        let root = tree("sub");
+        let worktrees = vec![root.join("wt")];
+        assert_eq!(owning_worktree(&root.join("wt/sub"), &worktrees), Some(&root.join("wt")));
+    }
+
+    #[test]
+    fn a_sibling_whose_name_extends_a_worktree_does_not_belong_to_it() {
+        let root = tree("sibling");
+        let worktrees = vec![root.join("wt")];
+        assert_eq!(owning_worktree(&root.join("wt2"), &worktrees), None);
+    }
+
+    #[test]
+    fn a_nested_worktree_takes_the_deepest_containing_one() {
+        let root = tree("nested");
+        let worktrees = vec![root.join("wt"), root.join("wt/nested")];
+        assert_eq!(
+            owning_worktree(&root.join("wt/nested/deep"), &worktrees),
+            Some(&root.join("wt/nested"))
+        );
+    }
 }

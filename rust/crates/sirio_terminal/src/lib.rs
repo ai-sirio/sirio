@@ -2820,6 +2820,14 @@ impl TerminalView {
                     );
                 }
             }
+            // An attached view that cannot attach shows the lost session; it
+            // never falls back to a shell under the session's id (spec §5).
+            OpenOutcome::Failed(reason) if request.attach_only => {
+                self.pending_prelude.clear();
+                self.pending_recreate = false;
+                self.terminal = TerminalState::Failed { message: reason };
+                self.host.teardown();
+            }
             OpenOutcome::Failed(reason) => {
                 eprintln!("[sirio] terminal on the in-process fallback: {reason}");
                 match LocalLink::open(&request) {
@@ -2893,6 +2901,11 @@ impl TerminalView {
     /// lost session the replica's scrollback is passed as the new session's
     /// prelude — captured here, before the old session ends.
     pub fn restart(&mut self, cx: &mut gpui::Context<Self>) {
+        // An attached view must not end the session it shows: restart is
+        // refused, and its lost overlay offers no Restart (spec §5).
+        if self.attached {
+            return;
+        }
         if self.session_lost {
             self.pending_prelude = self.capture_scrollback();
         }
@@ -4351,6 +4364,12 @@ impl TerminalView {
     }
 }
 
+/// Whether a lost session's overlay offers Restart (spec §5): never for an
+/// attached view, which must not end a session it does not own.
+pub(crate) fn lost_overlay_offers_restart(attached: bool) -> bool {
+    !attached
+}
+
 impl gpui::Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("TerminalView.render", cx.entity_id().as_u64());
@@ -4362,6 +4381,7 @@ impl gpui::Render for TerminalView {
         let file_drop_entity = terminal_entity.clone();
         let external_drop_entity = terminal_entity.clone();
         let session_lost_restart = terminal_entity.clone();
+        let attached = self.attached;
         let dropped_path = self
             .last_dropped_diff
             .as_ref()
@@ -4706,6 +4726,7 @@ impl gpui::Render for TerminalView {
                 // Restart, which replays it as the new session's prelude.
                 .when(self.session_lost, move |this| {
                     let restart_entity = session_lost_restart.clone();
+                    let offers_restart = lost_overlay_offers_restart(attached);
                     this.child(
                         div()
                             .absolute()
@@ -4721,7 +4742,7 @@ impl gpui::Render for TerminalView {
                             .text_size(px(12.0))
                             .text_color(theme.ely.fg)
                             .child("Session lost")
-                            .child(
+                            .children(offers_restart.then(|| {
                                 div()
                                     .id("terminal-restart")
                                     .debug_selector(|| "terminal-restart".to_owned())
@@ -4733,8 +4754,8 @@ impl gpui::Render for TerminalView {
                                     .on_click(move |_, _, cx| {
                                         restart_entity.update(cx, |view, cx| view.restart(cx));
                                     })
-                                    .child("Restart"),
-                            ),
+                                    .child("Restart")
+                            })),
                     )
                 })
                 .when_some(context_menu, |this, menu| this.child(menu))
@@ -4758,7 +4779,11 @@ impl gpui::Render for TerminalView {
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.ely.warning)
-                            .child("Terminal failed to start"),
+                            .child(if self.attached {
+                                "Session lost"
+                            } else {
+                                "Terminal failed to start"
+                            }),
                     )
                     .child(
                         div()
@@ -8268,6 +8293,52 @@ mod view_tests {
             recovered,
             "retry after the directory appears recovers the pane"
         );
+    }
+
+    /// An attached view (Show session) whose attach fails must never fall
+    /// back to a local shell under the session's id (spec §5, ruling r3).
+    #[gpui::test]
+    async fn attached_view_whose_attach_fails_never_starts_a_local_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingSessionFactory(
+            "Session lost: pane-c000000000000 is no longer on the host",
+        )))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-attach-only-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal");
+            view.identity = TerminalIdentity::new("pane-c000000000000", "terminal-attach");
+            view.set_attached();
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let (failed, running, message) = cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            let terminal = terminal.read(cx);
+            (
+                terminal.is_failed(),
+                terminal.running_terminal().is_some(),
+                terminal.failure_message().unwrap_or_default().to_string(),
+            )
+        });
+        assert!(!running, "an attached view must never run a local shell");
+        assert!(failed, "the attach failure is the view's state");
+        assert!(message.starts_with("Session lost"), "got: {message}");
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A lost session's overlay offers Restart to an owned view only.
+    #[test]
+    fn attached_view_offers_no_restart_on_a_lost_session() {
+        assert!(!lost_overlay_offers_restart(true));
+        assert!(lost_overlay_offers_restart(false));
     }
 
     /// A factory that never resolves: the pane waits in Connecting until the

@@ -5039,6 +5039,9 @@ struct SirioWorkspace {
     /// already replaced) can't clear a toast it doesn't own.
     toast: Option<Toast>,
     next_toast_id: u64,
+    /// Shows whose host listing is in flight, by session id, with every
+    /// request waiting on it: a second show joins the first, never opens a tab.
+    pending_shows: HashMap<String, Vec<Option<ControlReply>>>,
     /// F-WIN-11: the update-toast's own state machine, driven exclusively
     /// by `ControlAction::UpdateEvent` -- no Linux update transport exists
     /// yet to raise these on its own (see `sirio_project::ui`'s
@@ -6028,6 +6031,7 @@ impl SirioWorkspace {
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
+            pending_shows: HashMap::new(),
             update_state: UpdateState::Idle,
             live_update_state: UiUpdateState::default(),
             updater: None,
@@ -8710,7 +8714,8 @@ impl SirioWorkspace {
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
             for path in &removed_paths {
-                match self.panes.shutdown_for(path) {
+                let worktrees = self.known_worktree_paths();
+                match self.panes.shutdown_for(path, &worktrees) {
                     Ok(ids) => Self::end_control_sessions(ids, cx),
                     Err(error) => eprintln!(
                         "[control] failed to forget panes of removed project {}: {error}",
@@ -10656,7 +10661,8 @@ impl SirioWorkspace {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .current_workspace()
                 .is_some();
-        match self.panes.shutdown_for(&path) {
+        let worktrees = self.known_worktree_paths();
+        match self.panes.shutdown_for(&path, &worktrees) {
             Ok(ids) => Self::end_control_sessions(ids, cx),
             Err(error) => eprintln!(
                 "[control] failed to terminate panes for closed worktree {}: {error}",
@@ -12444,10 +12450,12 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(index) = self.tab_showing_session(session_id, cx) {
-            self.active_tab = index;
-            self.schedule_save(cx);
-            cx.notify();
+            self.focus_tab(index, cx);
             self.finish_show(reply, Ok(Vec::new()), cx);
+            return;
+        }
+        if let Some(waiting) = self.pending_shows.get_mut(session_id) {
+            waiting.push(reply);
             return;
         }
         let Some(client) = cx
@@ -12462,6 +12470,7 @@ impl SirioWorkspace {
             return;
         };
         let id = session_id.to_string();
+        self.pending_shows.insert(id.clone(), vec![reply]);
         let listing = cx.background_executor().spawn({
             let id = id.clone();
             async move {
@@ -12477,19 +12486,32 @@ impl SirioWorkspace {
         cx.spawn(async move |this, cx| {
             let check = listing.await;
             let _ = this.update(cx, |workspace, cx| {
+                let waiting = workspace.pending_shows.remove(&id).unwrap_or_default();
                 let result = match check {
                     Ok(ShowCheck::Live) => {
-                        workspace.open_session_tab(&id, cx);
+                        match workspace.tab_showing_session(&id, cx) {
+                            Some(index) => workspace.focus_tab(index, cx),
+                            None => workspace.open_session_tab(&id, cx),
+                        }
                         Ok(Vec::new())
                     }
                     Ok(ShowCheck::Missing) => Err(format!("unknown pane: {id}")),
                     Ok(ShowCheck::Exited) => Err(format!("closed pane: {id}")),
                     Err(_) => Err("Sirio could not reach its host".to_string()),
                 };
-                workspace.finish_show(reply, result, cx);
+                for reply in waiting {
+                    workspace.finish_show(reply, result.clone(), cx);
+                }
             });
         })
         .detach();
+    }
+
+    /// Makes the tab at `index` the active one.
+    fn focus_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active_tab = index;
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// The index of the tab whose terminal shows `session_id`, if any.
@@ -12555,6 +12577,15 @@ impl SirioWorkspace {
             ));
             terminal.set_attached();
         });
+    }
+
+    /// Every worktree path in the catalog.
+    fn known_worktree_paths(&self) -> Vec<PathBuf> {
+        self.project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+            .collect()
     }
 
     /// Ends host sessions a closed worktree or project owned (spec §4.2),
@@ -29294,7 +29325,7 @@ done
         );
 
         workspace.read_with(&cx.cx, |workspace, _| {
-            let _ = workspace.panes.shutdown_for(&third);
+            let _ = workspace.panes.shutdown_for(&third, &[]);
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
