@@ -6475,10 +6475,9 @@ impl SirioWorkspace {
         window.set_background_appearance(appearance);
     }
 
-    /// The shell's current layout, in the shape persistence understands.
-    fn layout(&self, cx: &App) -> SessionLayout {
-        let worktree_tabs: Vec<&OpenTab> = self
-            .tabs
+    /// The tabs of the worktree on screen, in strip order.
+    fn worktree_tabs(&self) -> Vec<&OpenTab> {
+        self.tabs
             .iter()
             .filter(|tab| {
                 // Every kind is saved, Project Settings included: its edits
@@ -6489,12 +6488,27 @@ impl SirioWorkspace {
                     &self.working_directory,
                 )
             })
-            .collect();
-        // An attached tab (Show session) is a view onto a session another
-        // client owns: it is never saved, so a relaunch cannot restore it as
-        // an owned tab (spec §5). The session lives on in the host.
-        let owned_tabs: Vec<&OpenTab> =
-            persisted_tabs(worktree_tabs, |tab| tab_shows_attached_session(tab, cx));
+            .collect()
+    }
+
+    /// The shell's layout as held in memory: every tab of the worktree,
+    /// attached ones included. Parking keeps this, so a parked attached tab
+    /// comes back attached with its own pane.
+    fn layout(&self, cx: &App) -> SessionLayout {
+        self.layout_of(cx, self.worktree_tabs())
+    }
+
+    /// The layout the session save writes. An attached tab (Show session) is
+    /// a view onto a session another client owns: it is never saved, so a
+    /// relaunch cannot restore it as an owned tab (spec §5). The session
+    /// lives on in the host.
+    fn saved_layout(&self, cx: &App) -> SessionLayout {
+        let owned_tabs =
+            persisted_tabs(self.worktree_tabs(), |tab| tab_shows_attached_session(tab, cx));
+        self.layout_of(cx, owned_tabs)
+    }
+
+    fn layout_of(&self, cx: &App, owned_tabs: Vec<&OpenTab>) -> SessionLayout {
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         SessionLayout {
             working_directory: self.working_directory.clone(),
@@ -6647,7 +6661,7 @@ impl SirioWorkspace {
         }) {
             return;
         }
-        self.session.schedule(self.layout(cx));
+        self.session.schedule(self.saved_layout(cx));
     }
 
     fn sidebar_projects(&self) -> Vec<SidebarProject> {
@@ -11787,12 +11801,14 @@ impl SirioWorkspace {
         self.parked_worktree_tabs.insert(
             worktree_id,
             ParkedWorktreeTabs {
-                layout: layout.clone(),
+                layout,
                 terminal_panes_by_tab,
                 chat_panes_by_tab,
             },
         );
-        layout
+        // The outgoing worktree is saved now, and that save never names an
+        // attached tab; the parked copy above keeps it.
+        self.saved_layout(cx)
     }
 
     /// The pane ids the other parked worktrees are still live under — the
@@ -29662,6 +29678,118 @@ done
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Fix round 5: an attached tab (Show session) sits beside an owned shell
+    /// tab in one worktree. Parking must keep both tabs and their panes paired
+    /// through a switch away and back, while the session save never names the
+    /// attached tab.
+    #[gpui::test]
+    async fn an_attached_tab_parks_and_restores_beside_an_owned_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-park-attached");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_terminal_tab_with_shell(
+                "Shown",
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+                None,
+                cx,
+            );
+            workspace.add_terminal_tab_with_shell(
+                "Owned",
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+                None,
+                cx,
+            );
+            let shown = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.title == "Shown")
+                .expect("the shown tab");
+            let (shown_tab, shown_pane) = (shown.persistence_id.clone(), shown.focused_pane);
+            let mut shown_view = None;
+            shown.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    shown_view = Some(view.clone());
+                }
+            });
+            shown_view
+                .expect("the shown tab's terminal")
+                .update(cx, |view, _| view.set_attached());
+            let owned = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.title == "Owned")
+                .expect("the owned tab");
+            let (owned_tab, owned_pane) = (owned.persistence_id.clone(), owned.focused_pane);
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.title == "Shown")
+                    .is_some_and(|tab| tab_shows_attached_session(tab, cx)),
+                "the predicate sees the attached tab"
+            );
+
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("switch away");
+            workspace
+                .select_worktree(worktrees[0].clone(), None, cx)
+                .expect("switch back");
+
+            let pane_of = |workspace: &SirioWorkspace, tab_id: &str| {
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.persistence_id == tab_id)
+                    .map(|tab| tab.focused_pane)
+            };
+            assert_eq!(
+                pane_of(workspace, &shown_tab),
+                Some(shown_pane),
+                "the attached tab comes back with its own pane"
+            );
+            assert_eq!(
+                pane_of(workspace, &owned_tab),
+                Some(owned_pane),
+                "the owned tab comes back with its own pane, not the attached tab's"
+            );
+            assert!(
+                !workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.persistence_id.starts_with("cached-terminal-")),
+                "no tab is rebuilt from a pane the parked layout did not name"
+            );
+            assert!(
+                workspace
+                    .layout(cx)
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.id == shown_tab),
+                "the in-memory layout keeps the attached tab"
+            );
+            let saved = workspace.saved_layout(cx);
+            assert!(
+                !saved.tabs.iter().any(|tab| tab.id == shown_tab),
+                "the session save never names the attached tab"
+            );
+            assert!(
+                saved.tabs.iter().any(|tab| tab.id == owned_tab),
+                "the session save keeps the owned tab"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[gpui::test]
     async fn agent_events_reach_the_database_once_the_tab_row_exists(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -44352,24 +44480,3 @@ browser  profile  "
     }
 }
 
-#[cfg(test)]
-mod persisted_tabs_tests {
-    use super::persisted_tabs;
-
-    /// A Show-session tab (attached) is left out of the saved layout and an
-    /// owned tab is kept, in order: a relaunch never restores an attached
-    /// tab as owned (spec §5).
-    #[test]
-    fn an_attached_tab_is_never_saved_and_an_owned_one_is() {
-        let tabs = vec![
-            ("owned-shell", false),
-            ("shown-session", true),
-            ("owned-chat", false),
-        ];
-        let saved: Vec<&str> = persisted_tabs(tabs, |tab| tab.1)
-            .into_iter()
-            .map(|tab| tab.0)
-            .collect();
-        assert_eq!(saved, vec!["owned-shell", "owned-chat"]);
-    }
-}
