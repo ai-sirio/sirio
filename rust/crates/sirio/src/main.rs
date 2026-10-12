@@ -24081,6 +24081,7 @@ fn ensure_host_in_background(
     settings: Entity<Settings>,
     workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
     host_terminal: Arc<HostTerminal>,
+    control_terminal: Arc<HostTerminal>,
     panes: Arc<PaneRegistry>,
     cx: &mut App,
 ) {
@@ -24110,7 +24111,11 @@ fn ensure_host_in_background(
                 .list()
                 .map(|list| list.sessions)
                 .unwrap_or_default();
-            (client, reconnect, sessions)
+            // `panel.*` gets its own connection, so a long-poll it holds
+            // never queues behind a tab's input on this one (SP2 review
+            // finding 2).
+            let control = handle.term();
+            (client, reconnect, sessions, control)
         });
         Ok((handle, line, term_data))
     };
@@ -24133,7 +24138,7 @@ fn ensure_host_in_background(
             let line = match outcome {
                 Ok((handle, line, term_data)) => {
                     match term_data {
-                        Some((client, reconnect, sessions)) => {
+                        Some((client, reconnect, sessions, control)) => {
                             // No socket work below: the floor and the orphans
                             // come from the single worker-side `list()`.
                             let listed: Vec<String> = sessions
@@ -24146,6 +24151,9 @@ fn ensure_host_in_background(
                             // worker completion re-sets the same `Arc`, which
                             // retries every `Connecting` view (Task 9).
                             host_terminal.set(client.clone(), Some(reconnect.clone()));
+                            if let Some(control) = control {
+                                control_terminal.set(control, Some(reconnect.clone()));
+                            }
                             cx.set_global(HostTerminalGlobal(host_terminal.clone()));
                             let _ = panes.set_control_sessions(
                                 sirio_control::host_panels::control_sessions_from(&sessions),
@@ -24405,6 +24413,7 @@ fn main() {
         let control_state = Arc::new(Mutex::new(control_state_seed));
         let panes = Arc::new(PaneRegistry::new());
         let host_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
+        let control_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
@@ -24434,7 +24443,7 @@ fn main() {
                 socket_info.clone(),
             )
             .with_database_path(database_path.clone())
-            .with_host_terminal(host_terminal.clone()),
+            .with_host_terminal(control_terminal.clone()),
         );
         let control_socket = Arc::new(ControlSocketController::new(
             socket_info.clone(),
@@ -24685,6 +24694,7 @@ fn main() {
                     settings.clone(),
                     workspace_slot.clone(),
                     host_terminal.clone(),
+                    control_terminal.clone(),
                     panes_for_host_link.clone(),
                     cx,
                 );

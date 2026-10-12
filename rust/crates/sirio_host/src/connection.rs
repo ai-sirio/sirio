@@ -247,6 +247,16 @@ fn read_loop(
                 }
                 continue;
             }
+            // A request that can block (SP2 review finding 2) is served on a
+            // thread of its own: this read thread keeps reading Data, resize,
+            // attach and close while it waits.
+            if matches!(
+                request.method.as_str(),
+                method::TERM_CREATE | method::TERM_READ | method::TERM_WAIT
+            ) {
+                serve_off_thread(router, outbound, request);
+                continue;
+            }
             let response = if request.method == method::SUBSCRIBE {
                 subscribe(router, &principal, &request, &mut conn)
             } else {
@@ -264,6 +274,38 @@ fn read_loop(
             }
             conn.after_response(sent);
         }
+    }
+}
+
+/// Serves one request on its own thread and writes its answer through the
+/// connection's writer. Responses are matched by id, so one may overtake
+/// another; each is one whole frame, so none interleaves with another.
+fn serve_off_thread(router: &Arc<Router>, outbound: &Outbound, request: Request) {
+    let worker_router = Arc::clone(router);
+    let worker_outbound = outbound.clone();
+    let id = request.id;
+    let spawned = std::thread::Builder::new()
+        .name("sirio-host-request".into())
+        .spawn(move || {
+            let principal = Principal {
+                transport: Transport::Local,
+            };
+            let mut worker = worker_router.connection(worker_outbound.clone());
+            let response = worker.handle(&principal, &request);
+            if !worker_outbound.json(FrameKind::Response, &response) {
+                // Refused: the client is gone (the error goes nowhere), or
+                // the answer did not fit one frame (spec §6.1).
+                worker_outbound.json(
+                    FrameKind::Response,
+                    &Response::err(id, ErrorCode::Internal, "response too large"),
+                );
+            }
+        });
+    if spawned.is_err() {
+        outbound.json(
+            FrameKind::Response,
+            &Response::err(id, ErrorCode::Internal, "could not start a request thread"),
+        );
     }
 }
 

@@ -59,6 +59,8 @@ set -eEuo pipefail
 #   15. bounded-read           a `term.read` bigger than one response frame is
 #                             answered, not dropped: `raw` is capped at 512 KiB,
 #                             newest bytes first
+#   16. wait-does-not-stall   a term.wait held open on one session does not stop
+#                             another session's echo on the same connection
 #
 # Each case force-shuts every host in its own root and retires the root
 # afterwards, and an exit trap does the same for whatever a failing or
@@ -860,6 +862,24 @@ case_bounded_read() {
   pass
 }
 
+# Finding 2 (one slow host request must not stall every terminal): a term.wait
+# held open on one session must not stop another session's echo on the same
+# connection. The probe measures the echo while the wait is still pending.
+case_wait_does_not_stall() {
+  fresh_root
+  start_held_host
+  new_session --origin control -- sh -c 'sleep 60'
+  local waiter="$NEW_ID"
+  new_session -- cat
+  local echo_id="$NEW_ID"
+  probe term-wait-echo "$waiter" "$echo_id"
+  [ "$(getf echo_seen)" = true ] || fail "the echo never arrived while term.wait was pending (echo_ms=$(getf echo_ms))"
+  [ "$(getf echo_ms)" -le 2000 ] || fail "the echo took $(getf echo_ms) ms while term.wait was pending (limit 2000 ms)"
+  [ "$(getf wait_running)" = true ] || fail "the term.wait ended before the echo was measured"
+  NOTE="echo $(getf echo_ms) ms with a term.wait pending on another session"
+  pass
+}
+
 run_case survives-client-kill case_survives_client_kill
 run_case resume               case_resume
 run_case snapshot-fidelity    case_snapshot_fidelity
@@ -874,5 +894,6 @@ run_case alt-screen           case_alt_screen           12
 run_case no-ctty              case_no_ctty              13
 run_case echo-latency         case_echo_latency         14
 run_case bounded-read           case_bounded_read           15
+run_case wait-does-not-stall    case_wait_does_not_stall    16
 
 echo "TERM E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"

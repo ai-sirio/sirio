@@ -827,6 +827,51 @@ case_end_all_host_stopped() {
   NOTE="worst surface tabs read while End All waited on the stopped host ${worst} ms; pid $pid1 gone after SIGCONT; host absent"
 }
 
+# Finding 2, app side (one slow host request must not stall every terminal):
+# `sirioctl panel wait` blocked through the app on a control session must not
+# stall a tab's keystrokes. The tab's program appends each line it reads to a
+# file, and the echo is timed on that file: panel.* is forwarded to the host,
+# the very path under test, so the screen cannot be the witness.
+case_panel_wait_does_not_stall() {
+  new_world c17
+  app_start
+  select_repo "$W/repo"
+  if [ "$STATE_ONLY" -eq 1 ] || [ -z "$DISPLAY_TARGET" ]; then
+    NOTE="not measured: keystrokes need the display (--xvfb)"
+    return 0
+  fi
+  local sink="$W/typed.txt" sinkscript="$W/sink.sh" window pane i start took worst
+  printf '%s\n' "while IFS= read -r line; do printf '%s\\n' \"\$line\" >> $sink; done" >"$sinkscript"
+  pane=$(open_terminal "sh $sinkscript")
+  wait_until 10 pane_known "$pane" || fail "the tab $pane is unknown"
+  probe term-create "$W/repo" --id pane-9001 --origin control -- sleep 300
+  "$CTL" panel wait pane-9001 >"$W/wait.out" 2>&1 &
+  local wait_pid=$!
+  APPS+=("$wait_pid")
+  sleep 1
+  alive "$wait_pid" || fail "sirioctl panel wait exited before the echo was measured: $(cat "$W/wait.out")"
+  sleep 1
+  window=$(app_window)
+  [ -n "$window" ] || fail "no window to type into"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowfocus --sync "$window" >/dev/null 2>&1 || true
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mousemove --window "$window" 400 300 click 1 >/dev/null 2>&1 || true
+  sleep 0.5
+  worst=0
+  for i in 1 2 3; do
+    start=$(date +%s%N)
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool type --delay 0 "probe-$i" >/dev/null 2>&1
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool key Return >/dev/null 2>&1
+    wait_until 5 grep -qx "probe-$i" "$sink" 2>/dev/null \
+      || fail "typed probe-$i did not reach the tab's program within 5 s while sirioctl panel wait was pending (echo arrived: $(cat "$sink" 2>/dev/null || true))"
+    took=$(( ($(date +%s%N) - start) / 1000000 ))
+    [ "$took" -gt "$worst" ] && worst=$took
+  done
+  alive "$wait_pid" || fail "sirioctl panel wait ended during the measurement, so the echo proves nothing"
+  [ "$worst" -le 2000 ] || fail "the slowest keystroke echo took ${worst} ms while sirioctl panel wait was pending (limit 2000 ms)"
+  kill "$wait_pid" 2>/dev/null || true
+  NOTE="worst keystroke echo ${worst} ms with sirioctl panel wait pending on a control session"
+}
+
 # Finding 5 (the owner thread never waits on the host for resize or feed): with
 # the host stopped, a window resize of the visible terminal must leave the app
 # answering. The app-local verb `surface tabs read` is timed, never a panel verb
@@ -1091,9 +1136,10 @@ run_case 13 adopt-two-worktrees case_adopt_two_worktrees
 run_case 14 unverifiable-no-fallback case_unverifiable_no_fallback
 run_case 15 stopped-host-resize case_stopped_host_resize
 run_case 16 end-all-host-stopped case_end_all_host_stopped
+run_case 17 panel-wait-no-stall case_panel_wait_does_not_stall
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 16 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 17 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

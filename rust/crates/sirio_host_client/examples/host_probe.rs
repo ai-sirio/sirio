@@ -259,6 +259,7 @@ fn main() {
         }
         Some("term-attach") => term_attach(&paths, major, &majors, &args),
         Some("term-echo-latency") => term_echo_latency(&paths, major, &majors, &args),
+        Some("term-wait-echo") => term_wait_echo(&paths, major, &majors, &args),
         _ => {
             eprintln!("see the header of examples/host_probe.rs");
             std::process::exit(2);
@@ -545,6 +546,59 @@ fn term_echo_latency(paths: &HostPaths, major: u32, majors: &[u32], args: &[Stri
     println!("p50_ms={}", percentile(&times, 50));
     println!("p95_ms={}", percentile(&times, 95));
     println!("max_ms={}", times[times.len() - 1]);
+}
+
+/// One connection holds a `term.wait` on a sleeping session while another
+/// session's echo is measured on the same connection (SP2 review finding 2:
+/// one slow request must not stall the terminals). Prints `echo_ms=<n>` and
+/// `wait_running=<bool>`; the echo must arrive within 2 s.
+fn term_wait_echo(paths: &HostPaths, major: u32, majors: &[u32], args: &[String]) {
+    let wait_id = args.get(1).expect("term-wait-echo <wait-id> <echo-id>");
+    let echo_id = args.get(2).expect("term-wait-echo <wait-id> <echo-id>");
+    let client = term_client(paths, major, majors);
+    let waiting = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let waiter = {
+        let client = client.clone();
+        let waiting = Arc::clone(&waiting);
+        let wait_id = wait_id.clone();
+        std::thread::spawn(move || {
+            let _ = client.wait(&wait_id, Duration::from_secs(20));
+            waiting.store(false, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let (attached, stream) = client.attach(echo_id, None).expect("term.attach");
+    let marker = format!("SIRIO-WAITECHO-{}-END", std::process::id());
+    let started = Instant::now();
+    let mut input = marker.as_bytes().to_vec();
+    input.push(b'\n');
+    client.input(attached.stream, &input).expect("stream input");
+    let deadline = started + Duration::from_secs(5);
+    let mut observed = Vec::new();
+    let mut seen = false;
+    while !seen {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match stream.recv_timeout(remaining) {
+            Ok(StreamItem::Snapshot(bytes)) | Ok(StreamItem::Output { bytes, .. }) => {
+                observed.extend_from_slice(&bytes);
+                seen = observed
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes());
+            }
+            Ok(StreamItem::Resync) => {}
+            Ok(StreamItem::Lagged | StreamItem::Closed)
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+        }
+    }
+    let echo_ms = started.elapsed().as_millis();
+    println!("echo_seen={seen}");
+    println!("echo_ms={echo_ms}");
+    println!("wait_running={}", waiting.load(std::sync::atomic::Ordering::SeqCst));
+    drop(waiter);
 }
 
 fn percentile(sorted: &[u64], percentile: usize) -> u64 {
