@@ -128,6 +128,8 @@ LOCAL_ECHO=""
 HOST_ECHO=""
 FRAME_NO=0
 WT_ID=""
+# Hosts this script stopped with SIGSTOP: resumed before anything ends them.
+STOPPED=()
 
 show_evidence() {
   [ -n "$LAST_CALL" ] && { echo "--- last call: $LAST_CALL (exit $RC)"; printf '%s\n' "$OUT"; }
@@ -791,6 +793,58 @@ case_unverifiable_no_fallback() {
   NOTE="restored $pane (pid $pid): no local child while unverifiable; attached after SIGCONT"
 }
 
+# Finding 5 (the owner thread never waits on the host for resize or feed): with
+# the host stopped, a window resize of the visible terminal must leave the app
+# answering. The app-local verb `surface tabs read` is timed, never a panel verb
+# (panel.* is forwarded to the host). After SIGCONT the host-side session must
+# have taken the new size.
+case_stopped_host_resize() {
+  new_world c15
+  app_start
+  select_repo "$W/repo"
+  local pane host_pid window i start took worst before after geometry_before geometry_after
+  if [ "$STATE_ONLY" -eq 1 ] || [ -z "$DISPLAY_TARGET" ]; then
+    NOTE="not measured: a window resize needs the display (--xvfb)"
+    return 0
+  fi
+  pane=$(open_terminal "while :; do stty size; sleep 0.5; done")
+  wait_until 10 pane_known "$pane" || fail "the terminal $pane is unknown"
+  host_pid=$(python3 -c 'import glob, json, sys; print(json.load(open(glob.glob(sys.argv[1] + "/host-v*.json")[0]))["pid"])' "$W/host")
+  sleep 1
+  window=$(app_window)
+  [ -n "$window" ] || fail "no window for the app to resize"
+  before=$(stty_last "$pane")
+  geometry_before=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$window" | grep -E 'Width|Height' | tr -d ' \n')
+  STOPPED+=("$host_pid")
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 1100 700 >/dev/null 2>&1 || fail "could not resize the window"
+  sleep 1
+  geometry_after=$(DISPLAY="$DISPLAY_TARGET" xwininfo -id "$window" | grep -E 'Width|Height' | tr -d ' \n')
+  [ "$geometry_before" != "$geometry_after" ] || fail "the window did not change size ($geometry_before)"
+  worst=0
+  for i in $(seq 1 8); do
+    start=$(date +%s%N)
+    ctl_json surface tabs read >/dev/null 2>&1 || fail "surface tabs read failed while the host is stopped"
+    took=$(( ($(date +%s%N) - start) / 1000000 ))
+    [ "$took" -gt "$worst" ] && worst=$took
+    sleep 0.25
+  done
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  STOPPED=()
+  [ "$worst" -lt 1000 ] || fail "the app took ${worst} ms to answer surface tabs read while its terminal's host was stopped (expected under 1000 ms); the owner thread waited on the host for a resize"
+  wait_until 30 bool_stty_changed "$pane" "$before" || fail "the host-side session $pane never took the new size after SIGCONT (was '$before', still '$(stty_last "$pane")')"
+  NOTE="worst surface tabs read while the host was stopped ${worst} ms; host-side size $before -> $(stty_last "$pane")"
+}
+stty_last() { # pane -> the newest 'rows cols' line in the host's screen
+  probe term-read "$1" text --max 4096 || true
+  printf '%s' "$OUT" | grep -oE '^[0-9]+ [0-9]+$' | tail -1
+}
+bool_stty_changed() { # pane before
+  local now
+  now=$(stty_last "$1")
+  [ -n "$now" ] && [ "$now" != "$2" ]
+}
+
 # The id of the worktree at path $1 in the project catalog.
 worktree_id_at() { # path
   ctl_json project list | python3 -c '
@@ -911,6 +965,10 @@ run_case() { # number name function
 # if it is a sirio-host). Every log is archived under OUT_DIR/worlds/<world>.
 end_case() {
   local pid w name f hostpid major
+  for pid in ${STOPPED[@]+"${STOPPED[@]}"}; do
+    kill -CONT "$pid" 2>/dev/null || true
+  done
+  STOPPED=()
   for pid in ${APPS[@]+"${APPS[@]}"}; do
     if alive "$pid"; then
       kill "$pid" 2>/dev/null || true
@@ -997,9 +1055,10 @@ run_case 11 close-worktree case_close_worktree
 run_case 12 duplicate-id case_duplicate_id
 run_case 13 adopt-two-worktrees case_adopt_two_worktrees
 run_case 14 unverifiable-no-fallback case_unverifiable_no_fallback
+run_case 15 stopped-host-resize case_stopped_host_resize
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 11 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 15 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

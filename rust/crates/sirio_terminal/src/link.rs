@@ -339,6 +339,10 @@ pub struct HostLink {
     shell_pid: Option<u32>,
     incoming: mpsc::Receiver<LinkChunk>,
     control: Arc<Mutex<HostControl>>,
+    /// The owner thread hands resize and feed to `sender_thread` and never
+    /// waits on the host for them (SP2 review finding 5).
+    outbound: mpsc::Sender<Outbound>,
+    latest_size: Arc<Mutex<Option<(u16, u16)>>>,
     /// The factory's reconnect closure: re-opens a `Mux` to the host's
     /// endpoint. Cloned into the forwarder at spawn; kept here so the link
     /// owns its own re-establishment path.
@@ -348,6 +352,51 @@ pub struct HostLink {
 }
 
 type ReconnectFn = Arc<dyn Fn() -> Option<TermClient> + Send + Sync>;
+
+/// A request the owner thread leaves for the link's sender thread.
+enum Outbound {
+    Feed(Vec<u8>),
+    /// Latest wins: the size itself travels in `HostLink::latest_size`, so
+    /// several queued resizes send one call, at the newest size.
+    Resize,
+}
+
+/// Sends the link's feeds and resizes, in order, each through the client
+/// current at send time (a reconnect swaps it). A call that waits on a stopped
+/// host blocks this thread only. Ends when the link is dropped.
+fn sender_thread(
+    session_id: String,
+    control: Arc<Mutex<HostControl>>,
+    outbound: mpsc::Receiver<Outbound>,
+    latest_size: Arc<Mutex<Option<(u16, u16)>>>,
+) {
+    while let Ok(message) = outbound.recv() {
+        let client = {
+            let control = control
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            control.client.clone()
+        };
+        match message {
+            Outbound::Feed(bytes) => {
+                if let Err(error) = client.feed(&session_id, &bytes) {
+                    eprintln!("[sirio] host link {session_id}: feed failed: {error}");
+                }
+            }
+            Outbound::Resize => {
+                let size = latest_size
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some((cols, rows)) = size {
+                    if let Err(error) = client.resize(&session_id, cols, rows) {
+                        eprintln!("[sirio] host link {session_id}: resize failed: {error}");
+                    }
+                }
+            }
+        }
+    }
+}
 
 struct HostControl {
     client: TermClient,
@@ -450,6 +499,8 @@ impl HostLink {
         let done = Arc::new(AtomicBool::new(false));
         let control = Arc::new(Mutex::new(HostControl { client, stream }));
         let session_id = request.session_id.clone();
+        let (outbound_tx, outbound_rx) = mpsc::channel();
+        let latest_size = Arc::new(Mutex::new(None));
         std::thread::Builder::new()
             .name(format!("sirio-terminal-host-link-{session_id}"))
             .spawn({
@@ -470,11 +521,22 @@ impl HostLink {
                 }
             })
             .map_err(|error| error.to_string())?;
+        std::thread::Builder::new()
+            .name(format!("sirio-terminal-host-send-{}", request.session_id))
+            .spawn({
+                let session_id = request.session_id.clone();
+                let control = Arc::clone(&control);
+                let latest_size = Arc::clone(&latest_size);
+                move || sender_thread(session_id, control, outbound_rx, latest_size)
+            })
+            .map_err(|error| error.to_string())?;
         Ok(HostLink {
             session_id: request.session_id.clone(),
             shell_pid,
             incoming: chunks_rx,
             control,
+            outbound: outbound_tx,
+            latest_size,
             reconnect,
             done,
         })
@@ -741,13 +803,15 @@ impl SessionLink for HostLink {
     }
 
     fn feed(&self, bytes: Vec<u8>) {
-        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = control.client.feed(&self.session_id, &bytes);
+        let _ = self.outbound.send(Outbound::Feed(bytes));
     }
 
     fn resize(&self, cols: u16, rows: u16) {
-        let control = self.control.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = control.client.resize(&self.session_id, cols, rows);
+        *self
+            .latest_size
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((cols, rows));
+        let _ = self.outbound.send(Outbound::Resize);
     }
 
     fn chunks(&self) -> &mpsc::Receiver<LinkChunk> {

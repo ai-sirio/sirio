@@ -181,7 +181,7 @@ fn read_loop(
         match stream.read(&mut buf) {
             Ok(0) => return,
             Ok(n) => decoder.push(&buf[..n]),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => continue,
             Err(_) => return,
         }
         loop {

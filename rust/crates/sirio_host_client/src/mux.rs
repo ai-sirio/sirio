@@ -444,7 +444,7 @@ fn read_welcome(stream: &mut LocalStream) -> Result<Welcome, CallError> {
         match stream.read(&mut buffer) {
             Ok(0) => return Err(unexpected_eof()),
             Ok(read) => decoder.push(&buffer[..read]),
-            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
             Err(error) => return Err(CallError::Io(error)),
         }
     }
@@ -457,6 +457,7 @@ fn reader_loop(mut stream: LocalStream, shared: Arc<Shared>) {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => decoder.push(&buffer[..read]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => break,
         }
         loop {
