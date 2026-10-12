@@ -793,6 +793,40 @@ case_unverifiable_no_fallback() {
   NOTE="restored $pane (pid $pid): no local child while unverifiable; attached after SIGCONT"
 }
 
+# Finding 4 (End All never touches the socket on the GPUI thread): with the
+# host stopped, End All must not stall the app. `surface tabs read` (app-local)
+# answers within a second on every sample while the shutdown is in flight; the
+# host is continued inside the call's own 5 s window, and End All then completes.
+case_end_all_host_stopped() {
+  new_world c16
+  app_start
+  select_repo "$W/repo"
+  local pid1 host_pid i took worst
+  open_terminal "$(heartbeat "$W/pid-1.txt")" >/dev/null
+  wait_until 10 pid_written "$W/pid-1.txt" || fail "the terminal never wrote its pid"
+  pid1=$(pid_in "$W/pid-1.txt")
+  host_pid=$(python3 -c 'import glob, json, sys; print(json.load(open(glob.glob(sys.argv[1] + "/host-v*.json")[0]))["pid"])' "$W/host")
+  STOPPED+=("$host_pid")
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  local end_out
+  end_out=$("$CTL" surface host end-all 2>&1) || fail "surface host end-all was refused while the host is stopped: $end_out"
+  worst=0
+  for i in $(seq 1 8); do
+    local start
+    start=$(date +%s%N)
+    ctl_json surface tabs read >/dev/null 2>&1 || fail "surface tabs read failed while End All waits on the host"
+    took=$(( ($(date +%s%N) - start) / 1000000 ))
+    [ "$took" -gt "$worst" ] && worst=$took
+    sleep 0.25
+  done
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  STOPPED=()
+  [ "$worst" -lt 1000 ] || fail "the app took ${worst} ms to answer surface tabs read while End All waited on a stopped host (expected under 1000 ms)"
+  wait_until 10 pid_dead "$pid1" || fail "pid $pid1 survived End All after the host was resumed"
+  wait_until 10 host_absent || fail "the host after End All is '$OUT', expected verdict=Absent"
+  NOTE="worst surface tabs read while End All waited on the stopped host ${worst} ms; pid $pid1 gone after SIGCONT; host absent"
+}
+
 # Finding 5 (the owner thread never waits on the host for resize or feed): with
 # the host stopped, a window resize of the visible terminal must leave the app
 # answering. The app-local verb `surface tabs read` is timed, never a panel verb
@@ -1056,9 +1090,10 @@ run_case 12 duplicate-id case_duplicate_id
 run_case 13 adopt-two-worktrees case_adopt_two_worktrees
 run_case 14 unverifiable-no-fallback case_unverifiable_no_fallback
 run_case 15 stopped-host-resize case_stopped_host_resize
+run_case 16 end-all-host-stopped case_end_all_host_stopped
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 15 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 16 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

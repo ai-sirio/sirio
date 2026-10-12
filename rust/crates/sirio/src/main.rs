@@ -12359,33 +12359,14 @@ impl SirioWorkspace {
         }
     }
 
-    /// Whether End All Terminal Sessions needs confirmation: some session
-    /// reports `foreground.running`, or some tab carries an agent.
-    fn end_all_needs_confirm(&self, cx: &App) -> bool {
-        if self.tabs.iter().any(|tab| tab.agent_id.is_some()) {
-            return true;
-        }
-        let Some(client) = cx
-            .try_global::<HostConnection>()
-            .and_then(|conn| conn.0.as_ref())
-            .and_then(|handle| handle.term())
-        else {
-            return false;
-        };
-        client
-            .list()
-            .map(|list| {
-                list.sessions
-                    .iter()
-                    .any(|summary| summary.foreground.running)
-            })
-            .unwrap_or(false)
-    }
-
     /// The palette / Settings / tray entry point: asks for confirmation (an
     /// Ely `Dialog`, like the Changes discard) only when some session reports
     /// `foreground.running` or an agent, then `host.shutdown {force: true}`.
     /// With no host it is disabled (the palette already disables it).
+    ///
+    /// The socket is never touched on the GPUI thread (SP2 review finding 4):
+    /// the listing runs in the background through the shared host client, and
+    /// the confirmation (or the shutdown) is decided back on the foreground.
     fn request_end_all_sessions(&mut self, cx: &mut Context<Self>) {
         if cx
             .try_global::<HostConnection>()
@@ -12393,15 +12374,38 @@ impl SirioWorkspace {
         {
             return;
         }
-        if self.end_all_needs_confirm(cx) {
-            self.pending_end_all = Some(PendingEndAll {
-                focus: cx.focus_handle().tab_stop(true),
-                needs_focus: true,
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        let has_agent = self.tabs.iter().any(|tab| tab.agent_id.is_some());
+        let listing = cx.background_executor().spawn(async move {
+            client
+                .list()
+                .map(|list| {
+                    list.sessions
+                        .iter()
+                        .any(|summary| summary.foreground.running)
+                })
+                .unwrap_or(false)
+        });
+        cx.spawn(async move |this, cx| {
+            let running = listing.await;
+            let _ = this.update(cx, |workspace, cx| {
+                if has_agent || running {
+                    workspace.pending_end_all = Some(PendingEndAll {
+                        focus: cx.focus_handle().tab_stop(true),
+                        needs_focus: true,
+                    });
+                    cx.notify();
+                } else {
+                    workspace.perform_end_all_sessions(cx);
+                }
             });
-            cx.notify();
-        } else {
-            self.perform_end_all_sessions(cx);
-        }
+        })
+        .detach();
     }
 
     fn cancel_pending_end_all(&mut self, cx: &mut Context<Self>) {
@@ -12415,22 +12419,23 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// `host.shutdown {force: true}` through the SP1 connection; every open
-    /// terminal view then shows `Process exited` via its session's exit event.
+    /// `host.shutdown {force: true}` through the shared host client, on the
+    /// background executor. Every open terminal view then shows the session's
+    /// exit (`Exited`) through its own event stream, like any other exit.
     fn perform_end_all_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(client) = cx
-            .try_global::<HostConnection>()
-            .and_then(|conn| conn.0.as_ref())
-            .and_then(|handle| handle.term())
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
         else {
             return;
         };
-        if let Err(error) = client.shutdown_force() {
-            eprintln!("[sirio] end all sessions failed: {error}");
-        }
-        // The host terminates every session; the views learn it through the
-        // session events (Exited) like any other exit. Nothing else to do here.
-        let _ = cx;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = client.shutdown_force() {
+                    eprintln!("[sirio] end all sessions failed: {error}");
+                }
+            })
+            .detach();
     }
 
     /// Raises `next_pane_id` to at least `floor` (SP2 spec §4.1): a new pane
