@@ -403,7 +403,7 @@ fn term_attach(paths: &HostPaths, major: u32, majors: &[u32], args: &[String]) {
         index += 1;
     }
     let client = term_client(paths, major, majors);
-    let (attached, stream) = client.attach(session_id, resume_from).expect("term.attach");
+    let (attached, mut stream) = client.attach(session_id, resume_from).expect("term.attach");
     println!(
         "mode={}",
         match attached.mode {
@@ -460,7 +460,13 @@ fn term_attach(paths: &HostPaths, major: u32, majors: &[u32], args: &[String]) {
                 bytes += output.len();
             }
             Ok(StreamItem::Resync) => resyncs += 1,
-            Ok(StreamItem::Lagged) => lagged += 1,
+            // The host detached this stream for falling behind (spec §3.4);
+            // re-attach for a snapshot as `sirio_terminal`'s link does, or
+            // the replica misses everything after the lag.
+            Ok(StreamItem::Lagged) => {
+                lagged += 1;
+                stream = client.attach(session_id, None).expect("term.attach after lagged").1;
+            }
             Ok(StreamItem::Closed) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
         }
