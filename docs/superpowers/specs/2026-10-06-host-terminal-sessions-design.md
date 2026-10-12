@@ -298,9 +298,16 @@ each of these dangerous:
 1. **Data-root isolation.** A debug build or an isolated Sirio (`SIRIO_DB`,
    `SIRIO_SOCKET`) adopts the user's real host today (SP1's known
    limitation); with SP2 it would list and close the user's terminals. The
-   root becomes: `$SIRIO_HOST_HOME` if absolute; else, when `SIRIO_DB` is
-   set, a `host` directory beside the database; else the default root, with
-   a `-debug` suffix on the directory name in debug builds.
+   root becomes: `$SIRIO_HOST_HOME` if absolute; else, when the database
+   in use is not the stable user-wide one (an explicit `SIRIO_DB`, or a
+   checkout-local database), a `host` directory beside that database; else
+   the default root, with a `-debug` suffix on the directory name in debug
+   builds. The rule keys on the resolved database path, not the `SIRIO_DB`
+   variable: a release build run from a checkout must not adopt the user's
+   real host (fix batch 1, finding 10). The app exports the resolved root as
+   `SIRIO_HOST_HOME` before it resolves any host path or spawns a child
+   (`session::export_host_root`); `HostPaths::from_environment` stays the one
+   resolver for everything else.
 2. **Successor safety.** A leaving host checks its socket's (device, inode),
    which a filesystem can reuse after the root is removed and re-created;
    it also requires the state file's `generation` to match before removing

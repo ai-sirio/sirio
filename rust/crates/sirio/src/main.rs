@@ -24120,6 +24120,11 @@ fn main() {
     #[cfg(target_os = "windows")]
     ensure_windows_console();
 
+    // Spec §7.1.1 (amended): the host root follows the database in use, and
+    // is exported before the host, the sirioctl of every pane, or anything
+    // else resolves it.
+    session::export_host_root();
+
     sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source
     // gpui finds nothing and paints nothing. Sirio's own icons embed their

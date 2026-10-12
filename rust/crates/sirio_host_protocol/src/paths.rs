@@ -223,3 +223,91 @@ mod tests {
         assert_eq!(p.root, PathBuf::from("/host"));
     }
 }
+
+/// Spec §7.1.1, amended (fix batch 1, finding 10): the host root follows the
+/// database the app actually uses, not the `SIRIO_DB` variable. `database` is
+/// the resolved database path; `stable` is the user-wide database. A stable
+/// database keeps the default root; any other database (an explicit
+/// `SIRIO_DB`, or a checkout-local database) gets a `host` directory beside
+/// it. `SIRIO_HOST_HOME`, when absolute, always wins.
+pub fn root_for_database(
+    environment: &BTreeMap<String, String>,
+    database: &std::path::Path,
+    stable: &std::path::Path,
+) -> Option<HostPaths> {
+    if absolute(environment, "SIRIO_HOST_HOME").is_some() {
+        return HostPaths::from_environment(environment);
+    }
+    if database == stable {
+        // The default root must not follow `SIRIO_DB`, which is not the
+        // database in use here (it is the stable one, or unset).
+        let mut without_database = environment.clone();
+        without_database.remove("SIRIO_DB");
+        return HostPaths::from_environment(&without_database);
+    }
+    if database.is_absolute()
+        && let Some(parent) = database.parent()
+    {
+        return Some(HostPaths {
+            root: parent.join("host"),
+        });
+    }
+    HostPaths::from_environment(environment)
+}
+
+#[cfg(test)]
+mod database_root_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_stable_database_keeps_the_default_root() {
+        let environment = env(&[("XDG_DATA_HOME", "/x")]);
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, stable, stable).unwrap();
+        assert_eq!(paths.root, Path::new("/x/Sirio").join(default_leaf()));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_checkout_database_puts_the_host_beside_it() {
+        let environment = env(&[("XDG_DATA_HOME", "/x")]);
+        let database = Path::new("/c/.sirio/state/sirio-abc.sqlite");
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, database, stable).unwrap();
+        assert_eq!(paths.root, Path::new("/c/.sirio/state/host"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn sirio_host_home_wins_over_the_database() {
+        let environment = env(&[("SIRIO_HOST_HOME", "/h"), ("XDG_DATA_HOME", "/x")]);
+        let database = Path::new("/c/.sirio/state/sirio-abc.sqlite");
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, database, stable).unwrap();
+        assert_eq!(paths.root, Path::new("/h"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_explicit_sirio_db_puts_the_host_beside_it() {
+        let environment = env(&[("SIRIO_DB", "/d/run/sirio.sqlite"), ("XDG_DATA_HOME", "/x")]);
+        let database = Path::new("/d/run/sirio.sqlite");
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, database, stable).unwrap();
+        assert_eq!(paths.root, Path::new("/d/run/host"));
+    }
+
+    #[cfg(not(windows))]
+    fn default_leaf() -> &'static str {
+        if cfg!(debug_assertions) { "host-debug" } else { "host" }
+    }
+}

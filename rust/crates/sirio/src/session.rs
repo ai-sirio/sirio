@@ -340,6 +340,24 @@ fn migrate_legacy_state_root(root: &Path) {
     }
 }
 
+/// Spec §7.1.1, amended (fix batch 1, finding 10): exports the host's data
+/// root as `SIRIO_HOST_HOME` so the app, the host it starts, and every shell
+/// whose `sirioctl` must reach the same host agree on one root. The root
+/// follows the database in use (`database_path`), not the `SIRIO_DB`
+/// variable alone. Call it on the main thread before any thread exists.
+pub fn export_host_root() {
+    let database = database_path();
+    let stable = app_support_root().join("sirio.sqlite");
+    let environment: BTreeMap<String, String> = std::env::vars().collect();
+    if let Some(paths) =
+        sirio_host_protocol::paths::root_for_database(&environment, &database, &stable)
+    {
+        // SAFETY: called first thing in `main`, before any thread is spawned,
+        // so nothing can be reading the environment concurrently.
+        unsafe { std::env::set_var("SIRIO_HOST_HOME", &paths.root) };
+    }
+}
+
 fn app_support_root() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
