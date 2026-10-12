@@ -12611,6 +12611,9 @@ impl SirioWorkspace {
             }
         });
         let leaf = self.next_pane_id;
+        // Attached before the tab is inserted: the insert saves the layout at
+        // once, and an attached tab must never reach the saved layout.
+        terminal.update(cx, |terminal, _| terminal.set_attached());
         self.insert_terminal_tab(title, terminal.clone(), None, cx);
         let session_id = session_id.to_string();
         terminal.update(cx, |terminal, _| {
@@ -12618,7 +12621,6 @@ impl SirioWorkspace {
                 session_id,
                 format!("terminal-{leaf}"),
             ));
-            terminal.set_attached();
         });
     }
 
