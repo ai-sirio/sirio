@@ -1726,6 +1726,7 @@ impl TerminalHandle {
             rows: 24,
             prelude: Vec::new(),
             recreate: false,
+            attach_only: false,
         };
         let link = LocalLink::open(&request).map_err(|message| anyhow::anyhow!("{message}"))?;
         Ok(Self::new_with_link(Box::new(link)))
@@ -2756,6 +2757,8 @@ impl TerminalView {
             // the retry must carry the same prelude.
             prelude: self.pending_prelude.clone(),
             recreate: self.pending_recreate,
+            // An attached tab never creates the session it shows (spec §5).
+            attach_only: self.attached,
         }
     }
 

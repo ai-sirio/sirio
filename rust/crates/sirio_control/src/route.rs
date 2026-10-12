@@ -50,17 +50,65 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// kind separates "no app" from "an app that is not answering": only a
 /// refused or missing socket sends the command to the host.
 pub fn probe(socket: &Path) -> AppSocket {
+    probe_within(socket, PROBE_TIMEOUT)
+}
+
+/// [`probe`] with the answer's deadline given: a test can wait out a silent
+/// app in milliseconds rather than the production five seconds.
+pub fn probe_within(socket: &Path, timeout: Duration) -> AppSocket {
     match sirio_ipc::connect(socket) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => AppSocket::Missing,
         Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => AppSocket::Refused,
         Err(_) => AppSocket::Silent,
         Ok(stream) => {
             drop(stream);
-            match round_trip(socket, &system_ping(), PROBE_TIMEOUT) {
+            match round_trip(socket, &system_ping(), timeout) {
                 Ok(response) if response.ok => AppSocket::Answered,
                 _ => AppSocket::Silent,
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod probe_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    const SHORT: Duration = Duration::from_millis(300);
+
+    /// A socket path in a scratch directory under `$TMPDIR`, cleared first.
+    fn scratch_socket(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sirio-route-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir.join("control.sock")
+    }
+
+    #[test]
+    fn a_missing_socket_path_is_missing() {
+        let socket = scratch_socket("missing");
+        assert_eq!(probe_within(&socket, SHORT), AppSocket::Missing);
+    }
+
+    #[test]
+    fn a_stale_socket_file_nobody_listens_on_is_refused() {
+        let socket = scratch_socket("refused");
+        drop(UnixListener::bind(&socket).expect("bind"));
+        assert!(socket.exists(), "the stale socket file stays behind");
+        assert_eq!(probe_within(&socket, SHORT), AppSocket::Refused);
+    }
+
+    #[test]
+    fn a_listener_that_accepts_and_never_answers_is_silent() {
+        let socket = scratch_socket("silent");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        assert_eq!(probe_within(&socket, SHORT), AppSocket::Silent);
     }
 }
 

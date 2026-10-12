@@ -236,7 +236,7 @@ impl HostPanels {
         }
     }
 
-    /// The control-owned sessions the host lists, with their cwd and pid.
+    /// The control-owned sessions the host lists, with their cwd.
     /// Runs off the GPUI thread: the app calls it from the control socket.
     pub fn control_sessions(&self) -> Result<Vec<ControlSession>, Failure> {
         let listed = self.client.list().map_err(|error| host_error("", error))?;
@@ -410,7 +410,6 @@ pub fn control_sessions_from(sessions: &[SessionSummary]) -> Vec<ControlSession>
                 active: false,
             },
             working_directory: PathBuf::from(&session.cwd),
-            pid: session.pid,
         })
         .collect()
 }

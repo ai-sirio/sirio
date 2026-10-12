@@ -718,7 +718,6 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                     "workingDirectory",
                     "exitStatus",
                     "exitCode",
-                    "scrollbackBytes",
                 ],
                 parsed.flag("json"),
             );

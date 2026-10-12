@@ -77,6 +77,10 @@ pub struct OpenRequest {
     /// session synchronously before re-creating, or the open attaches to the
     /// still-listed dying session (Task 9 review).
     pub recreate: bool,
+    /// Attach only (an attached-not-owned tab, Show session): a session the
+    /// host no longer lists fails the open as *Session lost* instead of being
+    /// created again as a new shell.
+    pub attach_only: bool,
 }
 
 pub enum OpenOutcome {
@@ -327,6 +331,12 @@ impl HostLink {
             .iter()
             .find(|summary| summary.session_id == request.session_id)
             .map(|summary| summary.pid);
+        if listed_pid.is_none() && request.attach_only {
+            return Err(format!(
+                "Session lost: {} is no longer on the host",
+                request.session_id
+            ));
+        }
         let created_pid = if listed_pid.is_none() {
             let params = CreateParams {
                 session_id: Some(request.session_id.clone()),
@@ -761,6 +771,7 @@ mod tests {
             rows: 24,
             prelude: Vec::new(),
             recreate: false,
+            attach_only: false,
         }
     }
 

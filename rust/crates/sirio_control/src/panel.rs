@@ -80,12 +80,11 @@ impl std::error::Error for PaneError {}
 
 /// A terminal session the host owns and the control socket created (or
 /// found), as the registry holds it so the sidebar's status and `panel.list`
-/// see it. Its pid is the session's shell (SP2 spec §3.2).
+/// see it. Layer D does not walk these (the pre-SP2 status quo), so no pid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlSession {
     pub info: PaneInfo,
     pub working_directory: PathBuf,
-    pub pid: u32,
 }
 
 /// A pane in the registry: an app tab (`control == false`) or a control-owned
@@ -96,7 +95,6 @@ struct ExternalPane {
     state: PaneStateSnapshot,
     scrollback_source: Option<ScrollbackSource>,
     control: bool,
-    pid: Option<u32>,
 }
 
 /// Thread-safe source of truth for the app's own panes, as seen by the
@@ -182,7 +180,6 @@ impl PaneRegistry {
                     state,
                     scrollback_source,
                     control: false,
-                    pid: None,
                 },
             );
         }
@@ -225,7 +222,7 @@ impl PaneRegistry {
     }
 
     /// Replaces the registered control sessions. Every listed session is
-    /// published with its cwd and pid; any registered control session not
+    /// published with its cwd; any registered control session not
     /// listed leaves the registry (it has closed or left the host).
     pub fn set_control_sessions(&self, sessions: Vec<ControlSession>) -> Result<(), PaneError> {
         let resolved: Vec<(ControlSession, PathBuf)> = sessions
@@ -253,7 +250,6 @@ impl PaneRegistry {
                     state,
                     scrollback_source: None,
                     control: true,
-                    pid: Some(session.pid),
                 },
             );
         }
@@ -327,16 +323,18 @@ impl PaneRegistry {
         Ok(bytes)
     }
 
-    /// Forgets the app's panes of one worktree; the next layout sync
-    /// republishes whichever still exist.
-    pub fn shutdown_for(&self, working_directory: impl AsRef<Path>) -> Result<(), PaneError> {
+    /// Forgets the panes of one worktree: its tabs and its control sessions.
+    /// Returns the ids of the control sessions it forgot, which the caller
+    /// must end on the host (spec §4.2: a closed worktree's sessions end).
+    /// Makes no host call itself: the caller runs it off the GPUI thread.
+    pub fn shutdown_for(&self, working_directory: impl AsRef<Path>) -> Result<Vec<String>, PaneError> {
         let requested = working_directory.as_ref();
         let canonical = requested.canonicalize().ok();
         let mut external = self
             .external
             .lock()
             .map_err(|_| PaneError::Io("external pane registry lock poisoned".to_string()))?;
-        let ids: Vec<String> = external
+        let forgotten: Vec<(String, bool)> = external
             .iter()
             .filter(|(_, pane)| {
                 pane.working_directory == requested
@@ -344,16 +342,20 @@ impl PaneRegistry {
                         .as_ref()
                         .is_some_and(|directory| pane.working_directory == *directory)
             })
-            .map(|(id, _)| id.clone())
+            .map(|(id, pane)| (id.clone(), pane.control))
             .collect();
-        for id in &ids {
+        for (id, _) in &forgotten {
             external.remove(id);
         }
         drop(external);
         if let Ok(mut closed) = self.closed.lock() {
-            closed.extend(ids);
+            closed.extend(forgotten.iter().map(|(id, _)| id.clone()));
         }
-        Ok(())
+        Ok(forgotten
+            .into_iter()
+            .filter(|(_, control)| *control)
+            .map(|(id, _)| id)
+            .collect())
     }
 
     /// Forgets every app pane. The app calls this when it quits.

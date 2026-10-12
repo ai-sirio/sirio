@@ -1912,6 +1912,19 @@ struct AppControlHandler {
 /// The app's link to the host's terminal sessions for `panel.*` (SP2 §5).
 /// The GPUI thread fills it once the host answers; the control thread reads
 /// it, and rebuilds the client through `reconnect` when the connection drops.
+/// What the host's listing says about a session a show names.
+enum ShowCheck {
+    Live,
+    Exited,
+    Missing,
+}
+
+/// The host link for the GPUI thread's own host work (Show session's check,
+/// ending a closed worktree's sessions): the same link the control thread uses.
+#[derive(Clone)]
+struct HostTerminalGlobal(Arc<HostTerminal>);
+impl gpui::Global for HostTerminalGlobal {}
+
 #[derive(Default)]
 struct HostTerminal {
     link: Mutex<Option<HostTerminalLink>>,
@@ -2127,21 +2140,16 @@ impl AppControlHandler {
     }
 
     /// `panel.show`: opens the tab for a host session on the GPUI thread. The
-    /// session must exist: attaching to a missing id would create a shell.
+    /// GPUI side reads the host's listing first and attaches only (see
+    /// `SirioWorkspace::show_session`).
     fn show_session(&self, request: &ControlRequest) -> ControlResponse {
         let Some(id) = request.params.get("id").cloned() else {
             return ControlResponse::failure(&request.id, format!("{} requires id", request.method));
         };
-        match self.host_call(true, |host| host.control_sessions()) {
-            Ok(sessions) if sessions.iter().any(|session| session.info.id == id) => {
-                self.queue_action(request, move |reply| ControlAction::ShowSession {
-                    session_id: id,
-                    reply,
-                })
-            }
-            Ok(_) => Self::pane_error(request, self.panes.missing_pane_error(&id)),
-            Err(_) => ControlResponse::failure(&request.id, "Sirio could not reach its host"),
-        }
+        self.queue_action(request, move |reply| ControlAction::ShowSession {
+            session_id: id,
+            reply,
+        })
     }
 
     /// `panel.list`: the app's tabs and the control sessions of the worktree,
@@ -5653,8 +5661,7 @@ impl SirioWorkspace {
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::ShowSession { session_id, reply } => {
-                                    let result = workspace.show_session(&session_id, cx);
-                                    let _ = reply.send(result);
+                                    workspace.show_session(&session_id, Some(reply), cx);
                                 }
                                 ControlAction::ReadPane { id, query, reply } => {
                                     workspace.sync_control_panes(cx);
@@ -8703,6 +8710,13 @@ impl SirioWorkspace {
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
             for path in &removed_paths {
+                match self.panes.shutdown_for(path) {
+                    Ok(ids) => Self::end_control_sessions(ids, cx),
+                    Err(error) => eprintln!(
+                        "[control] failed to forget panes of removed project {}: {error}",
+                        path.display()
+                    ),
+                }
                 let worktree_id = path.to_string_lossy().into_owned();
                 for controller in self
                     .terminal_pane_cache
@@ -10642,11 +10656,12 @@ impl SirioWorkspace {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .current_workspace()
                 .is_some();
-        if let Err(error) = self.panes.shutdown_for(&path) {
-            eprintln!(
+        match self.panes.shutdown_for(&path) {
+            Ok(ids) => Self::end_control_sessions(ids, cx),
+            Err(error) => eprintln!(
                 "[control] failed to terminate panes for closed worktree {}: {error}",
                 path.display()
-            );
+            ),
         }
         let worktree_id = path.to_string_lossy().into_owned();
         // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
@@ -12417,16 +12432,69 @@ impl SirioWorkspace {
         }
     }
 
-    /// Opens, or selects, the tab that shows a host session the control
-    /// socket named (SP2 spec §5). The tab is attached, not owned: closing it
-    /// detaches and the session lives on. The view's identity is the session
-    /// id itself, so the factory attaches to it rather than creating one.
+    /// Shows a host session (spec §5): selects its tab if one shows it,
+    /// otherwise reads the host's listing off the GPUI thread and opens an
+    /// attached, not owned tab only if the session is live. A missing or
+    /// exited session gets no tab; the answer says which. The palette passes
+    /// no reply and hears about a failure on the toast.
     fn show_session(
         &mut self,
         session_id: &str,
+        reply: Option<ControlReply>,
         cx: &mut Context<Self>,
-    ) -> Result<Vec<(String, String)>, String> {
-        let shown = self.tabs.iter().position(|tab| {
+    ) {
+        if let Some(index) = self.tab_showing_session(session_id, cx) {
+            self.active_tab = index;
+            self.schedule_save(cx);
+            cx.notify();
+            self.finish_show(reply, Ok(Vec::new()), cx);
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            self.finish_show(
+                reply,
+                Err("Sirio could not reach its host".to_string()),
+                cx,
+            );
+            return;
+        };
+        let id = session_id.to_string();
+        let listing = cx.background_executor().spawn({
+            let id = id.clone();
+            async move {
+                client.list().map(|listed| {
+                    match listed.sessions.into_iter().find(|session| session.session_id == id) {
+                        None => ShowCheck::Missing,
+                        Some(session) if session.exit.is_some() => ShowCheck::Exited,
+                        Some(_) => ShowCheck::Live,
+                    }
+                })
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let check = listing.await;
+            let _ = this.update(cx, |workspace, cx| {
+                let result = match check {
+                    Ok(ShowCheck::Live) => {
+                        workspace.open_session_tab(&id, cx);
+                        Ok(Vec::new())
+                    }
+                    Ok(ShowCheck::Missing) => Err(format!("unknown pane: {id}")),
+                    Ok(ShowCheck::Exited) => Err(format!("closed pane: {id}")),
+                    Err(_) => Err("Sirio could not reach its host".to_string()),
+                };
+                workspace.finish_show(reply, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The index of the tab whose terminal shows `session_id`, if any.
+    fn tab_showing_session(&self, session_id: &str, cx: &App) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
             let mut shown = false;
             tab.panes.for_each(&mut |_, content| {
                 if let Some(terminal) = content.terminal() {
@@ -12434,13 +12502,33 @@ impl SirioWorkspace {
                 }
             });
             shown
-        });
-        if let Some(index) = shown {
-            self.active_tab = index;
-            self.schedule_save(cx);
-            cx.notify();
-            return Ok(Vec::new());
+        })
+    }
+
+    /// Answers a show: the control socket gets the result, the palette a toast
+    /// for a failure.
+    fn finish_show(
+        &mut self,
+        reply: Option<ControlReply>,
+        result: Result<Vec<(String, String)>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match reply {
+            Some(reply) => {
+                let _ = reply.send(result);
+            }
+            None => {
+                if let Err(message) = result {
+                    self.show_toast(message, cx);
+                }
+            }
         }
+    }
+
+    /// Opens an attached, not owned tab on a live host session. The view's
+    /// identity is the session id, so the factory attaches to it, and the
+    /// attach never creates it again (attach-only).
+    fn open_session_tab(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let directory = self.working_directory.clone();
         let title = directory
             .file_name()
@@ -12467,7 +12555,29 @@ impl SirioWorkspace {
             ));
             terminal.set_attached();
         });
-        Ok(Vec::new())
+    }
+
+    /// Ends host sessions a closed worktree or project owned (spec §4.2),
+    /// off the GPUI thread.
+    fn end_control_sessions(ids: Vec<String>, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                for id in ids {
+                    if let Err(error) = client.close(&id) {
+                        eprintln!("[control] could not end session {id}: {error}");
+                    }
+                }
+            })
+            .detach();
     }
 
     /// Inserts a terminal tab bound to an explicit leaf id (orphan adoption):
@@ -20548,10 +20658,13 @@ impl SirioWorkspace {
                 self.request_end_all_sessions(cx);
             }
             PaletteCommand::ShowSession(index) => {
-                if let Some(id) = self.panes.control_sessions().get(index).map(|pane| pane.id.clone()) {
-                    if let Err(error) = self.show_session(&id, cx) {
-                        eprintln!("[sirio] show session failed: {error}");
-                    }
+                if let Some(id) = self
+                    .panes
+                    .control_sessions()
+                    .get(index)
+                    .map(|pane| pane.id.clone())
+                {
+                    self.show_session(&id, None, cx);
                 }
             }
         }
@@ -23763,6 +23876,7 @@ fn ensure_host_in_background(
                             let (wake, mut woken) =
                                 futures::channel::mpsc::unbounded::<()>();
                             host_terminal.set(client.clone(), Some(reconnect.clone()));
+                            cx.set_global(HostTerminalGlobal(host_terminal.clone()));
                             let _ = panes.set_control_sessions(
                                 sirio_control::host_panels::control_sessions_from(&sessions),
                             );
@@ -29119,7 +29233,6 @@ done
                         active: true,
                     },
                     working_directory: third.clone(),
-                    pid: 0,
                 }])
                 .expect("register a control session on the third worktree");
         });
@@ -42329,6 +42442,7 @@ browser  profile  "
                 rows: 24,
                 prelude: Vec::new(),
                 recreate: false,
+                attach_only: false,
             }
         }
 
@@ -42434,6 +42548,7 @@ browser  profile  "
             rows: 24,
             prelude: Vec::new(),
             recreate: false,
+            attach_only: false,
         };
         let started = Instant::now();
         assert!(matches!(factory.open(probe), OpenOutcome::Pending));
