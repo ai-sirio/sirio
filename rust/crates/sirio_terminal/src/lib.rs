@@ -2591,6 +2591,11 @@ impl TerminalView {
         self.exit_status
     }
 
+    /// Whether this pane's session outlives the app (a host session does).
+    pub fn survives_app(&self) -> bool {
+        self.view_mode.survives
+    }
+
     /// F-TERM-03: whether the pane's status pill should show "Running" right
     /// now — a live session, no recorded exit yet, and a foreground command
     /// currently holds the terminal (see

@@ -849,6 +849,7 @@ fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
+                    survives: false,
                     exit_status: Some(PaneExitStatus::Success),
                 },
                 Some(source),
@@ -890,6 +891,7 @@ fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
+                    survives: false,
                     exit_status: Some(PaneExitStatus::Success),
                 },
                 None,
@@ -950,6 +952,7 @@ fn pane_registry_read_finds_a_live_application_pane_panel_list_already_reported(
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
+                    survives: false,
                     exit_status: None,
                 },
                 Some(Arc::new(|| b"opencode ready\n".to_vec())),

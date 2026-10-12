@@ -4018,8 +4018,7 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot, scrollback: &[u8]) -> Vec<(St
             "workingDirectory".to_string(),
             display_absolute_path(&snapshot.working_directory),
         ),
-        // An app pane's process dies with the app: it does not survive a quit.
-        ("survives".to_string(), "false".to_string()),
+        ("survives".to_string(), snapshot.survives.to_string()),
         ("scrollback".to_string(), base64_encode(scrollback)),
         ("scrollbackBytes".to_string(), scrollback.len().to_string()),
     ];
@@ -10027,6 +10026,7 @@ impl SirioWorkspace {
                         String::new(),
                         PaneStateSnapshot {
                             working_directory: tab_worktree_path.clone(),
+                            survives: false,
                             exit_status: None,
                         },
                         None,
@@ -10037,6 +10037,7 @@ impl SirioWorkspace {
                         let state = PaneStateSnapshot {
                             working_directory: tab_worktree_path.clone(),
                             exit_status: pane_exit_status(terminal.exit_status()),
+                            survives: terminal.survives_app(),
                         };
                         let scrollback_source = terminal.scrollback_source().map(|source| {
                             let source: ScrollbackSource = Arc::new(move || source.capture());
@@ -10054,6 +10055,7 @@ impl SirioWorkspace {
                         String::new(),
                         PaneStateSnapshot {
                             working_directory: tab_worktree_path.clone(),
+                            survives: false,
                             exit_status: None,
                         },
                         None,
@@ -24761,6 +24763,27 @@ mod tests {
     // one by its pill, so this import lives here rather than at the top.
     use sirio_ui::sidebar::{SidebarView, parked_tab_row_id};
 
+    /// `panel.state` tells a caller whether a pane's session outlives the
+    /// app: a host session does, so its answer must say so (SP2 spec §5).
+    #[test]
+    fn panel_state_answers_survives_from_the_snapshot() {
+        let snapshot = |survives| PaneStateSnapshot {
+            working_directory: PathBuf::from("/wt"),
+            exit_status: None,
+            survives,
+        };
+        let answer = |survives| {
+            panel_state_pairs(&snapshot(survives), b"")
+                .into_iter()
+                .find(|(key, _)| key == "survives")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(answer(true).as_deref(), Some("true"), "a host session survives the app");
+        assert_eq!(answer(false).as_deref(), Some("false"), "an in-process fallback does not");
+    }
+
+    /// `panel.state` tells a caller whether a pane's session outlives the
+    /// app: a host session does, so its answer must say so (SP2 spec §5).
     #[test]
     fn the_identifier_under_the_caret_names_the_search() {
         // The LSP answer does not carry the symbol's name, so the heading

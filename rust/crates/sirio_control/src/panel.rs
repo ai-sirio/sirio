@@ -43,6 +43,9 @@ pub type ScrollbackSource = Arc<dyn Fn() -> Vec<u8> + Send + Sync>;
 pub struct PaneStateSnapshot {
     pub working_directory: PathBuf,
     pub exit_status: Option<PaneExitStatus>,
+    /// Whether the pane's session outlives the app (a host session does, an
+    /// in-process fallback does not). Answered as `survives` by `panel.state`.
+    pub survives: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +139,7 @@ impl PaneRegistry {
                     pane,
                     PaneStateSnapshot {
                         working_directory: working_directory.clone(),
+                        survives: false,
                         exit_status: None,
                     },
                     None,
@@ -240,6 +244,7 @@ impl PaneRegistry {
         for (session, directory) in resolved {
             let state = PaneStateSnapshot {
                 working_directory: directory.clone(),
+                survives: false,
                 exit_status: None,
             };
             external.insert(
