@@ -58,6 +58,11 @@ grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-e2e\.sh[[:space:]
 grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-term-e2e\.sh --out-dir term-e2e[[:space:]]*$" "$PR_CODE" \
   || fail "pr.yml must run the terminal sessions E2E"
 
+# The app-level terminal sessions E2E (SP2 spec §9.3) runs the real app, so it
+# needs a display: on Linux that is the private Xvfb the script starts itself.
+grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-sessions-e2e\.sh --xvfb --out-dir host-sessions-e2e[[:space:]]*$" "$PR_CODE" \
+  || fail "pr.yml must run the host sessions E2E under Xvfb"
+
 # Scripts/ci.sh runs check-cycle-version.sh, which compares the workspace
 # version against the last released tag. A shallow clone carries no tags, so
 # the check would pass by knowing nothing -- the exact failure it exists to

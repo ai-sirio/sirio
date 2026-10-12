@@ -165,3 +165,30 @@ jobs:
           name: term-e2e-linux
           path: term-e2e
           if-no-files-found: warn
+
+      # The app-level half (SP2 spec §9.3): a real debug Sirio on a private
+      # Xvfb, its host adopted and killed around, the control socket driving it.
+      # The display tools are the ones the window captures and the echo
+      # measurement use (Xvfb with Mesa's lavapipe, xdotool, X11 utils,
+      # ImageMagick's import and identify). Like the Ely probe, it runs under
+      # Xvfb; Windows does not run it (the app builds there only in the release job).
+      - name: Install the display tools for the host sessions E2E
+        run: |
+          sudo apt-get install -y -q --no-install-recommends \
+            xvfb \
+            x11-utils \
+            imagemagick \
+            xdotool \
+            mesa-vulkan-drivers
+
+      - name: Host sessions E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-host-sessions-e2e.sh --xvfb --out-dir host-sessions-e2e
+
+      - name: Upload host sessions E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-sessions-e2e-linux
+          path: host-sessions-e2e
+          if-no-files-found: warn

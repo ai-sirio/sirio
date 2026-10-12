@@ -717,6 +717,32 @@ pub mod request {
         )
     }
 
+    /// Debug-only: `tabs_close` with the dirty-tab prompt already answered
+    /// "Close" (a live terminal's tab otherwise asks first).
+    pub fn tabs_close_confirmed(position: usize) -> ControlRequest {
+        request(
+            "surface.tabs.close",
+            BTreeMap::from([
+                ("index".to_string(), position.to_string()),
+                ("confirm".to_string(), "yes".to_string()),
+            ]),
+        )
+    }
+
+    /// Debug-only `surface.host.end_all`: End All without its dialog.
+    pub fn host_end_all() -> ControlRequest {
+        request("surface.host.end_all", BTreeMap::new())
+    }
+
+    /// Debug-only `surface.terminal.open`: opens an application terminal tab
+    /// in the selected worktree, running `command` under `sh -c` when given.
+    pub fn terminal_open(command: Option<&str>) -> ControlRequest {
+        let params = command
+            .map(|command| BTreeMap::from([("cmd".to_string(), command.to_string())]))
+            .unwrap_or_default();
+        request("surface.terminal.open", params)
+    }
+
     pub fn file_read() -> ControlRequest {
         request("surface.file.read", BTreeMap::new())
     }

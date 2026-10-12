@@ -1233,6 +1233,9 @@ enum ControlAction {
     },
     CloseListedTab {
         position: usize,
+        /// Debug-only `confirm=yes`: closes a live terminal without the
+        /// "Close dirty tab?" prompt, as the prompt's Close button would.
+        confirmed: bool,
         reply: ControlReply,
     },
     ReadFile {
@@ -1296,6 +1299,12 @@ enum ControlAction {
     RefreshSidebar,
     /// Debug-only `surface.host.end_all`: performs End All without the dialog.
     EndAllSessions {
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.terminal.open`: an application terminal tab in the
+    /// selected worktree, running `command` under `sh -c` when given.
+    OpenTerminal {
+        command: Option<String>,
         reply: ControlReply,
     },
 }
@@ -2510,6 +2519,7 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.change_request.act");
                     methods.push("surface.changes.confirm");
                     methods.push("surface.host.end_all");
+                    methods.push("surface.terminal.open");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2869,6 +2879,13 @@ impl ControlHandler for AppControlHandler {
             "surface.host.end_all" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EndAllSessions { reply })
             }
+            // Debug-only `surface.terminal.open {cmd?}`: the tab a user's "new
+            // terminal" makes (an app-origin session on the host), or one that
+            // runs `cmd` directly under `sh -c` so its pid is the session's.
+            "surface.terminal.open" if cfg!(debug_assertions) => {
+                let command = request.params.get("cmd").cloned();
+                self.queue_action(request, move |reply| ControlAction::OpenTerminal { command, reply })
+            }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.tabs.select" => {
                 let Some(position) = request
@@ -2890,7 +2907,13 @@ impl ControlHandler for AppControlHandler {
                 else {
                     return ControlResponse::failure(&request.id, "surface.tabs.close requires a positive index");
                 };
-                self.queue_action(request, move |reply| ControlAction::CloseListedTab { position, reply })
+                let confirmed = cfg!(debug_assertions)
+                    && request.params.get("confirm").is_some_and(|value| value == "yes");
+                self.queue_action(request, move |reply| ControlAction::CloseListedTab {
+                    position,
+                    confirmed,
+                    reply,
+                })
             }
             "surface.file.read" => self.queue_action(request, |reply| ControlAction::ReadFile { reply }),
             // F-SET-15: registers an isolated Claude/Codex account and
@@ -5644,14 +5667,17 @@ impl SirioWorkspace {
                                     workspace.perform_end_all_sessions(cx);
                                     let _ = reply.send(Ok(vec![]));
                                 }
+                                ControlAction::OpenTerminal { command, reply } => {
+                                    let _ = reply.send(workspace.control_open_terminal(command, cx));
+                                }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
                                 }
                                 ControlAction::SelectListedTab { position, reply } => {
                                     let _ = reply.send(workspace.control_select_listed_tab(position, window, cx));
                                 }
-                                ControlAction::CloseListedTab { position, reply } => {
-                                    let _ = reply.send(workspace.control_close_listed_tab(position, window, cx));
+                                ControlAction::CloseListedTab { position, confirmed, reply } => {
+                                    let _ = reply.send(workspace.control_close_listed_tab(position, confirmed, window, cx));
                                 }
                                 ControlAction::ReadFile { reply } => {
                                     let _ = reply.send(workspace.control_read_file(cx));
@@ -16578,6 +16604,28 @@ impl SirioWorkspace {
     }
 
     /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
+    /// Debug-only `surface.terminal.open`. It goes through the path a
+    /// terminal launched by an agent takes: a tab, then `start` (no render
+    /// needed). The reply names the pane, `pane-<n>`, which is the session id
+    /// the host lists it under.
+    fn control_open_terminal(
+        &mut self,
+        command: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let pane = format!("pane-{}", self.next_pane_id);
+        let shell = match command {
+            Some(command) => TerminalShell::WithArguments {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), command],
+            },
+            None => TerminalShell::System,
+        };
+        let terminal = self.add_terminal_tab_with_shell_and_agent("Terminal", shell, None, None, cx);
+        terminal.update(cx, |terminal, cx| terminal.start(cx));
+        Ok(vec![("pane".to_string(), pane)])
+    }
+
     fn control_read_tabs(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let mut report = vec![
             ("count".to_string(), self.tabs.len().to_string()),
@@ -16626,11 +16674,15 @@ impl SirioWorkspace {
     fn control_close_listed_tab(
         &mut self,
         position: usize,
+        confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let id = self.listed_tab_id(position)?;
-        self.request_close_tab_by_id(id, window, cx);
+        match self.tabs.iter().position(|tab| tab.id == id) {
+            Some(index) if confirmed => self.close_tab(index, Some(window), cx),
+            _ => self.request_close_tab_by_id(id, window, cx),
+        }
         Ok(self.control_read_tabs(cx))
     }
 
@@ -24784,8 +24836,6 @@ mod tests {
         assert_eq!(answer(false).as_deref(), Some("false"), "an in-process fallback does not");
     }
 
-    /// `panel.state` tells a caller whether a pane's session outlives the
-    /// app: a host session does, so its answer must say so (SP2 spec §5).
     #[test]
     fn the_identifier_under_the_caret_names_the_search() {
         // The LSP answer does not carry the symbol's name, so the heading
@@ -39180,6 +39230,7 @@ done
             | ControlAction::SplitPane { reply, .. }
             | ControlAction::ClosePane { reply }
             | ControlAction::EndAllSessions { reply }
+            | ControlAction::OpenTerminal { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -39307,6 +39358,7 @@ done
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
             "surface.host.end_all" => request_with_params(method, &[]),
+            "surface.terminal.open" => request_with_params(method, &[]),
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),
