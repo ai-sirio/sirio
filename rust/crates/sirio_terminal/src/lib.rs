@@ -1727,6 +1727,7 @@ impl TerminalHandle {
             prelude: Vec::new(),
             recreate: false,
             attach_only: false,
+            restore: false,
         };
         let link = LocalLink::open(&request).map_err(|message| anyhow::anyhow!("{message}"))?;
         Ok(Self::new_with_link(Box::new(link)))
@@ -2193,6 +2194,10 @@ pub struct TerminalView {
     /// Attached, not owned (SP2 spec §5): a session another client created,
     /// shown here. Ending the view detaches it; the session lives on.
     attached: bool,
+    /// A restored tab (a persisted `session_id`): the one open that may attach
+    /// to a session the host already lists. A fresh view only creates
+    /// (fix batch 1, finding 11).
+    restored: bool,
     context_menu: Option<Point<Pixels>>,
     /// #259: the running autoscroll, armed only while a drag is held outside
     /// the pane. Cancel-on-drop, so releasing the button or coming back
@@ -2372,6 +2377,7 @@ impl TerminalView {
         let host = TerminalSurfaceHost::new(identity.terminal_id());
         Ok(Self {
             attached: false,
+            restored: false,
             terminal: TerminalState::Pending,
             spawn,
             view_mode: TerminalViewMode::default(),
@@ -2406,6 +2412,7 @@ impl TerminalView {
         let host = TerminalSurfaceHost::new(identity.terminal_id());
         Self {
             attached: false,
+            restored: false,
             terminal: TerminalState::Pending,
             spawn: SpawnParams {
                 working_directory,
@@ -2463,6 +2470,7 @@ impl TerminalView {
         host.teardown();
         Self {
             attached: false,
+            restored: false,
             terminal: TerminalState::Failed {
                 message: message.into(),
             },
@@ -2543,6 +2551,12 @@ impl TerminalView {
 
     pub fn identity(&self) -> &TerminalIdentity {
         &self.identity
+    }
+
+    /// Marks the view as restoring a persisted session: its open may attach to
+    /// the session the host already holds under its id.
+    pub fn set_restored(&mut self) {
+        self.restored = true;
     }
 
     /// Marks the view as showing a session it did not create (Show session).
@@ -2764,6 +2778,7 @@ impl TerminalView {
             recreate: self.pending_recreate,
             // An attached tab never creates the session it shows (spec §5).
             attach_only: self.attached,
+            restore: self.restored,
         }
     }
 

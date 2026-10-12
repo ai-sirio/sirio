@@ -31,6 +31,8 @@ set -eEuo pipefail
 #                       recorded beside each other, never a FAIL
 #   11. close-worktree  closing a worktree ends the control sessions inside it;
 #                       a session in a directory outside it survives
+#   12. duplicate-id    a control session holds the id the app will use next;
+#                       a fresh app terminal never attaches to it (finding 11)
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -749,6 +751,37 @@ case_echo_latency() {
 
 # Closing a worktree ends the control sessions inside it. A control session in
 # a directory outside it survives.
+# A fresh terminal never attaches to a session that already holds its id: the
+# control session holding the next app id stays untouched, with no client and
+# its own pid, and the new terminal is not on that session.
+case_duplicate_id() {
+  new_world c12
+  app_start
+  select_repo "$W/repo"
+  local first next pidfile control_pid control_clients dup dup_pid
+  first=$(open_terminal "sleep 300")
+  [ -n "$first" ] || fail "the first terminal has no pane id"
+  next="pane-$(( ${first#pane-} + 1 ))"
+  probe term-create "$W/repo" --id "$next" -- sleep 300
+  [ "$RC" -eq 0 ] || fail "host_probe term-create $next failed: $OUT"
+  wait_until 10 session_listed "$next" || fail "the control session $next is not listed"
+  control_pid=$(session_pid "$next")
+  control_clients=$(session_clients "$next")
+  pidfile="$W/pid.txt"
+  dup=$(open_terminal "$(heartbeat "$pidfile")")
+  [ "$dup" = "$next" ] || fail "the new terminal got $dup, not the held id $next: the case proves nothing"
+  sleep 2
+  session_listed "$next" || fail "the control session $next was ended"
+  [ "$(session_clients "$next")" = "$control_clients" ] || fail "the new terminal attached to the control session $next (clients $(session_clients "$next"), expected $control_clients)"
+  [ "$(session_pid "$next")" = "$control_pid" ] || fail "the held id $next now names another session"
+  pid_alive "$control_pid" || fail "the control session pid $control_pid is not alive"
+  wait_until 10 pid_written "$pidfile" || fail "the new terminal never wrote its pid"
+  dup_pid=$(pid_in "$pidfile")
+  [ "$dup_pid" != "$control_pid" ] || fail "the new terminal runs the control session's pid $control_pid"
+  [ "$(session_origin "$next")" = control ] || fail "the control session $next changed origin"
+  NOTE="held $next (pid $control_pid, clients $control_clients) untouched; new terminal pid $dup_pid"
+}
+
 case_close_worktree() {
   new_world c11
   app_start
@@ -870,6 +903,7 @@ run_case 8 slow-host case_slow_host
 run_case 9 isolation case_isolation
 run_case 10 echo-latency case_echo_latency
 run_case 11 close-worktree case_close_worktree
+run_case 12 duplicate-id case_duplicate_id
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 11 cases)"

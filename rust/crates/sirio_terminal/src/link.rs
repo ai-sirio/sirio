@@ -81,6 +81,10 @@ pub struct OpenRequest {
     /// host no longer lists fails the open as *Session lost* instead of being
     /// created again as a new shell.
     pub attach_only: bool,
+    /// A restore: a persisted tab carrying its `session_id`. Only a restore
+    /// (and an attach-only open) may attach to a session the host already
+    /// lists; every other open is a create (fix batch 1, finding 11).
+    pub restore: bool,
 }
 
 pub enum OpenOutcome {
@@ -103,15 +107,23 @@ enum OpenPlan {
     Create,
     /// Not listed, attach-only: the session is lost. Never created.
     Lost,
+    /// Listed, but this open is a fresh create: the id belongs to another
+    /// session, so this open must not attach to it.
+    Duplicate,
 }
 
-/// The open decision: a listed session is attached; a missing one is lost
-/// for an attach-only open and created otherwise.
-fn open_plan(listed: bool, attach_only: bool) -> OpenPlan {
-    match (listed, attach_only) {
-        (true, _) => OpenPlan::Attach,
-        (false, true) => OpenPlan::Lost,
-        (false, false) => OpenPlan::Create,
+/// The open decision. Attach-only opens attach to a listed session and lose
+/// a missing one. Restores attach to a listed session and create a missing
+/// one. Every other open is a create: a listed id is a duplicate, never an
+/// attach (fix batch 1, finding 11).
+fn open_plan(listed: bool, attach_only: bool, restore: bool) -> OpenPlan {
+    match (listed, attach_only, restore) {
+        (true, true, _) => OpenPlan::Attach,
+        (false, true, _) => OpenPlan::Lost,
+        (true, false, true) => OpenPlan::Attach,
+        (false, false, true) => OpenPlan::Create,
+        (true, false, false) => OpenPlan::Duplicate,
+        (false, false, false) => OpenPlan::Create,
     }
 }
 
@@ -360,10 +372,16 @@ impl HostLink {
             .iter()
             .find(|summary| summary.session_id == request.session_id)
             .map(|summary| summary.pid);
-        let plan = open_plan(listed_pid.is_some(), request.attach_only);
+        let plan = open_plan(listed_pid.is_some(), request.attach_only, request.restore);
         if plan == OpenPlan::Lost {
             return Err(format!(
                 "Session lost: {} is no longer on the host",
+                request.session_id
+            ));
+        }
+        if plan == OpenPlan::Duplicate {
+            return Err(format!(
+                "{} is already a session on the host; a new terminal does not attach to it",
                 request.session_id
             ));
         }
@@ -388,9 +406,11 @@ impl HostLink {
             match client.create(&params) {
                 Ok(created) => Some(created.pid),
                 // A racing create answered `invalid_params` for a duplicate
-                // id: the session exists now, attach to it.
+                // id: a restore attaches to the session that now holds it. A
+                // fresh open never does (fix batch 1, finding 11).
                 Err(CallError::Remote(body))
-                    if body.code == ErrorCode::InvalidParams
+                    if request.restore
+                        && body.code == ErrorCode::InvalidParams
                         && body.message.contains("duplicate") =>
                 {
                     None
@@ -802,6 +822,7 @@ mod tests {
             prelude: Vec::new(),
             recreate: false,
             attach_only: false,
+            restore: false,
         }
     }
 
@@ -1009,10 +1030,19 @@ mod attach_only_tests {
     /// creates it; a listed session is attached whichever kind of open.
     #[test]
     fn an_attach_only_open_of_a_missing_session_is_lost_and_never_created() {
-        assert_eq!(open_plan(false, true), OpenPlan::Lost);
-        assert_eq!(open_plan(false, false), OpenPlan::Create);
-        assert_eq!(open_plan(true, true), OpenPlan::Attach);
-        assert_eq!(open_plan(true, false), OpenPlan::Attach);
+        assert_eq!(open_plan(false, true, false), OpenPlan::Lost);
+        assert_eq!(open_plan(false, false, false), OpenPlan::Create);
+        assert_eq!(open_plan(true, true, false), OpenPlan::Attach);
+        assert_eq!(open_plan(true, false, true), OpenPlan::Attach);
+    }
+
+    /// Fix batch 1, finding 11: a fresh open never attaches to a session that
+    /// already has its id, whoever created it, and a restore of a session
+    /// the host does not list creates it.
+    #[test]
+    fn a_fresh_open_of_a_listed_id_is_a_duplicate_and_never_an_attach() {
+        assert_eq!(open_plan(true, false, false), OpenPlan::Duplicate);
+        assert_eq!(open_plan(false, false, true), OpenPlan::Create);
     }
 
     /// An attach-only open never starts a local shell: with no host to attach
@@ -1028,6 +1058,7 @@ mod attach_only_tests {
             prelude: Vec::new(),
             recreate: false,
             attach_only: true,
+            restore: false,
         };
         let refused = LocalLink::open(&request);
         assert!(

@@ -7885,6 +7885,9 @@ impl SirioWorkspace {
                 if let TabContent::Terminal { view } = content
                     && !reused_terminal_panes.is_some_and(|reused| reused.contains(&pane_id))
                 {
+                    // Restored tabs are the only terminals that may attach to
+                    // a session the host already holds (finding 11).
+                    view.update(cx, |terminal, _| terminal.set_restored());
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
             });
@@ -12712,6 +12715,8 @@ impl SirioWorkspace {
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
+        // An orphan is a session that already exists: adopting it is a restore.
+        terminal.update(cx, |terminal, _| terminal.set_restored());
         Self::bind_terminal(&terminal, tab_id, leaf, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -42709,6 +42714,7 @@ browser  profile  "
                 prelude: Vec::new(),
                 recreate: false,
                 attach_only: false,
+                restore: false,
             }
         }
 
@@ -42815,6 +42821,7 @@ browser  profile  "
             prelude: Vec::new(),
             recreate: false,
             attach_only: false,
+            restore: false,
         };
         let started = Instant::now();
         assert!(matches!(factory.open(probe), OpenOutcome::Pending));
