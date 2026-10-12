@@ -6,6 +6,7 @@
 //! only the answering side moved.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use sirio_host_client::TermClient;
@@ -15,7 +16,7 @@ use sirio_host_protocol::term::{
     CreateParams, ExitStatus, Origin, ReadFormat, SessionSummary, TermCommand, TermSize, b64_encode,
 };
 
-use crate::panel::{PaneError, PaneInfo, terminal_key_bytes};
+use crate::panel::{ControlSession, PaneError, PaneInfo, terminal_key_bytes};
 use crate::protocol::{ControlRequest, ControlResponse};
 
 /// The size a control-owned session starts with; nothing draws it.
@@ -26,6 +27,26 @@ const CONTROL_SIZE: TermSize = TermSize { cols: 120, rows: 40 };
 /// keeps each call inside the client's deadline.
 const UNBOUNDED_WAIT_SLICE: Duration = Duration::from_secs(30);
 
+/// Why a call did not get an answer from the host. `Unreached` is a lost
+/// connection: the request's fate is unknown and the caller may reconnect.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unreached {
+    No(String),
+}
+
+/// A failed dispatch: a pane error the caller reports, or no answer at all.
+#[derive(Debug)]
+pub enum Failure {
+    Pane(String),
+    Unreached(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Pane(message)
+    }
+}
+
 pub struct HostPanels {
     client: TermClient,
 }
@@ -35,16 +56,38 @@ impl HostPanels {
         Self { client }
     }
 
-    /// Answers one `panel.*` request. Errors keep the app's wording, so a
-    /// script sees the same text whichever side answered.
-    pub fn handle(&self, request: &ControlRequest) -> ControlResponse {
-        match self.dispatch(request) {
-            Ok(result) => ControlResponse::success(&request.id, result),
-            Err(message) => ControlResponse::failure(&request.id, message),
+    /// Answers one `panel.*` request. Pane errors keep the app's wording, so
+    /// a script sees the same text whichever side answered; a lost connection
+    /// is `Err(Unreached)`, never a pane error.
+    pub fn handle(&self, request: &ControlRequest) -> Result<ControlResponse, Unreached> {
+        match self.answer(request) {
+            Ok(response) => Ok(response),
+            Err(Failure::Unreached(message)) => Err(Unreached::No(message)),
+            Err(Failure::Pane(message)) => Ok(ControlResponse::failure(&request.id, message)),
         }
     }
 
-    fn dispatch(&self, request: &ControlRequest) -> Result<BTreeMap<String, String>, String> {
+    /// `handle` with the failures still typed: a pane error is an `Ok`
+    /// failure response, a lost connection is `Err(Failure::Unreached)`.
+    pub fn answer(&self, request: &ControlRequest) -> Result<ControlResponse, Failure> {
+        match self.dispatch(request) {
+            Ok(result) => Ok(ControlResponse::success(&request.id, result)),
+            Err(failure @ Failure::Unreached(_)) => Err(failure),
+            Err(Failure::Pane(message)) => Ok(ControlResponse::failure(&request.id, message)),
+        }
+    }
+
+    /// Whether a request may be sent again after the connection was rebuilt:
+    /// reads and waits always; a write, a create or a close only where the
+    /// caller knows it was not sent (the app never retries those).
+    pub fn is_read_only(method: &str) -> bool {
+        matches!(
+            method,
+            "panel.list" | "panel.read" | "panel.scrollback" | "panel.state" | "panel.wait"
+        )
+    }
+
+    fn dispatch(&self, request: &ControlRequest) -> Result<BTreeMap<String, String>, Failure> {
         let params = &request.params;
         match request.method.as_str() {
             "panel.create" => {
@@ -65,7 +108,7 @@ impl HostPanels {
                 let source = required(params, "from", "panel.split requires from")?;
                 let direction = required(params, "direction", "panel.split requires direction")?;
                 if !matches!(direction.as_str(), "left" | "right" | "up" | "down") {
-                    return Err(PaneError::InvalidDirection(direction).to_string());
+                    return Err(Failure::Pane(PaneError::InvalidDirection(direction).to_string()));
                 }
                 let parent = self.session(&source)?;
                 let created = self
@@ -183,34 +226,37 @@ impl HostPanels {
                     .map_err(|error| host_error(&id, error))?;
                 Ok(BTreeMap::new())
             }
-            "panel.focus" | "panel.show" => Err(format!(
-                "{} needs Sirio running",
-                request.method
+            "panel.show" => Err(Failure::Pane(
+                "Show session needs Sirio running".to_string(),
             )),
-            other => Err(format!("unknown method: {other}")),
+            "panel.focus" => Err(Failure::Pane(
+                "panel.focus needs Sirio running".to_string(),
+            )),
+            other => Err(Failure::Pane(format!("unknown method: {other}"))),
         }
     }
 
-    /// The control-owned sessions, in the shape `panel.list` reports. With
-    /// `cwd`, only the sessions whose working directory is exactly that path.
-    pub fn control_panes(&self, cwd: Option<&str>) -> Result<Vec<PaneInfo>, String> {
+    /// The control-owned sessions the host lists, with their cwd and pid.
+    /// Runs off the GPUI thread: the app calls it from the control socket.
+    pub fn control_sessions(&self) -> Result<Vec<ControlSession>, Failure> {
         let listed = self.client.list().map_err(|error| host_error("", error))?;
-        Ok(listed
-            .sessions
+        Ok(control_sessions_from(&listed.sessions))
+    }
+
+    /// The control-owned sessions in the shape `panel.list` reports. With
+    /// `cwd`, only the sessions whose working directory is exactly that path.
+    pub fn control_panes(&self, cwd: Option<&str>) -> Result<Vec<PaneInfo>, Failure> {
+        Ok(self
+            .control_sessions()?
             .into_iter()
-            .filter(|session| session.origin == Origin::Control)
-            .filter(|session| cwd.is_none_or(|cwd| session.cwd == cwd))
-            .map(|session| PaneInfo {
-                id: session.session_id,
-                tab: String::new(),
-                title: session.title,
-                agent: String::new(),
-                active: false,
+            .filter(|session| {
+                cwd.is_none_or(|cwd| session.working_directory == std::path::Path::new(cwd))
             })
+            .map(|session| session.info)
             .collect())
     }
 
-    fn session(&self, id: &str) -> Result<SessionSummary, String> {
+    fn session(&self, id: &str) -> Result<SessionSummary, Failure> {
         let listed = self
             .client
             .list()
@@ -219,12 +265,12 @@ impl HostPanels {
             .sessions
             .into_iter()
             .find(|session| session.session_id == id)
-            .ok_or_else(|| PaneError::UnknownPane(id.to_string()).to_string())
+            .ok_or_else(|| Failure::Pane(PaneError::UnknownPane(id.to_string()).to_string()))
     }
 
     /// Waits for the exit code. A timed-out wait is `pane timed out`; with no
     /// timeout the wait repeats in slices until the session exits.
-    fn wait(&self, id: &str, timeout: Option<Duration>) -> Result<i32, String> {
+    fn wait(&self, id: &str, timeout: Option<Duration>) -> Result<i32, Failure> {
         loop {
             let slice = timeout.unwrap_or(UNBOUNDED_WAIT_SLICE);
             let waited = self
@@ -234,7 +280,7 @@ impl HostPanels {
             match waited.exit {
                 Some(status) => return Ok(exit_code_of(&status)),
                 None if timeout.is_some() => {
-                    return Err(PaneError::TimedOut(id.to_string()).to_string());
+                    return Err(Failure::Pane(PaneError::TimedOut(id.to_string()).to_string()));
                 }
                 None => {}
             }
@@ -336,15 +382,35 @@ fn one(key: &str, value: String) -> BTreeMap<String, String> {
 
 /// Maps a host failure onto the app's pane errors. `id` is the pane the call
 /// was about, empty when none was named.
-fn host_error(id: &str, error: CallError) -> String {
+fn host_error(id: &str, error: CallError) -> Failure {
     match error {
-        CallError::Remote(body) => match body.code {
+        CallError::Remote(body) => Failure::Pane(match body.code {
             ErrorCode::UnknownSession => PaneError::UnknownPane(id.to_string()).to_string(),
             ErrorCode::SessionExited => PaneError::ClosedPane(id.to_string()).to_string(),
             ErrorCode::InvalidCwd => PaneError::InvalidWorkingDirectory(body.message).to_string(),
             ErrorCode::SpawnFailed => PaneError::Spawn(body.message).to_string(),
             _ => PaneError::Io(body.message).to_string(),
-        },
-        other => PaneError::Io(other.to_string()).to_string(),
+        }),
+        CallError::Io(_) | CallError::Frame(_) => Failure::Unreached(error.to_string()),
+        other => Failure::Pane(PaneError::Io(other.to_string()).to_string()),
     }
+}
+
+/// The control-owned sessions among a host listing, as the registry holds them.
+pub fn control_sessions_from(sessions: &[SessionSummary]) -> Vec<ControlSession> {
+    sessions
+        .iter()
+        .filter(|session| session.origin == Origin::Control)
+        .map(|session| ControlSession {
+            info: PaneInfo {
+                id: session.session_id.clone(),
+                tab: String::new(),
+                title: session.title.clone(),
+                agent: String::new(),
+                active: false,
+            },
+            working_directory: PathBuf::from(&session.cwd),
+            pid: session.pid,
+        })
+        .collect()
 }

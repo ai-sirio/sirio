@@ -1051,6 +1051,11 @@ fn handoff_command_from_params(params: &BTreeMap<String, String>) -> Result<Hand
 }
 
 enum ControlAction {
+    /// `panel.show` / `panel.focus`: the tab for a host session, on the GPUI thread.
+    ShowSession {
+        session_id: String,
+        reply: ControlReply,
+    },
     Quit {
         reply: ControlReply,
     },
@@ -1901,7 +1906,52 @@ struct AppControlHandler {
     /// The host's terminal client, once the host has answered (SP2 §5).
     /// Filled on the GPUI thread when the factory is installed; read on the
     /// control thread, where its blocking calls belong, never on GPUI's.
-    host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>>,
+    host_terminal: Arc<HostTerminal>,
+}
+
+/// The app's link to the host's terminal sessions for `panel.*` (SP2 §5).
+/// The GPUI thread fills it once the host answers; the control thread reads
+/// it, and rebuilds the client through `reconnect` when the connection drops.
+#[derive(Default)]
+struct HostTerminal {
+    link: Mutex<Option<HostTerminalLink>>,
+}
+
+struct HostTerminalLink {
+    client: sirio_host_client::TermClient,
+    reconnect: Option<Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>>,
+}
+
+impl HostTerminal {
+    fn set(
+        &self,
+        client: sirio_host_client::TermClient,
+        reconnect: Option<Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>>,
+    ) {
+        if let Ok(mut link) = self.link.lock() {
+            *link = Some(HostTerminalLink { client, reconnect });
+        }
+    }
+
+    fn client(&self) -> Option<sirio_host_client::TermClient> {
+        self.link
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|link| link.client.clone())
+    }
+
+    /// Rebuilds the client through the factory's reconnect and keeps it.
+    fn reconnect(&self) -> Option<sirio_host_client::TermClient> {
+        let reconnect = self.link.lock().ok()?.as_ref()?.reconnect.clone()?;
+        let fresh = reconnect()?;
+        if let Ok(mut link) = self.link.lock()
+            && let Some(link) = link.as_mut()
+        {
+            link.client = fresh.clone();
+        }
+        Some(fresh)
+    }
 }
 
 impl AppControlHandler {
@@ -1924,37 +1974,28 @@ impl AppControlHandler {
             session_store,
             socket_info,
             database_path: None,
-            host_terminal: Arc::new(Mutex::new(None)),
+            host_terminal: Arc::new(HostTerminal::default()),
         }
     }
 
-    /// Shares the slot the host factory fills (see `ensure_host_in_background`).
-    fn with_host_terminal(
-        mut self,
-        host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>>,
-    ) -> Self {
+    /// Shares the link the host factory fills (see `ensure_host_in_background`).
+    fn with_host_terminal(mut self, host_terminal: Arc<HostTerminal>) -> Self {
         self.host_terminal = host_terminal;
         self
     }
 
     /// `panel.*` (SP2 §5). The host answers for the terminal sessions it owns;
-    /// the app answers for the panes it renders (its own tabs), and adds the
-    /// layout only it knows to `panel.list`.
+    /// the app answers for its own tabs and keeps the sidebar's registry of
+    /// control sessions current.
     fn panel(&self, request: &ControlRequest) -> ControlResponse {
-        let host = self
-            .host_terminal
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .map(sirio_control::host_panels::HostPanels::new);
         match request.method.as_str() {
             "panel.create" | "panel.split" => {
-                let Some(host) = host else {
+                if self.host_terminal.client().is_none() {
                     return ControlResponse::failure(
                         &request.id,
                         "cannot spawn pane: the host is not running",
                     );
-                };
+                }
                 let mut request = request.clone();
                 if request.method == "panel.create" && !request.params.contains_key("cwd") {
                     let Some(working_directory) = self
@@ -1968,20 +2009,36 @@ impl AppControlHandler {
                         working_directory.to_string_lossy().into_owned(),
                     );
                 }
-                host.handle(&request)
+                let response = self.host_request(&request);
+                self.refresh_control();
+                response
             }
-            "panel.list" => self.panel_list(request, host.as_ref()),
+            "panel.list" => self.panel_list(request),
+            "panel.show" => self.show_session(request),
+            "panel.focus" => {
+                let Some(id) = request.params.get("id") else {
+                    return ControlResponse::failure(&request.id, "panel.focus requires id");
+                };
+                if self.panes.is_app_pane(id) {
+                    return Self::pane_error(request, self.panes.missing_pane_error(id));
+                }
+                self.show_session(request)
+            }
             method => {
                 let Some(id) = request.params.get("id").cloned() else {
                     return ControlResponse::failure(&request.id, format!("{method} requires id"));
                 };
-                if self.panes.is_external(&id) {
+                if self.panes.is_app_pane(&id) {
                     return self.app_pane(request, &id);
                 }
-                match host {
-                    Some(host) => host.handle(request),
-                    None => Self::pane_error(request, self.panes.missing_pane_error(&id)),
+                if self.host_terminal.client().is_none() {
+                    return Self::pane_error(request, self.panes.missing_pane_error(&id));
                 }
+                let response = self.host_request(request);
+                if method == "panel.close" {
+                    self.refresh_control();
+                }
+                response
             }
         }
     }
@@ -2028,34 +2085,79 @@ impl AppControlHandler {
         }
     }
 
-    /// `panel.list`: the app's panes of the worktree, then the control-owned
-    /// host sessions in that worktree that the app does not render.
-    fn panel_list(
+    /// Runs one call against the host, off the GPUI thread. A lost connection
+    /// is `Unreached`; a read (`read_only`) is run once more over a connection
+    /// rebuilt by the factory's reconnect, a write never is.
+    fn host_call<T>(
         &self,
-        request: &ControlRequest,
-        host: Option<&sirio_control::host_panels::HostPanels>,
-    ) -> ControlResponse {
+        read_only: bool,
+        call: impl Fn(&sirio_control::host_panels::HostPanels) -> Result<T, sirio_control::host_panels::Failure>,
+    ) -> Result<T, sirio_control::host_panels::Failure> {
+        use sirio_control::host_panels::{Failure, HostPanels};
+        let Some(client) = self.host_terminal.client() else {
+            return Err(Failure::Unreached("the host is not running".to_string()));
+        };
+        match call(&HostPanels::new(client)) {
+            Err(Failure::Unreached(message)) if read_only => match self.host_terminal.reconnect() {
+                Some(fresh) => call(&HostPanels::new(fresh)),
+                None => Err(Failure::Unreached(message)),
+            },
+            other => other,
+        }
+    }
+
+    /// Forwards one `panel.*` request to the host; a lost connection is
+    /// reported, not guessed at.
+    fn host_request(&self, request: &ControlRequest) -> ControlResponse {
+        let read_only = sirio_control::host_panels::HostPanels::is_read_only(&request.method);
+        match self.host_call(read_only, |host| host.answer(request)) {
+            Ok(response) => response,
+            Err(_) => ControlResponse::failure(&request.id, "Sirio could not reach its host"),
+        }
+    }
+
+    /// Brings the registry's control sessions up to the host's listing, so
+    /// the sidebar and `panel.list` see what the host holds.
+    fn refresh_control(&self) {
+        if let Ok(sessions) = self.host_call(true, |host| host.control_sessions()) {
+            if let Err(error) = self.panes.set_control_sessions(sessions) {
+                eprintln!("[control] failed to register control sessions: {error}");
+            }
+        }
+    }
+
+    /// `panel.show`: opens the tab for a host session on the GPUI thread. The
+    /// session must exist: attaching to a missing id would create a shell.
+    fn show_session(&self, request: &ControlRequest) -> ControlResponse {
+        let Some(id) = request.params.get("id").cloned() else {
+            return ControlResponse::failure(&request.id, format!("{} requires id", request.method));
+        };
+        match self.host_call(true, |host| host.control_sessions()) {
+            Ok(sessions) if sessions.iter().any(|session| session.info.id == id) => {
+                self.queue_action(request, move |reply| ControlAction::ShowSession {
+                    session_id: id,
+                    reply,
+                })
+            }
+            Ok(_) => Self::pane_error(request, self.panes.missing_pane_error(&id)),
+            Err(_) => ControlResponse::failure(&request.id, "Sirio could not reach its host"),
+        }
+    }
+
+    /// `panel.list`: the app's tabs and the control sessions of the worktree,
+    /// as the registry holds them after a refresh from the host.
+    fn panel_list(&self, request: &ControlRequest) -> ControlResponse {
         let Some(working_directory) = self
             .state()
             .working_directory(request.params.get("worktree").map(String::as_str))
         else {
             return ControlResponse::failure(&request.id, "unknown worktree");
         };
-        let mut panes = match self.panes.list_for(&working_directory) {
+        self.refresh_control();
+        let panes = match self.panes.list_for(&working_directory) {
             Ok(panes) => panes,
             Err(error) => return Self::pane_error(request, error),
         };
-        if let Some(host) = host {
-            let directory = working_directory.to_string_lossy();
-            match host.control_panes(Some(&directory)) {
-                Ok(sessions) => panes.extend(
-                    sessions
-                        .into_iter()
-                        .filter(|pane| !self.panes.is_external(&pane.id)),
-                ),
-                Err(error) => return ControlResponse::failure(&request.id, error),
-            }
-        }
         let rows: Vec<BTreeMap<String, String>> = panes
             .into_iter()
             .map(|pane| {
@@ -2319,6 +2421,7 @@ impl ControlHandler for AppControlHandler {
                     "panel.scrollback",
                     "panel.wait",
                     "panel.focus",
+                    "panel.show",
                     "panel.close",
                     "pane.split",
                     "pane.focus",
@@ -2899,7 +3002,7 @@ impl ControlHandler for AppControlHandler {
             }
             "panel.create" | "panel.split" | "panel.list" | "panel.write" | "panel.key"
             | "panel.read" | "panel.state" | "panel.scrollback" | "panel.wait"
-            | "panel.close" | "panel.focus" => self.panel(request),
+            | "panel.close" | "panel.focus" | "panel.show" => self.panel(request),
             "pane.split" => {
                 let Some(direction) = request.params.get("direction") else {
                     return ControlResponse::failure(&request.id, "pane.split requires direction");
@@ -5547,6 +5650,10 @@ impl SirioWorkspace {
                                         account_id,
                                         cx,
                                     );
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::ShowSession { session_id, reply } => {
+                                    let result = workspace.show_session(&session_id, cx);
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::ReadPane { id, query, reply } => {
@@ -8601,7 +8708,7 @@ impl SirioWorkspace {
                     .terminal_pane_cache
                     .panes_for_detach_in_worktree(&worktree_id)
                 {
-                    controller.update(cx, |terminal, _| terminal.shutdown());
+                    controller.update(cx, |terminal, _| terminal.end_session());
                 }
                 self.terminal_pane_cache.remove_worktree(&worktree_id);
                 self.parked_worktree_tabs.remove(&worktree_id);
@@ -10549,7 +10656,7 @@ impl SirioWorkspace {
             .terminal_pane_cache
             .panes_for_detach_in_worktree(&worktree_id)
         {
-            controller.update(cx, |terminal, _| terminal.shutdown());
+            controller.update(cx, |terminal, _| terminal.end_session());
         }
         self.terminal_pane_cache.remove_worktree(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
@@ -11957,10 +12064,9 @@ impl SirioWorkspace {
             }
         });
         for terminal in terminals {
-            // Closing a tab ends its sessions (SP2 spec §4.2): `shutdown`
-            // terminates the host session; a tab opened by Show session
-            // (Task 11) will call `detach` instead — no such tab exists yet.
-            terminal.update(cx, |terminal, _| terminal.shutdown());
+            // Closing a tab ends its sessions (SP2 spec §4.2), except an
+            // attached one, which only detaches (spec §5): `end_session`.
+            terminal.update(cx, |terminal, _| terminal.end_session());
         }
         for browser in browsers {
             // F-BRW: same reason as the terminals above — `Drop` is not a close
@@ -12309,6 +12415,59 @@ impl SirioWorkspace {
             self.insert_orphan_terminal_tab(&summary.session_id, leaf, tab_dir, cx);
             leaves.insert(leaf);
         }
+    }
+
+    /// Opens, or selects, the tab that shows a host session the control
+    /// socket named (SP2 spec §5). The tab is attached, not owned: closing it
+    /// detaches and the session lives on. The view's identity is the session
+    /// id itself, so the factory attaches to it rather than creating one.
+    fn show_session(
+        &mut self,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let shown = self.tabs.iter().position(|tab| {
+            let mut shown = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let Some(terminal) = content.terminal() {
+                    shown |= terminal.read(cx).identity().pane_id() == session_id;
+                }
+            });
+            shown
+        });
+        if let Some(index) = shown {
+            self.active_tab = index;
+            self.schedule_save(cx);
+            cx.notify();
+            return Ok(Vec::new());
+        }
+        let directory = self.working_directory.clone();
+        let title = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terminal".to_owned());
+        let terminal = cx.new(|cx| {
+            match TerminalView::with_shell(&directory, TerminalShell::System, cx) {
+                Ok(view) => view,
+                Err(error) => TerminalView::failed(
+                    &directory,
+                    TerminalShell::System,
+                    format!("{error:#}"),
+                    cx,
+                ),
+            }
+        });
+        let leaf = self.next_pane_id;
+        self.insert_terminal_tab(title, terminal.clone(), None, cx);
+        let session_id = session_id.to_string();
+        terminal.update(cx, |terminal, _| {
+            terminal.set_identity(TerminalIdentity::new(
+                session_id,
+                format!("terminal-{leaf}"),
+            ));
+            terminal.set_attached();
+        });
+        Ok(Vec::new())
     }
 
     /// Inserts a terminal tab bound to an explicit leaf id (orphan adoption):
@@ -16783,7 +16942,7 @@ impl SirioWorkspace {
                 .push(PaneEvent::Close { id: focused_pane });
             if let Some(terminal) = removed.terminal() {
                 // Closing a pane in a split ends its session (SP2 spec §4.2).
-                terminal.update(cx, |terminal, _| terminal.shutdown());
+                terminal.update(cx, |terminal, _| terminal.end_session());
                 self.terminal_pane_cache
                     .remove_in_worktree(&worktree_id, &format!("terminal-{focused_pane}"));
             }
@@ -20029,6 +20188,18 @@ impl SirioWorkspace {
             has_host: cx
                 .try_global::<HostConnection>()
                 .is_some_and(|conn| conn.0.is_some()),
+            control_sessions: self
+                .panes
+                .control_sessions()
+                .into_iter()
+                .map(|pane| {
+                    if pane.title.is_empty() {
+                        pane.id
+                    } else {
+                        format!("{} ({})", pane.id, pane.title)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -20259,7 +20430,7 @@ impl SirioWorkspace {
                 }
             }
             "enter" | "return" => {
-                if let Some(entry) = filtered.get(self.palette_selected).copied()
+                if let Some(entry) = filtered.get(self.palette_selected).cloned()
                     && entry.is_enabled()
                 {
                     self.dispatch_palette_command(entry.command, window, cx);
@@ -20376,6 +20547,13 @@ impl SirioWorkspace {
             PaletteCommand::EndAllSessions => {
                 self.request_end_all_sessions(cx);
             }
+            PaletteCommand::ShowSession(index) => {
+                if let Some(id) = self.panes.control_sessions().get(index).map(|pane| pane.id.clone()) {
+                    if let Err(error) = self.show_session(&id, cx) {
+                        eprintln!("[sirio] show session failed: {error}");
+                    }
+                }
+            }
         }
         self.close_command_palette(window, cx);
     }
@@ -20466,10 +20644,10 @@ impl SirioWorkspace {
             .flex_col()
             .gap(px(1.0));
 
-        for (index, entry) in filtered.iter().copied().enumerate() {
+        for (index, entry) in filtered.iter().cloned().enumerate() {
             let active = index == selected;
             let entity = entity.clone();
-            let selector = Self::palette_selector(entry.label);
+            let selector = Self::palette_selector(&entry.label);
             rows = rows.child(
                 div()
                     .id(selector.clone())
@@ -20499,7 +20677,7 @@ impl SirioWorkspace {
                             },
                         )
                     })
-                    .child(entry.label)
+                    .child(entry.label.clone())
                     .child(
                         div()
                             .flex()
@@ -20507,7 +20685,7 @@ impl SirioWorkspace {
                             .gap(px(8.0))
                             .text_color(theme.ely.fg_subtle)
                             .child(entry.shortcut.unwrap_or(""))
-                            .when_some(entry.disabled_reason, |this, reason| {
+                            .when_some(entry.disabled_reason.clone(), |this, reason| {
                                 this.child(
                                     div()
                                         .debug_selector(move || {
@@ -23501,7 +23679,8 @@ impl SessionFactory for FailingFactory {
 fn ensure_host_in_background(
     settings: Entity<Settings>,
     workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
-    host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>>,
+    host_terminal: Arc<HostTerminal>,
+    panes: Arc<PaneRegistry>,
     cx: &mut App,
 ) {
     cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
@@ -23583,9 +23762,10 @@ fn ensure_host_in_background(
                             // retries every `Connecting` view (Task 9).
                             let (wake, mut woken) =
                                 futures::channel::mpsc::unbounded::<()>();
-                            if let Ok(mut slot) = host_terminal.lock() {
-                                *slot = Some(client.clone());
-                            }
+                            host_terminal.set(client.clone(), Some(reconnect.clone()));
+                            let _ = panes.set_control_sessions(
+                                sirio_control::host_panels::control_sessions_from(&sessions),
+                            );
                             let factory = Arc::new(HostSessions {
                                 client,
                                 reconnect,
@@ -23840,8 +24020,7 @@ fn main() {
         }
         let control_state = Arc::new(Mutex::new(control_state_seed));
         let panes = Arc::new(PaneRegistry::new());
-        let host_terminal: Arc<Mutex<Option<sirio_host_client::TermClient>>> =
-            Arc::new(Mutex::new(None));
+        let host_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
@@ -23950,6 +24129,7 @@ fn main() {
                 .detach();
         }
 
+        let panes_for_host_link = panes.clone();
         let window_result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -24121,6 +24301,7 @@ fn main() {
                     settings.clone(),
                     workspace_slot.clone(),
                     host_terminal.clone(),
+                    panes_for_host_link.clone(),
                     cx,
                 );
                 let workspace = cx.new(|cx| {
@@ -28929,17 +29110,18 @@ done
         workspace.read_with(&cx.cx, |workspace, _| {
             workspace
                 .panes
-                .set_external(
-                    &third,
-                    vec![PaneInfo {
+                .set_control_sessions(vec![sirio_control::panel::ControlSession {
+                    info: PaneInfo {
                         id: errored_pane.clone(),
-                        tab: "Terminal".to_string(),
+                        tab: String::new(),
                         title: "Claude Code".to_string(),
                         agent: "claude".to_string(),
                         active: true,
-                    }],
-                )
-                .expect("register an app pane on the third worktree");
+                    },
+                    working_directory: third.clone(),
+                    pid: 0,
+                }])
+                .expect("register a control session on the third worktree");
         });
         workspace.update(&mut cx.cx, |workspace, cx| {
             let now = Instant::now();
@@ -38670,6 +38852,7 @@ done
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
+            | ControlAction::ShowSession { reply, .. }
             | ControlAction::PerfTerminalWrite { reply, .. }
             | ControlAction::FocusPane { reply, .. }
             | ControlAction::SplitPane { reply, .. }

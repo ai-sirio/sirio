@@ -38,8 +38,9 @@ set -eEuo pipefail
 #                             job object)
 #    7. sirioctl-direct       with no app (the control socket path does not
 #                             exist), `sirioctl panel` answers from the host:
-#                             create, read, write, wait, close, and the session
-#                             leaves term-list
+#                             create, read, write, wait, list, state, close,
+#                             SIRIO_PANE_ID read back from the session, and the
+#                             session leaves term-list
 #    8. exited-then-idle      a session that exits with no client is kept as
 #                             exited, and with no live session and no client
 #                             the host idles out
@@ -646,6 +647,36 @@ case_sirioctl_direct() {
     fail "panel wait reported an exit for a session still sleeping: $waited"
   fi
   case "$waited" in *"timed out"*) ;; *) fail "panel wait did not time out: $waited" ;; esac
+  # `panel list` names the session with an empty tab and agent (the host has
+  # neither: the app adds them when it answers).
+  local listed
+  listed="$(sirioctl_panel list)" || fail "sirioctl panel list failed"
+  printf '%s\n' "$listed" | awk -F'\t' -v id="$id" \
+    '$1 == id && $2 == "" && $4 == "" { found = 1 } END { exit !found }' \
+    || fail "panel list does not name $id with an empty tab and agent: $listed"
+  # `panel state` on the host route: alive, and it says the host keeps it.
+  local state
+  state="$(sirioctl_panel state "$id" --json)" || fail "sirioctl panel state failed"
+  case "$state" in *'"survives":"true"'*) ;; *) fail "panel state lacks survives=true: $state" ;; esac
+  case "$state" in *'"exitStatus":"running"'*) ;; *) fail "panel state says the session is not running: $state" ;; esac
+  # `SIRIO_PANE_ID` is the session's id, read back from inside the session (spec §3.1).
+  local keyed
+  keyed="$(sirioctl_panel create --cwd "$(native "$ROOT")" --cmd 'echo id=$SIRIO_PANE_ID; sleep 60')" \
+    || fail "sirioctl panel create (SIRIO_PANE_ID) failed"
+  text=""
+  for _ in $(seq 1 60); do
+    text="$(sirioctl_panel read "$keyed" | decode_base64)" || fail "sirioctl panel read failed"
+    case "$text" in *"id=$keyed"*) break ;; esac
+    sleep 0.1
+  done
+  case "$text" in *"id=$keyed"*) ;; *) fail "SIRIO_PANE_ID did not read back as $keyed: $text" ;; esac
+  # Show session needs the app: with none, the host route says so.
+  local shown
+  if shown="$(sirioctl_panel show "$id" 2>&1)"; then
+    fail "panel show succeeded with no app: $shown"
+  fi
+  case "$shown" in *"Show session needs Sirio running"*) ;; *) fail "panel show said: $shown" ;; esac
+  sirioctl_panel close "$keyed" || fail "sirioctl panel close (keyed) failed"
   sirioctl_panel close "$id" || fail "sirioctl panel close failed"
   wait_until 5 session_gone "$id" || fail "term-list still lists $id after close: $OUT"
   NOTE="id=$id"

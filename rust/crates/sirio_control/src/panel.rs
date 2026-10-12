@@ -78,12 +78,25 @@ impl fmt::Display for PaneError {
 
 impl std::error::Error for PaneError {}
 
-/// The app's pane, as the registry holds it.
+/// A terminal session the host owns and the control socket created (or
+/// found), as the registry holds it so the sidebar's status and `panel.list`
+/// see it. Its pid is the session's shell (SP2 spec §3.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlSession {
+    pub info: PaneInfo,
+    pub working_directory: PathBuf,
+    pub pid: u32,
+}
+
+/// A pane in the registry: an app tab (`control == false`) or a control-owned
+/// host session (`control == true`).
 struct ExternalPane {
     working_directory: PathBuf,
     info: PaneInfo,
     state: PaneStateSnapshot,
     scrollback_source: Option<ScrollbackSource>,
+    control: bool,
+    pid: Option<u32>,
 }
 
 /// Thread-safe source of truth for the app's own panes, as seen by the
@@ -149,14 +162,16 @@ impl PaneRegistry {
             .map_err(|_| PaneError::Io("external pane registry lock poisoned".to_string()))?;
         let removed = external
             .iter()
-            .filter(|(_, pane)| pane.working_directory == working_directory)
+            .filter(|(_, pane)| !pane.control && pane.working_directory == working_directory)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         let current_ids = panes
             .iter()
             .map(|(pane, _, _)| pane.id.clone())
             .collect::<Vec<_>>();
-        external.retain(|_, pane| pane.working_directory != working_directory);
+        // Control sessions are not the layout's to replace: only the tabs'
+        // entries of this worktree are republished.
+        external.retain(|_, pane| pane.control || pane.working_directory != working_directory);
         for (pane, mut state, scrollback_source) in panes {
             state.working_directory = working_directory.clone();
             external.insert(
@@ -166,6 +181,8 @@ impl PaneRegistry {
                     info: pane,
                     state,
                     scrollback_source,
+                    control: false,
+                    pid: None,
                 },
             );
         }
@@ -207,11 +224,65 @@ impl PaneRegistry {
         Ok(panes)
     }
 
-    /// Whether `pane_id` is one of the app's own panes (a `LocalLink` tab).
-    pub fn is_external(&self, pane_id: &str) -> bool {
+    /// Replaces the registered control sessions. Every listed session is
+    /// published with its cwd and pid; any registered control session not
+    /// listed leaves the registry (it has closed or left the host).
+    pub fn set_control_sessions(&self, sessions: Vec<ControlSession>) -> Result<(), PaneError> {
+        let resolved: Vec<(ControlSession, PathBuf)> = sessions
+            .into_iter()
+            .filter_map(|session| {
+                let directory = self.lookup_directory(&session.working_directory).ok()?;
+                Some((session, directory))
+            })
+            .collect();
+        let mut external = self
+            .external
+            .lock()
+            .map_err(|_| PaneError::Io("external pane registry lock poisoned".to_string()))?;
+        external.retain(|_, pane| !pane.control);
+        for (session, directory) in resolved {
+            let state = PaneStateSnapshot {
+                working_directory: directory.clone(),
+                exit_status: None,
+            };
+            external.insert(
+                session.info.id.clone(),
+                ExternalPane {
+                    working_directory: directory,
+                    info: session.info,
+                    state,
+                    scrollback_source: None,
+                    control: true,
+                    pid: Some(session.pid),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The registered control sessions, sorted by id.
+    pub fn control_sessions(&self) -> Vec<PaneInfo> {
+        let mut panes: Vec<PaneInfo> = self
+            .external
+            .lock()
+            .map(|external| {
+                external
+                    .values()
+                    .filter(|pane| pane.control)
+                    .map(|pane| pane.info.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        panes.sort_by(|left, right| left.id.cmp(&right.id));
+        panes
+    }
+
+    /// Whether `pane_id` is one of the app's own tabs (a `LocalLink` pane).
+    /// A registered control session is not an app pane.
+    pub fn is_app_pane(&self, pane_id: &str) -> bool {
         self.external
             .lock()
-            .map(|external| external.contains_key(pane_id))
+            .map(|external| external.get(pane_id).is_some_and(|pane| !pane.control))
             .unwrap_or(false)
     }
 

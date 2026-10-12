@@ -299,7 +299,13 @@ fn host_panel_call(request: &ControlRequest) -> ControlResponse {
         eprintln!("sirioctl: the host up at this data root serves no terminal sessions");
         exit(1);
     };
-    let response = HostPanels::new(client).handle(request);
+    let response = match HostPanels::new(client).handle(request) {
+        Ok(response) => response,
+        Err(_) => {
+            eprintln!("sirioctl: Sirio could not reach its host");
+            exit(1);
+        }
+    };
     if !response.ok {
         eprintln!(
             "sirioctl: {}",

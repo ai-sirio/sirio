@@ -2189,6 +2189,9 @@ pub struct TerminalView {
     focus_handle: gpui::FocusHandle,
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
+    /// Attached, not owned (SP2 spec §5): a session another client created,
+    /// shown here. Ending the view detaches it; the session lives on.
+    attached: bool,
     context_menu: Option<Point<Pixels>>,
     /// #259: the running autoscroll, armed only while a drag is held outside
     /// the pane. Cancel-on-drop, so releasing the button or coming back
@@ -2367,6 +2370,7 @@ impl TerminalView {
 
         let host = TerminalSurfaceHost::new(identity.terminal_id());
         Ok(Self {
+            attached: false,
             terminal: TerminalState::Pending,
             spawn,
             view_mode: TerminalViewMode::default(),
@@ -2400,6 +2404,7 @@ impl TerminalView {
         let identity = generated_identity();
         let host = TerminalSurfaceHost::new(identity.terminal_id());
         Self {
+            attached: false,
             terminal: TerminalState::Pending,
             spawn: SpawnParams {
                 working_directory,
@@ -2456,6 +2461,7 @@ impl TerminalView {
         let mut host = TerminalSurfaceHost::new(identity.terminal_id());
         host.teardown();
         Self {
+            attached: false,
             terminal: TerminalState::Failed {
                 message: message.into(),
             },
@@ -2536,6 +2542,27 @@ impl TerminalView {
 
     pub fn identity(&self) -> &TerminalIdentity {
         &self.identity
+    }
+
+    /// Marks the view as showing a session it did not create (Show session).
+    pub fn set_attached(&mut self) {
+        self.attached = true;
+    }
+
+    /// Whether the view shows a session it did not create.
+    pub fn attached(&self) -> bool {
+        self.attached
+    }
+
+    /// Ends this view's end of the session: a session the view created is
+    /// shut down, an attached one is only detached, so closing a tab that
+    /// shows someone else's session never ends it (SP2 spec §5).
+    pub fn end_session(&self) {
+        if self.attached {
+            self.detach();
+        } else {
+            self.shutdown();
+        }
     }
 
     /// Whether this pane is in the failed state (no session link could be

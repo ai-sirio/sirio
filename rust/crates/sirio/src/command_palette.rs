@@ -24,6 +24,8 @@ pub(crate) enum PaletteCommand {
     Sidebar(SidebarPaletteAction),
     GoToSymbol,
     EndAllSessions,
+    /// Show the host session at this index of `PaletteContext::control_sessions`.
+    ShowSession(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +76,9 @@ pub(crate) struct PaletteContext {
     /// Whether a host connection exists (End All Terminal Sessions disabled
     /// without one).
     pub has_host: bool,
+    /// One label per control-owned host session, in the order the
+    /// `PaletteCommand::ShowSession` slots index them.
+    pub control_sessions: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,10 +118,10 @@ impl PaletteDisabledReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaletteEntry {
     pub command: PaletteCommand,
-    pub label: &'static str,
+    pub label: String,
     pub shortcut: Option<&'static str>,
     pub disabled_reason: Option<PaletteDisabledReason>,
 }
@@ -124,12 +129,12 @@ pub(crate) struct PaletteEntry {
 impl PaletteEntry {
     fn enabled(
         command: PaletteCommand,
-        label: &'static str,
+        label: impl Into<String>,
         shortcut: Option<&'static str>,
     ) -> Self {
         Self {
             command,
-            label,
+            label: label.into(),
             shortcut,
             disabled_reason: None,
         }
@@ -137,19 +142,19 @@ impl PaletteEntry {
 
     fn disabled(
         command: PaletteCommand,
-        label: &'static str,
+        label: impl Into<String>,
         shortcut: Option<&'static str>,
         reason: PaletteDisabledReason,
     ) -> Self {
         Self {
             command,
-            label,
+            label: label.into(),
             shortcut,
             disabled_reason: Some(reason),
         }
     }
 
-    pub(crate) fn is_enabled(self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         self.disabled_reason.is_none()
     }
 }
@@ -214,6 +219,23 @@ fn new_tab_entry(action: NewTabAction, label: &'static str) -> PaletteEntry {
 /// The complete command catalog for the current shell. Filtering is applied
 /// after this eligibility pass so unavailable operations remain discoverable.
 pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
+    let mut entries: Vec<PaletteEntry> = context
+        .control_sessions
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            PaletteEntry::enabled(
+                PaletteCommand::ShowSession(index),
+                format!("Show Session: {label}"),
+                None,
+            )
+        })
+        .collect();
+    entries.extend(core_entries(context));
+    entries
+}
+
+fn core_entries(context: &PaletteContext) -> Vec<PaletteEntry> {
     let mut entries = vec![
         window_entry(
             WindowCommand::NewTerminalTab,
@@ -545,7 +567,7 @@ pub(crate) fn filter_entries(entries: &[PaletteEntry], query: &str) -> Vec<Palet
     let query = query.trim().to_ascii_lowercase();
     entries
         .iter()
-        .copied()
+        .cloned()
         .filter(|entry| query.is_empty() || entry.label.to_ascii_lowercase().contains(&query))
         .collect()
 }
@@ -569,7 +591,7 @@ mod tests {
                 project_is_git: true,
                 worktree_path: PathBuf::from("/tmp/sirio"),
                 worktree_is_primary: false,
-            }),
+            }),            control_sessions: Vec::new(),
         }
     }
 
@@ -578,7 +600,7 @@ mod tests {
         let commands = entries(&context());
         let filtered = filter_entries(&commands, "side");
         assert_eq!(
-            filtered.iter().map(|entry| entry.label).collect::<Vec<_>>(),
+            filtered.iter().map(|entry| entry.label.clone()).collect::<Vec<_>>(),
             ["Toggle Sidebar",]
         );
         assert!(filter_entries(&commands, "no command has this text").is_empty());
