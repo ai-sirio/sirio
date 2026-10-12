@@ -12449,10 +12449,35 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         use sirio_host_protocol::term::Origin;
+        // A session is referenced by any tab that names it (fix batch 1,
+        // finding 1): the current tabs, every worktree's persisted layout (only
+        // the active worktree is restored at startup), a parked layout and a
+        // cached view. Only what nothing names is an orphan.
         let mut leaves = HashSet::new();
         for tab in &self.tabs {
             for id in tab.panes.leaf_ids() {
                 leaves.insert(id);
+            }
+        }
+        for path in self.known_worktree_paths() {
+            leaves.extend(self.session.persisted_pane_ids_for(&path));
+        }
+        for parked in self.parked_worktree_tabs.values() {
+            for panes in parked
+                .terminal_panes_by_tab
+                .iter()
+                .chain(parked.chat_panes_by_tab.iter())
+            {
+                leaves.extend(panes.iter().copied());
+            }
+        }
+        for pane in self.terminal_pane_cache.iter() {
+            if let Some(leaf) = pane
+                .content_id
+                .strip_prefix("terminal-")
+                .and_then(|rest| rest.parse::<usize>().ok())
+            {
+                leaves.insert(leaf);
             }
         }
         let mut worktrees: Vec<(usize, PathBuf)> = Vec::new();
@@ -12505,7 +12530,22 @@ impl SirioWorkspace {
                 host_sessions::AdoptionTarget::Active => self.working_directory.clone(),
             };
             eprintln!("[sirio] orphan.adopted {}", summary.session_id);
-            self.insert_orphan_terminal_tab(&summary.session_id, leaf, tab_dir, cx);
+            if tab_dir == self.working_directory {
+                self.insert_orphan_terminal_tab(leaf, tab_dir, false, cx);
+            } else {
+                // Another worktree's session: its tab waits in that worktree's
+                // persisted layout and attaches when the worktree is selected
+                // (finding 1). With no row for that worktree it is shown,
+                // attached and never owned, in the active worktree.
+                let title = tab_dir
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Terminal".to_owned());
+                if !self.session.append_terminal_tab(&tab_dir, leaf, &title) {
+                    let active = self.working_directory.clone();
+                    self.insert_orphan_terminal_tab(leaf, active, true, cx);
+                }
+            }
             leaves.insert(leaf);
         }
     }
@@ -12690,12 +12730,11 @@ impl SirioWorkspace {
     /// the listed session. A missing session is created with a plain shell.
     fn insert_orphan_terminal_tab(
         &mut self,
-        session_id: &str,
         leaf: usize,
         directory: PathBuf,
+        attached: bool,
         cx: &mut Context<Self>,
     ) {
-        let _ = session_id;
         let title = directory
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -12716,7 +12755,12 @@ impl SirioWorkspace {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
         // An orphan is a session that already exists: adopting it is a restore.
-        terminal.update(cx, |terminal, _| terminal.set_restored());
+        terminal.update(cx, |terminal, _| {
+            terminal.set_restored();
+            if attached {
+                terminal.set_attached();
+            }
+        });
         Self::bind_terminal(&terminal, tab_id, leaf, cx);
         self.tabs.push(OpenTab {
             id: tab_id,

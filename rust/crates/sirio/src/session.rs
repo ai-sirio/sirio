@@ -1945,6 +1945,94 @@ impl SessionStore {
         }
     }
 
+    /// Every pane id a worktree's persisted tabs hold, terminals and chats
+    /// alike. Orphan adoption reads it for every worktree, not only the one
+    /// being restored (fix batch 1, finding 1).
+    pub fn persisted_pane_ids_for(&self, working_directory: &Path) -> HashSet<usize> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return HashSet::new();
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return HashSet::new();
+        };
+        match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
+            Ok(restored) => restored
+                .tab_states
+                .iter()
+                .flat_map(|state| crate::restored_tab_pane_ids(0, state))
+                .collect(),
+            Err(error) => {
+                eprintln!("[session] failed to read pane ids for {worktree_id}: {error}");
+                HashSet::new()
+            }
+        }
+    }
+
+    /// Adds a terminal tab that shows `leaf` to a worktree's persisted layout
+    /// that is not mounted, so it appears when the worktree is selected and
+    /// restores (attaches) to its session. `false` when the worktree has no
+    /// row yet, and nothing is written.
+    pub fn append_terminal_tab(&self, working_directory: &Path, leaf: usize, title: &str) -> bool {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return false;
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return false;
+        };
+        let branch = db
+            .worktrees()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.id == worktree_id))
+            .map(|row| row.branch)
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "main".to_string());
+        let Ok(restored) = tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf())
+        else {
+            return false;
+        };
+        let counter = restored.tabs.len();
+        let mut tabs = restored.tabs;
+        let mut tab_states = restored.tab_states;
+        tabs.push(SessionTab {
+            id: new_tab_id_for_worktree(&worktree_id, counter),
+            title: title.to_string(),
+            kind: "terminal".to_string(),
+            agent_id: None,
+            agent_session_id: None,
+            active: false,
+        });
+        while tab_states.len() < counter {
+            tab_states.push(SessionTabState::default());
+        }
+        tab_states.push(SessionTabState {
+            root_id: Some(leaf),
+            ..SessionTabState::default()
+        });
+        let layout = SessionLayout {
+            working_directory: working_directory.to_path_buf(),
+            branch,
+            tabs,
+            tab_states,
+        };
+        match write_layout(db, &layout) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[session] failed to add an adopted terminal tab: {error}");
+                false
+            }
+        }
+    }
+
     /// Whether this worktree's Secondary centre pane was hidden when the
     /// session was last written (v19). `false` — visible — for a worktree
     /// with no row yet, for a database in fallback mode, and on a read error:

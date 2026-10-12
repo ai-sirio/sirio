@@ -133,6 +133,12 @@ impl<T> TerminalPaneCache<T> {
             .get_mut(&(worktree_id.to_owned(), content_id.to_owned()))
     }
 
+    /// Every cached pane of every worktree (fix batch 1, finding 1: orphan
+    /// adoption must know each live view's session).
+    pub fn iter(&self) -> impl Iterator<Item = &CachedTerminalPane<T>> {
+        self.panes.values()
+    }
+
     pub fn iter_in_worktree(
         &self,
         worktree_id: &str,

@@ -33,6 +33,8 @@ set -eEuo pipefail
 #                       a session in a directory outside it survives
 #   12. duplicate-id    a control session holds the id the app will use next;
 #                       a fresh app terminal never attaches to it (finding 11)
+#   13. adopt-two-worktrees  a terminal in each of two worktrees survives kill -9;
+#                       the relaunch adds no tab and both pids keep running
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -277,6 +279,9 @@ session_listed() { term_list && [ -n "$(session_line "$1")" ]; }
 session_gone() { term_list && [ -z "$(session_line "$1")" ]; }
 session_pid() { term_list || true; session_line "$1" | sed -n 's/.* pid=\([0-9][0-9]*\).*/\1/p'; }
 session_clients() { term_list || true; session_line "$1" | sed -n 's/.* clients=\([0-9][0-9]*\).*/\1/p'; }
+clients_are() { # count id: re-read on every poll
+  [ "$(session_clients "$2")" = "$1" ]
+}
 session_origin() { term_list || true; session_line "$1" | sed -n 's/.* origin=\([a-z]*\).*/\1/p'; }
 
 # The host of the current world has left once its state file is gone.
@@ -608,7 +613,7 @@ case_orphan() {
   wait_until 10 [ "$(pane_state "$pane" survives)" = true ] || fail "the adopted $pane is not attached to the host (survives $(pane_state "$pane" survives), clients $(session_clients "$pane"))"
   wait_until 20 beat_above "$pane" 0 || fail "the adopted $pane does not print"
   [ "$(session_pid "$pane")" = "$pid" ] || fail "the adopted $pane is another session"
-  [ "$(session_clients "$pane")" = 1 ] || fail "the adopted $pane has $(session_clients "$pane") clients, expected 1"
+  wait_until 10 clients_are 1 "$pane" || fail "the adopted $pane has $(session_clients "$pane") clients, expected 1; tabs $(ctl_json surface tabs read); state $(ctl_json panel state "$pane")"
   NOTE="adopted $pane (pid $pid), attached, one client"
   capture orphan-adopted
 }
@@ -751,6 +756,57 @@ case_echo_latency() {
 
 # Closing a worktree ends the control sessions inside it. A control session in
 # a directory outside it survives.
+# The id of the worktree at path $1 in the project catalog.
+worktree_id_at() { # path
+  ctl_json project list | python3 -c '
+import json, os, sys
+target = os.path.realpath(sys.argv[1])
+for project in json.load(sys.stdin):
+    for wt in json.loads(project["worktrees"]):
+        if os.path.realpath(wt["path"]) == target:
+            print(wt["id"])
+            raise SystemExit
+' "$1"
+}
+
+# Finding 1: every worktree's persisted terminals are referenced. A terminal in
+# each of two worktrees survives kill -9; the relaunch (active: A) adds no tab
+# to A's strip, and selecting B attaches B's tab to B's own session.
+case_adopt_two_worktrees() {
+  new_world c13
+  local wt_b wt_a_id wt_b_id pb pa pa_pid pb_pid count_before
+  git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
+  app_start
+  select_repo "$W/repo"
+  wt_a_id="$WT_ID"
+  ctl project add "$W/wt-b" >/dev/null 2>&1 || true
+  wt_b_id=$(worktree_id_at "$W/wt-b")
+  [ -n "$wt_b_id" ] || fail "sirioctl does not list the second worktree"
+  ctl select-workspace --workspace "$wt_b_id" >/dev/null
+  sleep 2
+  pb=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$pb" || fail "the terminal in B ($pb) is not on the host"
+  pb_pid=$(session_pid "$pb")
+  ctl select-workspace --workspace "$wt_a_id" >/dev/null
+  sleep 2
+  pa=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$pa" || fail "the terminal in A ($pa) is not on the host"
+  pa_pid=$(session_pid "$pa")
+  count_before=$(tab_count)
+  app_kill9
+  app_start
+  wait_until 30 pane_known "$pa" || fail "the relaunched app does not know $pa"
+  sleep 3
+  [ "$(tab_count)" = "$count_before" ] || fail "the relaunch added a tab to the active worktree (count $(tab_count), expected $count_before): $(ctl_json surface tabs read)"
+  pid_alive "$pa_pid" || fail "pid $pa_pid of $pa is not alive after the relaunch"
+  pid_alive "$pb_pid" || fail "pid $pb_pid of $pb is not alive after the relaunch"
+  ctl select-workspace --workspace "$wt_b_id" >/dev/null
+  sleep 2
+  wait_until 10 [ "$(pane_state "$pb" survives)" = true ] || fail "B's tab $pb is not attached to its session after select-workspace B"
+  [ "$(session_pid "$pb")" = "$pb_pid" ] || fail "B's session $pb is another session (pid $(session_pid "$pb"), expected $pb_pid)"
+  NOTE="A strip unchanged at $count_before; $pa (pid $pa_pid) and $pb (pid $pb_pid) alive; B attached"
+}
+
 # A fresh terminal never attaches to a session that already holds its id: the
 # control session holding the next app id stays untouched, with no client and
 # its own pid, and the new terminal is not on that session.
@@ -904,6 +960,7 @@ run_case 9 isolation case_isolation
 run_case 10 echo-latency case_echo_latency
 run_case 11 close-worktree case_close_worktree
 run_case 12 duplicate-id case_duplicate_id
+run_case 13 adopt-two-worktrees case_adopt_two_worktrees
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 11 cases)"
