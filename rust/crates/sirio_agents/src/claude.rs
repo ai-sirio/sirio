@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::error::PrepareError;
-use crate::shell_quote::shell_quote;
+use crate::shell_quote::{prompt_argument, shell_quote};
+use crate::safe_write::{read_in_worktree, write_in_worktree};
 use crate::{GlobalHookInstall, NativeChat, write_atomic};
 
 /// Adapter for Anthropic's Claude Code CLI.
@@ -60,12 +61,11 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
         if let Some(markdown) = self.skill_markdown() {
             crate::install_skill(markdown, self.id(), worktree_path)?;
         }
-        let claude_dir = Path::new(worktree_path).join(".claude");
-        std::fs::create_dir_all(&claude_dir)?;
-        merge_sirio_hooks(
-            &claude_dir.join(SETTINGS_FILE_NAME),
-            sirio_hooks(sirioctl_path, Some(pane_id)),
-        )
+        let settings = Path::new(".claude").join(SETTINGS_FILE_NAME);
+        let existing = read_in_worktree(Path::new(worktree_path), &settings)?;
+        let merged = merged_settings(existing.as_deref(), sirio_hooks(sirioctl_path, Some(pane_id)))?;
+        write_in_worktree(Path::new(worktree_path), &settings, merged.as_bytes())?;
+        Ok(())
     }
 
     fn install_global_hooks(
@@ -90,6 +90,10 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
     fn command(&self, _worktree_path: &str, _pane_id: &str, _sirioctl_path: &str) -> String {
         // The pane already changes cwd to the worktree.
         "claude".to_string()
+    }
+
+    fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
+        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), prompt_argument(prompt))
     }
 
     fn resume_command(
@@ -144,9 +148,16 @@ fn sirio_hooks(sirioctl_path: &str, session: Option<&str>) -> Value {
 /// key in the file. Like the Swift original: a file that is missing,
 /// unreadable or not a JSON object is replaced wholesale.
 fn merge_sirio_hooks(settings_path: &Path, hooks: Value) -> Result<(), PrepareError> {
-    let mut root: Value = std::fs::read_to_string(settings_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    let existing = std::fs::read_to_string(settings_path).ok();
+    let output = merged_settings(existing.as_deref(), hooks)?;
+    write_atomic(settings_path, output.as_bytes())
+}
+
+/// The settings text `existing` (`None`: no file) with Sirio's hook arrays
+/// merged in, as the text to write. Nothing is read or written here.
+fn merged_settings(existing: Option<&str>, hooks: Value) -> Result<String, PrepareError> {
+    let mut root: Value = existing
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .filter(|value| value.is_object())
         .unwrap_or_else(|| json!({}));
 
@@ -165,6 +176,5 @@ fn merge_sirio_hooks(settings_path: &Path, hooks: Value) -> Result<(), PrepareEr
 
     // serde_json's default map is a BTreeMap, so keys serialize sorted —
     // matching `JSONSerialization`'s `.prettyPrinted, .sortedKeys`.
-    let output = serde_json::to_string_pretty(&root)?;
-    write_atomic(settings_path, output.as_bytes())
+    Ok(serde_json::to_string_pretty(&root)?)
 }

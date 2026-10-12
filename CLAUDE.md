@@ -69,6 +69,15 @@ Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
 # --appearance light|dark seeds the isolated app's appearance.
 Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
 
+# Checking a change request out into a worktree (change requests C1): same
+# repository, forks that accept and refuse pushes, a gone branch and a closed
+# request, reuse with fast-forward, refusals and the pinned card, against bare
+# repositories and the fake forge; then handing it to an agent (C2): stub CLIs
+# on PATH for every adapter, every purpose on GitHub and GitLab, the chat, the
+# warning, the refusals and a worktree switch mid-hand-off; same flags as the
+# other forge E2Es.
+Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
+
 # Ely's Tabs and git badges with Sirio's theme, on a private Xvfb with
 # Mesa's lavapipe: PID-matched captures, a click per tab, the badge tooltip,
 # dark and light (docs/testing/ely-forge-probe.md).
@@ -364,6 +373,72 @@ are debug-only; `thread --suggest` serves every build. The `review` stage of
 `test-forge-actions-e2e.sh` proves the wire, and `scenario_review` of
 `test-forge-diff-e2e.sh` the UI. The debug-only `review-open-submit` helper
 opens the submit dialog without sending, for the framed test.
+
+**C1** checks a change request out into a worktree. `sirio_ui::handoff`
+decides, purely, the local branch (`<source_branch>`, `<owner>/<source_branch>`
+for a fork, or `pr-<N>`/`mr-<N>` when the head repository is gone), the push
+target (the listed remote, the viewer's own fork remote when a project remote
+already names the head repository and the viewer may push to it (and the local
+branch of the source name is free or tracks that remote), a `sirio-<owner>-<number>` remote when the
+viewer may push to a fork, or none — read-only) and whether to reuse, create or
+refuse. Each fork change request has its own remote, because a remote's push
+mapping is per remote: two change requests sharing one would make a plain
+`git push` from either worktree push both branches. The remote is removed with
+the last linked worktree, and only when its single push mapping names that
+worktree's branch. `ForgeHub::checkout`
+(`sirio/src/forge/checkout.rs`) fetches the head through B1's
+`RevisionFetcher` first, so nothing is created before a refusal, then runs the
+`sirio_git` steps off the GPUI thread. A fork's local `<owner>/<branch>` gets
+`remote.sirio-<owner>-<number>.push = refs/heads/<owner>/<branch>:refs/heads/<branch>`,
+because a plain `git push` under `push.default=simple` would not reach
+`<branch>`. A reused worktree is fast-forwarded only when it is clean and on
+the change request's branch; one switched elsewhere, dirty or diverged is left
+as it is and the status line says why. A worktree whose folder was deleted
+outside git is unregistered (one entry, never a prune) and created again. The
+link worktree → change request lives in `sirio_persistence` (`change_request_link`,
+v22, keyed by the exact path the sidebar uses, with the branch it was made for;
+the card honours it only while the worktree is on that branch), and the card
+reads it with `ForgeClient::summary` before the branch match. *Open in a worktree* is in the tab's action bar and the list
+row's menu (which opens the tab); the outcome is the tab's checkout status
+line. `surface change-request checkout` acts on the open tab and serves every
+build because it touches only local git. `test-change-request-handoff-e2e.sh`
+proves it.
+
+**C2** hands that worktree to an agent. *Hand off to an agent* (the tab's
+action bar and the list row's menu), a thread card's *Fix with agent* and a
+failed check's open one Ely dialog (`change_request_tab/handoff.rs`): purpose
+(`comments`, `ci` — only when CI failed —, `review`, `resume`), agent or none,
+terminal or chat, instructions, and the worktree C1 would use, previewed with
+C1's plan in a dry mode. `ForgeClient::context` reads what the purpose needs
+**before** git is touched, so a failed or rate-limited read creates nothing;
+then C1 checks out and `sirio_ui::handoff::context::render` writes
+`.sirio/handoff/<N>-<purpose>-<YYYYMMDD-HHMMSS>.md` (excluded through the common
+dir's `info/exclude`, ten kept, a symlinked `.sirio` refused). A worktree C1
+reuses on another branch or a detached HEAD refuses the hand-off (a review
+excepted); a dirty or diverged one gets a note. Every forge text — bodies,
+comments, hunks, paths, names, logs, a log's error — loses its control
+characters, shows bidi controls as `<U+…>`, and sits in an
+````untrusted id="<nonce>" source="…" author="@…"```` block whose fence is one
+backtick longer than the text's longest run (at least four), followed by
+Sirio's line `(end of untrusted block <nonce>)`; the nonce is random per file,
+so forge text cannot fake a block's end even to a model that miscounts. Sirio's
+own lines name no forge text, not even the branch to push to, and a link stands
+outside a block only as printable ASCII. The user's instructions section is
+always written. The file is cut at 1 MiB, oldest first, and every part that
+cannot be dropped is bounded. `prepare` and `install_skill` read and write the
+worktree only through `sirio_agents`' `safe_write`, which refuses a committed
+symlink anywhere on the path. A terminal agent is
+launched as a restored pane is, `prepare` then `command_with_prompt` (every CLI
+takes the two-line prompt as an argument; Windows folds it to one line for
+`cmd`), and `TerminalView::start` runs it before its tab is drawn; a chat gets
+the prompt through `Chat::send_when_ready`. The agent starts in the hand-off's
+worktree even if the user switched meanwhile. Agent and surface are remembered
+per project (`handoff_choice`, v23). `surface change-request handoff` serves
+every build and acts on the open tab; a start sent while the preview loads is
+queued (`handoff_queued`). The C2 scenarios of
+`test-change-request-handoff-e2e.sh` prove it with stub CLIs on PATH, and
+`sirio_agents/tests/initial_prompt_live.rs` notices the day a CLI stops taking
+the prompt.
 
 **Merge, reviewers and labels** (B2b) go through the same door.
 `Action::Merge` carries the head the user saw when the confirmation opened, and

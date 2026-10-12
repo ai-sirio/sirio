@@ -648,6 +648,25 @@ impl Render for ThreadView {
                         ),
                 )
             })
+            .when(published > 0, |this| {
+                let owner = self.owner.clone();
+                let id = thread_id.clone();
+                this.child(
+                    div()
+                        .id(("change-request-thread-handoff", self.key))
+                        .debug_selector(|| "change-request-thread-handoff".into())
+                        .flex_none()
+                        .child(
+                            Button::new(("change-request-thread-handoff-button", self.key), "Fix with agent")
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    let id = id.clone();
+                                    let _ = owner.update(cx, |tab, cx| tab.ask_handoff(Scope::Thread(id), cx));
+                                }),
+                        ),
+                )
+            })
             .on_click(cx.listener(|view, _, _, cx| view.toggle(cx)));
         let mut card = if outdated {
             nested_card(("change-request-thread", self.key), &theme).child(header)

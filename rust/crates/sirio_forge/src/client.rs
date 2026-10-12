@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
 use crate::action::{Action, ActionOutcome};
+use crate::context::{Context, FailedJob, Purpose, Scope, failed_checks};
 use crate::error::ForgeError;
 use crate::model::{
     Candidate, ChangeHeader, ChangePage, ChangeRef, ChangeState, ChangeSummary, Check, CheckJob, Log, CommitSummary,
@@ -129,6 +130,15 @@ impl ForgeClient {
         }
     }
 
+    /// One change request's summary, read by number: the card of a worktree
+    /// linked to it (spec C §4).
+    pub fn summary(&self, number: u64) -> Result<ChangeSummary, ForgeError> {
+        match self.forge {
+            Forge::GitHub => github::summary_by_number(self, number),
+            Forge::GitLab => gitlab::summary_by_number(self, number),
+        }
+    }
+
     pub fn commits(&self, number: u64) -> Result<Listing<CommitSummary>, ForgeError> {
         match self.forge {
             Forge::GitHub => github::commits(self, number),
@@ -168,6 +178,53 @@ impl ForgeClient {
             Forge::GitHub => github::review_threads(self, number),
             Forge::GitLab => gitlab::review_threads(self, number),
         }
+    }
+
+    /// What a hand-off for `purpose` reads (spec C §6). A rate limit from any
+    /// read fails the whole read; a job log that fails otherwise is kept as
+    /// that job's reason.
+    pub fn context(&self, number: u64, purpose: Purpose, scope: &Scope) -> Result<Context, ForgeError> {
+        let header = self.header(number)?;
+        let viewer = match self.viewer() {
+            Ok(login) => Some(login),
+            Err(error @ ForgeError::RateLimited { .. }) => return Err(error),
+            Err(_) => None,
+        };
+        let mut context = Context {
+            header,
+            viewer,
+            threads: Vec::new(),
+            threads_truncated: false,
+            failed: Vec::new(),
+            commits: Vec::new(),
+            files: Vec::new(),
+        };
+        match purpose {
+            Purpose::Comments | Purpose::Resume => {
+                let threads = self.review_threads(number)?;
+                context.threads = threads.items;
+                context.threads_truncated = threads.truncated;
+            }
+            Purpose::Ci => {
+                let checks = self.checks(number)?;
+                for check in failed_checks(&checks.items, scope) {
+                    let log = match &check.job {
+                        None => None,
+                        Some(job) => match self.job_log(job) {
+                            Ok(log) => Some(Ok(log)),
+                            Err(error @ ForgeError::RateLimited { .. }) => return Err(error),
+                            Err(error) => Some(Err(error.to_string())),
+                        },
+                    };
+                    context.failed.push(FailedJob { check, log });
+                }
+            }
+            Purpose::Review => {
+                context.commits = self.commits(number)?.items;
+                context.files = self.files(number)?.items;
+            }
+        }
+        Ok(context)
     }
 
     /// The one door for a write (spec §5). Reads the change request's

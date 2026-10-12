@@ -8,6 +8,7 @@
 
 mod action;
 mod client;
+mod context;
 mod error;
 mod github;
 mod gitlab;
@@ -24,6 +25,7 @@ mod transport;
 pub use action::{LiveProbe, live_probes};
 pub use action::{Action, ActionOutcome, RerunTarget, ReviewTarget, ReviewVerdict};
 pub use client::ForgeClient;
+pub use context::{Context, FailedJob, Purpose, Scope, failed_checks};
 pub use error::ForgeError;
 
 pub use model::{
@@ -31,7 +33,7 @@ pub use model::{
     CheckStatus, CiState, CommentKind, CommentRef, CommitSummary, EventKind, FileChange,
     FileChangeKind, Filter, Forge, LineAnchor, LineComment, LineKind, ListQuery, Listing, PageCursor, Progress,
     ReviewOutcome, ReviewState, ReviewThread, Reviewer, Revisions, Side, ThreadComment, TimelineItem, BlockReason, Candidate, Label,
-    MergeCapability, MergeMethod, MergeMethods, MergeVerdict, Draft,
+    MergeCapability, MergeMethod, MergeMethods, MergeVerdict, Draft, HeadRepository,
 };
 pub use scopes::TokenScopes;
 pub use resolve::{HostSetting, Means, Probes, Resolution, SystemProbes, known_forge, resolve};

@@ -333,8 +333,17 @@ pub fn init_repository(directory: &Path) -> Result<(), GitError> {
     git::run_accepting(&["init"], directory, &[0]).map(|_| ())
 }
 
+/// Unregisters a worktree whose folder was deleted outside git (`rm -rf`, a
+/// file manager). `git worktree remove --force` on that one path drops only its
+/// administrative entry, so the branch can be checked out again.
+pub fn remove_missing_worktree(repo: &Path, path: &Path) -> Result<(), WorktreeError> {
+    let path = git::path_arg(path);
+    git::run_accepting(&["worktree", "remove", "--force", &path], repo, &[0])?;
+    Ok(())
+}
+
 /// The checkout path of the worktree currently on `branch`, if any.
-fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
+pub fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
     let output = git::run_accepting(&["worktree", "list", "--porcelain"], repo, &[0])?;
     let mut current_path: Option<PathBuf> = None;
     for line in output.stdout_string().lines() {

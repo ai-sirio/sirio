@@ -5,6 +5,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use safe_write::{read_in_worktree, write_in_worktree};
+
 mod claude;
 mod codex;
 mod error;
@@ -12,6 +14,7 @@ mod hook_migrator;
 mod omp;
 mod opencode;
 mod pi;
+mod safe_write;
 mod session_validator;
 mod shell_quote;
 mod transcript;
@@ -160,6 +163,15 @@ pub trait AgentAdapter {
     /// Full shell command to run inside the pane, which the pane executes
     /// with its cwd already set to the worktree.
     fn command(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str) -> String;
+
+    /// `command`, plus the prompt the agent starts on, as the CLI's own
+    /// initial-prompt argument. Every adapter states its form: all five
+    /// take the prompt on the command line (verified 2026-10-08 against
+    /// claude 2.1.293, codex 0.159.2, opencode 1.18.33, pi 1.0.0 and omp
+    /// 18.4.4; `tests/initial_prompt_live.rs` notices the day one stops).
+    /// On Windows the prompt is folded to one line first, because `cmd`
+    /// ends a command at a line break.
+    fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String;
 
     /// Full shell command that relaunches the agent resuming a previously
     /// captured native session, or `None` when the agent cannot resume by
@@ -324,17 +336,12 @@ pub fn install_skill(
         "codex" | "opencode" | "pi" | "omp" => ".agents/skills/sirio/SKILL.md",
         other => return Err(PrepareError::UnsupportedSkillAgent(other.to_string())),
     };
-    let destination = Path::new(worktree_path).join(relative);
-    if destination.exists() {
-        let existing = std::fs::read_to_string(&destination)?;
-        if !existing.contains(SKILL_MANAGED_PREFIX) {
-            return Err(PrepareError::UnmanagedSkillFile(destination));
-        }
+    if let Some(existing) = read_in_worktree(Path::new(worktree_path), Path::new(relative))?
+        && !existing.contains(SKILL_MANAGED_PREFIX)
+    {
+        return Err(PrepareError::UnmanagedSkillFile(Path::new(worktree_path).join(relative)));
     }
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&destination, markdown)?;
+    write_in_worktree(Path::new(worktree_path), Path::new(relative), markdown.as_bytes())?;
     Ok(())
 }
 

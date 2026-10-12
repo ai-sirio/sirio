@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::DocumentMut;
 
 use crate::error::PrepareError;
-use crate::shell_quote::{json_string_literal, shell_quote};
+use crate::shell_quote::{json_string_literal, prompt_argument, shell_quote};
 use crate::{GlobalHookInstall, write_atomic};
 
 /// Adapter for OpenAI's Codex CLI.
@@ -91,6 +91,10 @@ impl super::AgentAdapter for CodexAdapter {
 
     fn command(&self, _worktree_path: &str, pane_id: &str, sirioctl_path: &str) -> String {
         format!("codex -c {}", self.notify_override(pane_id, sirioctl_path))
+    }
+
+    fn command_with_prompt(&self, worktree_path: &str, pane_id: &str, sirioctl_path: &str, prompt: &str) -> String {
+        format!("{} {}", self.command(worktree_path, pane_id, sirioctl_path), prompt_argument(prompt))
     }
 
     fn resume_command(

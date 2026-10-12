@@ -214,6 +214,28 @@ pub struct TabStateRecord {
     pub state: String,
 }
 
+/// A worktree checked out from a change request (change requests C1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeRequestLinkRecord {
+    pub path: String,
+    pub forge: String,
+    pub host: String,
+    pub project: String,
+    pub number: u64,
+    /// The local branch the worktree was checked out on.
+    pub branch: String,
+}
+
+/// The agent and surface a project's last change request hand-off used
+/// (change requests C2). `agent` is empty for no agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffChoiceRecord {
+    pub project_id: String,
+    pub agent: String,
+    /// `terminal` or `chat`.
+    pub surface: String,
+}
+
 /// A stored row removed from active state because its payload could not be
 /// materialized. The original bytes remain available for diagnosis or recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]

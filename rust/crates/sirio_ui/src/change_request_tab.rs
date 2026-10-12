@@ -16,7 +16,7 @@ use gpui::{
 use sirio_forge::{
     Action, ChangeHeader, ChangeRef, Check, CheckJob, CheckStatus, CiState, CommitSummary, EventKind, FileChange,
     FileChangeKind, Forge, ForgeClient, ForgeError, Listing, Revisions, ReviewOutcome,
-    ReviewThread, RerunTarget, TimelineItem,
+    ReviewThread, RerunTarget, Scope, TimelineItem,
 };
 use sirio_theme::Theme;
 
@@ -24,11 +24,14 @@ mod actions;
 mod compose;
 mod composer;
 mod edit;
+mod handoff;
 mod merge;
 mod people;
 mod review;
 mod suggestion;
 mod threads;
+
+pub use handoff::{HandoffAgent, HandoffOptions, HandoffPreview, HandoffRequest, HandoffState, Surface};
 
 use crate::change_request_style as style;
 use ely_gpui_component::{
@@ -117,6 +120,39 @@ pub enum ChangeRequestTabEvent {
     /// A write reached the forge and the tab re-read it: the host refreshes
     /// the right panel's list now instead of at its next tick.
     Changed,
+    /// The user asked to check this change request out into a worktree (C1); the host runs it and answers with `set_checkout`.
+    OpenInWorktree,
+    /// A button asked for the hand-off dialog on this scope (C2); the host answers with `open_handoff`.
+    HandoffAsked(Scope),
+    /// *Start* in the hand-off dialog (C2); the host runs it and answers with `set_handoff`.
+    Handoff(HandoffRequest),
+}
+
+/// Where *Open in a worktree* stands (change requests C1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckoutState {
+    Idle,
+    Running,
+    Done(String),
+    Failed(String),
+}
+
+impl CheckoutState {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Done(_) => "done",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Done(detail) | Self::Failed(detail) => detail,
+            Self::Idle | Self::Running => "",
+        }
+    }
 }
 
 /// One piece of what the tab shows.
@@ -265,6 +301,13 @@ pub struct ChangeRequestTab {
     /// The write in flight, and the fields of an edit in progress.
     actions: actions::ActionsState,
     review: review::ReviewUi,
+    /// Where *Open in a worktree* stands (C1).
+    checkout: CheckoutState,
+    /// Where the hand-off stands (C2), and its dialog while it is open.
+    handoff: HandoffState,
+    handoff_dialog: Option<handoff::HandoffDialog>,
+    /// Bumped by every `open_handoff`: a preview answers only the dialog it was asked for.
+    handoff_generation: u64,
 }
 
 impl ChangeRequestTab {
@@ -329,7 +372,26 @@ impl ChangeRequestTab {
             commit_task: None,
             actions: actions::ActionsState::new(),
             review: Default::default(),
+            checkout: CheckoutState::Idle,
+            handoff: HandoffState::Idle,
+            handoff_dialog: None,
+            handoff_generation: 0,
         }
+    }
+
+    pub fn open_in_worktree(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.checkout == CheckoutState::Running {
+            return Err("a checkout is already running".to_string());
+        }
+        self.checkout = CheckoutState::Running;
+        cx.emit(ChangeRequestTabEvent::OpenInWorktree);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn set_checkout(&mut self, state: CheckoutState, cx: &mut Context<Self>) {
+        self.checkout = state;
+        cx.notify();
     }
 
     /// Opens the log of the loaded check whose job is `job_id` — what a row's
@@ -1132,6 +1194,8 @@ impl ChangeRequestTab {
                     .unwrap_or_default(),
             ),
             ("action".to_string(), self.actions.state.word().to_string()),
+            ("checkout".to_string(), self.checkout.word().to_string()),
+            ("checkout_detail".to_string(), self.checkout.detail().to_string()),
             ("action_kind".to_string(), self.actions.state.kind().to_string()),
             ("action_message".to_string(), self.action_message()),
             ("merge_strip".to_string(), self.strip().word().to_string()),
@@ -1174,6 +1238,7 @@ impl ChangeRequestTab {
             ),
         ];
         report.extend(self.thread_report(cx));
+        report.extend(self.handoff_fields());
         report
     }
 }
@@ -1478,6 +1543,8 @@ impl ChangeRequestTab {
             })
             .when_some(self.render_people_row(theme, entity), |this, row| this.child(row))
             .when_some(self.render_action_status(theme), |this, status| this.child(status))
+            .when_some(self.render_checkout_status(theme), |this, status| this.child(status))
+            .when_some(self.render_handoff_status(theme), |this, status| this.child(status))
     }
 
     fn inner_count(&self, inner: InnerTab) -> Option<String> {
@@ -2021,6 +2088,18 @@ impl ChangeRequestTab {
                             )),
                         );
                     }
+                    if check.status == CheckStatus::Failed {
+                        let entity = entity.clone();
+                        row = row.child(
+                            div().id(("change-request-check-handoff", index)).child(ely_ui::icon_button(
+                                "change-request-check-handoff",
+                                IconName::Bot,
+                                "Fix with agent",
+                                !busy,
+                                move |_, cx| entity.update(cx, |tab, cx| tab.ask_handoff(Scope::Job(job_id), cx)),
+                            )),
+                        );
+                    }
                     if let Some(url) = check.url.clone() {
                         row = row.child(
                             div().id(("change-request-check-browser", index)).child(ely_ui::icon_button(
@@ -2346,6 +2425,7 @@ impl Render for ChangeRequestTab {
             .child(body)
             .children(self.render_merge_dialog(&theme, &entity))
             .children(self.render_review_dialog(&theme, &entity))
+            .children(self.render_handoff_dialog(&theme, &entity))
     }
 }
 
@@ -2634,6 +2714,33 @@ mod tests {
             );
         });
         assert_eq!(*titles.borrow(), vec!["Fix the login redirect".to_string()]);
+    }
+
+    #[gpui::test]
+    fn a_second_checkout_is_refused_while_one_runs(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let source = FakeSource::ready(testing::github_client(forge_with_header()), None);
+        cx.update(|cx| forge_source::set_source(source, cx));
+        let tab = cx.new(|cx| {
+            ChangeRequestTab::new(testing::reference(101), "Fix".into(), std::env::temp_dir(), cx)
+        });
+        let events = Rc::new(RefCell::new(0));
+        cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&tab, move |_, event: &ChangeRequestTabEvent, _| {
+                if matches!(event, ChangeRequestTabEvent::OpenInWorktree) {
+                    *events.borrow_mut() += 1;
+                }
+            })
+            .detach();
+        });
+        tab.update(cx, |tab, cx| tab.open_in_worktree(cx)).expect("first starts");
+        let second = tab.update(cx, |tab, cx| tab.open_in_worktree(cx));
+        assert_eq!(second, Err("a checkout is already running".to_string()));
+        assert_eq!(*events.borrow(), 1);
+        tab.update(cx, |tab, cx| tab.set_checkout(CheckoutState::Failed("no remote".into()), cx));
+        tab.update(cx, |tab, cx| tab.open_in_worktree(cx)).expect("a finished checkout can start again");
+        assert_eq!(*events.borrow(), 2);
     }
 
     /// The title of a change request is the first thing a reviewer wants to

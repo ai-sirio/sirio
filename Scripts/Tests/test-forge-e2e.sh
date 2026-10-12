@@ -273,9 +273,13 @@ expect_line "BODY ## What"
 expect_line "REVIEWER bob changes"
 expect_line "REVIEWER fake-user requested"
 expect_line "REVISIONS base=a1b2c3d head=b2c3d4e"
+expect_line "HEAD owner=acme project=acme/widgets cross=no branch=yes push=yes http=https://ghe.test/acme/widgets.git ssh=git@ghe.test:acme/widgets.git"
 timeline=$(echo "$PROBE_OUT" | grep -E '^(COMMENT|REVIEW|LINE|EVENT) ' | paste -sd'|' -)
 [ "$timeline" = "EVENT commits:2|COMMENT alice|EVENT review-requested:fake-user|REVIEW bob changes lines=1|EVENT other:SomethingNew" ] ||
   { dump; fail "github timeline was '$timeline'"; }
+probe "${GH[@]}" summary 101
+expect_code 0 "github summary"
+expect_line "SUMMARY #101 open branch=feat/login"
 probe "${GH[@]}" commits 101
 expect_line "COMMIT 1111111 alice Fix the redirect"
 expect_line "COMMIT 2222222 Bob Roe Test the redirect"
@@ -354,9 +358,13 @@ expect_line "BODY ## Why"
 expect_line "REVIEWER fake-user requested"
 expect_line "REVIEWER carol changes"
 expect_line "REVISIONS base=c3d4e5f head=d4e5f60"
+expect_line "HEAD owner=team project=team/app cross=no branch=yes push=yes http=https://gitlab.test/team/app.git ssh=git@gitlab.test:team/app.git"
 timeline=$(echo "$PROBE_OUT" | grep -E '^(COMMENT|REVIEW|LINE|EVENT) ' | paste -sd'|' -)
 [ "$timeline" = "EVENT commits:3|COMMENT alice|EVENT review-requested:fake-user|LINE carol app/models/order.rb:12|REVIEW dave approved lines=0|EVENT ready|EVENT other:mentioned in issue #3" ] ||
   { dump; fail "gitlab timeline was '$timeline'"; }
+probe "${GL[@]}" summary 201
+expect_code 0 "gitlab summary"
+expect_line "SUMMARY !201 open branch=feat/export"
 probe "${GL[@]}" commits 201
 expect_line "COMMIT abc1234 alice Add CSV export"
 expect_line "COMMIT def5678 Ghost Writer Stream the rows"
@@ -395,6 +403,10 @@ probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old header 201
 expect_line "HEADER !201 state=open additions=- deletions=- files=- commits=- truncated=yes"
 expect_line "REVIEWER carol requested"
 expect_line "REVISIONS base=c3d4e5f head=d4e5f60"
+expect_line "HEAD owner=team project=team/app cross=no branch=yes push=yes http=https://gitlab.test/team/app.git ssh=git@gitlab.test:team/app.git"
+probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old summary 201
+expect_code 0 "an older GitLab summary"
+expect_line "SUMMARY !201 open branch=feat/export"
 probe "$PROBE" "${GL_TOKEN_ARGS[@]}" --token old threads 201
 expect_code 0 "an older GitLab reads threads without the quoted code"
 expect_line "THREAD app/models/order.rb new 12 - open outdated=no file=no reply=yes resolve=yes comments=2 pending=0 hunk=no"
