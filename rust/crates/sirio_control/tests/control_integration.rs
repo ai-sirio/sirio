@@ -1278,13 +1278,19 @@ fn sirioctl_exposes_every_panel_subcommand() {
         .into_iter()
         .map(|request| request.method)
         .collect();
-    assert_eq!(
-        methods,
-        commands
-            .iter()
-            .map(|(_, method)| method.to_string())
-            .collect::<Vec<_>>()
-    );
+    // A `panel.*` call first asks the app whether it answers (`system.ping`,
+    // the route's probe); the probe is part of the wire, so it is asserted.
+    let expected: Vec<String> = commands
+        .iter()
+        .flat_map(|(_, method)| {
+            if method.starts_with("panel.") {
+                vec!["system.ping".to_string(), method.to_string()]
+            } else {
+                vec![method.to_string()]
+            }
+        })
+        .collect();
+    assert_eq!(methods, expected);
 }
 
 #[test]
@@ -1336,13 +1342,19 @@ fn sirioctl_exposes_terminal_state_and_surface_subcommands() {
         .into_iter()
         .map(|request| request.method)
         .collect();
-    assert_eq!(
-        methods,
-        commands
-            .iter()
-            .map(|(_, method)| method.to_string())
-            .collect::<Vec<_>>()
-    );
+    // A `panel.*` call first asks the app whether it answers (`system.ping`,
+    // the route's probe); the probe is part of the wire, so it is asserted.
+    let expected: Vec<String> = commands
+        .iter()
+        .flat_map(|(_, method)| {
+            if method.starts_with("panel.") {
+                vec!["system.ping".to_string(), method.to_string()]
+            } else {
+                vec![method.to_string()]
+            }
+        })
+        .collect();
+    assert_eq!(methods, expected);
 }
 
 #[test]

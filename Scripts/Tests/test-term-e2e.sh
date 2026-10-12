@@ -36,8 +36,10 @@ set -eEuo pipefail
 #    6. close-kills-tree      `term.close` ends the shell and a backgrounded
 #                             grandchild (on Windows, through the session's
 #                             job object)
-#    7. sirioctl-direct       deferred to Task 11 (it needs `sirioctl`'s host
-#                             route); SKIP until then
+#    7. sirioctl-direct       with no app (the control socket path does not
+#                             exist), `sirioctl panel` answers from the host:
+#                             create, read, write, wait, close, and the session
+#                             leaves term-list
 #    8. exited-then-idle      a session that exits with no client is kept as
 #                             exited, and with no live session and no client
 #                             the host idles out
@@ -400,11 +402,13 @@ trap 'exit 143' TERM
 # ---------------------------------------------------------------- build
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/rust/target}"
-( cd "$REPO_ROOT/rust" && cargo build -q -p sirio_host --bin sirio-host -p sirio_host_client --example host_probe )
+( cd "$REPO_ROOT/rust" && cargo build -q -p sirio_host --bin sirio-host -p sirio_host_client --example host_probe -p sirio_control --bin sirioctl )
 HOST_BIN="$TARGET_DIR/debug/sirio-host$EXE"
 PROBE="$TARGET_DIR/debug/examples/host_probe$EXE"
+SIRIOCTL="$TARGET_DIR/debug/sirioctl$EXE"
 [ -x "$HOST_BIN" ] || { echo "FAIL: $HOST_BIN was not built" >&2; exit 1; }
 [ -x "$PROBE" ] || { echo "FAIL: $PROBE was not built" >&2; exit 1; }
+[ -x "$SIRIOCTL" ] || { echo "FAIL: $SIRIOCTL was not built" >&2; exit 1; }
 
 # Nothing from the caller's environment may steer the hosts under test.
 unset SIRIO_HOST_PROTOCOL_MAJOR SIRIO_HOST_HOME SIRIO_HOST_IDLE_GRACE_MS
@@ -607,9 +611,45 @@ no_session_ping() {
   [ -z "$(printf '%s' "$out" | tr -d ' \r\n\t')" ]
 }
 
+# sirioctl with the app down: the socket path does not exist, so every
+# `panel` verb is answered by the host of this case's root.
+sirioctl_panel() {
+  SIRIO_SOCKET="$(native "$ROOT/none.sock")" "$SIRIOCTL" panel "$@"
+}
+# The base64 `panel read` answers, decoded to stdout.
+decode_base64() {
+  base64 -d 2>/dev/null || base64 -D
+}
+session_listed() { # ID: term-list still names it
+  run_probe term-list
+  [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "^session=$1 "
+}
+session_gone() { ! session_listed "$1"; }
+
 case_sirioctl_direct() {
-  # Deferred to Task 11: it needs `sirioctl`'s host route. Turn it on there.
-  skip "Task 11"
+  fresh_root
+  start_held_host
+  local id text
+  id="$(sirioctl_panel create --cwd "$(native "$ROOT")" --cmd 'echo worker-ok; sleep 60')" \
+    || fail "sirioctl panel create failed with no app"
+  case "$id" in pane-c[0-9a-f]*) ;; *) fail "panel create printed no host id: $id" ;; esac
+  text=""
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    text="$(sirioctl_panel read "$id" | decode_base64)" || fail "sirioctl panel read failed"
+    case "$text" in *worker-ok*) break ;; esac
+    sleep 0.1
+  done
+  case "$text" in *worker-ok*) ;; *) fail "panel read never showed worker-ok" ;; esac
+  sirioctl_panel write "$id" --input 'x' || fail "sirioctl panel write failed"
+  local waited
+  if waited="$(sirioctl_panel wait "$id" --timeout-ms 200 2>&1)"; then
+    fail "panel wait reported an exit for a session still sleeping: $waited"
+  fi
+  case "$waited" in *"timed out"*) ;; *) fail "panel wait did not time out: $waited" ;; esac
+  sirioctl_panel close "$id" || fail "sirioctl panel close failed"
+  wait_until 5 session_gone "$id" || fail "term-list still lists $id after close: $OUT"
+  NOTE="id=$id"
+  pass
 }
 
 case_exited_then_idle() {

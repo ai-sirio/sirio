@@ -269,7 +269,11 @@ pub mod request {
         request("session.restore", BTreeMap::new())
     }
 
-    pub fn panel_create(worktree: Option<&str>, command: Option<&str>) -> ControlRequest {
+    pub fn panel_create(
+        worktree: Option<&str>,
+        command: Option<&str>,
+        cwd: Option<&str>,
+    ) -> ControlRequest {
         let mut params = BTreeMap::new();
         if let Some(worktree) = worktree {
             params.insert("worktree".to_string(), worktree.to_string());
@@ -277,7 +281,17 @@ pub mod request {
         if let Some(command) = command {
             params.insert("cmd".to_string(), command.to_string());
         }
+        if let Some(cwd) = cwd {
+            params.insert("cwd".to_string(), cwd.to_string());
+        }
         request("panel.create", params)
+    }
+
+    pub fn panel_show(id: &str) -> ControlRequest {
+        request(
+            "panel.show",
+            BTreeMap::from([("id".to_string(), id.to_string())]),
+        )
     }
 
     pub fn panel_split(from: &str, direction: &str, command: Option<&str>) -> ControlRequest {
