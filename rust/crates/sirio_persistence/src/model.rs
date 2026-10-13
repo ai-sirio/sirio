@@ -511,6 +511,10 @@ pub enum BaseColor {
     Notte,
     /// Sirio's darkest preset: no hue, and a grey ladder from pure black.
     Onice,
+    /// Claude's desktop app, warm palette.
+    Argilla,
+    /// Claude's desktop app, `cds` palette.
+    Grafite,
 }
 
 impl BaseColor {
@@ -523,6 +527,8 @@ impl BaseColor {
             BaseColor::Slate => "slate",
             BaseColor::Notte => "notte",
             BaseColor::Onice => "onice",
+            BaseColor::Argilla => "argilla",
+            BaseColor::Grafite => "grafite",
         }
     }
 
@@ -535,6 +541,8 @@ impl BaseColor {
             "slate" => Some(BaseColor::Slate),
             "notte" => Some(BaseColor::Notte),
             "onice" => Some(BaseColor::Onice),
+            "argilla" => Some(BaseColor::Argilla),
+            "grafite" => Some(BaseColor::Grafite),
             _ => None,
         }
     }
@@ -790,6 +798,8 @@ mod tests {
             BaseColor::Slate,
             BaseColor::Notte,
             BaseColor::Onice,
+            BaseColor::Argilla,
+            BaseColor::Grafite,
         ] {
             assert_eq!(BaseColor::parse(base.raw()), Some(base), "{base:?}");
         }
@@ -799,9 +809,12 @@ mod tests {
             "the raw values are lower-case, like every other enum setting"
         );
         // The presets are stored under the same lower-case rule; an older
-        // build reads "notte" or "onice" as unknown and falls back to Neutral
-        // in the loader, which is the downgrade path every unknown string has.
+        // build reads "notte", "onice", "argilla" or "grafite" as unknown and
+        // falls back to Neutral in the loader, which is the downgrade path
+        // every unknown string has.
         assert_eq!(BaseColor::Notte.raw(), "notte");
         assert_eq!(BaseColor::Onice.raw(), "onice");
+        assert_eq!(BaseColor::Argilla.raw(), "argilla");
+        assert_eq!(BaseColor::Grafite.raw(), "grafite");
     }
 }

@@ -35,6 +35,42 @@ the 2026-09-12 ladder that read as too grey: sidebars `#131313`, central
 panes `#0E0E0E`, chat `#1A1A1A`, composer `#242424`, hover `#292929`) and
 `ONICE_DARK` (Neutral's earlier shape from pure black). See "Preset ladders" in `base_color.rs`.
 
+`ARGILLA_*` and `GRAFITE_*` (2026-10-12) are the two palettes of Claude's
+desktop app, read from claude.ai rather than chosen. The app is claude.ai in
+a shell, so its colours are claude.ai's CSS custom properties: build
+`d40c622ef0`, `colorVersion` `v2`, `data-theme="claude"`, read by a headless
+Chromium over the DevTools protocol on the sign-in page in both
+`prefers-color-scheme`s, each token resolved to the colour it renders (a
+probe element's computed `background-color`). Two palettes are defined
+there at once:
+
+- **Argilla** is `[data-theme="claude"]`'s `bg-*`/`text-*` set, the warm
+  one: sidebars and panes `bg-100`, terminal and gaps `bg-200`, cards,
+  dialogs and composer `bg-000`, text `text-000`/`-200`/`-400`; light hovers
+  `bg-300`/`bg-400`.
+- **Grafite** is the `cds` design system the page actually paints (body
+  `#151515` = `--cds-page-bg`): sidebars and panes `surface-2`, terminal and
+  gaps `surface-1`, cards, dialogs and composer `surface-3`, text
+  `text-primary`/`-secondary`/`-muted`. In light every panel, popover and
+  field of cds is white, told apart by borders, so those three are white.
+
+Sirio paints its sidebars and its panes (the chat among them) with one
+token, `ely.bg`, so the two cannot differ as Claude's sidebar and chat do.
+Chosen 2026-10-12: that token takes Claude's *chat* step, and the terminal
+and the gaps between panes go one step darker. Sirio's own, not Claude's:
+every hover rung (Argilla dark one step above the composer; Grafite cds'
+7.5% / 5% ghost hover laid solid) and the `dim` text rung (a quarter of the
+way from muted to faint, where Neutral's sits). Body text is Claude's as it
+is: these two are exempt from the 10% softening every other base takes
+(`frozen_presets_match_their_bezel_ladders` holds both rules).
+Link and focus are Claude's blues (`accent-000`/`accent-100`,
+`text-accent`/`fill-accent`); the primary fill stays monochrome, as in
+Claude, and Claude's clay never enters the chrome, because in Sirio it is
+the Claude agent's brand mark. The tint is the mean oklch hue and chroma of
+each dark ladder's four Claude surfaces, an achromatic rung counting for
+chroma only. The semantic colours (borders, success/warning/danger, diff,
+ANSI, syntax, selection) stay the shared `Semantic` block.
+
 ## The vocabulary
 
 Sirio's colours are held in Ely's `Palette` vocabulary (`ely-palette`), plus
@@ -345,10 +381,13 @@ today's derivation and writes no Sirio token into it:
 
 Concretely, `to_bezel_theme` is still `Theme::branded(Brand { tint })` for
 the appearance plus the hand-written ladders: the Notte ladder painted onto
-the seven surface tokens (`paint_notte_ladder`), and the Neutral/Onice solid
-grey ladders (`paint_grey_ladder`). The tint stays `NONE` for the grey
-ladders — this moves lightness only, so bezel widgets (via `to_bezel_theme`)
-and Sirio tokens see one ladder by construction.
+the seven surface tokens (`paint_notte_ladder`), and the solid grey ladders
+of Neutral, Onice, Argilla and Grafite (`paint_grey_ladder`). The tint stays
+`NONE` for Neutral and Onice — they move lightness only — and is the
+measured warm hue for Argilla and Grafite, whose ladders also carry text
+rungs that `paint_grey_ladder` writes over bezel's `text`, `text_muted`,
+`text_faint` and `text_dim`, so bezel widgets (via `to_bezel_theme`) and
+Sirio tokens see one ladder by construction.
 
 ## Changing a colour
 
