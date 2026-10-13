@@ -209,6 +209,19 @@ like `save_session_ref` does), not the next periodic one, so a crash right
 after creation rarely leaves an orphan; orphan adoption (§4.2) covers the
 window that remains.
 
+**Ids are unique across the whole session database (fix batches 5 and 6).**
+One allocator serves the app. Its floor is the largest `pane-<n>` of every
+catalogued worktree's persisted and parked layouts and of the host's
+listing, so a new pane never takes an id any worktree still names. The
+duplicates a database already holds are renamed once, at the first answer of
+a startup that finds a host (or a host without terminals): a parked
+worktree's rows are rewritten, and the active strip's panes move live. A
+lazy adoption after an unverifiable or failed startup does not repeat that
+rename, so owner preference holds on the first-answer path only; the floor
+still keeps the ids unique there. A fresh open whose id the host already holds
+takes a new id and never attaches to it. A restore attaches only to a session
+its own worktree owns (§4.2).
+
 ### §4.2 Events
 
 | Event | Behaviour |
@@ -216,7 +229,9 @@ window that remains.
 | New terminal | `term.create` then `term.attach`. No host → `LocalLink`, with a banner in the tab: *This terminal will not survive closing Sirio* and the reason |
 | Quit, crash, Force Quit | The connection closes: every stream detaches. `LocalLink` sessions die as today. `on_app_quit` no longer calls `shutdown_terminals` for host sessions; `PaneRegistry::shutdown` no longer ends anything (its PTYs are gone) |
 | Relaunch | For each persisted tab with a `session_id` listed by `term.list` → `term.attach` (snapshot). Not listed (host gone, reboot) → today's path: a new shell, the persisted scrollback fed into it, the adapter's `resume_command` when the tab carried an agent |
-| Close a tab, worktree or project | `term.close` of its sessions — except a tab opened by **Show session** (§5), whose close detaches |
+| Close a tab, worktree or project | `term.close` of its sessions — except a tab opened by **Show session** (§5), whose close detaches. A worktree's close ends a session of `origin: app` only when the worktree owns its cwd (the deepest known worktree holding it), or when no known worktree does; a layout id alone never ends another worktree's session |
+| Restore a tab | Attaches a listed session only when its own worktree owns the session's cwd (the same rule as the close); otherwise the id is stale for this tab, and the tab takes a new id and creates its own session |
+| Restart on a `Failed` tab | Never closes a session: the id may be held by another worktree's live session, or by a host that was only unreachable |
 | Worktree unmounted | `TerminalPaneCache` stays; eviction past its cap now **detaches** instead of killing. Reselecting attaches again. Opening many worktrees no longer kills agents |
 | Session exits while no client is attached | The host keeps the exited session with its VT until it is closed: the reopened tab shows the last screen and *Process exited* |
 | The host dies while the app runs | Tabs show *Session lost* with **Restart** (a new shell, with the replica's scrollback fed in); `ensure_host` starts a host again |
@@ -304,10 +319,15 @@ each of these dangerous:
    the default root, with a `-debug` suffix on the directory name in debug
    builds. The rule keys on the resolved database path, not the `SIRIO_DB`
    variable: a release build run from a checkout must not adopt the user's
-   real host (fix batch 1, finding 10). The app exports the resolved root as
-   `SIRIO_HOST_HOME` before it resolves any host path or spawns a child
-   (`session::export_host_root`); `HostPaths::from_environment` stays the one
-   resolver for everything else.
+   real host (fix batch 1, finding 10). The app resolves that root once, in
+   process (`session::host_root`), and never exports it under a name it reads
+   itself: a child that inherited `SIRIO_HOST_HOME` would adopt the outer
+   app's host and its sessions (fix batch 6, N1). Its panes receive the root
+   as `SIRIO_PANE_HOST_HOME`, which only `sirioctl` and `host_probe` read, and
+   only when `SIRIO_PANE_ID` is set (`HostPaths::from_environment`). The app
+   and the host resolve their own root with `HostPaths::from_app_environment`,
+   which never reads a pane's variable, and the app hands the host its root as
+   `--root`, so the host does not depend on the environment it inherits.
 2. **Successor safety.** A leaving host checks its socket's (device, inode),
    which a filesystem can reuse after the root is removed and re-created;
    it also requires the state file's `generation` to match before removing
@@ -340,6 +360,16 @@ sides change together; SP2 is the first change to the codec since SP1.
 | The connection to the host drops while the app runs | Reconnect with `resume_from` per stream; *Session lost* only when `term.list` no longer lists the session or the host is `Absent` (SP1 §5.2) — never on the dropped connection alone |
 | `sirioctl` with neither app nor host | Exit non-zero with "Sirio is not running and no host is up" for `panel.*`; `notify` stays silent |
 | A Data frame with a bad `phase`, stream or direction | `frame_error`, connection closed (SP1 §6.1) |
+| An ensure that leaves no host to lose: `BinaryMissing`, `NoDataRoot`, `DataRoot`, `Stage`, `Spawn`, `StartTimeout`, `EndpointPathTooLong`, `Refused`, or a host with no `terminal` capability | `LocalLink` with the banner and the reason. Fix batch 6 (N4): one ensure runs at a time, a terminal that waited for it takes its answer, and that answer is kept for 30 s, so a burst of terminals starts at most one host. The startup ensure's answer is kept the same way |
+| An ensure that finds a host holding its lock without an answer (`Unverifiable`), or a connect that fails after the host answered (`Io`) | *Failed* with Retry, never a local shell beside a host that may be live (fix batch 6, N6, spec §8 finding 7). A terminal that waited for the ensure shares its answer; a later open ensures again, with no back-off, so a restored tab waits for a host that returns |
+
+**Deviations recorded (fix batches 5 and 6).** The review rulings accepted these:
+- A fresh terminal on an unverifiable host fails with Retry rather than waiting (fix batch 1, B1).
+- Re-ensure is lazy: the next terminal the app opens, or a Restart, starts a lost host again. Nothing re-ensures on a timer, and an ensure that succeeds clears any failure it replaces, so the first open after a lost client ensures at once (fix batch 6, N4; B3).
+- Control `panel.*` through the app fails until a terminal is opened after End All (B3, corrected cost). `sirioctl` reaches the host directly only when the app's socket is missing or refuses (`route::decide`), never when the app answers with an error.
+- The 30 s back-off covers no-host failures only. An unverifiable or failed ensure is shared with the openers waiting for it and never answered from a cache.
+- Dedup runs at the first answer of a startup that finds a host, not on a lazy adoption (§4.1). A pane moved by dedup or by a rebind keeps its saved agent session reference under the old key where the ref store wrote one, so it may resume the other worktree's conversation; the ref store, not the id allocator, owns that ambiguity.
+- Control sessions keep the ids the host gave them. A collision with one is handled by the restore check and the rebind (§4.1), not prevented.
 
 ## §9 Testing
 
