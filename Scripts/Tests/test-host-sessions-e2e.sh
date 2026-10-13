@@ -40,6 +40,8 @@ set -eEuo pipefail
 #                       survives=false; SIGCONT, and it attaches (finding 7)
 #   23. close-unvisited-worktree  closing a worktree this run never mounted ends its
 #                       session on the host; the other worktree's session lives (finding 8)
+#   31. agent-rebind-reports-under-its-id  a new agent tab takes a fresh id when its id is
+#                       held: its codex notify names that fresh id, not the held one (I1)
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -1462,6 +1464,103 @@ case_restore_stale_id_of_another_worktree() {
   NOTE="B's $pane_a (pid $control_pid) untouched with no client; A's restored tab runs its own session"
 }
 
+# Fix batch 7, I1 (a pane that moves to a fresh id launches its agent under that
+# id): a new agent tab opens on an id a control session holds. The agent's
+# command must name the id the tab really took, in its notify (--session) and in
+# SIRIO_PANE_ID, and the notify must save its ref under that id, not the held one.
+# The codex stub stands for codex: it records its argv and SIRIO_PANE_ID, then runs
+# the notify its -c override names, with an agent ref derived from the pane.
+install_codex_stub() {
+  mkdir -p "$W/bin" "$W/stub"
+  cat >"$W/bin/codex" <<'STUB'
+#!/usr/bin/env python3
+# A stand-in for codex (e2e). Only an agent launch (a -c notify override) stays
+# as the pane; every other call (a version probe) answers at once.
+import json, os, subprocess, sys, time
+args = sys.argv[1:]
+if not args or not args[0].startswith("-c") or len(args) < 2 or not args[1].startswith("notify="):
+    sys.exit(0)
+stub = os.environ["E2E_STUB_DIR"]
+os.makedirs(stub, exist_ok=True)
+base = os.path.join(stub, "codex-%d" % os.getpid())
+with open(base + ".argv", "wb") as f:
+    f.write(b"\0".join(a.encode() for a in args))
+pane = os.environ.get("SIRIO_PANE_ID", "")
+notify = json.loads(args[1][len("notify="):])
+subprocess.run(notify + ["--agent-session", "e2e-" + pane], check=False)
+with open(base + ".env", "w") as f:
+    f.write(pane)
+time.sleep(300)
+STUB
+  chmod +x "$W/bin/codex"
+  # The shell the world's terminals start (`$SHELL -lc CMD`): a login profile would
+  # put a real codex back ahead of the stub, so this one runs CMD with the stub's PATH.
+  cat >"$W/bin/guard-shell" <<GUARD
+#!/bin/sh
+PATH="$W/bin:/usr/bin:/bin"
+export PATH
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -*c*) shift; exec /bin/sh -c "\$1" ;;
+    *) shift ;;
+  esac
+done
+exec /bin/sh
+GUARD
+  chmod +x "$W/bin/guard-shell"
+}
+
+# The newest codex launch of this world: its file (argv or env) and, from the
+# argv, the --session its notify names.
+newest_codex() { ls -t "$W"/stub/codex-*."$1" 2>/dev/null | head -n 1; }
+codex_launched() { [ -n "$(newest_codex env)" ]; }
+codex_notify_session() {
+  python3 -c '
+import json, sys
+args = open(sys.argv[1], "rb").read().split(b"\0")
+notify = next(a.decode() for a in args if a.decode().startswith("notify="))
+parts = json.loads(notify[len("notify="):])
+print(parts[parts.index("--session") + 1])
+' "$1"
+}
+# The ref the store holds for a pane key ("" when none): read from the world's db.
+saved_ref() {
+  python3 -c '
+import sqlite3, sys
+row = sqlite3.connect(sys.argv[1]).execute("SELECT reference FROM session_ref WHERE session = ?", (sys.argv[2],)).fetchone()
+print(row[0] if row else "")
+' "$W/s.sqlite" "$1"
+}
+saved_ref_is() { [ "$(saved_ref "$1")" = "$2" ]; }
+
+case_agent_rebind_reports_under_its_id() {
+  new_world c31
+  install_codex_stub
+  app_start "PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub"
+  select_repo "$W/repo"
+  local first next control_pid control_clients new_pane session_arg
+  first=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$first" || fail "the first terminal $first is not on the host"
+  next="pane-$(( ${first#pane-} + 1 ))"
+  probe term-create "$W/repo" --id "$next" -- sleep 300
+  [ "$RC" -eq 0 ] || fail "host_probe term-create $next failed: $OUT"
+  wait_until 10 session_listed "$next" || fail "the control session $next is not listed"
+  control_pid=$(session_pid "$next")
+  control_clients=$(session_clients "$next")
+  ctl surface terminal open --agent codex >/dev/null || fail "the agent terminal was refused"
+  wait_until 60 codex_launched || fail "the codex agent never started (its tab held $next)"
+  new_pane=$(cat "$(newest_codex env)")
+  [ -n "$new_pane" ] && [ "$new_pane" != "$next" ] || fail "the agent tab kept the held id $next (SIRIO_PANE_ID=$new_pane)"
+  session_arg=$(codex_notify_session "$(newest_codex argv)")
+  [ "$session_arg" = "$new_pane" ] || fail "codex reports under --session $session_arg, but its pane is $new_pane (the held id was $next)"
+  wait_until 10 session_listed "$new_pane" || fail "the agent's pane $new_pane is not on the host"
+  wait_until 10 saved_ref_is "$new_pane" "e2e-$new_pane" || fail "the agent's notify saved no ref under $new_pane (saved: '$(saved_ref "$new_pane")')"
+  saved_ref_is "$next" "e2e-$new_pane" && fail "the agent's notify saved its ref under the held id $next"
+  [ "$(session_pid "$next")" = "$control_pid" ] || fail "the held id $next now names another session"
+  [ "$(session_clients "$next")" = "$control_clients" ] || fail "the control session $next gained a client"
+  NOTE="held $next (pid $control_pid) untouched; the agent took $new_pane and reported under it"
+}
+
 # ---------------------------------------------------------------- the run
 
 # Fix batch 6, N1 (a nested Sirio does not inherit the outer app's host root):
@@ -1663,6 +1762,7 @@ run_case 27 adopt-after-late-host case_adopt_after_late_host
 run_case 28 restore-stale-id-of-another-worktree case_restore_stale_id_of_another_worktree
 run_case 29 nested-app-own-host case_nested_app_own_host
 run_case 30 ensure-storm case_ensure_storm
+run_case 31 agent-rebind-reports-under-its-id case_agent_rebind_reports_under_its_id
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED cases passed)"

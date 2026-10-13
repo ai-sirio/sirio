@@ -154,7 +154,7 @@ fn usage() {
            \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|review-open-submit|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete|rerun-job|rerun-failed\n\
          \x20 panel show <id>                   show a session in a tab (app only)\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
-         \x20 surface terminal open [--cmd c]    (debug builds) open an app terminal tab running c\n\
+         \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
@@ -979,7 +979,10 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ),
         ("terminal", "open") => require_ok(
             socket,
-            &sirio_control::protocol::request::terminal_open(parsed.value("cmd")),
+            &sirio_control::protocol::request::terminal_open(
+                parsed.value("cmd"),
+                parsed.value("agent"),
+            ),
         ),
         ("terminal", "restart" | "state") => {
             let pane = parsed

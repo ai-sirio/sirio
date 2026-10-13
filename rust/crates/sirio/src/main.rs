@@ -1302,9 +1302,11 @@ enum ControlAction {
         reply: ControlReply,
     },
     /// Debug-only `surface.terminal.open`: an application terminal tab in the
-    /// selected worktree, running `command` under `sh -c` when given.
+    /// selected worktree, running `command` under `sh -c` when given, or the
+    /// agent `agent` launched the way a new agent tab is.
     OpenTerminal {
         command: Option<String>,
+        agent: Option<String>,
         reply: ControlReply,
     },
     /// Debug-only `surface.terminal.restart {pane}`: Restart on a terminal
@@ -2898,12 +2900,18 @@ impl ControlHandler for AppControlHandler {
             "surface.host.end_all" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EndAllSessions { reply })
             }
-            // Debug-only `surface.terminal.open {cmd?}`: the tab a user's "new
-            // terminal" makes (an app-origin session on the host), or one that
-            // runs `cmd` directly under `sh -c` so its pid is the session's.
+            // Debug-only `surface.terminal.open {cmd?, agent?}`: the tab a user's
+            // "new terminal" makes (an app-origin session on the host), one that
+            // runs `cmd` directly under `sh -c` so its pid is the session's, or
+            // a new agent tab for the adapter `agent`.
             "surface.terminal.open" if cfg!(debug_assertions) => {
                 let command = request.params.get("cmd").cloned();
-                self.queue_action(request, move |reply| ControlAction::OpenTerminal { command, reply })
+                let agent = request.params.get("agent").cloned();
+                self.queue_action(request, move |reply| ControlAction::OpenTerminal {
+                    command,
+                    agent,
+                    reply,
+                })
             }
             "surface.terminal.restart" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
@@ -5694,8 +5702,8 @@ impl SirioWorkspace {
                                     workspace.perform_end_all_sessions(cx);
                                     let _ = reply.send(Ok(vec![]));
                                 }
-                                ControlAction::OpenTerminal { command, reply } => {
-                                    let _ = reply.send(workspace.control_open_terminal(command, cx));
+                                ControlAction::OpenTerminal { command, agent, reply } => {
+                                    let _ = reply.send(workspace.control_open_terminal(command, agent, cx));
                                 }
                                 ControlAction::TerminalRestart { pane, reply } => {
                                     let _ = reply.send(workspace.control_terminal_restart(&pane, cx));
@@ -17015,9 +17023,18 @@ impl SirioWorkspace {
     fn control_open_terminal(
         &mut self,
         command: Option<String>,
+        agent: Option<String>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let pane = format!("pane-{}", self.next_pane_id);
+        if let Some(agent) = agent {
+            let adapter = *AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent)
+                .ok_or_else(|| format!("there is no agent adapter {agent}"))?;
+            self.add_agent_terminal_tab(adapter, "", cx);
+            return Ok(vec![("pane".to_string(), pane)]);
+        }
         let shell = match command {
             Some(command) => TerminalShell::WithArguments {
                 program: "/bin/sh".to_string(),

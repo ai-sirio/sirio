@@ -735,11 +735,16 @@ pub mod request {
     }
 
     /// Debug-only `surface.terminal.open`: opens an application terminal tab
-    /// in the selected worktree, running `command` under `sh -c` when given.
-    pub fn terminal_open(command: Option<&str>) -> ControlRequest {
-        let params = command
-            .map(|command| BTreeMap::from([("cmd".to_string(), command.to_string())]))
-            .unwrap_or_default();
+    /// in the selected worktree, running `command` under `sh -c` when given,
+    /// or the agent adapter `agent` launched the way a new agent tab is.
+    pub fn terminal_open(command: Option<&str>, agent: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if let Some(command) = command {
+            params.insert("cmd".to_string(), command.to_string());
+        }
+        if let Some(agent) = agent {
+            params.insert("agent".to_string(), agent.to_string());
+        }
         request("surface.terminal.open", params)
     }
 
