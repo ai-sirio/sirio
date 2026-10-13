@@ -112,6 +112,10 @@ pub struct OpenRequest {
     /// (and an attach-only open) may attach to a session the host already
     /// lists; every other open is a create (fix batch 1, finding 11).
     pub restore: bool,
+    /// Every worktree the app knows, for a restore's ownership check (fix batch
+    /// 5, N3): a listed session of another known worktree is not this tab's.
+    /// Empty when nothing is known, which lets every listed session through.
+    pub known_worktrees: std::sync::Arc<[std::path::PathBuf]>,
 }
 
 pub enum OpenOutcome {
@@ -496,6 +500,23 @@ impl HostLink {
         if plan == OpenPlan::Duplicate {
             return Err(HostOpenError::Taken(format!(
                 "{} is already a session on the host; a new terminal does not attach to it",
+                request.session_id
+            )));
+        }
+        // A restore attaches only to a session its own worktree holds (fix batch
+        // 5, N3). A listed session of another known worktree is a stale id for
+        // this tab: the pane takes a fresh id and creates its own session.
+        if plan == OpenPlan::Attach
+            && !request.attach_only
+            && let Some(summary) = listed_summary
+            && !restore_may_attach(
+                std::path::Path::new(&summary.cwd),
+                &request.cwd,
+                &request.known_worktrees,
+            )
+        {
+            return Err(HostOpenError::Taken(format!(
+                "{} is held by another worktree's session on the host",
                 request.session_id
             )));
         }
@@ -1068,6 +1089,7 @@ mod tests {
             recreate: false,
             attach_only: false,
             restore: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
         }
     }
 
@@ -1304,6 +1326,7 @@ mod attach_only_tests {
             recreate: false,
             attach_only: true,
             restore: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
         };
         let refused = LocalLink::open(&request);
         assert!(
@@ -1311,5 +1334,72 @@ mod attach_only_tests {
             "an attach-only open must not start a shell: {:?}",
             refused.as_ref().err()
         );
+    }
+}
+
+/// The worktree that holds `cwd`: the deepest one whose path contains it, in
+/// canonical form where the path exists (the app's own ownership rule).
+fn deepest_owner<'a>(cwd: &std::path::Path, worktrees: &'a [std::path::PathBuf]) -> Option<&'a std::path::PathBuf> {
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut best: Option<(&std::path::PathBuf, usize)> = None;
+    for worktree in worktrees {
+        let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.clone());
+        if cwd.starts_with(&canonical) {
+            let depth = canonical.components().count();
+            if best.is_none_or(|(_, best_depth)| depth > best_depth) {
+                best = Some((worktree, depth));
+            }
+        }
+    }
+    best.map(|(worktree, _)| worktree)
+}
+
+/// Whether a restore may attach to a session the host lists under the tab's
+/// id, whose cwd is `session_cwd` (SP2 fix batch 5, N3). It may when no known
+/// worktree holds that cwd, or when the worktree holding it is the one holding
+/// the tab's own `tab_cwd`. Otherwise the id is stale for this tab.
+pub fn restore_may_attach(
+    session_cwd: &std::path::Path,
+    tab_cwd: &std::path::Path,
+    worktrees: &[std::path::PathBuf],
+) -> bool {
+    match deepest_owner(session_cwd, worktrees) {
+        None => true,
+        Some(owner) => deepest_owner(tab_cwd, worktrees) == Some(owner),
+    }
+}
+
+#[cfg(test)]
+mod restore_claim_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn p(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    #[test]
+    fn a_restore_attaches_a_session_of_its_own_worktree() {
+        let worktrees = [p("/r/a"), p("/r/b")];
+        assert!(restore_may_attach(&p("/r/a"), &p("/r/a"), &worktrees));
+    }
+
+    #[test]
+    fn a_restore_does_not_attach_a_session_of_another_worktree() {
+        let worktrees = [p("/r/a"), p("/r/b")];
+        assert!(!restore_may_attach(&p("/r/b/src"), &p("/r/a"), &worktrees));
+    }
+
+    #[test]
+    fn a_restore_in_a_subdirectory_attaches_its_worktrees_session() {
+        let worktrees = [p("/r/a"), p("/r/b")];
+        assert!(restore_may_attach(&p("/r/a/x"), &p("/r/a/sub/y"), &worktrees));
+    }
+
+    #[test]
+    fn a_restore_attaches_a_session_no_known_worktree_holds() {
+        let worktrees = [p("/r/a")];
+        assert!(restore_may_attach(&p("/elsewhere"), &p("/r/a"), &worktrees));
+        assert!(restore_may_attach(&p("/r/a"), &p("/r/a"), &[]));
     }
 }

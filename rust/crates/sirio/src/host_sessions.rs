@@ -54,10 +54,12 @@ pub fn adoption_target(
 
 /// The app sessions a set of closing worktrees owns (SP2 spec §4.2): every
 /// `origin: app` session whose cwd the deepest worktree holding it is one of
-/// `closing`, plus every app session a persisted or parked layout names
-/// (`layout_ids`, as `pane-<leaf>`). `known` lists every worktree the app
-/// knows; the closing ones are counted whether or not it lists them. Control
-/// sessions are never returned: `PaneRegistry::shutdown_for` ends those.
+/// `closing`, and, for a session no known worktree holds, one a persisted or
+/// parked layout names (`layout_ids`, as `pane-<leaf>`). A layout id alone
+/// never ends a session another known worktree holds: pane ids are not unique
+/// across layouts (fix batch 5). `known` lists every worktree the app knows;
+/// the closing ones are counted whether or not it lists them. Control sessions
+/// are never returned: `PaneRegistry::shutdown_for` ends those.
 pub fn app_sessions_to_end(
     listed: &[(String, Origin, PathBuf)],
     closing: &[PathBuf],
@@ -69,9 +71,12 @@ pub fn app_sessions_to_end(
     listed
         .iter()
         .filter(|(_, origin, _)| *origin == Origin::App)
-        .filter(|(id, _, cwd)| {
-            layout_ids.contains(id)
-                || owning_worktree(cwd, &candidates).is_some_and(|owner| closing.contains(owner))
+        .filter(|(id, _, cwd)| match owning_worktree(cwd, &candidates) {
+            // The deepest worktree holding the session's cwd decides, as the
+            // cwd rule always did (fix batch 5, N2).
+            Some(owner) => closing.contains(owner),
+            // No known worktree holds it: only a layout that names it can.
+            None => layout_ids.contains(id),
         })
         .map(|(id, _, _)| id.clone())
         .collect()
@@ -171,11 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_leaf_counts_even_when_its_session_cwd_is_elsewhere() {
-        let known = [p("/r/wt")];
-        let listed = [listed("pane-7", Origin::App, "/elsewhere")];
-        let layout = HashSet::from(["pane-7".to_string()]);
-        assert_eq!(app_sessions_to_end(&listed, &[p("/r/wt")], &known, &layout), ["pane-7"]);
+    fn a_layout_leaf_names_a_session_only_when_no_other_worktree_holds_its_cwd() {
+        // SP2 fix batch 5 (N2): a stale layout id can name another worktree's
+        // live session, so the layout alone never ends a session that a known
+        // worktree other than the closing one holds. A session no known worktree
+        // holds is the layout's own.
+        let known = [p("/r/wt"), p("/r/other")];
+        let listed = [
+            listed("pane-7", Origin::App, "/r/other/src"),
+            listed("pane-8", Origin::App, "/elsewhere"),
+        ];
+        let layout = HashSet::from(["pane-7".to_string(), "pane-8".to_string()]);
+        assert_eq!(app_sessions_to_end(&listed, &[p("/r/wt")], &known, &layout), ["pane-8"]);
     }
 
     #[test]

@@ -1733,6 +1733,7 @@ impl TerminalHandle {
             recreate: false,
             attach_only: false,
             restore: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
         };
         let link = LocalLink::open(&request).map_err(|message| anyhow::anyhow!("{message}"))?;
         Ok(Self::new_with_link(Box::new(link)))
@@ -2210,6 +2211,8 @@ pub struct TerminalView {
     /// to a session the host already lists. A fresh view only creates
     /// (fix batch 1, finding 11).
     restored: bool,
+    /// The worktrees the app knows, handed to a restore's open (fix batch 5, N3).
+    known_worktrees: std::sync::Arc<[std::path::PathBuf]>,
     context_menu: Option<Point<Pixels>>,
     /// #259: the running autoscroll, armed only while a drag is held outside
     /// the pane. Cancel-on-drop, so releasing the button or coming back
@@ -2390,6 +2393,7 @@ impl TerminalView {
         Ok(Self {
             attached: false,
             restored: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
             terminal: TerminalState::Pending,
             spawn,
             view_mode: TerminalViewMode::default(),
@@ -2427,6 +2431,7 @@ impl TerminalView {
         Self {
             attached: false,
             restored: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
             terminal: TerminalState::Pending,
             spawn: SpawnParams {
                 working_directory,
@@ -2487,6 +2492,7 @@ impl TerminalView {
         Self {
             attached: false,
             restored: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
             terminal: TerminalState::Failed {
                 message: message.into(),
             },
@@ -2575,6 +2581,12 @@ impl TerminalView {
     /// the session the host already holds under its id.
     pub fn set_restored(&mut self) {
         self.restored = true;
+    }
+
+    /// The worktrees the app knows, for a restore's ownership check (fix batch
+    /// 5, N3). Set on a restored view with [`Self::set_restored`].
+    pub fn set_known_worktrees(&mut self, worktrees: std::sync::Arc<[std::path::PathBuf]>) {
+        self.known_worktrees = worktrees;
     }
 
     /// Marks the view as showing a session it did not create (Show session).
@@ -2803,6 +2815,7 @@ impl TerminalView {
             // An attached tab never creates the session it shows (spec §5).
             attach_only: self.attached,
             restore: self.restored,
+            known_worktrees: self.known_worktrees.clone(),
         }
     }
 

@@ -5914,7 +5914,14 @@ impl SirioWorkspace {
             },
         )
         .detach();
-        Self::bind_terminal_tabs(&tabs, cx);
+        let known_worktrees = std::sync::Arc::from(
+            project_catalog
+                .projects()
+                .iter()
+                .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+                .collect::<Vec<PathBuf>>(),
+        );
+        Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         // `bind_file_tabs` needs `&mut self`, which does not exist yet, so
         // collect the restored file views here and adopt them just below,
@@ -8091,13 +8098,18 @@ impl SirioWorkspace {
         }
     }
 
-    fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
-        Self::bind_terminal_tabs_with_reused(tabs, None, cx);
+    fn bind_terminal_tabs(
+        tabs: &[OpenTab],
+        known_worktrees: &std::sync::Arc<[PathBuf]>,
+        cx: &mut Context<Self>,
+    ) {
+        Self::bind_terminal_tabs_with_reused(tabs, None, known_worktrees, cx);
     }
 
     fn bind_terminal_tabs_with_reused(
         tabs: &[OpenTab],
         reused_terminal_panes: Option<&HashSet<usize>>,
+        known_worktrees: &std::sync::Arc<[PathBuf]>,
         cx: &mut Context<Self>,
     ) {
         for tab in tabs {
@@ -8108,7 +8120,12 @@ impl SirioWorkspace {
                 {
                     // Restored tabs are the only terminals that may attach to
                     // a session the host already holds (finding 11).
-                    view.update(cx, |terminal, _| terminal.set_restored());
+                    // A restore's open checks the session against the worktrees
+                    // the app knows (fix batch 5, N3).
+                    view.update(cx, |terminal, _| {
+                        terminal.set_restored();
+                        terminal.set_known_worktrees(known_worktrees.clone());
+                    });
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
             });
@@ -10613,7 +10630,13 @@ impl SirioWorkspace {
             {
                 self.parked_worktree_tabs.remove(&selected_worktree_id);
             }
-            Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
+            let known_worktrees = std::sync::Arc::from(self.known_worktree_paths());
+            Self::bind_terminal_tabs_with_reused(
+                &new_tabs,
+                Some(&reused_terminal_panes),
+                &known_worktrees,
+                cx,
+            );
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
             self.bind_file_tabs(&new_tabs, &selected_path, cx);
             Self::bind_change_request_tabs(&new_tabs, cx);
@@ -11055,7 +11078,8 @@ impl SirioWorkspace {
                 cx,
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
-            Self::bind_terminal_tabs(&tabs, cx);
+            let known_worktrees = std::sync::Arc::from(self.known_worktree_paths());
+            Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
             let worktree = self.working_directory.clone();
             self.bind_file_tabs(&tabs, &worktree, cx);
             Self::bind_change_request_tabs(&tabs, cx);
@@ -43528,6 +43552,7 @@ browser  profile  "
                 recreate: false,
                 attach_only: false,
                 restore: false,
+                known_worktrees: std::sync::Arc::from(Vec::new()),
             }
         }
 
@@ -43635,6 +43660,7 @@ browser  profile  "
             recreate: false,
             attach_only: false,
             restore: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
         };
         let started = Instant::now();
         assert!(matches!(factory.open(probe), OpenOutcome::Pending));

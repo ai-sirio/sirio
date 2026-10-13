@@ -1422,6 +1422,43 @@ case_adopt_after_late_host() {
   NOTE="orphan $pane (pid $pid) adopted by the first open after SIGCONT, attached with one client"
 }
 
+# Finding N3 (a restore attaches only to a session its own worktree holds): A's
+# layout names pane-N, and the host holds a live session with that id in B's
+# cwd. Restoring A must not attach to it: A's tab takes a fresh id and runs its
+# own session, and B's session keeps its pid with no client.
+case_restore_stale_id_of_another_worktree() {
+  new_world c28
+  git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
+  app_start
+  select_repo "$W/repo"
+  local pane_a control_pid app_session
+  ctl project add "$W/wt-b" >/dev/null 2>&1 || true
+  pane_a=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$pane_a" || fail "the terminal $pane_a is not on the host"
+  app_quit
+  probe shutdown --force >/dev/null 2>&1 || true
+  wait_until 20 host_gone || fail "the host did not end before the control session was made"
+  probe ensure
+  [ "$RC" -eq 0 ] || fail "host_probe ensure failed: $OUT"
+  probe term-create "$W/wt-b" --id "$pane_a" -- sleep 300
+  [ "$RC" -eq 0 ] || fail "host_probe term-create $pane_a in B failed: $OUT"
+  wait_until 10 session_listed "$pane_a" || fail "B's session $pane_a is not listed"
+  control_pid=$(session_pid "$pane_a")
+  app_start
+  app_session=""
+  for _ in $(seq 1 300); do
+    term_list || true
+    app_session=$(printf '%s\n' "$TERM_LIST" | grep 'origin=app' | grep -v " pid=$control_pid " | head -1 || true)
+    [ -n "$app_session" ] && break
+    sleep 0.2
+  done
+  [ -n "$app_session" ] || fail "A's restored tab did not get a session of its own (the host lists $(printf '%s' "$TERM_LIST" | tr '\n' ' '))"
+  [ "$(session_clients "$pane_a")" = 0 ] || fail "A's restore attached to B's session $pane_a (clients $(session_clients "$pane_a"), expected 0)"
+  [ "$(session_pid "$pane_a")" = "$control_pid" ] || fail "B's session $pane_a changed pid"
+  pid_alive "$control_pid" || fail "B's session pid $control_pid is not alive"
+  NOTE="B's $pane_a (pid $control_pid) untouched with no client; A's restored tab runs its own session"
+}
+
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1545,6 +1582,7 @@ run_case 24 close-worktree-id-collision case_close_worktree_id_collision
 run_case 25 fresh-tab-never-dead-ends case_fresh_tab_never_dead_ends
 run_case 26 restart-on-failed-is-safe case_restart_on_failed_is_safe
 run_case 27 adopt-after-late-host case_adopt_after_late_host
+run_case 28 restore-stale-id-of-another-worktree case_restore_stale_id_of_another_worktree
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 23 cases)"
