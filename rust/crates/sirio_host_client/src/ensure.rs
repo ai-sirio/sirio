@@ -170,7 +170,17 @@ fn ensure_major(
                     });
                 }
                 match connect(options, major, majors) {
-                    Ok(session) => return Ok((session, None)),
+                    Ok(mut session) => {
+                        // An SP1 host (no `terminal` capability) with no
+                        // session is replaced by the packaged host, so it is
+                        // not held for the whole run (finding 3). When it
+                        // cannot be replaced, the session is returned and the
+                        // app drops it, so that host can idle out.
+                        if major == options.major && !has_terminal(&session) && retire(&mut session, options, major, majors) {
+                            continue;
+                        }
+                        return Ok((session, None));
+                    }
                     // The host answered a moment ago and is gone or turning
                     // us away now (its idle exit, §5.5): the client that
                     // loses that race goes through §5.3 again, bounded by
@@ -209,6 +219,54 @@ fn ensure_major(
             }
         }
     }
+}
+
+/// How long a retired host may take to leave before it is treated as kept.
+const RETIRE_WAIT: Duration = Duration::from_secs(10);
+
+fn has_terminal(session: &HostSession) -> bool {
+    session
+        .welcome
+        .capabilities
+        .iter()
+        .any(|name| name == capability::TERMINAL)
+}
+
+/// Asks a host that predates `terminal` to leave, but only when it holds no
+/// session: a non-force `host.shutdown` is refused otherwise, and the answer
+/// is the same as a host that refuses for any other reason (SP2 finding 3).
+/// `true` once the host is `Absent`, within `RETIRE_WAIT`.
+fn retire(session: &mut HostSession, options: &EnsureOptions, major: u32, majors: &[u32]) -> bool {
+    let sessions = session
+        .connection
+        .call(method::INFO, serde_json::json!({}), None)
+        .ok()
+        .and_then(|info| serde_json::from_value::<HostInfo>(info).ok())
+        .map(|info| info.sessions);
+    if sessions != Some(0) {
+        return false;
+    }
+    // Every request after the welcome carries the host's generation: a host
+    // refuses a shutdown that names none (`stale_generation`).
+    if session
+        .connection
+        .call(
+            method::SHUTDOWN,
+            serde_json::json!({ "force": false }),
+            Some(&session.welcome.generation),
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let deadline = Instant::now() + RETIRE_WAIT;
+    while Instant::now() < deadline {
+        if observe(&options.paths, major, majors).verdict == Verdict::Absent {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureError> {

@@ -115,6 +115,7 @@ RUN=""
 N=0
 CASE_NAME=""
 CASE_STARTED=0
+SKIPPED=0
 NOTE=""
 CASES_PASSED=0
 W=""
@@ -1180,13 +1181,58 @@ case_exited_attach() {
   pane_text "$pane" | grep -q done-marker || fail "the restored $pane does not show its last screen"
   NOTE="$pane exited with code 3 while the app was gone; restored tab shows exitStatus code:3 and its last screen"
 }
+# Finding 3 (an SP1 host is replaced, never held): v0.31.0 shipped the SP1 host,
+# which has no `terminal` capability. An app that finds one with no session
+# asks it to leave (non-force), starts the packaged host, and runs its terminal
+# on that. The old host's pid is gone; the new host lists the session. Gated on
+# SIRIO_SP1_HOST_BIN (a sirio-host built from tag v0.31.0); skipped without it.
+case_sp1_host_upgrade() {
+  if [ -z "${SIRIO_SP1_HOST_BIN:-}" ]; then
+    SKIPPED=1
+    NOTE="SKIP: SIRIO_SP1_HOST_BIN is not set (a sirio-host built from tag v0.31.0)"
+    return 0
+  fi
+  [ -x "$SIRIO_SP1_HOST_BIN" ] || fail "SIRIO_SP1_HOST_BIN is not executable: $SIRIO_SP1_HOST_BIN"
+  new_world c22
+  mkdir -p "$W/host"
+  local old_host pidfile pane pid new_host
+  # The old host, started as an SP1 app would leave it: on-demand, detached
+  # from this shell, on this world's root.
+  SIRIO_HOST_HOME="$W/host" setsid "$SIRIO_SP1_HOST_BIN" --mode on-demand >"$W/sp1-host.log" 2>&1 </dev/null &
+  wait_until 10 test -s "$W/host/host-v1.json" || fail "the SP1 host did not record itself"
+  old_host=$(current_host_pid)
+  alive "$old_host" || fail "the SP1 host $old_host is not alive"
+  app_start
+  select_repo "$W/repo"
+  pidfile="$W/pid.txt"
+  pane=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 30 pid_written "$pidfile" || fail "the terminal opened over the SP1 host never wrote its pid"
+  pid=$(pid_in "$pidfile")
+  wait_until 10 beat_above "$pane" 1 || fail "the terminal opened over the SP1 host does not print"
+  wait_until 10 dead "$old_host" || fail "the SP1 host $old_host is still alive: the app held it"
+  new_host=$(current_host_pid)
+  { [ "$new_host" != "$old_host" ] && alive "$new_host"; } \
+    || fail "the host is $new_host, expected a new live host in place of the SP1 host $old_host"
+  probe term-list
+  [ "$RC" -eq 0 ] || fail "the new host does not advertise the terminal capability: $(head -c 200 "$W/probe.err")"
+  wait_until 30 session_listed "$pane" || fail "the new host does not list $pane"
+  [ "$(session_pid "$pane")" = "$pid" ] || fail "the new host lists pid $(session_pid "$pane") for $pane, expected $pid"
+  wait_until 10 clients_are 1 "$pane" || fail "the new host counts $(session_clients "$pane") clients for $pane, expected 1"
+  [ "$(pane_state "$pane" survives)" = true ] || fail "$pane does not report survives=true"
+  NOTE="SP1 host $old_host gone; $pane (pid $pid) on new host $new_host with the terminal capability"
+}
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
-  N="$1"; CASE_NAME="$2"; CASE_STARTED=$(date +%s); NOTE=""
+  N="$1"; CASE_NAME="$2"; CASE_STARTED=$(date +%s); NOTE=""; SKIPPED=0
   if [ -n "$ONLY" ] && [ "${ONLY#*,$N,}" = "$ONLY" ]; then return 0; fi
   "$3"
   end_case
+  # A case that could not run here says so, and is not counted as passed.
+  if [ "$SKIPPED" -eq 1 ]; then
+    echo "CASE $N $CASE_NAME SKIP${NOTE:+ ($NOTE)}"
+    return 0
+  fi
   pass
 }
 
@@ -1292,9 +1338,10 @@ run_case 18 recover-after-end-all case_recover_after_end_all
 run_case 19 recover-after-host-death case_recover_after_host_death
 run_case 20 close-connecting case_close_connecting
 run_case 21 exited-attach case_exited_attach
+run_case 22 sp1-host-upgrade case_sp1_host_upgrade
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 21 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 22 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi
