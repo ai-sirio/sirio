@@ -34,7 +34,7 @@ use sirio_project::{
     is_git_repository, numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
-    Abandon, HostLink, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal, TerminalActivityEvent,
+    Abandon, HostLink, HostOpenError, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal, TerminalActivityEvent,
     TerminalContextAction, TerminalContextEvent, TerminalDropEvent, TerminalExitStatus,
     TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
     TerminalPromptEvent, TerminalShell, TerminalView, command_shell_invocation,
@@ -7835,6 +7835,9 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// Gives a terminal the identity of `pane_id` and routes its events to the
+    /// workspace. A terminal bound again (a pane moved to a fresh id) keeps only
+    /// the subscriptions of its latest binding.
     fn bind_terminal(
         terminal: &Entity<TerminalView>,
         tab_id: usize,
@@ -7847,10 +7850,78 @@ impl SirioWorkspace {
                 format!("terminal-{pane_id}"),
             ));
         });
-        Self::subscribe_terminal(terminal, tab_id, pane_id, cx);
-        Self::subscribe_terminal_link(terminal, pane_id, cx);
-        Self::subscribe_terminal_activity(terminal, pane_id, cx);
-        Self::subscribe_terminal_drop(terminal, cx);
+        let subscriptions = vec![
+            Self::subscribe_terminal(terminal, tab_id, pane_id, cx),
+            Self::subscribe_terminal_link(terminal, pane_id, cx),
+            Self::subscribe_terminal_activity(terminal, pane_id, cx),
+            Self::subscribe_terminal_drop(terminal, cx),
+        ];
+        if !cx.has_global::<TerminalBindings>() {
+            cx.set_global(TerminalBindings::default());
+        }
+        cx.global_mut::<TerminalBindings>()
+            .0
+            .insert(terminal.entity_id(), subscriptions);
+    }
+
+    /// The tab and pane id of a terminal in the active worktree's strip.
+    fn terminal_pane_of(&self, terminal: &Entity<TerminalView>) -> Option<(usize, usize)> {
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut found = None;
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let TabContent::Terminal { view } = content
+                    && view == terminal
+                {
+                    found = Some(pane_id);
+                }
+            });
+            if let Some(pane_id) = found {
+                return Some((index, pane_id));
+            }
+        }
+        None
+    }
+
+    /// A terminal whose open found its session id held by another session
+    /// (SP2 fix batch 5, N5 and #11): the pane takes a fresh id from the one
+    /// allocator, its tab's history and its subscriptions follow it, and it
+    /// opens again. The held session is neither attached to nor closed.
+    fn rebind_taken_terminal(&mut self, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        let Some((tab_index, from)) = self.terminal_pane_of(terminal) else {
+            return;
+        };
+        let to = self.next_pane_id;
+        self.next_pane_id += 1;
+        self.move_terminal_pane(tab_index, from, to, terminal, cx);
+        terminal.update(cx, |view, cx| view.retry(cx));
+        self.sync_control_panes(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Renames pane `from` of tab `tab_index` to `to`: the tree's leaf, the
+    /// focus, the tab's history, the activity model's entry and the bindings
+    /// of `terminal`, which is bound under `to` from now on.
+    fn move_terminal_pane(
+        &mut self,
+        tab_index: usize,
+        from: usize,
+        to: usize,
+        terminal: &Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) {
+        let (tab_id, agent_id) = {
+            let tab = &mut self.tabs[tab_index];
+            tab.panes.rename_leaf(from, to);
+            if tab.focused_pane == from {
+                tab.focused_pane = to;
+            }
+            host_sessions::rename_pane_in_session_state(&mut tab.session_state, from, to);
+            (tab.id, tab.agent_id.clone())
+        };
+        self.activity.pane_closed(&format!("pane-{from}"));
+        register_restored_agent(&mut self.activity, to, agent_id.as_deref());
+        Self::bind_terminal(terminal, tab_id, to, cx);
     }
 
     /// Every open document and its view. Shared by `bind_file_tabs` and the
@@ -7955,7 +8026,7 @@ impl SirioWorkspace {
         tab_id: usize,
         pane_id: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui::Subscription {
         let expected_pane_id = format!("pane-{pane_id}");
         let terminal_entity = terminal.clone();
         cx.subscribe(
@@ -7986,14 +8057,13 @@ impl SirioWorkspace {
                 }
             },
         )
-        .detach();
     }
 
     fn subscribe_terminal_link(
         terminal: &Entity<TerminalView>,
         pane_id: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui::Subscription {
         let expected_pane_id = format!("pane-{pane_id}");
         cx.subscribe(
             terminal,
@@ -8010,7 +8080,6 @@ impl SirioWorkspace {
                 }
             },
         )
-        .detach();
     }
 
     /// F-CHG-18: a changed-file row dragged from the Changes panel onto a
@@ -8026,24 +8095,29 @@ impl SirioWorkspace {
     /// same action a changed-file row's own "Open Diff in Editor" menu item
     /// takes), so dropping a diff onto a terminal now opens/focuses that
     /// same Diff tab instead of silently updating a field nothing reads.
-    fn subscribe_terminal_drop(terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+    fn subscribe_terminal_drop(terminal: &Entity<TerminalView>, cx: &mut Context<Self>) -> gpui::Subscription {
         cx.subscribe(terminal, |workspace, _, event: &TerminalDropEvent, cx| {
             if let TerminalDropEvent::Diff { path, .. } = event {
                 workspace.add_changes_tab(Some(path.clone()), cx);
             }
         })
-        .detach();
     }
 
     fn subscribe_terminal_activity(
         terminal: &Entity<TerminalView>,
         pane_id: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui::Subscription {
         let activity_pane_id = format!("pane-{pane_id}");
         cx.subscribe(
             terminal,
             move |workspace, terminal, event: &TerminalActivityEvent, cx| {
+                // The open was refused because the id is held: the pane takes
+                // a fresh one and opens again (SP2 fix batch 5).
+                if matches!(event, TerminalActivityEvent::IdTaken) {
+                    workspace.rebind_taken_terminal(&terminal, cx);
+                    return;
+                }
                 sirio_perf::event(
                     match event {
                         TerminalActivityEvent::OscTitle(_) => "activity_event.osc_title",
@@ -8055,6 +8129,7 @@ impl SirioWorkspace {
                             "activity_event.lifecycle_changed"
                         }
                         TerminalActivityEvent::SessionLost => "activity_event.session_lost",
+                        TerminalActivityEvent::IdTaken => "activity_event.id_taken",
                     },
                     pane_id as u64,
                 );
@@ -8115,6 +8190,7 @@ impl SirioWorkspace {
                     // (`TerminalView::restart`, prelude replay). Mark and
                     // repaint like an exit; Layer D keeps polling `shell_pid()`,
                     // which now comes from the link.
+                    TerminalActivityEvent::IdTaken => {}
                     TerminalActivityEvent::SessionLost => {
                         workspace.mark_activity_dirty();
                         cx.notify();
@@ -8153,7 +8229,6 @@ impl SirioWorkspace {
                 }
             },
         )
-        .detach();
     }
 
     /// Layer C off the UI thread: takes the cheap agent-id lookup
@@ -23958,6 +24033,14 @@ fn ensure_windows_console() {
     }
 }
 
+/// The subscriptions that route a terminal pane's events to the workspace,
+/// keyed by the terminal's entity. A pane given a fresh id replaces its set, so
+/// the old subscriptions are dropped and no closure keeps routing a session's
+/// events to a pane id the pane no longer holds (fix batch 5).
+#[derive(Default)]
+struct TerminalBindings(HashMap<gpui::EntityId, Vec<gpui::Subscription>>);
+impl gpui::Global for TerminalBindings {}
+
 /// Keeps the app's route to its host for the app's lifetime. The host counts
 /// the route's connection as a client, so it does not idle out under a running
 /// app (spec §5.5). The route is the one place a host's client is replaced
@@ -23975,6 +24058,8 @@ enum HostUnavailable {
     NoHost(String),
     /// A host is there but the open failed.
     Failed(String),
+    /// The session id is held by another session: the pane takes a fresh id.
+    Taken(String),
 }
 
 /// The terminal client and reconnect closure of the host, as one unit.
@@ -24245,6 +24330,9 @@ impl SessionFactory for HostSessions {
                 Some(HostOpenSlot::Ready(Err(HostUnavailable::Failed(reason)))) => {
                     return OpenOutcome::Failed(reason);
                 }
+                Some(HostOpenSlot::Ready(Err(HostUnavailable::Taken(reason)))) => {
+                    return OpenOutcome::Taken(reason);
+                }
                 Some(HostOpenSlot::InFlight { abandoned }) => {
                     slots.insert(id.clone(), HostOpenSlot::InFlight { abandoned });
                     false
@@ -24311,7 +24399,12 @@ impl SessionFactory for HostSessions {
                                     reconnect,
                                 ) {
                                     Ok(link) => Ok(Box::new(link)),
-                                    Err(reason) => Err(HostUnavailable::Failed(reason)),
+                                    Err(HostOpenError::Taken(reason)) => {
+                                        Err(HostUnavailable::Taken(reason))
+                                    }
+                                    Err(HostOpenError::Failed(reason)) => {
+                                        Err(HostUnavailable::Failed(reason))
+                                    }
                                 }
                             }
                         };
@@ -26995,7 +27088,7 @@ done
             terminal.update(cx, |terminal, _| {
                 terminal.set_identity(TerminalIdentity::new("pane-0", "terminal-0"));
             });
-            SirioWorkspace::subscribe_terminal_link(&terminal, 0, cx);
+            SirioWorkspace::subscribe_terminal_link(&terminal, 0, cx).detach();
             terminal.update(cx, |_, cx| {
                 cx.emit(TerminalLinkEvent {
                     target: TerminalIdentity::new("pane-0", "terminal-0"),

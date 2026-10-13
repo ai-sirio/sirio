@@ -997,12 +997,13 @@ case_adopt_two_worktrees() {
 
 # A fresh terminal never attaches to a session that already holds its id: the
 # control session holding the next app id stays untouched, with no client and
-# its own pid, and the new terminal is not on that session.
+# its own pid. The new terminal moves to a fresh id and runs on its own session
+# (fix batch 5, N5 and #11: a refused id is never a dead end).
 case_duplicate_id() {
   new_world c12
   app_start
   select_repo "$W/repo"
-  local first next pidfile control_pid control_clients dup
+  local first next pidfile control_pid control_clients pid fresh
   first=$(open_terminal "sleep 300")
   [ -n "$first" ] || fail "the first terminal has no pane id"
   next="pane-$(( ${first#pane-} + 1 ))"
@@ -1012,18 +1013,18 @@ case_duplicate_id() {
   control_pid=$(session_pid "$next")
   control_clients=$(session_clients "$next")
   pidfile="$W/pid.txt"
-  dup=$(open_terminal "$(heartbeat "$pidfile")")
-  [ "$dup" = "$next" ] || fail "the new terminal got $dup, not the held id $next: the case proves nothing"
-  sleep 2
+  open_terminal "$(heartbeat "$pidfile")" >/dev/null
+  wait_until 30 pid_written "$pidfile" || fail "the new terminal (held id $next) never ran its command"
+  pid=$(pid_in "$pidfile")
+  term_list || true
+  fresh=$(printf '%s\n' "$TERM_LIST" | grep -E " pid=$pid( |\$)" | sed -n 's/^session=\([^ ]*\) .*/\1/p' | head -1)
+  [ -n "$fresh" ] && [ "$fresh" != "$next" ] || fail "the new terminal (pid $pid) did not get its own session (held $next, listed as ${fresh:-nothing})"
   session_listed "$next" || fail "the control session $next was ended"
   [ "$(session_clients "$next")" = "$control_clients" ] || fail "the new terminal attached to the control session $next (clients $(session_clients "$next"), expected $control_clients)"
   [ "$(session_pid "$next")" = "$control_pid" ] || fail "the held id $next now names another session"
   pid_alive "$control_pid" || fail "the control session pid $control_pid is not alive"
-  # The duplicate open fails and shows why; it runs no command at all, on the
-  # held session or on a local shell (finding 7: no fallback for a host open).
-  ! pid_written "$pidfile" || fail "the new terminal ran its command beside the control session"
   [ "$(session_origin "$next")" = control ] || fail "the control session $next changed origin"
-  NOTE="held $next (pid $control_pid, clients $control_clients) untouched; the new terminal failed, ran nothing"
+  NOTE="held $next (pid $control_pid, clients $control_clients) untouched; the new terminal took $fresh (pid $pid)"
 }
 
 case_close_worktree() {

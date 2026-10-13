@@ -59,6 +59,7 @@ pub use context_menu::{
 pub use domain::{SplitAxis, SplitDirection, SplitTree, TerminalKey};
 pub use lifecycle::{CachedTerminalPane, TerminalPaneCache, TerminalSurfaceHost};
 pub use link::{
+    HostOpenError,
     Abandon, HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory,
     SessionFactoryGlobal, SessionLink,
 };
@@ -185,6 +186,10 @@ pub enum TerminalActivityEvent {
     /// keeps its scrollback; the app offers a Restart, which replays it as
     /// the new session's prelude.
     SessionLost,
+    /// The open was refused because the session id is held by another session
+    /// on the host. The pane stays failed until its owner gives it a fresh
+    /// identity and reopens it (fix batch 5, N5 and #11).
+    IdTaken,
 }
 
 /// The renderer-owned state that persistence and headless verification can
@@ -2877,6 +2882,18 @@ impl TerminalView {
             }
             // An attached view that cannot attach shows the lost session; it
             // never falls back to a shell under the session's id (spec §5).
+            // The id is held by another session (a fresh open, or a restore
+            // whose listed session is not this worktree's). Nothing is
+            // attached or closed here: the pane asks its owner for a fresh id.
+            OpenOutcome::Taken(reason) => {
+                eprintln!("[sirio] terminal id {} is held on the host: {reason}", request.session_id);
+                self.view_mode.survives = true;
+                self.fallback_reason = None;
+                self.session_lost = false;
+                self.terminal = TerminalState::Failed { message: reason };
+                self.host.teardown();
+                cx.emit(TerminalActivityEvent::IdTaken);
+            }
             OpenOutcome::Failed(reason) if request.attach_only => {
                 self.pending_prelude.clear();
                 self.pending_recreate = false;
@@ -2938,7 +2955,7 @@ impl TerminalView {
     /// against, but the generation still bumps so the surface host's count
     /// reflects every real "started a fresh process" event, not just the
     /// ones reached through [`Self::restart`].
-    fn retry(&mut self, cx: &mut gpui::Context<Self>) {
+    pub fn retry(&mut self, cx: &mut gpui::Context<Self>) {
         self.host.relaunch();
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
@@ -8552,6 +8569,88 @@ mod view_tests {
         assert!(
             recorded.iter().all(|recreate| !recreate),
             "Restart on a failed pane asked the factory to close the session its id names: {recorded:?}"
+        );
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Records each open's session id and refuses it as `Taken`, as a fresh
+    /// open of an id the host already holds is refused.
+    struct TakenFactory {
+        opened: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl SessionFactory for TakenFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            self.opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.session_id);
+            OpenOutcome::Taken("pane-7 is already a session on the host".to_string())
+        }
+    }
+
+    /// Finding N5 and #11: an open refused because its id is held runs nothing
+    /// and attaches to nothing. The pane stays failed and tells its owner
+    /// (`IdTaken`), which gives it a fresh identity; reopening under that
+    /// identity is the only open the factory sees for the new id.
+    #[gpui::test]
+    async fn a_taken_open_reports_the_id_and_reopens_under_a_new_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The host answers later: the first open waits, then the factory
+        // global changes to the one that refuses the id.
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingSessionFactory))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-taken-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal");
+            view.set_identity(TerminalIdentity::new("pane-7", "terminal-7"));
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let taken = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let _subscription = cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            let taken = taken.clone();
+            cx.subscribe(&terminal, move |_, event: &TerminalActivityEvent, _| {
+                if matches!(event, TerminalActivityEvent::IdTaken) {
+                    *taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                }
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            cx.set_global(SessionFactoryGlobal(Some(Arc::new(TakenFactory {
+                opened: opened.clone(),
+            }))));
+        });
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window.root::<TerminalView>().flatten().expect("terminal root")
+        });
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.is_failed()),
+            "a taken open leaves the pane failed"
+        );
+        assert_eq!(*taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner), 1);
+        assert_eq!(
+            *opened.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["pane-7".to_string()],
+        );
+        terminal.update(&mut cx.cx, |terminal, cx| {
+            terminal.set_identity(TerminalIdentity::new("pane-8", "terminal-8"));
+            terminal.retry(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *opened.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["pane-7".to_string(), "pane-8".to_string()],
+            "the reopen goes out under the fresh identity"
         );
         let _ = std::fs::remove_dir_all(working_directory);
     }

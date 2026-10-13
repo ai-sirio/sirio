@@ -125,6 +125,34 @@ pub enum OpenOutcome {
     /// No host is available (absent, or without the `terminal` capability):
     /// the only case that falls back to `LocalLink` (spec §8).
     NoHost(String),
+    /// The session id is already held by another session on the host, and
+    /// this open would create a session under it (a fresh open, or a restore
+    /// whose listed session belongs to another worktree). Nothing is attached
+    /// or closed: the owner gives the pane a fresh id and opens it again
+    /// (fix batch 5, N5 and #11).
+    Taken(String),
+}
+
+/// Why a host open produced no link. `Taken` is the only failure its owner
+/// answers by changing the pane's id; every other one is shown as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostOpenError {
+    Taken(String),
+    Failed(String),
+}
+
+impl From<String> for HostOpenError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl std::fmt::Display for HostOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Taken(message) | Self::Failed(message) => formatter.write_str(message),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -436,7 +464,7 @@ impl HostLink {
     pub fn attach_or_create(
         client: TermClient,
         request: &OpenRequest,
-    ) -> Result<HostLink, String> {
+    ) -> Result<HostLink, HostOpenError> {
         Self::attach_or_create_with_reconnect(client, request, Arc::new(|| None))
     }
 
@@ -447,7 +475,7 @@ impl HostLink {
         client: TermClient,
         request: &OpenRequest,
         reconnect: ReconnectFn,
-    ) -> Result<HostLink, String> {
+    ) -> Result<HostLink, HostOpenError> {
         // Subscribed before the listing and the attach: an exit after this
         // point is an event, and one before it is in the listing (finding 9).
         let events_rx = client.events().map_err(|error| error.to_string())?;
@@ -460,16 +488,16 @@ impl HostLink {
         let listed_exit = listed_summary.and_then(|summary| summary.exit.clone());
         let plan = open_plan(listed_pid.is_some(), request.attach_only, request.restore);
         if plan == OpenPlan::Lost {
-            return Err(format!(
+            return Err(HostOpenError::Failed(format!(
                 "Session lost: {} is no longer on the host",
                 request.session_id
-            ));
+            )));
         }
         if plan == OpenPlan::Duplicate {
-            return Err(format!(
+            return Err(HostOpenError::Taken(format!(
                 "{} is already a session on the host; a new terminal does not attach to it",
                 request.session_id
-            ));
+            )));
         }
         let created_pid = if plan == OpenPlan::Create {
             let params = CreateParams {
@@ -501,7 +529,15 @@ impl HostLink {
                 {
                     None
                 }
-                Err(error) => return Err(error.to_string()),
+                // A fresh open that lost the race to another create of its id
+                // is refused the same way as a listed one (taken, not attached).
+                Err(CallError::Remote(body))
+                    if body.code == ErrorCode::InvalidParams
+                        && body.message.contains("duplicate") =>
+                {
+                    return Err(HostOpenError::Taken(body.message.clone()));
+                }
+                Err(error) => return Err(error.to_string().into()),
             }
         } else {
             None

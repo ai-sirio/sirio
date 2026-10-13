@@ -197,3 +197,87 @@ mod tests {
         assert_eq!(app_sessions_to_end(&listed, &closing, &known, &HashSet::new()), ["pane-1", "pane-2"]);
     }
 }
+
+/// Renames a pane id everywhere a tab's history names it: its root, its split
+/// and close events, and the scrollback keyed by it (fix batch 5). The tab's
+/// tree is renamed separately, leaf by leaf.
+pub fn rename_pane_in_session_state(
+    state: &mut crate::session::SessionTabState,
+    from: usize,
+    to: usize,
+) {
+    use crate::session::PaneEvent;
+    if state.root_id == Some(from) {
+        state.root_id = Some(to);
+    }
+    for event in &mut state.pane_events {
+        match event {
+            PaneEvent::Split {
+                focused, new_id, ..
+            } => {
+                if *focused == from {
+                    *focused = to;
+                }
+                if *new_id == from {
+                    *new_id = to;
+                }
+            }
+            PaneEvent::Close { id } => {
+                if *id == from {
+                    *id = to;
+                }
+            }
+            PaneEvent::SetRatio { .. } => {}
+        }
+    }
+    if let Some(scrollback) = state.scrollback.remove(&from) {
+        state.scrollback.insert(to, scrollback);
+    }
+}
+
+#[cfg(test)]
+mod pane_id_tests {
+    use super::*;
+    use crate::session::{PaneEvent, SessionTabState};
+
+    #[test]
+    fn a_moved_pane_is_renamed_in_its_tab_history() {
+        let mut state = SessionTabState {
+            root_id: Some(2),
+            pane_events: vec![
+                PaneEvent::Split {
+                    focused: 2,
+                    new_id: 3,
+                    direction: "right".to_string(),
+                },
+                PaneEvent::Split {
+                    focused: 3,
+                    new_id: 4,
+                    direction: "down".to_string(),
+                },
+                PaneEvent::Close { id: 4 },
+            ],
+            ..SessionTabState::default()
+        };
+        state.scrollback.insert(2, b"root".to_vec());
+        state.scrollback.insert(9, b"other".to_vec());
+        rename_pane_in_session_state(&mut state, 2, 7);
+        assert_eq!(state.root_id, Some(7));
+        assert_eq!(
+            state.pane_events[0],
+            PaneEvent::Split {
+                focused: 7,
+                new_id: 3,
+                direction: "right".to_string(),
+            }
+        );
+        assert_eq!(state.pane_events[1], PaneEvent::Split {
+            focused: 3,
+            new_id: 4,
+            direction: "down".to_string(),
+        });
+        assert!(state.scrollback.contains_key(&7));
+        assert!(!state.scrollback.contains_key(&2));
+        assert!(state.scrollback.contains_key(&9));
+    }
+}
