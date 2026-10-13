@@ -1414,12 +1414,15 @@ case_adopt_after_late_host() {
   wait_until 90 grep -q "host unavailable" "$W/app.log" || fail "the startup ensure never reported the stopped host"
   kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
   STOPPED=()
-  first=$(open_terminal "sleep 300")
-  wait_until 60 pane_known "$pane" || fail "the first terminal $first opened after SIGCONT did not adopt the orphan $pane"
+  # The reconnect the app makes once the host answers (its initial terminal is
+  # waiting on the host) adopts the orphan. No terminal is opened here: a new
+  # tab made in the same instant would take the active tab from the adopted one,
+  # which is not drawn, so it never opens and never attaches until it is selected.
+  wait_until 60 pane_known "$pane" || fail "the reconnect after SIGCONT did not adopt the orphan $pane"
   wait_until 20 survives_is "$pane" true || fail "the adopted $pane is not attached to the host (survives $(pane_state "$pane" survives 2>/dev/null))"
   [ "$(session_pid "$pane")" = "$pid" ] || fail "the adopted $pane is another session (pid $(session_pid "$pane"), expected $pid)"
   wait_until 10 clients_are 1 "$pane" || fail "the adopted $pane has $(session_clients "$pane") clients, expected 1"
-  NOTE="orphan $pane (pid $pid) adopted by the first open after SIGCONT, attached with one client"
+  NOTE="orphan $pane (pid $pid) adopted by the reconnect after SIGCONT, attached with one client"
 }
 
 # Finding N3 (a restore attaches only to a session its own worktree holds): A's
@@ -1503,6 +1506,37 @@ case_nested_app_own_host() {
   wait_until 30 grep -q "running" "$W/panel-in-pane.txt" \
     || fail "a sirioctl in app 1's pane did not reach app 1's host: $(head -c 300 "$W/panel-in-pane.txt" 2>/dev/null)"
   NOTE="app 2 host $host2_pid, app 1 host $host1_pid; app 1's $pane1 (pid $pid1) not on app 2's host; sirioctl in $pane3 reached app 1's host"
+}
+
+# Fix batch 6, N4 (no re-ensure storm): the host binary starts and never
+# answers, so every ensure waits out its start and finds no host. The app's
+# startup ensure is the one attempt the storm may cost; three terminals opened
+# in quick succession share its answer. All three fall back to LocalLink within
+# 15 s of being opened, and the host is started once in all. The stub records
+# each start, so the count is the spawns themselves, not a log line.
+case_ensure_storm() {
+  new_world c30
+  local stub="$W/stub-host" starts="$W/host-starts.txt" first second third count
+  printf '#!/bin/sh\necho "$$" >> %s\nexit 0\n' "$starts" >"$stub"
+  chmod +x "$stub"
+  export SIRIO_HOST_BIN="$stub"
+  app_start
+  select_repo "$W/repo"
+  first=$(open_terminal "sleep 300")
+  second=$(open_terminal "sleep 300")
+  third=$(open_terminal "sleep 300")
+  wait_until 15 all_fallen_back "$first" "$second" "$third" \
+    || fail "the three terminals ($first, $second, $third) did not all fall back to LocalLink within 15 s (survives: $(pane_state "$first" survives 2>/dev/null)/$(pane_state "$second" survives 2>/dev/null)/$(pane_state "$third" survives 2>/dev/null))"
+  count=0
+  if [ -f "$starts" ]; then count=$(wc -l <"$starts" | tr -d ' '); fi
+  [ "$count" -le 1 ] || fail "the host was started $count times for three terminals; at most the startup's own start is allowed"
+  NOTE="three terminals on LocalLink within 15 s; host started $count time(s)"
+}
+all_fallen_back() { # panes: each reports survives=false
+  local p
+  for p in "$@"; do
+    [ "$(pane_state "$p" survives 2>/dev/null)" = false ] || return 1
+  done
 }
 
 run_case() { # number name function
@@ -1628,9 +1662,10 @@ run_case 26 restart-on-failed-is-safe case_restart_on_failed_is_safe
 run_case 27 adopt-after-late-host case_adopt_after_late_host
 run_case 28 restore-stale-id-of-another-worktree case_restore_stale_id_of_another_worktree
 run_case 29 nested-app-own-host case_nested_app_own_host
+run_case 30 ensure-storm case_ensure_storm
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 23 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED cases passed)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

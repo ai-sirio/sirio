@@ -80,7 +80,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -24253,10 +24253,13 @@ struct HostRoute {
     current_exe: PathBuf,
     /// The client of the last successful ensure, read without waiting.
     current: Mutex<Option<HostClient>>,
-    /// Held for the length of one ensure, and it keeps the handle that holds
-    /// the host's connection for the app. Replaced with the handle of each
-    /// successful ensure.
-    ensure: Mutex<Option<sirio_host_client::HostHandle>>,
+    /// Held for the length of one ensure: the handle that holds the host's
+    /// connection for the app, and the last failure (fix batch 6, N4).
+    ensure: Mutex<EnsureSlot>,
+    /// How many ensures have completed, successful or not. Read before a
+    /// caller waits for the lock, so the caller can tell an ensure it waited
+    /// for from one that finished before it began.
+    completed: AtomicU64,
     /// The GPUI thread's client (End All, Show session, worktree close).
     host_terminal: Arc<HostTerminal>,
     /// The control socket's client (`panel.*`).
@@ -24282,7 +24285,8 @@ impl HostRoute {
             environment,
             current_exe,
             current: Mutex::new(None),
-            ensure: Mutex::new(None),
+            ensure: Mutex::new(EnsureSlot::default()),
+            completed: AtomicU64::new(0),
             host_terminal,
             control_terminal,
             present: AtomicBool::new(false),
@@ -24313,7 +24317,7 @@ impl HostRoute {
         control: Option<sirio_host_client::TermClient>,
         reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
     ) {
-        let mut ensure = self
+        let mut slot = self
             .ensure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -24327,8 +24331,47 @@ impl HostRoute {
             .current
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(HostClient { client, reconnect });
-        *ensure = Some(handle);
+        self.succeed(&mut slot, handle);
+    }
+
+    /// Records a successful ensure: its handle is kept, and the failure it
+    /// replaces is forgotten, so the next open after a lost client ensures at
+    /// once (spec §3.1: re-ensure only after a client that was connected).
+    fn succeed(&self, slot: &mut EnsureSlot, handle: sirio_host_client::HostHandle) {
+        self.completed.fetch_add(1, Ordering::AcqRel);
+        slot.failed = None;
+        slot.handle = Some(handle);
         self.present.store(true, Ordering::Release);
+    }
+
+    /// Records a failed ensure: no handle is kept, the host is not present,
+    /// and the failure is what the callers that waited for it, and any caller
+    /// inside its back-off, are answered with.
+    fn fail(&self, slot: &mut EnsureSlot, why: HostUnavailable) {
+        let completed = self.completed.fetch_add(1, Ordering::AcqRel) + 1;
+        slot.handle = None;
+        slot.failed = Some(EnsureFailure {
+            completed,
+            at: Instant::now(),
+            why,
+        });
+        self.present.store(false, Ordering::Release);
+    }
+
+    /// The startup ensure found no host and could not start one: terminals
+    /// opened after it take that answer, as they would take a failed ensure of
+    /// their own, rather than each starting a host of its own (fix batch 6,
+    /// N4). A failure with a live host is not recorded: a terminal waits for
+    /// that host as before (spec §8).
+    fn record_startup_failure(&self, error: &sirio_host_client::EnsureError) {
+        if !error.means_no_host() {
+            return;
+        }
+        let mut slot = self
+            .ensure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.fail(&mut slot, HostUnavailable::NoHost(error.to_string()));
     }
 
     /// The client a terminal open uses: the current one while its connection
@@ -24338,13 +24381,28 @@ impl HostRoute {
         if let Some(current) = self.current() {
             return Ok(current);
         }
-        let mut ensure = self
+        // Read before the wait: an ensure that completes after this point is
+        // one this caller waited for, and its failure is shared with it.
+        let seen = self.completed.load(Ordering::Acquire);
+        let mut slot = self
             .ensure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Another worker's ensure may have finished while this one waited.
         if let Some(current) = self.current() {
             return Ok(current);
+        }
+        if let Some(failure) = &slot.failed {
+            // A failure this caller waited for is shared, whatever it was. A
+            // failure that leaves no host is also answered for 30 s: re-running
+            // it only starts another host that will not answer. A failure with
+            // a live host is not held back, so the next open asks again.
+            let shared = failure.completed > seen;
+            let backed_off = matches!(failure.why, HostUnavailable::NoHost(_))
+                && failure.at.elapsed() < NO_HOST_BACKOFF;
+            if shared || backed_off {
+                return Err(failure.why.clone());
+            }
         }
         *self
             .current
@@ -24353,8 +24411,7 @@ impl HostRoute {
         let handle = match ensure_now(self.environment.clone(), self.current_exe.clone()) {
             Ok(handle) => handle,
             Err(unavailable) => {
-                *ensure = None;
-                self.present.store(false, Ordering::Release);
+                self.fail(&mut slot, unavailable.clone());
                 return Err(unavailable);
             }
         };
@@ -24362,11 +24419,10 @@ impl HostRoute {
             // Held by nobody: a host without sessions of ours can idle out
             // (spec §5.5). Terminals fall back as the banner says.
             drop(handle);
-            *ensure = None;
-            self.present.store(false, Ordering::Release);
-            return Err(HostUnavailable::NoHost(
-                "the host has no terminal capability".to_string(),
-            ));
+            let unavailable =
+                HostUnavailable::NoHost("the host has no terminal capability".to_string());
+            self.fail(&mut slot, unavailable.clone());
+            return Err(unavailable);
         };
         let reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync> =
             handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
@@ -24394,10 +24450,28 @@ impl HostRoute {
             .current
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fresh.clone());
-        *ensure = Some(handle);
-        self.present.store(true, Ordering::Release);
+        self.succeed(&mut slot, handle);
         Ok(fresh)
     }
+}
+
+/// How long a failed ensure that leaves no host is answered from its failure
+/// (fix batch 6, N4).
+const NO_HOST_BACKOFF: Duration = Duration::from_secs(30);
+
+/// What a route's ensure holds: the handle of the host it found, and the last
+/// failed ensure, if the last one failed.
+#[derive(Default)]
+struct EnsureSlot {
+    handle: Option<sirio_host_client::HostHandle>,
+    failed: Option<EnsureFailure>,
+}
+
+/// A failed ensure: how many ensures had completed when it did, when, and why.
+struct EnsureFailure {
+    completed: u64,
+    at: Instant,
+    why: HostUnavailable,
 }
 
 /// `ensure_host`, retried while a host holds its lock and does not answer
@@ -24893,6 +24967,7 @@ fn ensure_host_in_background(
                 }
                 Err(error) => {
                     eprintln!("[sirio] host unavailable: {error}");
+                    route.record_startup_failure(&error);
                     // The terminals' opens ask the route again, so a host
                     // that answers later is still found (spec §3.1).
                     install_host_sessions(route_connect(route.clone()), cx);
