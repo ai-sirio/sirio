@@ -290,6 +290,12 @@ session_clients() { term_list || true; session_line "$1" | sed -n 's/.* clients=
 clients_are() { # count id: re-read on every poll
   [ "$(session_clients "$2")" = "$1" ]
 }
+survives_is() { # pane value: re-read on every poll
+  [ "$(pane_state "$1" survives 2>/dev/null)" = "$2" ]
+}
+tab_count_is() { # count: re-read on every poll
+  [ "$(tab_count 2>/dev/null)" = "$1" ]
+}
 session_origin() { term_list || true; session_line "$1" | sed -n 's/.* origin=\([a-z]*\).*/\1/p'; }
 
 # The host of the current world has left once its state file is gone.
@@ -504,7 +510,7 @@ survive() { # kill|quit
   app_start
   wait_until 30 pane_known "$pane" || fail "the relaunched app does not show $pane"
   wait_until 20 beat_above "$pane" "$before" || fail "$pane did not print past beat=$before after the $mode"
-  wait_until 10 [ "$(session_clients "$pane")" = 1 ] || fail "the host counts $(session_clients "$pane") clients, expected 1"
+  wait_until 10 clients_are 1 "$pane" || fail "the host counts $(session_clients "$pane") clients, expected 1"
   [ "$(session_pid "$pane")" = "$pid" ] || fail "the pid of $pane changed across the $mode"
   NOTE="pid $pid kept printing from beat $before"
   capture "$mode-after"
@@ -625,7 +631,7 @@ case_orphan() {
   [ "$(session_origin "$pane")" = app ] || fail "the orphan $pane is not origin app"
   app_start
   wait_until 30 pane_known "$pane" || fail "the relaunched app did not adopt $pane"
-  wait_until 10 [ "$(pane_state "$pane" survives)" = true ] || fail "the adopted $pane is not attached to the host (survives $(pane_state "$pane" survives), clients $(session_clients "$pane"))"
+  wait_until 10 survives_is "$pane" true || fail "the adopted $pane is not attached to the host (survives $(pane_state "$pane" survives), clients $(session_clients "$pane"))"
   wait_until 20 beat_above "$pane" 0 || fail "the adopted $pane does not print"
   [ "$(session_pid "$pane")" = "$pid" ] || fail "the adopted $pane is another session"
   wait_until 10 clients_are 1 "$pane" || fail "the adopted $pane has $(session_clients "$pane") clients, expected 1; tabs $(ctl_json surface tabs read); state $(ctl_json panel state "$pane")"
@@ -645,7 +651,7 @@ case_show_session() {
   [ -n "$id" ] || fail "panel create answered no id"
   before=$(tab_count)
   ctl panel show "$id" >/dev/null
-  wait_until 5 [ "$(tab_count)" = "$((before + 1))" ] || fail "panel show did not open one tab"
+  wait_until 5 tab_count_is "$((before + 1))" || fail "panel show did not open one tab"
   ctl panel show "$id" >/dev/null
   sleep 1
   [ "$(tab_count)" = "$((before + 1))" ] || fail "a second panel show opened another tab"
@@ -653,11 +659,11 @@ case_show_session() {
   pid=$(session_pid "$id")
   [ -n "$pid" ] || fail "the shown session $id is not on the host"
   ctl surface tabs close "$shown_count" --confirm >/dev/null
-  wait_until 5 [ "$(tab_count)" = "$before" ] || fail "closing the shown tab did not remove it"
+  wait_until 5 tab_count_is "$before" || fail "closing the shown tab did not remove it"
   session_listed "$id" || fail "closing the shown tab ended $id on the host"
   pid_alive "$pid" || fail "closing the shown tab killed pid $pid"
   ctl panel show "$id" >/dev/null
-  wait_until 5 [ "$(tab_count)" = "$((before + 1))" ] || fail "the second show did not open a tab"
+  wait_until 5 tab_count_is "$((before + 1))" || fail "the second show did not open a tab"
   app_kill9
   app_start
   wait_until 30 pane_known "$id" || fail "the relaunched app does not know $id"
@@ -707,7 +713,7 @@ print(int((os.stat(sock).st_mtime - os.stat(lock).st_mtime) * 1000))' "$W/host/h
   # starts once the host lists the pane: from then on survives must reach
   # true and then stay true for three seconds of samples. A LocalLink fallback
   # at any sample fails the case, not only the end state.
-  wait_until 10 [ "$(pane_state "$pane" survives)" = true ] || fail "the restored $pane never reached the host"
+  wait_until 10 survives_is "$pane" true || fail "the restored $pane never reached the host"
   for _ in $(seq 1 30); do
     [ "$(pane_state "$pane" survives)" = true ] || fail "the restored $pane fell back to LocalLink after the host listed it"
     sleep 0.1
@@ -797,7 +803,7 @@ case_unverifiable_no_fallback() {
     sleep 0.5
   done
   kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
-  wait_until 60 [ "$(pane_state "$pane" survives 2>/dev/null)" = true ] || fail "the restored tab $pane is not attached after SIGCONT (survives $(pane_state "$pane" survives 2>/dev/null))"
+  wait_until 60 survives_is "$pane" true || fail "the restored tab $pane is not attached after SIGCONT (survives $(pane_state "$pane" survives 2>/dev/null))"
   [ "$(session_pid "$pane")" = "$pid" ] || fail "the restored tab $pane is another session (pid $(session_pid "$pane"), expected $pid)"
   wait_until 20 clients_are 1 "$pane" || fail "the restored tab $pane has $(session_clients "$pane") clients, expected 1"
   NOTE="restored $pane (pid $pid): no local child while unverifiable; attached after SIGCONT"
@@ -984,7 +990,7 @@ case_adopt_two_worktrees() {
   pid_alive "$pb_pid" || fail "pid $pb_pid of $pb is not alive after the relaunch"
   ctl select-workspace --workspace "$wt_b_id" >/dev/null
   sleep 2
-  wait_until 10 [ "$(pane_state "$pb" survives)" = true ] || fail "B's tab $pb is not attached to its session after select-workspace B"
+  wait_until 10 survives_is "$pb" true || fail "B's tab $pb is not attached to its session after select-workspace B"
   [ "$(session_pid "$pb")" = "$pb_pid" ] || fail "B's session $pb is another session (pid $(session_pid "$pb"), expected $pb_pid)"
   NOTE="A strip unchanged at $count_before; $pa (pid $pa_pid) and $pb (pid $pb_pid) alive; B attached"
 }
