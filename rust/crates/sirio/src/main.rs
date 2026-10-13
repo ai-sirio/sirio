@@ -34,7 +34,7 @@ use sirio_project::{
     is_git_repository, numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
-    HostLink, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal, TerminalActivityEvent,
+    Abandon, HostLink, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal, TerminalActivityEvent,
     TerminalContextAction, TerminalContextEvent, TerminalDropEvent, TerminalExitStatus,
     TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
     TerminalPromptEvent, TerminalShell, TerminalView, command_shell_invocation,
@@ -24072,8 +24072,9 @@ type HostConnect =
     Arc<dyn Fn() -> Result<HostConnectResult, HostUnavailable> + Send + Sync>;
 
 enum HostOpenSlot {
-    /// The worker is running.
-    InFlight,
+    /// The worker is running. `abandoned` is the end or detach the view asked
+    /// for before the open finished (finding 12): the worker applies it.
+    InFlight { abandoned: Option<Abandon> },
     Ready(Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable>),
 }
 
@@ -24101,6 +24102,22 @@ impl Drop for HostOpenWorkerGuard {
     }
 }
 
+/// Ends or detaches a session an open produced after its view let go of it
+/// (finding 12). A failed open applies `End` to nothing: a session the failed
+/// open may have created is not closed by id, because a listed id can belong
+/// to another session that the open refused as a duplicate.
+fn settle_abandoned(
+    result: Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable>,
+    intent: Abandon,
+) {
+    if let Ok(link) = result {
+        match intent {
+            Abandon::End => link.end(),
+            Abandon::Detach => link.detach(),
+        }
+    }
+}
+
 impl SessionFactory for HostSessions {
     fn open(&self, request: OpenRequest) -> OpenOutcome {
         let id = request.session_id.clone();
@@ -24121,12 +24138,12 @@ impl SessionFactory for HostSessions {
                 Some(HostOpenSlot::Ready(Err(HostUnavailable::Failed(reason)))) => {
                     return OpenOutcome::Failed(reason);
                 }
-                Some(HostOpenSlot::InFlight) => {
-                    slots.insert(id.clone(), HostOpenSlot::InFlight);
+                Some(HostOpenSlot::InFlight { abandoned }) => {
+                    slots.insert(id.clone(), HostOpenSlot::InFlight { abandoned });
                     false
                 }
                 None => {
-                    slots.insert(id.clone(), HostOpenSlot::InFlight);
+                    slots.insert(id.clone(), HostOpenSlot::InFlight { abandoned: None });
                     true
                 }
             }
@@ -24191,10 +24208,26 @@ impl SessionFactory for HostSessions {
                                 }
                             }
                         };
-                    slots
+                    let mut stored = slots
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(request.session_id.clone(), HostOpenSlot::Ready(result));
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match stored.get(&request.session_id) {
+                        Some(HostOpenSlot::InFlight {
+                            abandoned: Some(intent),
+                        }) => {
+                            let intent = *intent;
+                            stored.remove(&request.session_id);
+                            drop(stored);
+                            settle_abandoned(result, intent);
+                        }
+                        _ => {
+                            stored.insert(
+                                request.session_id.clone(),
+                                HostOpenSlot::Ready(result),
+                            );
+                            drop(stored);
+                        }
+                    }
                     let _ = wake.unbounded_send(());
                     std::mem::forget(guard);
                 }
@@ -24208,6 +24241,29 @@ impl SessionFactory for HostSessions {
             return OpenOutcome::Failed("could not start the session open".to_string());
         }
         OpenOutcome::Pending
+    }
+
+    fn abandon(&self, session_id: &str, intent: Abandon) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slots.get_mut(session_id) {
+            Some(HostOpenSlot::InFlight { abandoned }) => {
+                *abandoned = Some(abandoned.map_or(intent, |held| held.merge(intent)));
+            }
+            Some(HostOpenSlot::Ready(_)) => {
+                let Some(HostOpenSlot::Ready(result)) = slots.remove(session_id) else {
+                    return;
+                };
+                drop(slots);
+                // Off the GPUI thread: ending or detaching is a host call.
+                let _ = std::thread::Builder::new()
+                    .name("sirio-host-abandon".into())
+                    .spawn(move || settle_abandoned(result, intent));
+            }
+            None => {}
+        }
     }
 }
 

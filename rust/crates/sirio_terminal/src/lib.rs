@@ -59,8 +59,8 @@ pub use context_menu::{
 pub use domain::{SplitAxis, SplitDirection, SplitTree, TerminalKey};
 pub use lifecycle::{CachedTerminalPane, TerminalPaneCache, TerminalSurfaceHost};
 pub use link::{
-    HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal,
-    SessionLink,
+    Abandon, HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory,
+    SessionFactoryGlobal, SessionLink,
 };
 pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
@@ -2186,6 +2186,13 @@ pub struct TerminalView {
     /// Replaced, never stacked: assigning drops the previous subscription,
     /// which unsubscribes it.
     factory_observer: Option<gpui::Subscription>,
+    /// The factory that answered the open still in flight (`Pending`), kept
+    /// so an end or detach while Connecting reaches the open (finding 12).
+    /// `shutdown(&self)` has no `cx`, so the global cannot be asked then.
+    connecting_factory: Option<Arc<dyn SessionFactory>>,
+    /// The end or detach this view was given while it had no session yet.
+    /// A view that was abandoned never opens again.
+    abandoned: std::cell::Cell<Option<Abandon>>,
     empty_prompt: bool,
     font_size: Pixels,
     focus_handle: gpui::FocusHandle,
@@ -2386,6 +2393,8 @@ impl TerminalView {
             pending_recreate: false,
             session_lost: false,
             factory_observer: None,
+            connecting_factory: None,
+            abandoned: std::cell::Cell::new(None),
             empty_prompt: false,
             font_size: FONT_SIZE,
             focus_handle,
@@ -2424,6 +2433,8 @@ impl TerminalView {
             pending_recreate: false,
             session_lost: false,
             factory_observer: None,
+            connecting_factory: None,
+            abandoned: std::cell::Cell::new(None),
             empty_prompt: true,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
@@ -2484,6 +2495,8 @@ impl TerminalView {
             pending_recreate: false,
             session_lost: false,
             factory_observer: None,
+            connecting_factory: None,
+            abandoned: std::cell::Cell::new(None),
             empty_prompt: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
@@ -2801,6 +2814,11 @@ impl TerminalView {
         if self.empty_prompt {
             return;
         }
+        // Ended or dropped while it waited: never opened again, so nothing is
+        // created or attached for a tab that is gone (finding 12).
+        if self.abandoned.get().is_some() {
+            return;
+        }
         // A fresh `Pending` opens at once; a `Connecting` pane retries on
         // every trigger (render, factory-global change) until the factory
         // answers `Linked` or `Failed`. A `Pending` factory outcome is
@@ -2812,10 +2830,16 @@ impl TerminalView {
             return;
         }
         let request = self.open_request();
-        let outcome = match cx.try_global::<SessionFactoryGlobal>() {
-            Some(SessionFactoryGlobal(Some(factory))) => factory.open(request.clone()),
-            Some(SessionFactoryGlobal(None)) | None => Self::open_local(&request),
+        let factory = cx
+            .try_global::<SessionFactoryGlobal>()
+            .and_then(|SessionFactoryGlobal(factory)| factory.clone());
+        let outcome = match &factory {
+            Some(factory) => factory.open(request.clone()),
+            None => Self::open_local(&request),
         };
+        if !matches!(outcome, OpenOutcome::Pending) {
+            self.connecting_factory = None;
+        }
         match outcome {
             OpenOutcome::Linked(link) => {
                 let survives = link.survives_app();
@@ -2835,7 +2859,9 @@ impl TerminalView {
             }
             OpenOutcome::Pending => {
                 // Waiting on the host: no local shell exists, so the session
-                // is not a LocalLink (finding 7).
+                // is not a LocalLink (finding 7). The factory that answered
+                // keeps the open an end or detach can reach (finding 12).
+                self.connecting_factory = factory;
                 self.view_mode.survives = true;
                 self.terminal = TerminalState::Connecting;
                 // Registered once per view and replaced, never stacked:
@@ -2953,8 +2979,12 @@ impl TerminalView {
         }
         // A restart re-opens under the same id: the factory closes the old
         // host session synchronously before re-creating (see `OpenRequest.recreate`).
+        // Only a running session is ended here: a pane still connecting must
+        // not be marked abandoned, or its reopen below would never happen.
         self.pending_recreate = true;
-        self.shutdown();
+        if matches!(self.terminal, TerminalState::Running(_)) {
+            self.shutdown();
+        }
         self.host.relaunch();
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
@@ -3210,8 +3240,12 @@ impl TerminalView {
     /// GPUI entity is still alive, avoiding background-test scheduler
     /// activity during drop.
     pub fn shutdown(&self) {
-        if let TerminalState::Running(terminal) = &self.terminal {
-            terminal.shutdown();
+        match &self.terminal {
+            TerminalState::Running(terminal) => terminal.shutdown(),
+            TerminalState::Pending | TerminalState::Connecting => {
+                self.abandon(Abandon::End);
+            }
+            TerminalState::Failed { .. } => {}
         }
     }
 
@@ -3219,8 +3253,23 @@ impl TerminalView {
     /// close). Dropping a view must never end a host session, so `Drop`
     /// calls this, not `shutdown()`.
     pub fn detach(&self) {
-        if let TerminalState::Running(terminal) = &self.terminal {
-            terminal.detach();
+        match &self.terminal {
+            TerminalState::Running(terminal) => terminal.detach(),
+            TerminalState::Pending | TerminalState::Connecting => {
+                self.abandon(Abandon::Detach);
+            }
+            TerminalState::Failed { .. } => {}
+        }
+    }
+
+    /// The view wants no session from its open any more. The factory that
+    /// answered `Pending` applies the intent when the open finishes; the view
+    /// never opens again (finding 12).
+    fn abandon(&self, intent: Abandon) {
+        let merged = self.abandoned.get().map_or(intent, |held| held.merge(intent));
+        self.abandoned.set(Some(merged));
+        if let Some(factory) = &self.connecting_factory {
+            factory.abandon(self.identity.pane_id(), intent);
         }
     }
 

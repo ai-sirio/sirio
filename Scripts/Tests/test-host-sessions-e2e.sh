@@ -1117,6 +1117,37 @@ case_recover_after_host_death() {
   NOTE="host $old_host died; $pane2 (pid $pid2) and restarted $lost (pid $restarted_pid) on new host $new_host"
 }
 
+# Finding 12 (closing a tab while it connects): the host is stopped before the
+# tab opens, so the open waits in its first host call. The tab is closed in that
+# wait, and the host is continued inside the open's own window. The closed
+# tab's session must never be left listed, and nothing may stay attached to it.
+case_close_connecting() {
+  new_world c20
+  app_start
+  select_repo "$W/repo"
+  local host_pid pidfile pane count
+  host_pid=$(current_host_pid)
+  pidfile="$W/pid.txt"
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  STOPPED+=("$host_pid")
+  pane=$(open_terminal "$(heartbeat "$pidfile")")
+  sleep 1
+  count=$(tab_count)
+  ctl surface tabs close "$count" --confirm >/dev/null || fail "closing the connecting tab was refused"
+  sleep 1
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  STOPPED=()
+  sleep 2
+  if [ -s "$pidfile" ]; then
+    local pid
+    pid=$(pid_in "$pidfile")
+    wait_until 5 dead "$pid" || fail "the session of the closed tab $pane ran (pid $pid is alive)"
+  fi
+  wait_until 10 session_gone "$pane" \
+    || fail "the closed tab's session $pane is still on the host (clients $(session_clients "$pane"))"
+  NOTE="$pane closed while connecting: not listed on the host after the host was resumed"
+}
+
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1227,9 +1258,10 @@ run_case 16 end-all-host-stopped case_end_all_host_stopped
 run_case 17 panel-wait-no-stall case_panel_wait_does_not_stall
 run_case 18 recover-after-end-all case_recover_after_end_all
 run_case 19 recover-after-host-death case_recover_after_host_death
+run_case 20 close-connecting case_close_connecting
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 19 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 20 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

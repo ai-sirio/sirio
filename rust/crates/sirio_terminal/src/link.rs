@@ -60,6 +60,33 @@ pub enum LinkChunk {
 /// a build with no host) every pane gets a `LocalLink`.
 pub trait SessionFactory: Send + Sync + 'static {
     fn open(&self, request: OpenRequest) -> OpenOutcome;
+
+    /// The view that asked for `session_id` no longer wants it: it was ended
+    /// or dropped while its open was still in flight. The factory applies
+    /// the intent when the open finishes, so nothing is left attached or
+    /// created for a tab that is gone (SP2 review finding 12). The default
+    /// does nothing.
+    fn abandon(&self, _session_id: &str, _intent: Abandon) {}
+}
+
+/// What a view wants done with a session its open has not yet delivered:
+/// `End` closes it (an owned tab closed while connecting), `Detach` only
+/// stops the view from attaching to it. `End` wins over `Detach`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Abandon {
+    Detach,
+    End,
+}
+
+impl Abandon {
+    /// The stronger of two intents.
+    pub fn merge(self, other: Abandon) -> Abandon {
+        if self == Abandon::End || other == Abandon::End {
+            Abandon::End
+        } else {
+            Abandon::Detach
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
