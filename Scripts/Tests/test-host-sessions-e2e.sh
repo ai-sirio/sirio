@@ -1388,6 +1388,40 @@ case_restart_on_failed_is_safe() {
   NOTE="restarted $pane attached to its original pid $pid after SIGCONT"
 }
 
+# Finding 6 and N5 (the startup work runs on the first adoption, not only at
+# the startup's): the app starts while the host is unverifiable, so no startup
+# work runs. An orphan session of the app's own (no tab names it) stands on the
+# host. Once the host answers, the first terminal's open adopts the host, and
+# the orphan is adopted with it: it becomes a tab, attached to its own pid.
+case_adopt_after_late_host() {
+  new_world c27
+  local pane pidfile pid host_pid first
+  pane=pane-7
+  pidfile="$W/pid.txt"
+  app_start
+  select_repo "$W/repo"
+  app_quit
+  probe ensure
+  [ "$RC" -eq 0 ] || fail "host_probe ensure failed: $OUT"
+  probe term-create "$W/repo" --id "$pane" --origin app -- /bin/sh -c "$(heartbeat "$pidfile")"
+  [ "$RC" -eq 0 ] || fail "host_probe term-create failed: $OUT"
+  wait_until 10 pid_written "$pidfile" || fail "the orphan session never wrote its pid"
+  pid=$(pid_in "$pidfile")
+  host_pid=$(current_host_pid)
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  STOPPED+=("$host_pid")
+  app_start
+  wait_until 90 grep -q "host unavailable" "$W/app.log" || fail "the startup ensure never reported the stopped host"
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  STOPPED=()
+  first=$(open_terminal "sleep 300")
+  wait_until 60 pane_known "$pane" || fail "the first terminal $first opened after SIGCONT did not adopt the orphan $pane"
+  wait_until 20 survives_is "$pane" true || fail "the adopted $pane is not attached to the host (survives $(pane_state "$pane" survives 2>/dev/null))"
+  [ "$(session_pid "$pane")" = "$pid" ] || fail "the adopted $pane is another session (pid $(session_pid "$pane"), expected $pid)"
+  wait_until 10 clients_are 1 "$pane" || fail "the adopted $pane has $(session_clients "$pane") clients, expected 1"
+  NOTE="orphan $pane (pid $pid) adopted by the first open after SIGCONT, attached with one client"
+}
+
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1510,6 +1544,7 @@ run_case 23 close-unvisited-worktree case_close_unvisited_worktree
 run_case 24 close-worktree-id-collision case_close_worktree_id_collision
 run_case 25 fresh-tab-never-dead-ends case_fresh_tab_never_dead_ends
 run_case 26 restart-on-failed-is-safe case_restart_on_failed_is_safe
+run_case 27 adopt-after-late-host case_adopt_after_late_host
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 23 cases)"

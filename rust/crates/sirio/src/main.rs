@@ -24239,6 +24239,11 @@ struct HostRoute {
     control_terminal: Arc<HostTerminal>,
     /// Whether the last ensure found a host with the terminal capability.
     present: AtomicBool,
+    /// Every adoption a `connect` makes sends the host's listing here, and the
+    /// GPUI thread applies the startup work (the floor, the orphans and the
+    /// control registry) with it (SP2 fix batch 5). Read on the GPUI thread
+    /// only through [`ensure_host_in_background`]'s receiver.
+    adopted: Mutex<futures::channel::mpsc::UnboundedSender<Vec<sirio_host_protocol::term::SessionSummary>>>,
 }
 
 impl HostRoute {
@@ -24247,6 +24252,7 @@ impl HostRoute {
         current_exe: PathBuf,
         host_terminal: Arc<HostTerminal>,
         control_terminal: Arc<HostTerminal>,
+        adopted: futures::channel::mpsc::UnboundedSender<Vec<sirio_host_protocol::term::SessionSummary>>,
     ) -> Self {
         Self {
             environment,
@@ -24256,6 +24262,7 @@ impl HostRoute {
             host_terminal,
             control_terminal,
             present: AtomicBool::new(false),
+            adopted: Mutex::new(adopted),
         }
     }
 
@@ -24346,6 +24353,15 @@ impl HostRoute {
             self.control_terminal
                 .set(control, Some(Arc::clone(&reconnect)));
         }
+        // The first adoption after a startup that did not find the host (or a
+        // re-ensure of a lost host) runs the startup work the startup's own
+        // adoption ran: the floor, the orphans and the control registry.
+        let listed = client.list().map(|list| list.sessions).unwrap_or_default();
+        let _ = self
+            .adopted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unbounded_send(listed);
         let fresh = HostClient {
             client,
             reconnect,
@@ -24707,12 +24723,47 @@ fn ensure_host_in_background(
     cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
     let environment: BTreeMap<String, String> = std::env::vars().collect();
     let current_exe = std::env::current_exe().unwrap_or_default();
+    let (adopted_tx, mut adopted_rx) = futures::channel::mpsc::unbounded::<
+        Vec<sirio_host_protocol::term::SessionSummary>,
+    >();
     let route = Arc::new(HostRoute::new(
         environment.clone(),
         current_exe.clone(),
         host_terminal.clone(),
         control_terminal.clone(),
+        adopted_tx,
     ));
+    {
+        let workspace_slot = workspace_slot.clone();
+        let panes = panes.clone();
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            // An adoption made off the GPUI thread (a `connect` after the host
+            // was lost or was not found at startup) applies the startup work here.
+            while let Some(sessions) = adopted_rx.next().await {
+                let _ = cx.update(|cx| {
+                    let listed: Vec<String> =
+                        sessions.iter().map(|s| s.session_id.clone()).collect();
+                    let floor = host_sessions::next_pane_floor(&listed);
+                    let _ = panes.set_control_sessions(
+                        sirio_control::host_panels::control_sessions_from(&sessions),
+                    );
+                    if let Some(workspace) = workspace_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .cloned()
+                    {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.raise_next_pane_id(floor);
+                            workspace.adopt_host_orphans(sessions, cx);
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
+    }
     cx.set_global(HostConnection(Some(route.clone())));
     // The GPUI thread's client is filled by the route when a host answers.
     cx.set_global(HostTerminalGlobal(host_terminal.clone()));
