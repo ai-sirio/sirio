@@ -981,6 +981,18 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             socket,
             &sirio_control::protocol::request::terminal_open(parsed.value("cmd")),
         ),
+        ("terminal", "restart" | "state") => {
+            let pane = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing pane id".to_string())?;
+            let request = if action == "restart" {
+                sirio_control::protocol::request::terminal_restart(pane)
+            } else {
+                sirio_control::protocol::request::terminal_state(pane)
+            };
+            require_ok(socket, &request)
+        }
         ("tabs", "select" | "close") => {
             let position = parsed
                 .positional

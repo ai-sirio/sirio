@@ -743,6 +743,24 @@ pub mod request {
         request("surface.terminal.open", params)
     }
 
+    /// Debug-only `surface.terminal.restart {pane}`: Restart on an application
+    /// terminal tab, as its *Session lost* button does.
+    pub fn terminal_restart(pane: &str) -> ControlRequest {
+        request(
+            "surface.terminal.restart",
+            BTreeMap::from([("pane".to_string(), pane.to_string())]),
+        )
+    }
+
+    /// Debug-only `surface.terminal.state {pane}`: `sessionLost` of an
+    /// application terminal tab.
+    pub fn terminal_state(pane: &str) -> ControlRequest {
+        request(
+            "surface.terminal.state",
+            BTreeMap::from([("pane".to_string(), pane.to_string())]),
+        )
+    }
+
     pub fn file_read() -> ControlRequest {
         request("surface.file.read", BTreeMap::new())
     }

@@ -1307,6 +1307,18 @@ enum ControlAction {
         command: Option<String>,
         reply: ControlReply,
     },
+    /// Debug-only `surface.terminal.restart {pane}`: Restart on a terminal
+    /// tab, as its *Session lost* button does.
+    TerminalRestart {
+        pane: String,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.terminal.state {pane}`: whether the tab shows
+    /// *Session lost*.
+    TerminalState {
+        pane: String,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -2520,6 +2532,8 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.changes.confirm");
                     methods.push("surface.host.end_all");
                     methods.push("surface.terminal.open");
+                    methods.push("surface.terminal.restart");
+                    methods.push("surface.terminal.state");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2885,6 +2899,14 @@ impl ControlHandler for AppControlHandler {
             "surface.terminal.open" if cfg!(debug_assertions) => {
                 let command = request.params.get("cmd").cloned();
                 self.queue_action(request, move |reply| ControlAction::OpenTerminal { command, reply })
+            }
+            "surface.terminal.restart" if cfg!(debug_assertions) => {
+                let pane = request.params.get("pane").cloned().unwrap_or_default();
+                self.queue_action(request, move |reply| ControlAction::TerminalRestart { pane, reply })
+            }
+            "surface.terminal.state" if cfg!(debug_assertions) => {
+                let pane = request.params.get("pane").cloned().unwrap_or_default();
+                self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
             }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.tabs.select" => {
@@ -5669,6 +5691,12 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::OpenTerminal { command, reply } => {
                                     let _ = reply.send(workspace.control_open_terminal(command, cx));
+                                }
+                                ControlAction::TerminalRestart { pane, reply } => {
+                                    let _ = reply.send(workspace.control_terminal_restart(&pane, cx));
+                                }
+                                ControlAction::TerminalState { pane, reply } => {
+                                    let _ = reply.send(workspace.control_terminal_state(&pane, cx));
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -12370,7 +12398,7 @@ impl SirioWorkspace {
     fn request_end_all_sessions(&mut self, cx: &mut Context<Self>) {
         if cx
             .try_global::<HostConnection>()
-            .is_none_or(|conn| conn.0.is_none())
+            .is_none_or(|conn| !conn.0.as_ref().is_some_and(|route| route.has_host()))
         {
             return;
         }
@@ -16679,6 +16707,44 @@ impl SirioWorkspace {
         Ok(vec![("pane".to_string(), pane)])
     }
 
+    /// The terminal of the pane `pane` (`pane-<n>`), in whichever tab holds it.
+    fn control_terminal_view(&self, pane: &str) -> Result<Entity<TerminalView>, String> {
+        let id: usize = pane
+            .strip_prefix("pane-")
+            .unwrap_or(pane)
+            .parse()
+            .map_err(|_| format!("{pane} is not a pane id"))?;
+        let mut found = None;
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |pane_id, content| {
+                if pane_id == id && found.is_none() {
+                    found = content.terminal();
+                }
+            });
+        }
+        found.ok_or_else(|| format!("no terminal {pane} in any tab"))
+    }
+
+    fn control_terminal_restart(
+        &mut self,
+        pane: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.control_terminal_view(pane)?;
+        view.update(cx, |terminal, cx| terminal.restart(cx));
+        Ok(Vec::new())
+    }
+
+    fn control_terminal_state(
+        &self,
+        pane: &str,
+        cx: &App,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.control_terminal_view(pane)?;
+        let lost = view.read(cx).session_lost();
+        Ok(vec![("sessionLost".to_string(), lost.to_string())])
+    }
+
     /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
     fn control_read_tabs(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let mut report = vec![
@@ -20479,7 +20545,7 @@ impl SirioWorkspace {
             symbols_available: self.active_file_offers_symbols(cx),
             has_host: cx
                 .try_global::<HostConnection>()
-                .is_some_and(|conn| conn.0.is_some()),
+                .is_some_and(|conn| conn.0.as_ref().is_some_and(|route| route.has_host())),
             control_sessions: self
                 .panes
                 .control_sessions()
@@ -23785,13 +23851,197 @@ fn ensure_windows_console() {
     }
 }
 
-/// Keeps the app's connection to its host for the app's lifetime: the host
-/// counts this connection as a client, so it does not idle out under a
-/// running app (spec §5.5). Nothing functional depends on it in SP1 (spec
-/// §7) — it is held, and its status line is shown in Settings → General.
-// Held, never read in SP1: dropping it is what would end the connection.
-struct HostConnection(#[allow(dead_code)] Option<sirio_host_client::HostHandle>);
+/// Keeps the app's route to its host for the app's lifetime. The host counts
+/// the route's connection as a client, so it does not idle out under a running
+/// app (spec §5.5). The route is the one place a host's client is replaced
+/// (see [`HostRoute`]); the palette and End All read whether there is a host.
+struct HostConnection(Option<Arc<HostRoute>>);
 impl gpui::Global for HostConnection {}
+
+/// Why a host open gave no session. Only `NoHost` falls back to a local
+/// shell (spec §8): a host that is there but could not be reached may hold
+/// the session live, so a local shell beside it would run a second agent
+/// (review finding 7).
+#[derive(Clone, Debug)]
+enum HostUnavailable {
+    /// No host, or one without the `terminal` capability.
+    NoHost(String),
+    /// A host is there but the open failed.
+    Failed(String),
+}
+
+/// The terminal client and reconnect closure of the host, as one unit.
+#[derive(Clone)]
+struct HostClient {
+    client: sirio_host_client::TermClient,
+    reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+}
+
+/// The app's one route to its host's terminal sessions (SP2 review finding 6).
+/// Every open, Restart and the control socket reach the host through it. A
+/// client whose connection has closed (the host was killed, or End All ended
+/// it) is replaced by what one `ensure_host` finds, and only when a terminal
+/// asks for one: the next terminal starts a host again (spec §3.1, §4.2 row
+/// 7). Nothing re-ensures on a timer or on a silent host (spec §8). One ensure
+/// runs at a time; a second caller waits for it and takes the client it made.
+struct HostRoute {
+    environment: BTreeMap<String, String>,
+    current_exe: PathBuf,
+    /// The client of the last successful ensure, read without waiting.
+    current: Mutex<Option<HostClient>>,
+    /// Held for the length of one ensure, and it keeps the handle that holds
+    /// the host's connection for the app. Replaced with the handle of each
+    /// successful ensure.
+    ensure: Mutex<Option<sirio_host_client::HostHandle>>,
+    /// The GPUI thread's client (End All, Show session, worktree close).
+    host_terminal: Arc<HostTerminal>,
+    /// The control socket's client (`panel.*`).
+    control_terminal: Arc<HostTerminal>,
+    /// Whether the last ensure found a host with the terminal capability.
+    present: AtomicBool,
+}
+
+impl HostRoute {
+    fn new(
+        environment: BTreeMap<String, String>,
+        current_exe: PathBuf,
+        host_terminal: Arc<HostTerminal>,
+        control_terminal: Arc<HostTerminal>,
+    ) -> Self {
+        Self {
+            environment,
+            current_exe,
+            current: Mutex::new(None),
+            ensure: Mutex::new(None),
+            host_terminal,
+            control_terminal,
+            present: AtomicBool::new(false),
+        }
+    }
+
+    fn has_host(&self) -> bool {
+        self.present.load(Ordering::Acquire)
+    }
+
+    /// The client of the last ensure, when its connection is still up.
+    fn current(&self) -> Option<HostClient> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|current| !current.client.closed())
+            .cloned()
+    }
+
+    /// Records the host the startup ensure found: its handle, the terminal
+    /// client and the control socket's own client.
+    fn adopt(
+        &self,
+        handle: sirio_host_client::HostHandle,
+        client: sirio_host_client::TermClient,
+        control: Option<sirio_host_client::TermClient>,
+        reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+    ) {
+        let mut ensure = self
+            .ensure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.host_terminal
+            .set(client.clone(), Some(Arc::clone(&reconnect)));
+        if let Some(control) = control {
+            self.control_terminal
+                .set(control, Some(Arc::clone(&reconnect)));
+        }
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(HostClient { client, reconnect });
+        *ensure = Some(handle);
+        self.present.store(true, Ordering::Release);
+    }
+
+    /// The client a terminal open uses: the current one while its connection
+    /// is up, else the one a fresh `ensure_host` finds. Blocking: call it off
+    /// the GPUI thread only.
+    fn connect(&self) -> Result<HostClient, HostUnavailable> {
+        if let Some(current) = self.current() {
+            return Ok(current);
+        }
+        let mut ensure = self
+            .ensure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Another worker's ensure may have finished while this one waited.
+        if let Some(current) = self.current() {
+            return Ok(current);
+        }
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let handle = match ensure_now(self.environment.clone(), self.current_exe.clone()) {
+            Ok(handle) => handle,
+            Err(unavailable) => {
+                *ensure = None;
+                self.present.store(false, Ordering::Release);
+                return Err(unavailable);
+            }
+        };
+        let Some(client) = handle.term() else {
+            // Held by nobody: a host without sessions of ours can idle out
+            // (spec §5.5). Terminals fall back as the banner says.
+            drop(handle);
+            *ensure = None;
+            self.present.store(false, Ordering::Release);
+            return Err(HostUnavailable::NoHost(
+                "the host has no terminal capability".to_string(),
+            ));
+        };
+        let reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync> =
+            handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
+        let control = handle.term();
+        self.host_terminal
+            .set(client.clone(), Some(Arc::clone(&reconnect)));
+        if let Some(control) = control {
+            self.control_terminal
+                .set(control, Some(Arc::clone(&reconnect)));
+        }
+        let fresh = HostClient {
+            client,
+            reconnect,
+        };
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fresh.clone());
+        *ensure = Some(handle);
+        self.present.store(true, Ordering::Release);
+        Ok(fresh)
+    }
+}
+
+/// `ensure_host`, retried while a host holds its lock and does not answer
+/// (review finding 7): three bounded attempts, as at startup. Any other
+/// failure means there is no host (spec §8).
+fn ensure_now(
+    environment: BTreeMap<String, String>,
+    current_exe: PathBuf,
+) -> Result<sirio_host_client::HostHandle, HostUnavailable> {
+    const ATTEMPTS: usize = 3;
+    let options = host_ensure_options(environment, current_exe)
+        .map_err(|error| HostUnavailable::NoHost(error.to_string()))?;
+    let mut last = String::from("the host did not answer");
+    for _ in 0..ATTEMPTS {
+        match sirio_host_client::ensure_host(&options) {
+            Ok(handle) => return Ok(handle),
+            Err(error @ sirio_host_client::EnsureError::Unverifiable { .. }) => {
+                last = error.to_string();
+            }
+            Err(error) => return Err(HostUnavailable::NoHost(error.to_string())),
+        }
+    }
+    Err(HostUnavailable::Failed(last))
+}
 
 /// The app's session factory: every terminal opens through the host.
 ///
@@ -23806,8 +24056,7 @@ impl gpui::Global for HostConnection {}
 /// link is handed out once, never to two views.
 struct HostSessions {
     /// Yields the terminal client and its reconnect closure. Off the GPUI
-    /// thread, once per open: a fixed client when the host answered at
-    /// startup, and a fresh `ensure_host` when it did not (finding 7).
+    /// thread, once per open: the route's current client, or a fresh ensure.
     connect: HostConnect,
     slots: Arc<Mutex<HashMap<String, HostOpenSlot>>>,
     wake: futures::channel::mpsc::UnboundedSender<()>,
@@ -23819,11 +24068,13 @@ type HostConnectResult = (
     sirio_host_client::TermClient,
     Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
 );
-type HostConnect = Arc<dyn Fn() -> Result<HostConnectResult, String> + Send + Sync>;
+type HostConnect =
+    Arc<dyn Fn() -> Result<HostConnectResult, HostUnavailable> + Send + Sync>;
 
 enum HostOpenSlot {
+    /// The worker is running.
     InFlight,
-    Ready(Result<Box<dyn sirio_terminal::SessionLink>, String>),
+    Ready(Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable>),
 }
 
 /// Stored as `Failed` if the open worker unwinds before finishing: an id must
@@ -23840,7 +24091,9 @@ impl Drop for HostOpenWorkerGuard {
             if !matches!(slots.get(&self.id), Some(HostOpenSlot::Ready(_))) {
                 slots.insert(
                     self.id.clone(),
-                    HostOpenSlot::Ready(Err("the host open worker panicked".to_string())),
+                    HostOpenSlot::Ready(Err(HostUnavailable::Failed(
+                        "the host open worker panicked".to_string(),
+                    ))),
                 );
             }
         }
@@ -23862,7 +24115,12 @@ impl SessionFactory for HostSessions {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match slots.remove(&id) {
                 Some(HostOpenSlot::Ready(Ok(link))) => return OpenOutcome::Linked(link),
-                Some(HostOpenSlot::Ready(Err(reason))) => return OpenOutcome::Failed(reason),
+                Some(HostOpenSlot::Ready(Err(HostUnavailable::NoHost(reason)))) => {
+                    return OpenOutcome::NoHost(reason);
+                }
+                Some(HostOpenSlot::Ready(Err(HostUnavailable::Failed(reason)))) => {
+                    return OpenOutcome::Failed(reason);
+                }
                 Some(HostOpenSlot::InFlight) => {
                     slots.insert(id.clone(), HostOpenSlot::InFlight);
                     false
@@ -23894,9 +24152,9 @@ impl SessionFactory for HostSessions {
                     // Blocking host work stays off the GPUI thread (SP1 §7):
                     // reaching the host, the recreate close-and-wait and the
                     // attach-or-create round trips all run here.
-                    let result: Result<Box<dyn sirio_terminal::SessionLink>, String> =
+                    let result: Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable> =
                         match connect() {
-                            Err(reason) => Err(reason),
+                            Err(unavailable) => Err(unavailable),
                             Ok((client, reconnect)) => {
                                 if request.recreate {
                                     // RESTART RACE (Task 9 review): `restart` queues
@@ -23929,7 +24187,7 @@ impl SessionFactory for HostSessions {
                                     reconnect,
                                 ) {
                                     Ok(link) => Ok(Box::new(link)),
-                                    Err(reason) => Err(reason),
+                                    Err(reason) => Err(HostUnavailable::Failed(reason)),
                                 }
                             }
                         };
@@ -23954,25 +24212,11 @@ impl SessionFactory for HostSessions {
 }
 
 /// The host is still being found; the view waits in `Connecting`.
-
-/// The host is still being found; the view waits in `Connecting`.
 struct PendingFactory;
 
 impl SessionFactory for PendingFactory {
     fn open(&self, _request: OpenRequest) -> OpenOutcome {
         OpenOutcome::Pending
-    }
-}
-
-/// No host (or no `terminal` capability): every pane falls back to
-/// `LocalLink` with the reason in its banner.
-struct FailingFactory {
-    reason: String,
-}
-
-impl SessionFactory for FailingFactory {
-    fn open(&self, _request: OpenRequest) -> OpenOutcome {
-        OpenOutcome::NoHost(self.reason.clone())
     }
 }
 
@@ -24004,45 +24248,6 @@ fn host_ensure_options(
     })
 }
 
-/// A client already in hand, for the host that answered at startup.
-fn fixed_connect(
-    client: sirio_host_client::TermClient,
-    reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
-) -> HostConnect {
-    Arc::new(move || Ok((client.clone(), Arc::clone(&reconnect))))
-}
-
-/// Re-ensures the host on each open, for a host that held its lock but did
-/// not answer at startup (finding 7). Each open re-attempts the host: a host
-/// that answers now is attached, one that still does not fails the open (never
-/// a local shell). A host that is absent or refused is not retried here.
-fn retry_connect(environment: BTreeMap<String, String>, current_exe: PathBuf) -> HostConnect {
-    const ATTEMPTS: usize = 3;
-    Arc::new(move || {
-        let mut last = String::from("the host did not answer");
-        for _ in 0..ATTEMPTS {
-            let options = host_ensure_options(environment.clone(), current_exe.clone())
-                .map_err(|error| error.to_string())?;
-            match sirio_host_client::ensure_host(&options) {
-                Ok(handle) => {
-                    let client = handle
-                        .term()
-                        .ok_or_else(|| "the host has no terminal capability".to_string())?;
-                    let reconnect = handle
-                        .term_reconnect()
-                        .unwrap_or_else(|| Arc::new(|| None));
-                    return Ok((client, reconnect));
-                }
-                Err(error @ sirio_host_client::EnsureError::Unverifiable { .. }) => {
-                    last = error.to_string();
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        Err(last)
-    })
-}
-
 /// Installs the terminals' session factory over `connect`, and re-sets the
 /// global whenever an open worker finishes, which wakes every `Connecting`
 /// view (Task 9).
@@ -24066,6 +24271,15 @@ fn install_host_sessions(connect: HostConnect, cx: &mut App) {
     .detach();
 }
 
+/// The factory's connect closure for `route`.
+fn route_connect(route: Arc<HostRoute>) -> HostConnect {
+    Arc::new(move || {
+        route
+            .connect()
+            .map(|connected| (connected.client, connected.reconnect))
+    })
+}
+
 /// Finds, starts or adopts the session host on a thread of its own —
 /// `ensure_host` blocks, up to ~15 s on a host that will not answer, and a
 /// background-executor worker held that long starves every other task queued
@@ -24074,9 +24288,10 @@ fn install_host_sessions(connect: HostConnect, cx: &mut App) {
 /// nothing else changes.
 ///
 /// Terminals wait in `Connecting` while the host is found (`PendingFactory`
-/// installed below before the ensure thread spawns); once the host answers,
-/// the factory flips to `HostSessions` (or `FailingFactory` with the reason),
-/// which wakes every `Connecting` view (Task 9).
+/// installed below before the ensure thread spawns); once the ensure ends,
+/// the factory flips to the route's `HostSessions`, which wakes every
+/// `Connecting` view (Task 9). A later open re-ensures through the route when
+/// its client has closed (finding 6).
 fn ensure_host_in_background(
     settings: Entity<Settings>,
     workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
@@ -24088,8 +24303,15 @@ fn ensure_host_in_background(
     cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
     let environment: BTreeMap<String, String> = std::env::vars().collect();
     let current_exe = std::env::current_exe().unwrap_or_default();
-    let retry_environment = environment.clone();
-    let retry_exe = current_exe.clone();
+    let route = Arc::new(HostRoute::new(
+        environment.clone(),
+        current_exe.clone(),
+        host_terminal.clone(),
+        control_terminal.clone(),
+    ));
+    cx.set_global(HostConnection(Some(route.clone())));
+    // The GPUI thread's client is filled by the route when a host answers.
+    cx.set_global(HostTerminalGlobal(host_terminal.clone()));
     let (sender, outcome) = futures::channel::oneshot::channel();
     let ensure = move || {
         let options = host_ensure_options(environment, current_exe)?;
@@ -24099,10 +24321,9 @@ fn ensure_host_in_background(
         // sessions in SP1, and holding it would keep it from idling out
         // (spec §5.6).
         handle.previous = None;
-        // Blocking host work stays off the GPUI thread (SP1 §7): the
-        // terminal client and the single startup `term.list` (floor +
-        // orphans) are resolved here, on the ensure worker. The UI thread
-        // below only installs the factory and applies the listed sessions.
+        // The startup's client and listing are resolved here, on the ensure
+        // worker. The UI thread below only installs the factory and applies
+        // the listed sessions.
         let term_data = handle.term().map(|client| {
             let reconnect: Arc<
                 dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync,
@@ -24146,20 +24367,11 @@ fn ensure_host_in_background(
                                 .map(|s| s.session_id.clone())
                                 .collect();
                             let floor = host_sessions::next_pane_floor(&listed);
-                            // One factory `Arc` (and one slot map) shared by
-                            // the installed global and the wakeup task: each
-                            // worker completion re-sets the same `Arc`, which
-                            // retries every `Connecting` view (Task 9).
-                            host_terminal.set(client.clone(), Some(reconnect.clone()));
-                            if let Some(control) = control {
-                                control_terminal.set(control, Some(reconnect.clone()));
-                            }
-                            cx.set_global(HostTerminalGlobal(host_terminal.clone()));
+                            route.adopt(handle, client, control, reconnect);
                             let _ = panes.set_control_sessions(
                                 sirio_control::host_panels::control_sessions_from(&sessions),
                             );
-                            install_host_sessions(fixed_connect(client, reconnect), cx);
-                            cx.set_global(HostConnection(Some(handle)));
+                            install_host_sessions(route_connect(route.clone()), cx);
                             if let Some(workspace) = workspace_slot
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -24171,39 +24383,25 @@ fn ensure_host_in_background(
                                     workspace.adopt_host_orphans(sessions, cx);
                                 });
                             }
-                            line
                         }
                         None => {
-                            let reason = "the host has no terminal capability".to_string();
+                            // No `terminal` capability (an SP1 host, say): the
+                            // handle is dropped, so the host is held by nobody
+                            // and can idle out (spec §5.5). The route asks
+                            // again on each open and reports the reason.
                             eprintln!("[sirio] host has no terminal capability");
-                            cx.set_global(SessionFactoryGlobal(Some(Arc::new(
-                                FailingFactory {
-                                    reason: reason.clone(),
-                                },
-                            ))));
-                            cx.set_global(HostConnection(Some(handle)));
-                            line
+                            drop(handle);
+                            install_host_sessions(route_connect(route.clone()), cx);
                         }
                     }
+                    line
                 }
                 Err(error) => {
                     eprintln!("[sirio] host unavailable: {error}");
-                    let line = sirio_host_client::status_line_for_error(&error);
-                    if matches!(error, sirio_host_client::EnsureError::Unverifiable { .. }) {
-                        // A host that holds its lock is not absent: its
-                        // terminals re-attempt it, and never fall back to a
-                        // local shell (finding 7).
-                        install_host_sessions(
-                            retry_connect(retry_environment.clone(), retry_exe.clone()),
-                            cx,
-                        );
-                    } else {
-                        let reason = error.to_string();
-                        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingFactory {
-                            reason,
-                        }))));
-                    }
-                    line
+                    // The terminals' opens ask the route again, so a host
+                    // that answers later is still found (spec §3.1).
+                    install_host_sessions(route_connect(route.clone()), cx);
+                    sirio_host_client::status_line_for_error(&error)
                 }
             };
             settings.update(cx, |settings, cx| settings.set_host_status(Some(line), cx));
@@ -39383,6 +39581,8 @@ done
             | ControlAction::ClosePane { reply }
             | ControlAction::EndAllSessions { reply }
             | ControlAction::OpenTerminal { reply, .. }
+            | ControlAction::TerminalRestart { reply, .. }
+            | ControlAction::TerminalState { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -39511,6 +39711,9 @@ done
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
+            "surface.terminal.restart" | "surface.terminal.state" => {
+                request_with_params(method, &[("pane", "pane-1")])
+            }
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),

@@ -26,6 +26,12 @@ impl TermClient {
         mux.has_terminal().then_some(Self { mux })
     }
 
+    /// Whether the connection behind this client has closed (the host went
+    /// away, or ended the connection). A closed client never answers again.
+    pub fn closed(&self) -> bool {
+        self.mux.closed()
+    }
+
     pub fn create(&self, params: &CreateParams) -> Result<Created, CallError> {
         let value = serde_json::to_value(params).map_err(decode_error)?;
         self.call_typed(method::TERM_CREATE, value, true, CALL_TIMEOUT)

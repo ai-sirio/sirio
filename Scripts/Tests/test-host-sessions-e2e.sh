@@ -340,6 +340,13 @@ pane_state() { # pane key
   ctl_json panel state "$1" | field "$2"
 }
 pane_known() { ctl_json panel state "$1" >/dev/null 2>&1; }
+# Whether a terminal tab shows *Session lost* (surface.terminal.state, debug only).
+session_lost_of() { # pane
+  ctl_json surface terminal state "$1" 2>/dev/null | field sessionLost
+}
+lost_flagged() { [ "$(session_lost_of "$1")" = true ]; }
+# A pane whose exit the view has reported (any status but running).
+not_running() { [ "$(pane_state "$1" exitStatus)" != running ]; }
 
 # The largest beat=N a pane prints; -1 while none is shown.
 max_beat() { # pane
@@ -1029,6 +1036,87 @@ case_close_worktree() {
   NOTE="pid $pid_in_session ended with its worktree; pid $pid_out outside survives"
 }
 
+# The pid the current world's host recorded in its state file.
+current_host_pid() {
+  python3 -c 'import glob, json, sys; print(json.load(open(glob.glob(sys.argv[1] + "/host-v*.json")[0]))["pid"])' "$W/host"
+}
+
+# Finding 6 (recovery after End All): End All ends the host by design. The tab
+# of a session it closed shows that session's exit, and the next terminal
+# starts a new host and runs on it (spec §3.1, §4.2 row 7). The check is a
+# working session on the new host: it lists the pane under the new pid, the
+# pid prints, and the host the app uses is not the old one.
+case_recover_after_end_all() {
+  new_world c18
+  app_start
+  select_repo "$W/repo"
+  local old_pane pidfile old_pid old_host pane pidfile2 new_pid new_host
+  pidfile="$W/pid-1.txt"
+  old_pane=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 10 pid_written "$pidfile" || fail "the first terminal never wrote its pid"
+  wait_until 10 beat_above "$old_pane" 1 || fail "the first terminal does not print"
+  old_pid=$(pid_in "$pidfile")
+  old_host=$(current_host_pid)
+  ctl surface host end-all >/dev/null
+  wait_until 10 pid_dead "$old_pid" || fail "pid $old_pid survived End All"
+  wait_until 10 host_absent || fail "the host after End All is '$OUT', expected verdict=Absent"
+  wait_until 10 not_running "$old_pane" \
+    || fail "the tab of the session End All closed still reads running (exitStatus $(pane_state "$old_pane" exitStatus))"
+  pidfile2="$W/pid-2.txt"
+  pane=$(open_terminal "$(heartbeat "$pidfile2")")
+  wait_until 30 pid_written "$pidfile2" || fail "the terminal opened after End All never wrote its pid"
+  new_pid=$(pid_in "$pidfile2")
+  wait_until 10 beat_above "$pane" 1 || fail "the terminal opened after End All does not print"
+  new_host=$(current_host_pid)
+  { [ "$new_host" != "$old_host" ] && alive "$new_host"; } \
+    || fail "the host is $new_host after End All, expected a new live host (the old one was $old_host)"
+  wait_until 30 session_listed "$pane" || fail "the new host does not list $pane"
+  [ "$(session_pid "$pane")" = "$new_pid" ] || fail "the new host lists pid $(session_pid "$pane") for $pane, expected $new_pid"
+  wait_until 10 clients_are 1 "$pane" || fail "the new host counts $(session_clients "$pane") clients for $pane, expected 1"
+  [ "$(pane_state "$pane" survives)" = true ] || fail "$pane does not report survives=true"
+  NOTE="old tab exit $(pane_state "$old_pane" exitStatus); $pane (pid $new_pid) on new host $new_host, was $old_host"
+}
+
+# Finding 6 (recovery after host death): a host killed with kill -9 leaves its
+# tab Session lost. A new terminal starts a host and runs on it, and Restart on
+# the lost tab goes through that host too (spec §4.2 rows 6 and 7).
+case_recover_after_host_death() {
+  new_world c19
+  app_start
+  select_repo "$W/repo"
+  local lost pidfile old_host pane2 pidfile2 pid2 new_host restarted_pid
+  pidfile="$W/pid-1.txt"
+  lost=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 10 pid_written "$pidfile" || fail "the terminal never wrote its pid"
+  wait_until 10 beat_above "$lost" 1 || fail "the terminal does not print"
+  old_host=$(current_host_pid)
+  kill -9 "$old_host" || fail "could not kill the host $old_host"
+  wait_until 10 dead "$old_host" || fail "the host $old_host did not die"
+  wait_until 30 lost_flagged "$lost" \
+    || fail "the tab $lost does not show Session lost after its host died (sessionLost $(session_lost_of "$lost"))"
+  pidfile2="$W/pid-2.txt"
+  pane2=$(open_terminal "$(heartbeat "$pidfile2")")
+  wait_until 30 pid_written "$pidfile2" || fail "the terminal opened after the host died never wrote its pid"
+  pid2=$(pid_in "$pidfile2")
+  wait_until 10 beat_above "$pane2" 1 || fail "the terminal opened after the host died does not print"
+  new_host=$(current_host_pid)
+  { [ "$new_host" != "$old_host" ] && alive "$new_host"; } \
+    || fail "the host is $new_host after the death, expected a new live host (the old one was $old_host)"
+  wait_until 30 session_listed "$pane2" || fail "the new host does not list $pane2"
+  [ "$(session_pid "$pane2")" = "$pid2" ] || fail "the new host lists pid $(session_pid "$pane2") for $pane2, expected $pid2"
+  wait_until 10 clients_are 1 "$pane2" || fail "the new host counts $(session_clients "$pane2") clients for $pane2, expected 1"
+  # Restart on the lost tab: the same command runs again, on the new host.
+  rm -f "$pidfile"
+  ctl surface terminal restart "$lost" >/dev/null || fail "surface terminal restart $lost was refused"
+  wait_until 30 pid_written "$pidfile" || fail "Restart did not start the lost tab's terminal"
+  restarted_pid=$(pid_in "$pidfile")
+  wait_until 30 session_listed "$lost" || fail "the new host does not list the restarted $lost"
+  [ "$(session_pid "$lost")" = "$restarted_pid" ] || fail "the new host lists pid $(session_pid "$lost") for $lost, expected $restarted_pid"
+  wait_until 10 clients_are 1 "$lost" || fail "the new host counts $(session_clients "$lost") clients for $lost, expected 1"
+  [ "$(pane_state "$lost" survives)" = true ] || fail "the restarted $lost does not report survives=true"
+  NOTE="host $old_host died; $pane2 (pid $pid2) and restarted $lost (pid $restarted_pid) on new host $new_host"
+}
+
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1137,9 +1225,11 @@ run_case 14 unverifiable-no-fallback case_unverifiable_no_fallback
 run_case 15 stopped-host-resize case_stopped_host_resize
 run_case 16 end-all-host-stopped case_end_all_host_stopped
 run_case 17 panel-wait-no-stall case_panel_wait_does_not_stall
+run_case 18 recover-after-end-all case_recover_after_end_all
+run_case 19 recover-after-host-death case_recover_after_host_death
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 17 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 19 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

@@ -555,7 +555,9 @@ const HOST_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 /// transparently on the same connection. `Closed` (the connection is gone)
 /// retries the attach against a fresh client every 500 ms for 10 s; `Lost`
 /// goes out only when the host no longer lists the id or no host answers —
-/// never on the dropped connection alone (SP2 spec §8).
+/// never on the dropped connection alone (SP2 spec §8). A session the host
+/// closed (`SessionEvent::Closed`, End All) is an exit, not a loss: its exit
+/// is sent and the forwarder ends without reconnecting (finding 6).
 #[allow(clippy::too_many_arguments)]
 fn forward_host(
     session_id: String,
@@ -568,6 +570,9 @@ fn forward_host(
     done: Arc<AtomicBool>,
 ) {
     let mut next_offset = 0u64;
+    // Whether this session's exit has been sent: once, from whichever of an
+    // `Exited` or a `Closed` event comes first.
+    let mut exited = false;
     // Re-attach on the live connection (after `Lagged`): a snapshot, no
     // resume offset. Returns false when the view is gone.
     let reattach_snapshot = |control: &Arc<Mutex<HostControl>>,
@@ -628,11 +633,21 @@ fn forward_host(
                         &mut size,
                         Some(next_offset),
                         &done,
+                        &mut exited,
                     ) {
                         return;
                     }
                 }
                 StreamItem::Closed => {
+                    // The events that came before the connection went may
+                    // still be queued: a session the host closed is an exit
+                    // (finding 6), so they are read before any reconnect.
+                    if matches!(
+                        forward_session_events(&session_id, &events_rx, &chunks_tx, &mut exited),
+                        Events::Ended | Events::ViewGone
+                    ) {
+                        return;
+                    }
                     if !reconnect_until_attached(
                         &session_id,
                         &control,
@@ -643,6 +658,7 @@ fn forward_host(
                         &mut size,
                         Some(next_offset),
                         &done,
+                        &mut exited,
                     ) {
                         return;
                     }
@@ -650,6 +666,12 @@ fn forward_host(
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if matches!(
+                    forward_session_events(&session_id, &events_rx, &chunks_tx, &mut exited),
+                    Events::Ended | Events::ViewGone
+                ) {
+                    return;
+                }
                 if !reconnect_until_attached(
                     &session_id,
                     &control,
@@ -660,57 +682,115 @@ fn forward_host(
                     &mut size,
                     Some(next_offset),
                     &done,
+                    &mut exited,
                 ) {
                     return;
                 }
             }
         }
-        let mut events_gone = false;
-        loop {
-            match events_rx.try_recv() {
-                Ok(event) => {
-                    let chunk = match event {
-                        SessionEvent::Title {
-                            session_id: id,
-                            title,
-                        } if id == session_id => LinkChunk::Title(title),
-                        SessionEvent::Foreground {
-                            session_id: id,
-                            running,
-                        } if id == session_id => LinkChunk::Foreground(running),
-                        SessionEvent::Exited {
-                            session_id: id,
-                            status,
-                        } if id == session_id => LinkChunk::Exited(host_exit_status(&status)),
-                        _ => continue,
-                    };
-                    if chunks_tx.send(chunk).is_err() {
-                        return;
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                // The events subscription lives on the same connection as
-                // the stream: when it is gone the connection is too.
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    events_gone = true;
-                    break;
+        match forward_session_events(&session_id, &events_rx, &chunks_tx, &mut exited) {
+            Events::Open => {}
+            Events::Ended | Events::ViewGone => return,
+            // The events subscription lives on the same connection as the
+            // stream: when it is gone the connection is too.
+            Events::Disconnected => {
+                if !reconnect_until_attached(
+                    &session_id,
+                    &control,
+                    &reconnect,
+                    &mut stream_rx,
+                    &mut events_rx,
+                    &chunks_tx,
+                    &mut size,
+                    Some(next_offset),
+                    &done,
+                    &mut exited,
+                ) {
+                    return;
                 }
             }
         }
-        if events_gone && !reconnect_until_attached(
-            &session_id,
-            &control,
-            &reconnect,
-            &mut stream_rx,
-            &mut events_rx,
-            &chunks_tx,
-            &mut size,
-            Some(next_offset),
-            &done,
-        ) {
-            return;
+    }
+}
+
+/// What the session's queued events left the forwarder with.
+#[derive(Debug, PartialEq, Eq)]
+enum Events {
+    /// Drained; the connection is up.
+    Open,
+    /// The events subscription is gone: the connection is too.
+    Disconnected,
+    /// The host closed the session: its exit went out, and nothing follows.
+    Ended,
+    /// The view is gone.
+    ViewGone,
+}
+
+/// Sends the session's queued events, in order. `exited` records that the
+/// session's exit has gone out, so a later event does not send it again.
+fn forward_session_events(
+    session_id: &str,
+    events_rx: &mpsc::Receiver<SessionEvent>,
+    chunks_tx: &mpsc::Sender<LinkChunk>,
+    exited: &mut bool,
+) -> Events {
+    loop {
+        let event = match events_rx.try_recv() {
+            Ok(event) => event,
+            Err(mpsc::TryRecvError::Empty) => return Events::Open,
+            Err(mpsc::TryRecvError::Disconnected) => return Events::Disconnected,
+        };
+        let chunk = match event {
+            SessionEvent::Title {
+                session_id: id,
+                title,
+            } if id == session_id => LinkChunk::Title(title),
+            SessionEvent::Foreground {
+                session_id: id,
+                running,
+            } if id == session_id => LinkChunk::Foreground(running),
+            SessionEvent::Exited {
+                session_id: id,
+                status,
+            } if id == session_id => {
+                if *exited {
+                    continue;
+                }
+                *exited = true;
+                LinkChunk::Exited(host_exit_status(&status))
+            }
+            SessionEvent::Closed { session_id: id } if id == session_id => {
+                if !*exited {
+                    *exited = true;
+                    if chunks_tx
+                        .send(LinkChunk::Exited(TerminalExitStatus::Unknown))
+                        .is_err()
+                    {
+                        return Events::ViewGone;
+                    }
+                }
+                return Events::Ended;
+            }
+            _ => continue,
+        };
+        if chunks_tx.send(chunk).is_err() {
+            return Events::ViewGone;
         }
     }
+}
+
+/// Whether the session's queued events end it: its close or its exit has
+/// gone out, and nothing follows on the session.
+fn session_ended(
+    session_id: &str,
+    events_rx: &mpsc::Receiver<SessionEvent>,
+    chunks_tx: &mpsc::Sender<LinkChunk>,
+    exited: &mut bool,
+) -> bool {
+    matches!(
+        forward_session_events(session_id, events_rx, chunks_tx, exited),
+        Events::Ended | Events::ViewGone
+    )
 }
 
 /// Re-establish the stream against a fresh client after the connection
@@ -728,10 +808,17 @@ fn reconnect_until_attached(
     size: &mut TermSize,
     resume_from: Option<u64>,
     done: &Arc<AtomicBool>,
+    exited: &mut bool,
 ) -> bool {
     let deadline = Instant::now() + HOST_RECONNECT_GRACE;
     loop {
         if done.load(Ordering::Acquire) {
+            return false;
+        }
+        // A `Closed` event can still be on its way through the events relay
+        // after the connection ended: the session is then an exit, not a loss
+        // (finding 6), so the queue is read on every turn.
+        if session_ended(session_id, events_rx, chunks_tx, exited) {
             return false;
         }
         if Instant::now() >= deadline {
@@ -752,6 +839,9 @@ fn reconnect_until_attached(
                     .iter()
                     .any(|summary| summary.session_id == session_id) =>
             {
+                if session_ended(session_id, events_rx, chunks_tx, exited) {
+                    return false;
+                }
                 let _ = chunks_tx.send(LinkChunk::Lost);
                 return false;
             }

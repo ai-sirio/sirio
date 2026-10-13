@@ -2580,6 +2580,12 @@ impl TerminalView {
         }
     }
 
+    /// Whether the pane shows *Session lost*: its host is gone and the
+    /// pane offers Restart. Read by the debug-only `surface.terminal.state`.
+    pub fn session_lost(&self) -> bool {
+        self.session_lost
+    }
+
     /// Whether this pane is in the failed state (no session link could be
     /// opened). The host may use this to show a distinct tab glyph.
     pub fn is_failed(&self) -> bool {
