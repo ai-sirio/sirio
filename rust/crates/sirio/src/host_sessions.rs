@@ -198,6 +198,78 @@ mod tests {
     }
 }
 
+/// One worktree's persisted pane ids, as its layout names them (SP2 fix batch
+/// 5). `parked` marks a worktree whose panes are live in this process: its ids
+/// are never moved, because a running session keeps its id in its environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneIdLayout {
+    pub worktree: PathBuf,
+    pub ids: std::collections::BTreeSet<usize>,
+    pub parked: bool,
+}
+
+/// A persisted pane id that one worktree gives up for a fresh one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneIdMove {
+    pub worktree: PathBuf,
+    pub from: usize,
+    pub to: usize,
+}
+
+/// The one-time dedup of pane ids across every worktree's persisted layout
+/// (SP2 fix batch 5, N2 and N3). Pane ids are session ids (`pane-<n>`), so an
+/// id one layout names twice is two panes that the host cannot tell apart.
+///
+/// For each id that more than one layout names, one layout keeps it: a parked
+/// layout if one names it (its session is running); else the worktree that
+/// owns the live host session with that id (`owners`), if it names the id;
+/// else the first layout in catalog order. Every other holder moves to a fresh
+/// id, taken upward from `next`, which the caller sets above every id any
+/// layout names.
+pub fn dedup_pane_ids(
+    layouts: &[PaneIdLayout],
+    owners: &std::collections::HashMap<usize, PathBuf>,
+    next: usize,
+) -> Vec<PaneIdMove> {
+    let mut holders: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for (index, layout) in layouts.iter().enumerate() {
+        for &id in &layout.ids {
+            holders.entry(id).or_default().push(index);
+        }
+    }
+    let mut next = next;
+    let mut moves = Vec::new();
+    for (id, indices) in holders {
+        if indices.len() < 2 {
+            continue;
+        }
+        let keeper = indices
+            .iter()
+            .copied()
+            .find(|&index| layouts[index].parked)
+            .or_else(|| {
+                let owner = owners.get(&id)?;
+                indices
+                    .iter()
+                    .copied()
+                    .find(|&index| &layouts[index].worktree == owner)
+            })
+            .unwrap_or(indices[0]);
+        for index in indices {
+            if index == keeper || layouts[index].parked {
+                continue;
+            }
+            moves.push(PaneIdMove {
+                worktree: layouts[index].worktree.clone(),
+                from: id,
+                to: next,
+            });
+            next += 1;
+        }
+    }
+    moves
+}
+
 /// Renames a pane id everywhere a tab's history names it: its root, its split
 /// and close events, and the scrollback keyed by it (fix batch 5). The tab's
 /// tree is renamed separately, leaf by leaf.
@@ -239,6 +311,63 @@ pub fn rename_pane_in_session_state(
 mod pane_id_tests {
     use super::*;
     use crate::session::{PaneEvent, SessionTabState};
+
+    fn layout(worktree: &str, ids: &[usize], parked: bool) -> PaneIdLayout {
+        PaneIdLayout {
+            worktree: PathBuf::from(worktree),
+            ids: ids.iter().copied().collect(),
+            parked,
+        }
+    }
+
+    fn mv(worktree: &str, from: usize, to: usize) -> PaneIdMove {
+        PaneIdMove {
+            worktree: PathBuf::from(worktree),
+            from,
+            to,
+        }
+    }
+
+    #[test]
+    fn no_collision_moves_nothing() {
+        let layouts = [layout("/a", &[0, 1], false), layout("/b", &[2, 3], false)];
+        assert!(dedup_pane_ids(&layouts, &Default::default(), 4).is_empty());
+    }
+
+    #[test]
+    fn a_collision_between_two_worktrees_keeps_the_first_in_catalog_order() {
+        let layouts = [layout("/a", &[1, 2], false), layout("/b", &[2, 5], false)];
+        assert_eq!(
+            dedup_pane_ids(&layouts, &Default::default(), 6),
+            [mv("/b", 2, 6)]
+        );
+    }
+
+    #[test]
+    fn a_collision_with_a_live_session_keeps_the_id_with_its_owner() {
+        let layouts = [layout("/a", &[2], false), layout("/b", &[2], false)];
+        let owners = std::collections::HashMap::from([(2, PathBuf::from("/b"))]);
+        assert_eq!(dedup_pane_ids(&layouts, &owners, 3), [mv("/a", 2, 3)]);
+    }
+
+    #[test]
+    fn a_parked_layout_keeps_its_ids_and_the_unmounted_one_moves() {
+        let layouts = [layout("/a", &[4], false), layout("/b", &[4], true)];
+        assert_eq!(dedup_pane_ids(&layouts, &Default::default(), 5), [mv("/a", 4, 5)]);
+    }
+
+    #[test]
+    fn legacy_pane_zero_in_several_worktrees_moves_all_but_the_first() {
+        let layouts = [
+            layout("/a", &[0], false),
+            layout("/b", &[0], false),
+            layout("/c", &[0], false),
+        ];
+        assert_eq!(
+            dedup_pane_ids(&layouts, &Default::default(), 7),
+            [mv("/b", 0, 7), mv("/c", 0, 8)]
+        );
+    }
 
     #[test]
     fn a_moved_pane_is_renamed_in_its_tab_history() {

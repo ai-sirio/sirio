@@ -1946,8 +1946,9 @@ impl SessionStore {
     }
 
     /// Every pane id a worktree's persisted tabs hold, terminals and chats
-    /// alike. Orphan adoption reads it for every worktree, not only the one
-    /// being restored (fix batch 1, finding 1).
+    /// alike, as the restore gives them: a legacy tab with no root is the id
+    /// its index restores to, not pane 0. Orphan adoption and the pane-id
+    /// dedup read it for every worktree (fix batch 1, finding 1; batch 5).
     pub fn persisted_pane_ids_for(&self, working_directory: &Path) -> HashSet<usize> {
         let db = self
             .inner
@@ -1961,14 +1962,73 @@ impl SessionStore {
             return HashSet::new();
         };
         match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
-            Ok(restored) => restored
-                .tab_states
-                .iter()
-                .flat_map(|state| crate::restored_tab_pane_ids(0, state))
-                .collect(),
+            Ok(restored) => {
+                let roots = crate::restored_pane_ids(&restored, 0);
+                restored
+                    .tab_states
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, state)| {
+                        crate::restored_tab_pane_ids(
+                            roots.get(index).copied().unwrap_or(0),
+                            state,
+                        )
+                    })
+                    .collect()
+            }
             Err(error) => {
                 eprintln!("[session] failed to read pane ids for {worktree_id}: {error}");
                 HashSet::new()
+            }
+        }
+    }
+
+    /// Edits a worktree's persisted layout in place (fix batch 5: the pane-id
+    /// dedup moves ids in the rows of worktrees that are not mounted). `edit`
+    /// returns whether it changed anything; the row is written only then.
+    /// `false` when the worktree has no row, or when nothing changed.
+    pub fn edit_persisted_layout(
+        &self,
+        working_directory: &Path,
+        edit: impl FnOnce(&mut RestoredSession) -> bool,
+    ) -> bool {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return false;
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return false;
+        };
+        let branch = db
+            .worktrees()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.id == worktree_id))
+            .map(|row| row.branch)
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "main".to_string());
+        let Ok(mut restored) =
+            tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf())
+        else {
+            return false;
+        };
+        if !edit(&mut restored) {
+            return false;
+        }
+        let layout = SessionLayout {
+            working_directory: working_directory.to_path_buf(),
+            branch,
+            tabs: restored.tabs,
+            tab_states: restored.tab_states,
+        };
+        match write_layout(db, &layout) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[session] failed to rewrite a worktree's pane ids: {error}");
+                false
             }
         }
     }

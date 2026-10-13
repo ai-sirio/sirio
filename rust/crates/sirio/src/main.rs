@@ -5952,7 +5952,7 @@ impl SirioWorkspace {
         .detach();
 
         let tabs_len = tabs.len();
-        let next_pane_id = next_pane_id(&tabs);
+        let next_pane_id = next_pane_id(&tabs).max(db_pane_id_floor(&session, &project_catalog));
         let tab_worktree_paths = tabs
             .iter()
             .map(|tab| (tab.id, working_directory.clone()))
@@ -7882,6 +7882,93 @@ impl SirioWorkspace {
         None
     }
 
+    /// The one-time dedup of pane ids across the worktrees' persisted layouts
+    /// (SP2 fix batch 5, N2 and N3). It runs when the host first answers, before
+    /// any terminal opens, so no pane has opened under an id it is about to lose.
+    /// An id that two layouts name keeps one holder: a parked layout (its
+    /// session runs), else the worktree owning the live session with that id,
+    /// else the first in catalog order. The others move to fresh ids from the
+    /// allocator: the active strip's panes live, the other rows are rewritten.
+    /// With no listing (`sessions` empty) there is no owner to prefer.
+    fn dedup_pane_ids_at_first_answer(
+        &mut self,
+        sessions: &[sirio_host_protocol::term::SessionSummary],
+        cx: &mut Context<Self>,
+    ) {
+        let worktrees = self.known_worktree_paths();
+        let active = self.working_directory.clone();
+        let parked: HashSet<PathBuf> = worktrees
+            .iter()
+            .filter(|path| **path != active)
+            .filter(|path| {
+                let id = path.to_string_lossy();
+                self.parked_worktree_tabs.contains_key(id.as_ref())
+                    || self.terminal_pane_cache.has_in_worktree(&id)
+            })
+            .cloned()
+            .collect();
+        let layouts: Vec<host_sessions::PaneIdLayout> = worktrees
+            .iter()
+            .map(|path| host_sessions::PaneIdLayout {
+                worktree: path.clone(),
+                ids: self.session.persisted_pane_ids_for(path).into_iter().collect(),
+                parked: parked.contains(path),
+            })
+            .collect();
+        let owners: HashMap<usize, PathBuf> = sessions
+            .iter()
+            .filter(|session| session.origin == sirio_host_protocol::term::Origin::App)
+            .filter_map(|session| {
+                let id = session.session_id.strip_prefix("pane-")?.parse::<usize>().ok()?;
+                let owner =
+                    sirio_control::panel::owning_worktree(Path::new(&session.cwd), &worktrees)?;
+                Some((id, owner.clone()))
+            })
+            .collect();
+        let listed: Vec<String> = sessions.iter().map(|session| session.session_id.clone()).collect();
+        let layout_floor = layouts
+            .iter()
+            .flat_map(|layout| layout.ids.iter())
+            .max()
+            .map_or(0, |max| max.saturating_add(1));
+        let floor = host_sessions::next_pane_floor(&listed)
+            .max(layout_floor)
+            .max(self.next_pane_id);
+        let moves = host_sessions::dedup_pane_ids(&layouts, &owners, floor);
+        if moves.is_empty() {
+            return;
+        }
+        eprintln!("[sirio] pane ids: {} duplicate id(s) moved to fresh ids", moves.len());
+        let refs = self.session.load_session_refs();
+        let mut by_worktree: BTreeMap<PathBuf, Vec<(usize, usize)>> = BTreeMap::new();
+        for pane_move in &moves {
+            by_worktree
+                .entry(pane_move.worktree.clone())
+                .or_default()
+                .push((pane_move.from, pane_move.to));
+            // A moved pane still resumes whatever its old key would have.
+            if let Some(reference) = refs.get(&format!("pane-{}", pane_move.from)) {
+                self.session
+                    .save_session_ref(&format!("pane-{}", pane_move.to), reference);
+            }
+        }
+        for (worktree, pairs) in &by_worktree {
+            if *worktree == active {
+                for &(from, to) in pairs {
+                    self.move_live_pane(from, to, cx);
+                }
+            } else {
+                self.session.edit_persisted_layout(worktree, |restored| {
+                    apply_pane_id_moves(restored, pairs);
+                    true
+                });
+            }
+        }
+        self.next_pane_id = self.next_pane_id.max(floor + moves.len());
+        self.sync_control_panes(cx);
+        self.schedule_save(cx);
+    }
+
     /// A terminal whose open found its session id held by another session
     /// (SP2 fix batch 5, N5 and #11): the pane takes a fresh id from the one
     /// allocator, its tab's history and its subscriptions follow it, and it
@@ -7892,7 +7979,7 @@ impl SirioWorkspace {
         };
         let to = self.next_pane_id;
         self.next_pane_id += 1;
-        self.move_terminal_pane(tab_index, from, to, terminal, cx);
+        self.move_pane(tab_index, from, to, Some(terminal), cx);
         terminal.update(cx, |view, cx| view.retry(cx));
         self.sync_control_panes(cx);
         self.schedule_save(cx);
@@ -7900,14 +7987,15 @@ impl SirioWorkspace {
     }
 
     /// Renames pane `from` of tab `tab_index` to `to`: the tree's leaf, the
-    /// focus, the tab's history, the activity model's entry and the bindings
-    /// of `terminal`, which is bound under `to` from now on.
-    fn move_terminal_pane(
+    /// focus, the tab's history and the activity model's entry. A terminal
+    /// (`terminal` is its view) is also bound under `to`, so its events follow
+    /// it and the old bindings are dropped.
+    fn move_pane(
         &mut self,
         tab_index: usize,
         from: usize,
         to: usize,
-        terminal: &Entity<TerminalView>,
+        terminal: Option<&Entity<TerminalView>>,
         cx: &mut Context<Self>,
     ) {
         let (tab_id, agent_id) = {
@@ -7921,7 +8009,36 @@ impl SirioWorkspace {
         };
         self.activity.pane_closed(&format!("pane-{from}"));
         register_restored_agent(&mut self.activity, to, agent_id.as_deref());
-        Self::bind_terminal(terminal, tab_id, to, cx);
+        if let Some(terminal) = terminal {
+            Self::bind_terminal(terminal, tab_id, to, cx);
+        }
+    }
+
+    /// Moves the live pane `from` of the active strip to `to`, whatever its
+    /// content is. `false` when no tab of the strip holds it.
+    fn move_live_pane(&mut self, from: usize, to: usize, cx: &mut Context<Self>) -> bool {
+        let mut found = None;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut terminal = None;
+            let mut holds = false;
+            tab.panes.for_each(&mut |pane_id, content| {
+                if pane_id == from {
+                    holds = true;
+                    if let TabContent::Terminal { view } = content {
+                        terminal = Some(view.clone());
+                    }
+                }
+            });
+            if holds {
+                found = Some((index, terminal));
+                break;
+            }
+        }
+        let Some((index, terminal)) = found else {
+            return false;
+        };
+        self.move_pane(index, from, to, terminal.as_ref(), cx);
+        true
     }
 
     /// Every open document and its view. Shared by `bind_file_tabs` and the
@@ -22261,7 +22378,7 @@ fn restore_tabs(
     (tabs, active)
 }
 
-fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSet<usize> {
+pub(crate) fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSet<usize> {
     let mut pane_ids = HashSet::from([state.root_id.unwrap_or(root_pane_id)]);
     for event in &state.pane_events {
         match event {
@@ -22282,7 +22399,7 @@ fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSe
 /// fallback is retained whenever it is free; only the colliding legacy tab
 /// moves, which keeps old pane identities stable as far as the snapshot
 /// allows.
-fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<usize> {
+pub(crate) fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<usize> {
     let mut reserved = HashSet::new();
     for state in &restored.tab_states {
         if let Some(root_id) = state.root_id {
@@ -22315,6 +22432,37 @@ fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<u
             root_id
         })
         .collect()
+}
+
+/// Renames pane ids in a restored layout (SP2 fix batch 5). Each legacy root
+/// is pinned first, as the restore pins it, so the renamed layout and the next
+/// restore agree.
+fn apply_pane_id_moves(restored: &mut RestoredSession, moves: &[(usize, usize)]) {
+    if restored.tab_states.len() < restored.tabs.len() {
+        restored
+            .tab_states
+            .resize_with(restored.tabs.len(), SessionTabState::default);
+    }
+    let roots = restored_pane_ids(restored, 0);
+    for (index, (state, root)) in restored.tab_states.iter_mut().zip(&roots).enumerate() {
+        materialize_restored_root(state, *root, index);
+        for &(from, to) in moves {
+            host_sessions::rename_pane_in_session_state(state, from, to);
+        }
+    }
+}
+
+/// One past the largest pane id any catalog worktree's persisted layout names
+/// (SP2 fix batch 5): a new pane never takes an id a layout holds, whichever
+/// worktree holds it.
+fn db_pane_id_floor(session: &session::SessionStore, catalog: &ProjectCatalog) -> usize {
+    catalog
+        .projects()
+        .iter()
+        .flat_map(|project| project.worktrees.iter())
+        .flat_map(|worktree| session.persisted_pane_ids_for(&worktree.path))
+        .max()
+        .map_or(0, |max| max.saturating_add(1))
 }
 
 /// Gives every pane of a restored session that a live pane elsewhere already
@@ -24635,6 +24783,7 @@ fn ensure_host_in_background(
                                 .cloned()
                             {
                                 workspace.update(cx, |workspace, cx| {
+                                    workspace.dedup_pane_ids_at_first_answer(&sessions, cx);
                                     workspace.raise_next_pane_id(floor);
                                     workspace.adopt_host_orphans(sessions, cx);
                                 });
@@ -24648,6 +24797,18 @@ fn ensure_host_in_background(
                             eprintln!("[sirio] host has no terminal capability");
                             drop(handle);
                             install_host_sessions(route_connect(route.clone()), cx);
+                            // No terminal of ours lives on such a host: its
+                            // layouts are the only ids there are to dedup.
+                            if let Some(workspace) = workspace_slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .cloned()
+                            {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.dedup_pane_ids_at_first_answer(&[], cx);
+                                });
+                            }
                         }
                     }
                     line
