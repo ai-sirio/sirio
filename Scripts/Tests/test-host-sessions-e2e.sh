@@ -42,6 +42,8 @@ set -eEuo pipefail
 #                       session on the host; the other worktree's session lives (finding 8)
 #   31. agent-rebind-reports-under-its-id  a new agent tab takes a fresh id when its id is
 #                       held: its codex notify names that fresh id, not the held one (I1)
+#   32. restored-agent-rebind-resumes-under-its-id  a restored agent whose id is held by
+#                       another worktree resumes its saved session under the fresh id (I1)
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -1561,6 +1563,59 @@ case_agent_rebind_reports_under_its_id() {
   NOTE="held $next (pid $control_pid) untouched; the agent took $new_pane and reported under it"
 }
 
+# Fix batch 7, I1 for a restored agent: its saved session ref moves with it, so
+# the pane that takes a fresh id after the held one resumes the same session.
+# App A's codex pane is saved and resumable (its rollout file is on disk); the
+# host is ended, another worktree's control session takes its id, and the
+# relaunch refuses that id (N3) and reopens the agent under a fresh one.
+codex_launches() { ls "$W"/stub/codex-*.env 2>/dev/null | wc -l; }
+codex_launched_twice() { [ "$(codex_launches)" -ge 2 ]; }
+codex_resume_arg() {
+  python3 -c '
+import sys
+args = open(sys.argv[1], "rb").read().split(b"\0")
+print(args[args.index(b"resume") + 1].decode() if b"resume" in args else "")
+' "$1"
+}
+
+case_restored_agent_rebind_resumes_under_its_id() {
+  new_world c32
+  git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
+  install_codex_stub
+  mkdir -p "$W/codex-home/sessions"
+  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "CODEX_HOME=$W/codex-home")
+  app_start "${agent_env[@]}"
+  select_repo "$W/repo"
+  ctl project add "$W/wt-b" >/dev/null 2>&1 || true
+  local pane_a ref control_pid argv_new pane_new
+  ctl surface terminal open --agent codex >/dev/null || fail "the agent terminal was refused"
+  wait_until 60 codex_launched || fail "the codex agent never started"
+  pane_a=$(cat "$(newest_codex env)")
+  ref="e2e-$pane_a"
+  wait_until 10 saved_ref_is "$pane_a" "$ref" || fail "the agent saved no ref under $pane_a (saved: '$(saved_ref "$pane_a")')"
+  : >"$W/codex-home/sessions/rollout-$ref.jsonl"
+  app_quit
+  probe shutdown --force >/dev/null 2>&1 || true
+  wait_until 20 host_gone || fail "the host did not end before B's control session was made"
+  probe ensure
+  [ "$RC" -eq 0 ] || fail "host_probe ensure failed: $OUT"
+  probe term-create "$W/wt-b" --id "$pane_a" -- sleep 300
+  [ "$RC" -eq 0 ] || fail "host_probe term-create $pane_a in B failed: $OUT"
+  wait_until 10 session_listed "$pane_a" || fail "B's session $pane_a is not listed"
+  control_pid=$(session_pid "$pane_a")
+  app_start "${agent_env[@]}"
+  wait_until 60 codex_launched_twice || fail "the restored agent of A never relaunched (its tab held $pane_a)"
+  pane_new=$(cat "$(newest_codex env)")
+  [ -n "$pane_new" ] && [ "$pane_new" != "$pane_a" ] || fail "the restored agent kept the held id $pane_a (SIRIO_PANE_ID=$pane_new)"
+  argv_new=$(newest_codex argv)
+  [ "$(codex_notify_session "$argv_new")" = "$pane_new" ] || fail "codex reports under $(codex_notify_session "$argv_new"), but its pane is $pane_new (the held id was $pane_a)"
+  [ "$(codex_resume_arg "$argv_new")" = "$ref" ] || fail "the restored agent does not resume $ref under $pane_new (resume: '$(codex_resume_arg "$argv_new")')"
+  wait_until 10 session_listed "$pane_new" || fail "the restored agent's pane $pane_new is not on the host"
+  [ "$(session_pid "$pane_a")" = "$control_pid" ] || fail "B's session $pane_a changed pid"
+  pid_alive "$control_pid" || fail "B's session pid $control_pid is not alive"
+  NOTE="B's $pane_a (pid $control_pid) untouched; A's restored agent took $pane_new and resumed $ref under it"
+}
+
 # ---------------------------------------------------------------- the run
 
 # Fix batch 6, N1 (a nested Sirio does not inherit the outer app's host root):
@@ -1763,6 +1818,7 @@ run_case 28 restore-stale-id-of-another-worktree case_restore_stale_id_of_anothe
 run_case 29 nested-app-own-host case_nested_app_own_host
 run_case 30 ensure-storm case_ensure_storm
 run_case 31 agent-rebind-reports-under-its-id case_agent_rebind_reports_under_its_id
+run_case 32 restored-agent-rebind-resumes-under-its-id case_restored_agent_rebind_resumes_under_its_id
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED cases passed)"
