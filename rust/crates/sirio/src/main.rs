@@ -5186,6 +5186,9 @@ struct SirioWorkspace {
     /// a mounted worktree uses this snapshot when its DB row is empty or
     /// belongs to another worktree.
     parked_worktree_tabs: BTreeMap<String, ParkedWorktreeTabs>,
+    /// How each new agent tab's terminal was launched (fix batch 7, I1). A pane
+    /// that moves to a fresh id launches again from it, under that id.
+    new_agent_launches: Vec<NewAgentLaunch>,
     /// Chat tabs of worktrees the user switched away from, keyed by worktree
     /// id and then by the tab's stable persistence id. The terminal cache is
     /// what keeps a terminal alive across a switch; a chat's `Entity<Chat>`
@@ -6138,6 +6141,7 @@ impl SirioWorkspace {
             worktree_picker,
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
+            new_agent_launches: Vec::new(),
             retained_worktree_chats: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
@@ -8013,20 +8017,83 @@ impl SirioWorkspace {
         terminal: Option<&Entity<TerminalView>>,
         cx: &mut Context<Self>,
     ) {
-        let (tab_id, agent_id) = {
+        let (tab_id, agent_id, was_root) = {
             let tab = &mut self.tabs[tab_index];
+            let was_root = tab_primary_pane_id(tab) == Some(from);
             tab.panes.rename_leaf(from, to);
             if tab.focused_pane == from {
                 tab.focused_pane = to;
             }
             host_sessions::rename_pane_in_session_state(&mut tab.session_state, from, to);
-            (tab.id, tab.agent_id.clone())
+            (tab.id, tab.agent_id.clone(), was_root)
         };
         self.activity.pane_closed(&format!("pane-{from}"));
         register_restored_agent(&mut self.activity, to, agent_id.as_deref());
         if let Some(terminal) = terminal {
             Self::bind_terminal(terminal, tab_id, to, cx);
+            // The root pane of an agent tab runs the agent, and the agent's hooks
+            // and resume command name the pane they run in: it launches again
+            // under `to`, before its next open (fix batch 7, I1).
+            if was_root
+                && let Some(shell) =
+                    self.relaunch_agent_shell(terminal, agent_id.as_deref(), from, to, cx)
+            {
+                terminal.update(cx, |view, _| view.set_launch_shell(shell));
+            }
         }
+    }
+
+    /// The shell an agent pane that moved from `from` to `to` launches with
+    /// (fix batch 7, I1): the launch its tab was made with, under the new key.
+    /// A new agent starts fresh with its prompt, as `add_agent_terminal_tab`
+    /// starts it. A restored one resumes the session its pane saved under
+    /// `from`, which moves to `to` with it, as a restore resumes it. `None` for
+    /// a pane with no agent, or when sirioctl cannot be resolved (the command
+    /// it has keeps the old key then).
+    fn relaunch_agent_shell(
+        &mut self,
+        terminal: &Entity<TerminalView>,
+        agent_id: Option<&str>,
+        from: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<TerminalShell> {
+        let worktree = self.working_directory.to_string_lossy().into_owned();
+        let pane_key = format!("pane-{to}");
+        if let Some(launch) = self
+            .new_agent_launches
+            .iter()
+            .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
+        {
+            let (shell, warning) =
+                fresh_agent_shell(launch.adapter, &pane_key, &worktree, &launch.prompt);
+            if let Some(warning) = warning {
+                eprintln!("[sirio] {pane_key}: {warning}");
+            }
+            return Some(shell);
+        }
+        let adapter = *AGENT_CATALOG
+            .iter()
+            .find(|adapter| Some(adapter.id()) == agent_id)?;
+        let from_key = format!("pane-{from}");
+        let refs = self.session.load_session_refs();
+        let mut resumable = BTreeMap::new();
+        if let Some(reference) = refs.get(&from_key) {
+            self.session.save_session_ref(&pane_key, reference);
+            let resume = self.settings.read(cx).snapshot().resume_agent_sessions;
+            if resume
+                && sirio_agents::AgentSessionValidator::is_likely_valid(
+                    adapter.id(),
+                    reference,
+                    &worktree,
+                    claude_config_dir(),
+                    codex_home(),
+                )
+            {
+                resumable.insert(pane_key.clone(), reference.clone());
+            }
+        }
+        restored_agent_shell(Some(adapter.id()), &pane_key, Path::new(&worktree), &resumable)
     }
 
     /// Moves the live pane `from` of the active strip to `to`, whatever its
@@ -15169,28 +15236,20 @@ impl SirioWorkspace {
     ) -> Option<String> {
         let pane_key = format!("pane-{}", self.next_pane_id);
         let worktree = self.working_directory.to_string_lossy().into_owned();
-        let mut warning = None;
-        let sirioctl = match resolve_sirioctl_for_process() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                warning = Some(format!("hooks not written: {error}"));
-                String::new()
-            }
-        };
-        if warning.is_none()
-            && let Err(error) = adapter.prepare(&worktree, &pane_key, &sirioctl)
-        {
-            warning = Some(format!("hooks not written: {error}"));
-        }
-        let command = adapter.command_with_prompt(&worktree, &pane_key, &sirioctl, prompt);
-        let (program, args) = command_shell_invocation(&command);
+        let (shell, warning) = fresh_agent_shell(adapter, &pane_key, &worktree, prompt);
         let terminal = self.add_terminal_tab_with_shell_and_agent(
             adapter.display_name(),
-            TerminalShell::WithArguments { program, args },
+            shell,
             Icon::for_agent_id(adapter.id()),
             Some(adapter.id().to_string()),
             cx,
         );
+        self.new_agent_launches.retain(|launch| launch.terminal.upgrade().is_some());
+        self.new_agent_launches.push(NewAgentLaunch {
+            terminal: terminal.downgrade(),
+            adapter,
+            prompt: prompt.to_string(),
+        });
         // The agent works whether or not its tab is drawn (a hidden window,
         // another worktree), so it starts now rather than on first render.
         terminal.update(cx, |terminal, cx| terminal.start(cx));
@@ -22249,6 +22308,33 @@ fn replay_pane_events<T>(
     tree
 }
 
+/// The shell a new agent starts under `pane_key`: `prepare` writes the
+/// worktree's hooks for that pane, then the adapter's command with its prompt.
+/// The warning names what could not be written, and the command still runs.
+fn fresh_agent_shell(
+    adapter: &dyn sirio_agents::AgentAdapter,
+    pane_key: &str,
+    worktree: &str,
+    prompt: &str,
+) -> (TerminalShell, Option<String>) {
+    let mut warning = None;
+    let sirioctl = match resolve_sirioctl_for_process() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(error) => {
+            warning = Some(format!("hooks not written: {error}"));
+            String::new()
+        }
+    };
+    if warning.is_none()
+        && let Err(error) = adapter.prepare(worktree, pane_key, &sirioctl)
+    {
+        warning = Some(format!("hooks not written: {error}"));
+    }
+    let command = adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt);
+    let (program, args) = command_shell_invocation(&command);
+    (TerminalShell::WithArguments { program, args }, warning)
+}
+
 fn register_restored_agent(
     activity: &mut AgentActivityModel,
     root_pane_id: usize,
@@ -24220,6 +24306,17 @@ fn ensure_windows_console() {
             }
         }
     }
+}
+
+/// A new agent tab's launch, kept with its terminal (fix batch 7, I1): the
+/// adapter and the prompt it was started with. A restored agent tab has none
+/// (its launch comes from its saved tab), so only a new one is recorded here.
+/// The terminal is weak, so an entry whose tab closed is dropped on the next
+/// new agent tab.
+struct NewAgentLaunch {
+    terminal: gpui::WeakEntity<TerminalView>,
+    adapter: &'static dyn sirio_agents::AgentAdapter,
+    prompt: String,
 }
 
 /// The subscriptions that route a terminal pane's events to the workspace,

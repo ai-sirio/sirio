@@ -2669,6 +2669,14 @@ impl TerminalView {
         &self.spawn.shell
     }
 
+    /// Replaces the command the pane's next open runs: its first start, a
+    /// retry, or a restart. The owner calls it when the pane moves to a fresh
+    /// id, so an agent's command names that id (SP2 fix batch 7, I1). A
+    /// process that already runs keeps the command it started with.
+    pub fn set_launch_shell(&mut self, shell: TerminalShell) {
+        self.spawn.shell = shell;
+    }
+
     /// The last diff accepted through this pane's drop target, if any.
     pub fn last_dropped_diff(&self) -> Option<&(PathBuf, String)> {
         self.last_dropped_diff.as_ref()
