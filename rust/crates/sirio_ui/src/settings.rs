@@ -58,12 +58,13 @@ const DETAIL_BOTTOM_PADDING: f32 = 12.0;
 const DETAIL_SECTION_MARGIN: f32 = 20.0;
 
 const SEGMENTED_THEME: &[&str] = &["System", "Light", "Dark"];
-/// bezel's five base colours, in its own order, then Sirio's Notte and Onice
-/// presets. Text rather than swatches: the five differ by hue at chroma
-/// 0.013–0.046, which a 16px pill cannot show, and the names are Tailwind's —
-/// a vocabulary a user may already have.
+/// bezel's five base colours, in its own order, then Sirio's presets: Notte,
+/// Onice, and Claude's two palettes, Argilla and Grafite. Text rather than
+/// swatches: the five differ by hue at chroma 0.013–0.046, which a 16px pill
+/// cannot show, and the names are Tailwind's — a vocabulary a user may
+/// already have.
 const SEGMENTED_BASE_COLOR: &[&str] = &[
-    "Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte", "Onice",
+    "Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte", "Onice", "Argilla", "Grafite",
 ];
 
 /// The segment index of a base colour. `BaseColor::ALL` is the display order,

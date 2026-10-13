@@ -11,6 +11,10 @@
 //! reach. `Notte` is a hue *and* a ladder: four given dark surfaces that are
 //! lighter than bezel's dark page. `Onice` is a ladder alone, with no hue: the
 //! same kind of solid grey ladder `Neutral` paints, started at pure black.
+//! `Argilla` and `Grafite` are the two palettes of Claude's desktop app,
+//! read from claude.ai: the warm `[data-theme=claude]` one and the newer,
+//! nearly neutral `cds` one. Each is a hue, a ladder in both appearances and
+//! a text ladder, because Claude's text is part of the look.
 //! The ladders are painted in `bezel_theme_for` (`lib.rs`); this file only
 //! carries the values and the tint measured from them. See
 //! `docs/THEME-PROVENANCE.md`, "Preset ladders".
@@ -38,6 +42,12 @@ pub enum BaseColor {
     /// at pure black ([`ONICE_DARK`]). Black has no light form, so light is
     /// Neutral's own ladder.
     Onice,
+    /// Claude's desktop app in its warm palette (`[data-theme=claude]` on
+    /// claude.ai): brown-grey surfaces, ivory text. Both appearances.
+    Argilla,
+    /// Claude's desktop app in its newer `cds` palette (`colorVersion` v2):
+    /// near-neutral greys with a warm trace, darker than Argilla.
+    Grafite,
 }
 
 /// The four surfaces the Notte preset was given, darkest first, as
@@ -78,6 +88,25 @@ pub(crate) struct GreyLadder {
     pub input: u32,
     /// A row under the pointer.
     pub hover: u32,
+    /// The text rungs, when the preset brings its own; `None` keeps bezel's
+    /// tinted text.
+    pub text: Option<TextLadder>,
+}
+
+/// A preset's own text rungs, as `0xRRGGBB`, painted over bezel's. The body
+/// text is `text` as it is: these presets copy an app, so they are exempt
+/// from the softening every other base's body text takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TextLadder {
+    /// Body text.
+    pub text: u32,
+    /// Secondary text.
+    pub muted: u32,
+    /// The faintest readable text: metadata, placeholders.
+    pub faint: u32,
+    /// A quarter of the way from `muted` to `faint`, where Neutral's own
+    /// dim rung sits.
+    pub dim: u32,
 }
 
 /// Approved shell values (2026-10-02, darkened from 2026-09-12's `#141414`
@@ -90,6 +119,7 @@ const NEUTRAL_DARK: GreyLadder = GreyLadder {
     raised_hover: 0x292929,
     input: 0x242424,
     hover: 0x292929,
+    text: None,
 };
 
 /// The light steps mirror the dark ones.
@@ -100,6 +130,7 @@ const NEUTRAL_LIGHT: GreyLadder = GreyLadder {
     raised_hover: 0xD9D9D9,
     input: 0xFFFFFF,
     hover: 0xD9D9D9,
+    text: None,
 };
 
 /// Neutral's shape from pure black: steps of ten code values (`00`, `0A`,
@@ -114,12 +145,89 @@ const ONICE_DARK: GreyLadder = GreyLadder {
     raised_hover: 0x262626,
     input: 0x1E1E1E,
     hover: 0x262626,
+    text: None,
+};
+
+/// Argilla: claude.ai's `[data-theme=claude]` tokens (build `d40c622ef0`,
+/// read 2026-10-12). Sidebars and panes take Claude's chat `bg-100`, so the
+/// chat reads as Claude's does; the terminal and the gaps between panes go a
+/// step darker to `bg-200`; cards, dialogs and the composer are `bg-000`. The
+/// dark hover is Sirio's step above the composer, as Claude names none. Text
+/// `text-000`, `text-200`, `text-400`.
+const ARGILLA_DARK: GreyLadder = GreyLadder {
+    page: 0x1F1E1D,
+    surface: 0x262624,
+    raised: 0x30302E,
+    raised_hover: 0x3A3936,
+    input: 0x30302E,
+    hover: 0x3A3936,
+    text: Some(TextLadder {
+        text: 0xFAF9F5,
+        muted: 0xC2C0B6,
+        faint: 0x9C9A92,
+        dim: 0xB8B6AD,
+    }),
+};
+
+/// Argilla's light tokens, same roles; the hovers are `bg-300` and `bg-400`.
+const ARGILLA_LIGHT: GreyLadder = GreyLadder {
+    page: 0xF5F4ED,
+    surface: 0xFAF9F5,
+    raised: 0xFFFFFF,
+    raised_hover: 0xE8E6DC,
+    input: 0xFFFFFF,
+    hover: 0xF0EEE6,
+    text: Some(TextLadder {
+        text: 0x141413,
+        muted: 0x3D3D3A,
+        faint: 0x73726C,
+        dim: 0x4A4A46,
+    }),
+};
+
+/// Grafite: claude.ai's `cds` tokens (same build). Sidebars and panes take
+/// the chat's `surface-2`, the terminal and the gaps `surface-1` (the page
+/// cds paints), cards, dialogs and the composer `surface-3`; the hover is
+/// cds' 7.5% white ghost hover laid solid over the chat. Text
+/// `text-primary`, `text-secondary`, `text-muted`.
+const GRAFITE_DARK: GreyLadder = GreyLadder {
+    page: 0x151515,
+    surface: 0x1A1A19,
+    raised: 0x20201F,
+    raised_hover: 0x2A2A29,
+    input: 0x20201F,
+    hover: 0x2A2A29,
+    text: Some(TextLadder {
+        text: 0xF0EFEC,
+        muted: 0xC3C2B7,
+        faint: 0x898781,
+        dim: 0xB4B3AA,
+    }),
+};
+
+/// Grafite's light tokens, same roles. cds' panels, popovers and fields are
+/// all white and told apart by their borders, so cards and the composer are
+/// the panes' white too; the hover is cds' 5% black ghost hover laid solid
+/// over white.
+const GRAFITE_LIGHT: GreyLadder = GreyLadder {
+    page: 0xFCFCFB,
+    surface: 0xFFFFFF,
+    raised: 0xFFFFFF,
+    raised_hover: 0xF1F1EF,
+    input: 0xFFFFFF,
+    hover: 0xF1F1EF,
+    text: Some(TextLadder {
+        text: 0x0B0B0B,
+        muted: 0x52514E,
+        faint: 0x898781,
+        dim: 0x605E5B,
+    }),
 };
 
 impl BaseColor {
     /// Every variant, in the order the picker offers them — bezel's own
     /// order in `BASE_COLORS`, neutral first, Sirio's presets last.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Neutral,
         Self::Stone,
         Self::Zinc,
@@ -127,6 +235,8 @@ impl BaseColor {
         Self::Slate,
         Self::Notte,
         Self::Onice,
+        Self::Argilla,
+        Self::Grafite,
     ];
 
     /// The grey ladder this base feeds only to `Theme::to_bezel_theme`, or
@@ -138,6 +248,10 @@ impl BaseColor {
             (Self::Neutral, Appearance::Dark) => Some(NEUTRAL_DARK),
             (Self::Neutral | Self::Onice, Appearance::Light) => Some(NEUTRAL_LIGHT),
             (Self::Onice, Appearance::Dark) => Some(ONICE_DARK),
+            (Self::Argilla, Appearance::Dark) => Some(ARGILLA_DARK),
+            (Self::Argilla, Appearance::Light) => Some(ARGILLA_LIGHT),
+            (Self::Grafite, Appearance::Dark) => Some(GRAFITE_DARK),
+            (Self::Grafite, Appearance::Light) => Some(GRAFITE_LIGHT),
             _ => None,
         }
     }
@@ -156,6 +270,11 @@ impl BaseColor {
             // surfaces they sit on. `notte_tint_is_the_mean_of_its_own_ladder`
             // recomputes it.
             Self::Notte => Tint::new(270.6, 0.013),
+            // Measured the same way from each dark ladder's four Claude
+            // surfaces; Grafite's darkest is achromatic, so its hue is the
+            // mean of the other three (106.5–106.6 degrees).
+            Self::Argilla => Tint::new(96.9, 0.0033),
+            Self::Grafite => Tint::new(106.54, 0.0014),
         }
     }
 
@@ -171,6 +290,8 @@ impl BaseColor {
             Self::Slate => "Slate",
             Self::Notte => "Notte",
             Self::Onice => "Onice",
+            Self::Argilla => "Argilla",
+            Self::Grafite => "Grafite",
         }
     }
 }
@@ -179,37 +300,70 @@ impl BaseColor {
 mod tests {
     use super::*;
 
-    /// Notte's tint is not quoted from Tailwind: it is the mean oklch hue and
-    /// chroma of the four surfaces the preset was given, so the text and
+    /// A preset's tint is not quoted from Tailwind: it is the mean oklch hue
+    /// and chroma of the surfaces the preset was given, so the text and
     /// plates bezel tints with it share the family of the surfaces they sit
-    /// on. Recomputed here from the ladder so the two cannot drift apart.
+    /// on. Recomputed here from the ladders so the two cannot drift apart.
+    ///
+    /// A rung with no chroma has no hue (`#151515` reads as whatever angle
+    /// rounding leaves), so it counts toward the mean chroma and not toward
+    /// the mean hue.
     #[test]
-    fn notte_tint_is_the_mean_of_its_own_ladder() {
-        let ladder = NOTTE_LADDER;
-        let rungs = [
-            ladder.page,
-            ladder.surface,
-            ladder.raised,
-            ladder.raised_hover,
+    fn every_preset_tint_is_the_mean_of_its_own_ladder() {
+        let dark = |base: BaseColor| {
+            base.grey_ladder(Appearance::Dark)
+                .expect("a tinted grey-ladder preset has a dark ladder")
+        };
+        let notte = NOTTE_LADDER;
+        let argilla = dark(BaseColor::Argilla);
+        let grafite = dark(BaseColor::Grafite);
+        let presets = [
+            (
+                BaseColor::Notte,
+                vec![notte.page, notte.surface, notte.raised, notte.raised_hover],
+            ),
+            // The four surfaces read from Claude; the hover rungs are Sirio's.
+            // (`raised` and `input` are one Claude token, so it counts twice.)
+            (
+                BaseColor::Argilla,
+                vec![argilla.page, argilla.surface, argilla.raised, argilla.input],
+            ),
+            (
+                BaseColor::Grafite,
+                vec![grafite.page, grafite.surface, grafite.raised, grafite.input],
+            ),
         ];
-        let (hue_sum, chroma_sum) = rungs.iter().fold((0.0_f32, 0.0_f32), |(h, c), &hex| {
-            let (_, chroma, hue) = oklch_of(hex);
-            (h + hue, c + chroma)
-        });
-        let mean_hue = hue_sum / rungs.len() as f32;
-        let mean_chroma = chroma_sum / rungs.len() as f32;
 
-        let tint = BaseColor::Notte.tint();
-        assert!(
-            (tint.hue - mean_hue).abs() < 1.0,
-            "hue {} is not the ladder's mean {mean_hue:.1}",
-            tint.hue
-        );
-        assert!(
-            (tint.chroma - mean_chroma).abs() < 0.001,
-            "chroma {} is not the ladder's mean {mean_chroma:.4}",
-            tint.chroma
-        );
+        for (base, rungs) in presets {
+            let measured: Vec<(f32, f32)> = rungs
+                .iter()
+                .map(|&hex| {
+                    let (_, chroma, hue) = oklch_of(hex);
+                    (chroma, hue)
+                })
+                .collect();
+            let hued: Vec<f32> = measured
+                .iter()
+                .filter(|(chroma, _)| *chroma > 0.001)
+                .map(|&(_, hue)| hue)
+                .collect();
+            assert!(!hued.is_empty(), "{base:?} has no hue to tint with");
+            let mean_hue = hued.iter().sum::<f32>() / hued.len() as f32;
+            let mean_chroma =
+                measured.iter().map(|&(chroma, _)| chroma).sum::<f32>() / measured.len() as f32;
+
+            let tint = base.tint();
+            assert!(
+                (tint.hue - mean_hue).abs() < 1.0,
+                "{base:?} hue {} is not the ladder's mean {mean_hue:.1}",
+                tint.hue
+            );
+            assert!(
+                (tint.chroma - mean_chroma).abs() < 0.001,
+                "{base:?} chroma {} is not the ladder's mean {mean_chroma:.4}",
+                tint.chroma
+            );
+        }
     }
 
     /// sRGB `0xRRGGBB` to oklch `(lightness, chroma, hue in degrees)`.
