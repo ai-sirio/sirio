@@ -1148,6 +1148,38 @@ case_close_connecting() {
   NOTE="$pane closed while connecting: not listed on the host after the host was resumed"
 }
 
+# Whether a terminal's text (its screen or its replica) contains MARKER.
+shows_text() { # pane marker
+  pane_text "$1" 2>/dev/null | grep -q -- "$2"
+}
+# Whether the host lists PANE as exited with EXIT (exit=code:3 and the like).
+session_exited_with() { # pane label
+  term_list && session_line "$1" | grep -q -- "exit=$2"
+}
+
+# Finding 9 (attaching to an exited session): a session that exited while no
+# client was attached shows its exit when its tab is restored, with the last
+# screen above it (spec §4.2, row "Session exits while no client is attached").
+case_exited_attach() {
+  new_world c21
+  app_start
+  select_repo "$W/repo"
+  local pane release="$W/release"
+  pane=$(open_terminal "echo done-marker; while [ ! -f $release ]; do sleep 0.2; done; exit 3")
+  wait_until 10 shows_text "$pane" done-marker || fail "the terminal never printed its marker"
+  app_quit
+  touch "$release"
+  wait_until 10 session_exited_with "$pane" "code:3" \
+    || fail "the host does not list $pane as exited with code 3 (line: $(session_line "$pane"))"
+  app_start
+  wait_until 30 pane_known "$pane" || fail "the relaunched app does not show $pane"
+  wait_until 10 not_running "$pane" \
+    || fail "the restored $pane reads running, though its session exited while the app was gone (exitStatus $(pane_state "$pane" exitStatus))"
+  [ "$(pane_state "$pane" exitStatus)" = "code:3" ] \
+    || fail "the restored $pane reads exitStatus $(pane_state "$pane" exitStatus), expected code:3"
+  pane_text "$pane" | grep -q done-marker || fail "the restored $pane does not show its last screen"
+  NOTE="$pane exited with code 3 while the app was gone; restored tab shows exitStatus code:3 and its last screen"
+}
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1259,9 +1291,10 @@ run_case 17 panel-wait-no-stall case_panel_wait_does_not_stall
 run_case 18 recover-after-end-all case_recover_after_end_all
 run_case 19 recover-after-host-death case_recover_after_host_death
 run_case 20 close-connecting case_close_connecting
+run_case 21 exited-attach case_exited_attach
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 20 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 21 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

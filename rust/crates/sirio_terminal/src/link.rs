@@ -448,12 +448,16 @@ impl HostLink {
         request: &OpenRequest,
         reconnect: ReconnectFn,
     ) -> Result<HostLink, String> {
+        // Subscribed before the listing and the attach: an exit after this
+        // point is an event, and one before it is in the listing (finding 9).
+        let events_rx = client.events().map_err(|error| error.to_string())?;
         let listed = client.list().map_err(|error| error.to_string())?;
-        let listed_pid = listed
+        let listed_summary = listed
             .sessions
             .iter()
-            .find(|summary| summary.session_id == request.session_id)
-            .map(|summary| summary.pid);
+            .find(|summary| summary.session_id == request.session_id);
+        let listed_pid = listed_summary.map(|summary| summary.pid);
+        let listed_exit = listed_summary.and_then(|summary| summary.exit.clone());
         let plan = open_plan(listed_pid.is_some(), request.attach_only, request.restore);
         if plan == OpenPlan::Lost {
             return Err(format!(
@@ -519,8 +523,13 @@ impl HostLink {
                         .map(|summary| summary.pid)
                 })
         });
-        let events_rx = client.events().map_err(|error| error.to_string())?;
         let size = attached.size;
+        // A session that exited before this attach shows its exit from its
+        // listing, after the snapshot (finding 9).
+        let exit_at_attach = match plan {
+            OpenPlan::Attach => listed_exit,
+            OpenPlan::Create | OpenPlan::Duplicate | OpenPlan::Lost => None,
+        };
         let stream = attached.stream;
         let (chunks_tx, chunks_rx) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -544,6 +553,7 @@ impl HostLink {
                         chunks_tx,
                         size,
                         done,
+                        exit_at_attach,
                     );
                 }
             })
@@ -595,11 +605,15 @@ fn forward_host(
     chunks_tx: mpsc::Sender<LinkChunk>,
     mut size: TermSize,
     done: Arc<AtomicBool>,
+    exit_at_attach: Option<ExitStatus>,
 ) {
     let mut next_offset = 0u64;
-    // Whether this session's exit has been sent: once, from whichever of an
-    // `Exited` or a `Closed` event comes first.
+    // Whether this session's exit has been sent: once, from whichever of the
+    // listing, an `Exited` event or a `Closed` event comes first (finding 9).
     let mut exited = false;
+    // The exit the listing reported at attach: sent after the first snapshot,
+    // so the replica is drawn before the view learns the session is over.
+    let mut exit_pending = exit_at_attach.as_ref().map(host_exit_status);
     // Re-attach on the live connection (after `Lagged`): a snapshot, no
     // resume offset. Returns false when the view is gone.
     let reattach_snapshot = |control: &Arc<Mutex<HostControl>>,
@@ -638,6 +652,14 @@ fn forward_host(
                         .is_err()
                     {
                         return;
+                    }
+                    if let Some(status) = exit_pending.take()
+                        && !exited
+                    {
+                        exited = true;
+                        if chunks_tx.send(LinkChunk::Exited(status)).is_err() {
+                            return;
+                        }
                     }
                 }
                 StreamItem::Output { offset, bytes } => {
