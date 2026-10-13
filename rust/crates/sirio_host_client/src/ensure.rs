@@ -54,6 +54,9 @@ pub enum EnsureError {
     },
     Stage(io::Error),
     Spawn(io::Error),
+    /// The data root could not be created before anything was staged: no
+    /// host can be started on it (fix batch 6, N6).
+    DataRoot(io::Error),
     Unverifiable {
         waited: Duration,
         reason: Option<String>,
@@ -91,6 +94,7 @@ impl std::fmt::Display for EnsureError {
             ),
             Self::Stage(e) => write!(f, "could not copy sirio-host: {e}"),
             Self::Spawn(e) => write!(f, "could not start sirio-host: {e}"),
+            Self::DataRoot(e) => write!(f, "could not create the data directory: {e}"),
             Self::Unverifiable { waited, reason } => {
                 write!(
                     f,
@@ -122,6 +126,29 @@ impl std::fmt::Display for EnsureError {
 }
 
 impl std::error::Error for EnsureError {}
+
+impl EnsureError {
+    /// Whether this failure leaves no host to lose, so a terminal may fall
+    /// back to a local shell (spec §8). Every failure rooted in `Absent` says
+    /// so: no host was found, and none could be started. So does `Refused`,
+    /// a newer host that will not serve this client and holds nothing it
+    /// could see. A host that answered `Live` and then failed to connect, or
+    /// one that holds its lock without answering, may still be live beside
+    /// the terminal, so the failure is one to retry (spec §8, finding 7).
+    pub fn means_no_host(&self) -> bool {
+        match self {
+            Self::NoDataRoot
+            | Self::BinaryMissing { .. }
+            | Self::Stage(_)
+            | Self::Spawn(_)
+            | Self::DataRoot(_)
+            | Self::Refused { .. }
+            | Self::StartTimeout
+            | Self::EndpointPathTooLong { .. } => true,
+            Self::Unverifiable { .. } | Self::Io(_) => false,
+        }
+    }
+}
 
 pub fn ensure_host(options: &EnsureOptions) -> Result<HostHandle, EnsureError> {
     let majors = majors_spoken(options.major);
@@ -283,7 +310,7 @@ fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureErro
                     .unwrap_or_default(),
             }
         })?;
-    std::fs::create_dir_all(&options.paths.root).map_err(EnsureError::Io)?;
+    std::fs::create_dir_all(&options.paths.root).map_err(EnsureError::DataRoot)?;
     // A stale endpoint or state file of a host that is gone is not cleared
     // here: the host replaces a stale socket when it binds and rewrites its
     // state file when it is ready, and a client that removed them would, when
@@ -562,5 +589,54 @@ mod tests {
                 " — the lock file cannot be opened (PermissionDenied)"
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    /// Every variant, with what a terminal must make of it: `true` when the
+    /// failure leaves no host to lose (a fallback), `false` when a host may be
+    /// live beside the terminal (a failure to retry).
+    fn every_variant() -> Vec<(EnsureError, bool)> {
+        vec![
+            (EnsureError::NoDataRoot, true),
+            (EnsureError::BinaryMissing { looked: vec![] }, true),
+            (EnsureError::Stage(io::Error::other("copy")), true),
+            (EnsureError::Spawn(io::Error::other("spawn")), true),
+            (EnsureError::DataRoot(io::Error::other("mkdir")), true),
+            (
+                EnsureError::Unverifiable {
+                    waited: Duration::from_secs(10),
+                    reason: None,
+                },
+                false,
+            ),
+            (
+                EnsureError::Refused {
+                    host_major: 2,
+                    client_majors: vec![1],
+                },
+                true,
+            ),
+            (EnsureError::StartTimeout, true),
+            (
+                EnsureError::EndpointPathTooLong {
+                    path: PathBuf::from("/r/host-v1.sock"),
+                    max: 107,
+                },
+                true,
+            ),
+            // A connect that fails after a host answered: the host is live.
+            (EnsureError::Io(io::Error::other("connect")), false),
+        ]
+    }
+
+    #[test]
+    fn every_failure_says_whether_it_leaves_no_host() {
+        for (error, expected) in every_variant() {
+            assert_eq!(error.means_no_host(), expected, "{error}");
+        }
     }
 }

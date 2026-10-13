@@ -24401,8 +24401,9 @@ impl HostRoute {
 }
 
 /// `ensure_host`, retried while a host holds its lock and does not answer
-/// (review finding 7): three bounded attempts, as at startup. Any other
-/// failure means there is no host (spec §8).
+/// (review finding 7): three bounded attempts, as at startup. A failure that
+/// leaves no host to lose is `NoHost`; any other is `Failed`, because a host
+/// may be live beside the terminal (fix batch 6, N6).
 fn ensure_now(
     environment: BTreeMap<String, String>,
     current_exe: PathBuf,
@@ -24417,7 +24418,10 @@ fn ensure_now(
             Err(error @ sirio_host_client::EnsureError::Unverifiable { .. }) => {
                 last = error.to_string();
             }
-            Err(error) => return Err(HostUnavailable::NoHost(error.to_string())),
+            Err(error) if error.means_no_host() => {
+                return Err(HostUnavailable::NoHost(error.to_string()));
+            }
+            Err(error) => return Err(HostUnavailable::Failed(error.to_string())),
         }
     }
     Err(HostUnavailable::Failed(last))
