@@ -38,6 +38,8 @@ set -eEuo pipefail
 #   14. unverifiable-no-fallback  the host holds its lock but does not answer: a
 #                       restored tab runs no local shell and reports no
 #                       survives=false; SIGCONT, and it attaches (finding 7)
+#   23. close-unvisited-worktree  closing a worktree this run never mounted ends its
+#                       session on the host; the other worktree's session lives (finding 8)
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -965,6 +967,10 @@ case_adopt_two_worktrees() {
   pb_pid=$(session_pid "$pb")
   ctl select-workspace --workspace "$wt_a_id" >/dev/null
   sleep 2
+  # Unmounting B (selecting A) detaches its terminal and ends nothing: B's
+  # session is still listed and its pid still runs.
+  session_listed "$pb" || fail "B's session $pb is no longer listed after B was unmounted"
+  pid_alive "$pb_pid" || fail "pid $pb_pid of B's session $pb died when B was unmounted"
   pa=$(open_terminal "sleep 300")
   wait_until 10 session_listed "$pa" || fail "the terminal in A ($pa) is not on the host"
   pa_pid=$(session_pid "$pa")
@@ -1221,6 +1227,49 @@ case_sp1_host_upgrade() {
   [ "$(pane_state "$pane" survives)" = true ] || fail "$pane does not report survives=true"
   NOTE="SP1 host $old_host gone; $pane (pid $pid) on new host $new_host with the terminal capability"
 }
+
+# Finding 8 (closing a worktree that this run never visited): B's terminal is on
+# the host, the app is killed and relaunched on A, so B is never mounted. Closing
+# B must still end its session, because the close reads the host's listing and
+# not only the terminal views of this run (spec §4.2: "its sessions"). A's
+# session is untouched.
+case_close_unvisited_worktree() {
+  new_world c23
+  git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
+  app_start
+  select_repo "$W/repo"
+  local wt_a_id wt_b_id pa pb pa_pid pb_pid
+  wt_a_id="$WT_ID"
+  ctl project add "$W/wt-b" >/dev/null 2>&1 || true
+  wt_b_id=$(worktree_id_at "$W/wt-b")
+  [ -n "$wt_b_id" ] || fail "sirioctl does not list the second worktree"
+  ctl select-workspace --workspace "$wt_b_id" >/dev/null
+  sleep 2
+  pb=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$pb" || fail "the terminal in B ($pb) is not on the host"
+  pb_pid=$(session_pid "$pb")
+  ctl select-workspace --workspace "$wt_a_id" >/dev/null
+  sleep 2
+  pa=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$pa" || fail "the terminal in A ($pa) is not on the host"
+  pa_pid=$(session_pid "$pa")
+  app_kill9
+  app_start
+  wait_until 30 pane_known "$pa" || fail "the relaunched app does not know $pa"
+  # The relaunch restores A, so B has no terminal view in this run.
+  wt_b_id=$(worktree_id_at "$W/wt-b")
+  [ -n "$wt_b_id" ] || fail "sirioctl does not list the second worktree after the relaunch"
+  ctl close-workspace --workspace "$wt_b_id" >/dev/null \
+    || fail "closing the unvisited worktree B was refused"
+  wait_until 10 session_gone "$pb" \
+    || fail "the session $pb of the closed, unvisited worktree B is still listed (pid $pb_pid)"
+  wait_until 10 pid_dead "$pb_pid" || fail "pid $pb_pid of the closed worktree B survived"
+  session_listed "$pa" || fail "A's session $pa was ended by the close of B"
+  [ "$(session_pid "$pa")" = "$pa_pid" ] || fail "A's session $pa changed pid (now $(session_pid "$pa"), was $pa_pid)"
+  pid_alive "$pa_pid" || fail "pid $pa_pid of A's session $pa died with the close of B"
+  NOTE="B's $pb (pid $pb_pid) ended though B was never mounted this run; A's $pa (pid $pa_pid) untouched"
+}
+
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1339,9 +1388,10 @@ run_case 19 recover-after-host-death case_recover_after_host_death
 run_case 20 close-connecting case_close_connecting
 run_case 21 exited-attach case_exited_attach
 run_case 22 sp1-host-upgrade case_sp1_host_upgrade
+run_case 23 close-unvisited-worktree case_close_unvisited_worktree
 
 if [ -n "$ONLY" ]; then
-  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 22 cases)"
+  echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 23 cases)"
 else
   echo "HOST SESSIONS E2E OK ($CASES_PASSED cases, $(( $(date +%s) - START_ALL ))s)"
 fi

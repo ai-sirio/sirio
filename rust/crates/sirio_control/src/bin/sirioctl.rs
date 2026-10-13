@@ -120,7 +120,7 @@ fn usage() {
          \x20 new-workspace --project <p> [--branch <b>]\n\
          \x20 select-workspace --workspace <w>  select a worktree in the sidebar\n\
          \x20 current-workspace [--json]        show the selected worktree\n\
-         \x20 close-workspace --workspace <w>   unmount a worktree's terminals\n\
+         \x20 close-workspace --workspace <w>   close a worktree and end its terminals\n\
          \x20 worktree-set --worktree <w> [--comment c] [--session s]\n\
          \x20 restore-session                   restore the launch snapshot\n\
          \x20 pane split <right|down>            split the focused application pane\n\

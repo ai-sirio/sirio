@@ -1419,6 +1419,11 @@ struct ParkedWorktreeTabs {
     /// status under its own `pane-N` key, which is what the Activity list
     /// reads.
     chat_panes_by_tab: Vec<HashSet<usize>>,
+    /// The terminal panes among `terminal_panes_by_tab` that were attached when
+    /// the worktree was parked: a shown session, or an orphan with no tab row.
+    /// Their sessions are another worktree's or a shown tab's, so closing the
+    /// worktree must not end them (SP2 spec §4.2).
+    attached_panes: HashSet<usize>,
 }
 
 struct TabRename {
@@ -8803,11 +8808,16 @@ impl SirioWorkspace {
                     .collect()
             })
             .unwrap_or_default();
+        // Read before the project leaves the catalog, so each of its worktrees
+        // is still known when a session's deepest owner is worked out.
+        let known_before = self.known_worktree_paths();
+        let layout_ids = self.layout_session_ids(&removed_paths);
         if self.project_catalog.remove(id) {
             self.session.schedule_catalog(&self.project_catalog);
             self.sync_control_state();
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
+            self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
             for path in &removed_paths {
                 let worktrees = self.known_worktree_paths();
                 match self.panes.shutdown_for(path, &worktrees) {
@@ -10760,6 +10770,9 @@ impl SirioWorkspace {
                 .current_workspace()
                 .is_some();
         let worktrees = self.known_worktree_paths();
+        // Read before anything below drops this worktree's row or parked
+        // layout: the sessions its layouts name end with it (SP2 spec §4.2).
+        let layout_ids = self.layout_session_ids(std::slice::from_ref(&path));
         match self.panes.shutdown_for(&path, &worktrees) {
             Ok(ids) => Self::end_control_sessions(ids, cx),
             Err(error) => eprintln!(
@@ -10767,6 +10780,7 @@ impl SirioWorkspace {
                 path.display()
             ),
         }
+        self.end_app_sessions(vec![path.clone()], worktrees, layout_ids, cx);
         let worktree_id = path.to_string_lossy().into_owned();
         // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
         // cached terminals before dropping them; parked layouts carry no
@@ -11856,6 +11870,20 @@ impl SirioWorkspace {
                 (terminal_pane_ids, chat_pane_ids)
             })
             .collect();
+        let mut attached_panes = HashSet::new();
+        for tab in self
+            .tabs
+            .iter()
+            .filter(|tab| paths_name_the_same_document(&self.tab_worktree_path(tab.id), &current_path))
+        {
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let TabContent::Terminal { view } = content
+                    && view.read(cx).attached()
+                {
+                    attached_panes.insert(pane_id);
+                }
+            });
+        }
         let worktree_id = current_path.to_string_lossy().into_owned();
         self.parked_worktree_tabs.insert(
             worktree_id,
@@ -11863,6 +11891,7 @@ impl SirioWorkspace {
                 layout,
                 terminal_panes_by_tab,
                 chat_panes_by_tab,
+                attached_panes,
             },
         );
         // The outgoing worktree is saved now, and that save never names an
@@ -12733,6 +12762,84 @@ impl SirioWorkspace {
             .iter()
             .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
             .collect()
+    }
+
+    /// The session ids the persisted and parked layouts of these worktrees name,
+    /// as `pane-<leaf>` (SP2 spec §4.2). Read on the GPUI thread, before the rows
+    /// or the parked layout are dropped. An attached parked pane is left out.
+    fn layout_session_ids(&self, worktrees: &[PathBuf]) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        for path in worktrees {
+            ids.extend(
+                self.session
+                    .persisted_pane_ids_for(path)
+                    .into_iter()
+                    .map(|leaf| format!("pane-{leaf}")),
+            );
+            let worktree_id = path.to_string_lossy().into_owned();
+            if let Some(parked) = self.parked_worktree_tabs.get(&worktree_id) {
+                ids.extend(
+                    parked
+                        .terminal_panes_by_tab
+                        .iter()
+                        .flatten()
+                        .filter(|leaf| !parked.attached_panes.contains(leaf))
+                        .map(|leaf| format!("pane-{leaf}")),
+                );
+            }
+        }
+        ids
+    }
+
+    /// Ends the app sessions a closing worktree, or each of a closing project's
+    /// worktrees, owns (SP2 spec §4.2), off the GPUI thread: one host listing,
+    /// then a `term.close` for each session `host_sessions::app_sessions_to_end`
+    /// names. A session the views already ended answers `unknown_session`, the
+    /// expected double close, and is not logged. Without a host there are none.
+    fn end_app_sessions(
+        &self,
+        closing: Vec<PathBuf>,
+        known: Vec<PathBuf>,
+        layout_ids: HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if closing.is_empty() {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let listed: Vec<(String, sirio_host_protocol::term::Origin, PathBuf)> =
+                    match client.list() {
+                        Ok(list) => list
+                            .sessions
+                            .into_iter()
+                            .map(|summary| {
+                                (summary.session_id, summary.origin, PathBuf::from(summary.cwd))
+                            })
+                            .collect(),
+                        Err(error) => {
+                            eprintln!(
+                                "[sirio] could not list the host's sessions to end a closed worktree's: {error}"
+                            );
+                            return;
+                        }
+                    };
+                for id in host_sessions::app_sessions_to_end(&listed, &closing, &known, &layout_ids) {
+                    match client.close(&id) {
+                        Ok(()) => {}
+                        Err(sirio_host_client::connection::CallError::Remote(body))
+                            if body.code == sirio_host_protocol::messages::ErrorCode::UnknownSession => {}
+                        Err(error) => eprintln!("[sirio] could not end session {id}: {error}"),
+                    }
+                }
+            })
+            .detach();
     }
 
     /// Ends host sessions a closed worktree or project owned (spec §4.2),

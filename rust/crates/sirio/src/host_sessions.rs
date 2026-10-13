@@ -4,7 +4,11 @@
 //! (the deepest one), else its project, else the active worktree — and the
 //! pane-id floor new panes must start above.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use sirio_control::panel::owning_worktree;
+use sirio_host_protocol::term::Origin;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdoptionTarget {
@@ -46,6 +50,31 @@ pub fn adoption_target(
         return AdoptionTarget::Project(id);
     }
     AdoptionTarget::Active
+}
+
+/// The app sessions a set of closing worktrees owns (SP2 spec §4.2): every
+/// `origin: app` session whose cwd the deepest worktree holding it is one of
+/// `closing`, plus every app session a persisted or parked layout names
+/// (`layout_ids`, as `pane-<leaf>`). `known` lists every worktree the app
+/// knows; the closing ones are counted whether or not it lists them. Control
+/// sessions are never returned: `PaneRegistry::shutdown_for` ends those.
+pub fn app_sessions_to_end(
+    listed: &[(String, Origin, PathBuf)],
+    closing: &[PathBuf],
+    known: &[PathBuf],
+    layout_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut candidates = known.to_vec();
+    candidates.extend(closing.iter().cloned());
+    listed
+        .iter()
+        .filter(|(_, origin, _)| *origin == Origin::App)
+        .filter(|(id, _, cwd)| {
+            layout_ids.contains(id)
+                || owning_worktree(cwd, &candidates).is_some_and(|owner| closing.contains(owner))
+        })
+        .map(|(id, _, _)| id.clone())
+        .collect()
 }
 
 fn canonical_or_raw(path: &Path) -> PathBuf {
@@ -115,5 +144,56 @@ mod tests {
         let listed = ["pane-3", "pane-17", "pane-c0123456789ab", "pane-x"].map(String::from);
         assert_eq!(next_pane_floor(&listed), 18);
         assert_eq!(next_pane_floor(&[]), 0);
+    }
+
+    fn listed(id: &str, origin: Origin, cwd: &str) -> (String, Origin, PathBuf) {
+        (id.to_string(), origin, p(cwd))
+    }
+
+    #[test]
+    fn closing_a_worktree_ends_the_app_sessions_whose_deepest_worktree_it_is() {
+        let known = [p("/r"), p("/r/wt/feature")];
+        let listed = [
+            listed("pane-1", Origin::App, "/r/wt/feature/src"),
+            listed("pane-2", Origin::App, "/r/docs"),
+            listed("pane-3", Origin::App, "/r/wt/feature"),
+        ];
+        let ended = app_sessions_to_end(&listed, &[p("/r/wt/feature")], &known, &HashSet::new());
+        assert_eq!(ended, ["pane-1", "pane-3"]);
+    }
+
+    #[test]
+    fn a_control_session_is_never_one_to_end_here() {
+        let known = [p("/r/wt")];
+        let listed = [listed("c-held", Origin::Control, "/r/wt/sub")];
+        let layout = HashSet::from(["c-held".to_string()]);
+        assert!(app_sessions_to_end(&listed, &[p("/r/wt")], &known, &layout).is_empty());
+    }
+
+    #[test]
+    fn a_layout_leaf_counts_even_when_its_session_cwd_is_elsewhere() {
+        let known = [p("/r/wt")];
+        let listed = [listed("pane-7", Origin::App, "/elsewhere")];
+        let layout = HashSet::from(["pane-7".to_string()]);
+        assert_eq!(app_sessions_to_end(&listed, &[p("/r/wt")], &known, &layout), ["pane-7"]);
+    }
+
+    #[test]
+    fn a_sibling_whose_name_starts_with_the_closing_worktree_is_not_owned() {
+        let known = [p("/r/app"), p("/r/application")];
+        let listed = [listed("pane-4", Origin::App, "/r/application/x")];
+        assert!(app_sessions_to_end(&listed, &[p("/r/app")], &known, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn closing_a_project_ends_the_sessions_of_each_of_its_worktrees() {
+        let known = [p("/r/a"), p("/r/b"), p("/r/other")];
+        let listed = [
+            listed("pane-1", Origin::App, "/r/a"),
+            listed("pane-2", Origin::App, "/r/b/src"),
+            listed("pane-3", Origin::App, "/r/other"),
+        ];
+        let closing = [p("/r/a"), p("/r/b")];
+        assert_eq!(app_sessions_to_end(&listed, &closing, &known, &HashSet::new()), ["pane-1", "pane-2"]);
     }
 }
