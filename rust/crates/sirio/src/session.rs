@@ -340,21 +340,36 @@ fn migrate_legacy_state_root(root: &Path) {
     }
 }
 
-/// Spec §7.1.1, amended (fix batch 1, finding 10): exports the host's data
-/// root as `SIRIO_HOST_HOME` so the app, the host it starts, and every shell
-/// whose `sirioctl` must reach the same host agree on one root. The root
-/// follows the database in use (`database_path`), not the `SIRIO_DB`
-/// variable alone. Call it on the main thread before any thread exists.
-pub fn export_host_root() {
-    let database = database_path();
-    let stable = app_support_root().join("sirio.sqlite");
-    let environment: BTreeMap<String, String> = std::env::vars().collect();
-    if let Some(paths) =
-        sirio_host_protocol::paths::root_for_database(&environment, &database, &stable)
-    {
+/// The app's host root (spec §7.1.1), resolved once from its database and its
+/// environment, and held in process: the app never exports it under a name it
+/// reads itself, so a child that inherits the environment cannot adopt it.
+static HOST_ROOT: std::sync::OnceLock<Option<sirio_host_protocol::paths::HostPaths>> =
+    std::sync::OnceLock::new();
+
+/// The root this app and the host it starts use. The root follows the database
+/// in use (`database_path`), not the `SIRIO_DB` variable alone.
+pub fn host_root() -> Option<sirio_host_protocol::paths::HostPaths> {
+    HOST_ROOT
+        .get_or_init(|| {
+            let database = database_path();
+            let stable = app_support_root().join("sirio.sqlite");
+            let environment: BTreeMap<String, String> = std::env::vars().collect();
+            sirio_host_protocol::paths::root_for_database(&environment, &database, &stable)
+        })
+        .clone()
+}
+
+/// Exports the root to this app's panes and their children as
+/// `SIRIO_PANE_HOST_HOME`, which only `sirioctl` and `host_probe` read, and only
+/// inside a pane (fix batch 6, N1). A root that does not resolve removes a
+/// variable inherited from a parent app's pane. Call it on the main thread
+/// before any thread exists: it changes the process environment.
+pub fn export_pane_host_root() {
+    match host_root() {
         // SAFETY: called first thing in `main`, before any thread is spawned,
         // so nothing can be reading the environment concurrently.
-        unsafe { std::env::set_var("SIRIO_HOST_HOME", &paths.root) };
+        Some(paths) => unsafe { std::env::set_var("SIRIO_PANE_HOST_HOME", &paths.root) },
+        None => unsafe { std::env::remove_var("SIRIO_PANE_HOST_HOME") },
     }
 }
 

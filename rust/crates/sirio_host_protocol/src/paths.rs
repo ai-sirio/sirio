@@ -20,11 +20,30 @@ fn absolute(env: &BTreeMap<String, String>, key: &str) -> Option<PathBuf> {
 }
 
 impl HostPaths {
-    /// Spec §7.1.1 (SP2): `$SIRIO_HOST_HOME` if absolute; else beside an
-    /// absolute `SIRIO_DB` — an isolated Sirio gets an isolated host; else the
-    /// per-user default, which a debug build names `host-debug` so it never
-    /// adopts the user's own host and its terminals.
+    /// The resolver of `sirioctl` and `host_probe` (spec §7.1.1, fix batch 6
+    /// N1): `$SIRIO_HOST_HOME` if absolute; else, inside a pane (`SIRIO_PANE_ID`
+    /// set), the root of the app that opened the pane (`SIRIO_PANE_HOST_HOME`);
+    /// else what [`Self::from_app_environment`] resolves. Only this resolver
+    /// reads the pane's variable, so an app or a host started from a pane never
+    /// adopts the root of the app that opened it.
     pub fn from_environment(env: &BTreeMap<String, String>) -> Option<Self> {
+        if let Some(root) = absolute(env, "SIRIO_HOST_HOME") {
+            return Some(Self { root });
+        }
+        if env.contains_key("SIRIO_PANE_ID")
+            && let Some(root) = absolute(env, "SIRIO_PANE_HOST_HOME")
+        {
+            return Some(Self { root });
+        }
+        Self::from_app_environment(env)
+    }
+
+    /// The root an app or a host resolves for itself, which never reads a
+    /// pane's variable. Spec §7.1.1 (SP2): `$SIRIO_HOST_HOME` if absolute; else
+    /// beside an absolute `SIRIO_DB` — an isolated Sirio gets an isolated host;
+    /// else the per-user default, which a debug build names `host-debug` so it
+    /// never adopts the user's own host and its terminals.
+    pub fn from_app_environment(env: &BTreeMap<String, String>) -> Option<Self> {
         if let Some(root) = absolute(env, "SIRIO_HOST_HOME") {
             return Some(Self { root });
         }
@@ -236,14 +255,14 @@ pub fn root_for_database(
     stable: &std::path::Path,
 ) -> Option<HostPaths> {
     if absolute(environment, "SIRIO_HOST_HOME").is_some() {
-        return HostPaths::from_environment(environment);
+        return HostPaths::from_app_environment(environment);
     }
     if database == stable {
         // The default root must not follow `SIRIO_DB`, which is not the
         // database in use here (it is the stable one, or unset).
         let mut without_database = environment.clone();
         without_database.remove("SIRIO_DB");
-        return HostPaths::from_environment(&without_database);
+        return HostPaths::from_app_environment(&without_database);
     }
     if database.is_absolute()
         && let Some(parent) = database.parent()
@@ -252,7 +271,7 @@ pub fn root_for_database(
             root: parent.join("host"),
         });
     }
-    HostPaths::from_environment(environment)
+    HostPaths::from_app_environment(environment)
 }
 
 #[cfg(test)]
@@ -309,5 +328,107 @@ mod database_root_tests {
     #[cfg(not(windows))]
     fn default_leaf() -> &'static str {
         if cfg!(debug_assertions) { "host-debug" } else { "host" }
+    }
+}
+
+/// Fix batch 6 (N1): a pane's root reaches only the processes that read it.
+/// The app's own resolution, the host and the root rule never read the pane
+/// variable; `sirioctl` and `host_probe` do, and only inside a pane.
+#[cfg(test)]
+mod pane_root_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn default_leaf() -> &'static str {
+        if cfg!(debug_assertions) { "host-debug" } else { "host" }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_sirioctl_resolver_honours_the_pane_root_of_a_pane() {
+        // A pane's shell carries SIRIO_PANE_ID and the root of the app that
+        // opened it, so its sirioctl reaches that app's host even when no
+        // database variable would lead there.
+        let paths = HostPaths::from_environment(&env(&[
+            ("SIRIO_PANE_ID", "pane-1"),
+            ("SIRIO_PANE_HOST_HOME", "/app/host"),
+            ("XDG_DATA_HOME", "/x"),
+        ]))
+        .unwrap();
+        assert_eq!(paths.root, PathBuf::from("/app/host"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_explicit_sirio_host_home_wins_over_the_pane_root() {
+        let paths = HostPaths::from_environment(&env(&[
+            ("SIRIO_HOST_HOME", "/h"),
+            ("SIRIO_PANE_ID", "pane-1"),
+            ("SIRIO_PANE_HOST_HOME", "/app/host"),
+        ]))
+        .unwrap();
+        assert_eq!(paths.root, PathBuf::from("/h"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_pane_root_without_a_pane_id_is_ignored() {
+        let paths = HostPaths::from_environment(&env(&[
+            ("SIRIO_PANE_HOST_HOME", "/app/host"),
+            ("XDG_DATA_HOME", "/x"),
+        ]))
+        .unwrap();
+        assert_eq!(paths.root, Path::new("/x/Sirio").join(default_leaf()));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_app_resolver_ignores_a_pane_root_for_the_stable_database() {
+        // The stable database keeps the default root, and a pane's variable
+        // must not move it: this is the path a release app takes when it is
+        // launched from a pane of another Sirio.
+        let environment = env(&[
+            ("SIRIO_PANE_ID", "pane-1"),
+            ("SIRIO_PANE_HOST_HOME", "/app/host"),
+            ("XDG_DATA_HOME", "/x"),
+        ]);
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, stable, stable).unwrap();
+        assert_eq!(paths.root, Path::new("/x/Sirio").join(default_leaf()));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_app_resolver_ignores_a_pane_root_for_a_checkout_database() {
+        let environment = env(&[
+            ("SIRIO_PANE_ID", "pane-1"),
+            ("SIRIO_PANE_HOST_HOME", "/app/host"),
+        ]);
+        let database = Path::new("/c/.sirio/state/sirio-abc.sqlite");
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, database, stable).unwrap();
+        assert_eq!(paths.root, Path::new("/c/.sirio/state/host"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_app_resolver_ignores_a_pane_root_when_the_database_is_relative() {
+        // The last fallthrough of the root rule: no absolute database to sit
+        // beside, so the default root decides, and the pane variable does not.
+        let environment = env(&[
+            ("SIRIO_PANE_ID", "pane-1"),
+            ("SIRIO_PANE_HOST_HOME", "/app/host"),
+            ("XDG_DATA_HOME", "/x"),
+        ]);
+        let stable = Path::new("/s/sirio.sqlite");
+        let paths = root_for_database(&environment, Path::new("rel.sqlite"), stable).unwrap();
+        assert_eq!(paths.root, Path::new("/x/Sirio").join(default_leaf()));
     }
 }

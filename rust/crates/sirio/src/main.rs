@@ -24674,8 +24674,7 @@ fn host_ensure_options(
     environment: BTreeMap<String, String>,
     current_exe: PathBuf,
 ) -> Result<sirio_host_client::EnsureOptions, sirio_host_client::EnsureError> {
-    let Some(paths) = sirio_host_protocol::paths::HostPaths::from_environment(&environment)
-    else {
+    let Some(paths) = session::host_root() else {
         return Err(sirio_host_client::EnsureError::NoDataRoot);
     };
     let major = if cfg!(debug_assertions) {
@@ -24959,10 +24958,10 @@ fn main() {
     #[cfg(target_os = "windows")]
     ensure_windows_console();
 
-    // Spec §7.1.1 (amended): the host root follows the database in use, and
-    // is exported before the host, the sirioctl of every pane, or anything
-    // else resolves it.
-    session::export_host_root();
+    // Spec §7.1.1 (amended): the host root follows the database in use. It is
+    // resolved here, before the host, the sirioctl of every pane or anything
+    // else asks for it; a pane receives it as SIRIO_PANE_HOST_HOME.
+    session::export_pane_host_root();
 
     sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source

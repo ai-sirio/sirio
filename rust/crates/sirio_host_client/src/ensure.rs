@@ -319,7 +319,14 @@ fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureErro
         .map_err(EnsureError::Stage)?;
     spawn_detached(&DetachedSpawn {
         program,
-        args: vec!["--mode".into(), "on-demand".into()],
+        // The root is an argument, not the environment: the host's shells
+        // inherit its environment, and the app's root must not reach them.
+        args: vec![
+            "--mode".into(),
+            "on-demand".into(),
+            "--root".into(),
+            options.paths.root.as_os_str().to_owned(),
+        ],
         cwd: options.paths.root.clone(),
         label: format!("sirio-host-v{major}"),
         launchd_dir: options.paths.launchd_dir(),

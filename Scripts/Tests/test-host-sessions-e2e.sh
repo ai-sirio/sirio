@@ -1461,6 +1461,50 @@ case_restore_stale_id_of_another_worktree() {
 
 # ---------------------------------------------------------------- the run
 
+# Fix batch 6, N1 (a nested Sirio does not inherit the outer app's host root):
+# app 2, launched from a pane of app 1 with only its own SIRIO_DB and
+# SIRIO_SOCKET, has a host root of its own. It does not adopt app 1's host or
+# list app 1's sessions, and a sirioctl in app 1's pane still reaches app 1's
+# host when the app's socket is not there to answer. App 1 takes its root from
+# its database, not from an explicit SIRIO_HOST_HOME, which a child would inherit.
+case_nested_app_own_host() {
+  new_world c29
+  unset SIRIO_HOST_HOME
+  app_start
+  select_repo "$W/repo"
+  local pane1 pid1 host1_pid nested host2_pid nested_pid pane3
+  nested="$W/nested"
+  mkdir -p "$nested"
+  host1_pid=$(current_host_pid)
+  pane1=$(open_terminal "$(heartbeat "$W/pid1.txt")")
+  wait_until 10 pid_written "$W/pid1.txt" || fail "app 1's terminal never wrote its pid"
+  pid1=$(pid_in "$W/pid1.txt")
+  # Typed into a pane of app 1: the nested app inherits that pane's environment.
+  open_terminal "env SIRIO_DB=$nested/s.sqlite SIRIO_SOCKET=$nested/c.sock $APP_EXE >>$nested/app.log 2>&1 & echo \$! >$nested/app.pid; sleep 600" >/dev/null
+  wait_until 60 pid_written "$nested/app.pid" || fail "the nested app was never launched from app 1's pane"
+  nested_pid=$(pid_in "$nested/app.pid")
+  APPS+=("$nested_pid")
+  WORLDS+=("$nested")
+  wait_until 60 test -s "$nested/host/host-v1.json" || fail "the nested app has no host of its own under $nested/host"
+  host2_pid=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$nested/host/host-v1.json")
+  [ "$host2_pid" != "$host1_pid" ] || fail "the nested app adopted app 1's host (pid $host1_pid)"
+  alive "$host1_pid" || fail "app 1's host $host1_pid is gone"
+  # App 2's host lists none of app 1's sessions.
+  local listing rc=0
+  listing=$(env -u SIRIO_HOST_HOME SIRIO_DB="$nested/s.sqlite" "$PROBE" term-list 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the nested app's host did not answer term-list (exit $rc)"
+  if printf '%s\n' "$listing" | grep -q "^session=$pane1 "; then
+    fail "the nested app's host lists app 1's session $pane1"
+  fi
+  # A sirioctl in app 1's pane, with no socket to answer and no database
+  # variable to lead anywhere, reaches app 1's host: panel state of app 1's
+  # pane is answered by the host, and only the pane's own root holds it.
+  pane3=$(open_terminal "env -u SIRIO_DB SIRIO_SOCKET=$W/none.sock $CTL panel state $pane1 >$W/panel-in-pane.txt 2>&1; sleep 600")
+  wait_until 30 grep -q "running" "$W/panel-in-pane.txt" \
+    || fail "a sirioctl in app 1's pane did not reach app 1's host: $(head -c 300 "$W/panel-in-pane.txt" 2>/dev/null)"
+  NOTE="app 2 host $host2_pid, app 1 host $host1_pid; app 1's $pane1 (pid $pid1) not on app 2's host; sirioctl in $pane3 reached app 1's host"
+}
+
 run_case() { # number name function
   N="$1"; CASE_NAME="$2"; CASE_STARTED=$(date +%s); NOTE=""; SKIPPED=0
   if [ -n "$ONLY" ] && [ "${ONLY#*,$N,}" = "$ONLY" ]; then return 0; fi
@@ -1583,6 +1627,7 @@ run_case 25 fresh-tab-never-dead-ends case_fresh_tab_never_dead_ends
 run_case 26 restart-on-failed-is-safe case_restart_on_failed_is_safe
 run_case 27 adopt-after-late-host case_adopt_after_late_host
 run_case 28 restore-stale-id-of-another-worktree case_restore_stale_id_of_another_worktree
+run_case 29 nested-app-own-host case_nested_app_own_host
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 23 cases)"
