@@ -2977,12 +2977,16 @@ impl TerminalView {
         if self.session_lost {
             self.pending_prelude = self.capture_scrollback();
         }
-        // A restart re-opens under the same id: the factory closes the old
-        // host session synchronously before re-creating (see `OpenRequest.recreate`).
-        // Only a running session is ended here: a pane still connecting must
-        // not be marked abandoned, or its reopen below would never happen.
-        self.pending_recreate = true;
-        if matches!(self.terminal, TerminalState::Running(_)) {
+        // A restart re-opens under the same id. The factory closes the old host
+        // session before re-creating it (see `OpenRequest.recreate`), which is
+        // only safe for a session this pane is running: a Failed pane's session
+        // may be live on a host it could not reach, so its restart is a retry
+        // that attaches or creates and closes nothing (finding N5). Only a
+        // running session is ended here: a pane still connecting must not be
+        // marked abandoned, or its reopen below would never happen.
+        let running = matches!(self.terminal, TerminalState::Running(_));
+        self.pending_recreate = running;
+        if running {
             self.shutdown();
         }
         self.host.relaunch();
@@ -8495,6 +8499,60 @@ mod view_tests {
         });
         assert!(failed, "the view stays in Session lost");
         assert_eq!(message, reason);
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Records whether each open asked to close the session its id names,
+    /// and always fails the open, as an unreachable host does.
+    struct RecreateRecordingFactory {
+        recreates: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+    impl SessionFactory for RecreateRecordingFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            self.recreates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.recreate);
+            OpenOutcome::Failed("host is unverifiable".to_string())
+        }
+    }
+
+    /// Finding N5: Restart on a Failed pane must never ask the factory to close
+    /// the session its id names. The open failed because the host could not be
+    /// reached, so the session may be live on it; Restart on such a pane is a
+    /// retry, and every open after it carries no recreate.
+    #[gpui::test]
+    async fn restart_on_a_failed_pane_never_asks_for_a_recreate(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let recreates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(RecreateRecordingFactory {
+            recreates: recreates.clone(),
+        }))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-failed-restart-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            terminal.update(cx, |terminal, cx| terminal.restart(cx));
+        });
+        cx.run_until_parked();
+        let recorded = recreates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(!recorded.is_empty(), "the restart must reach the factory");
+        assert!(
+            recorded.iter().all(|recreate| !recreate),
+            "Restart on a failed pane asked the factory to close the session its id names: {recorded:?}"
+        );
         let _ = std::fs::remove_dir_all(working_directory);
     }
 

@@ -1276,6 +1276,117 @@ case_close_unvisited_worktree() {
   NOTE="B's $pb (pid $pb_pid) ended though B was never mounted this run; A's $pa (pid $pa_pid) untouched"
 }
 
+# Finding N2 (closing a worktree ends another worktree's agent): B's layout
+# names the ids its terminals took in this run, and after a relaunch on an
+# empty host A's next id is one of them. Closing B must not end A's new
+# terminal, whose cwd is A.
+case_close_worktree_id_collision() {
+  new_world c24
+  git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
+  app_start
+  select_repo "$W/repo"
+  local wt_a_id wt_b_id pa1 pa2 pb1 pb2 pa3 pa3_pid
+  wt_a_id="$WT_ID"
+  pa1=$(open_terminal "sleep 300")
+  pa2=$(open_terminal "sleep 300")
+  ctl project add "$W/wt-b" >/dev/null 2>&1 || true
+  wt_b_id=$(worktree_id_at "$W/wt-b")
+  [ -n "$wt_b_id" ] || fail "sirioctl does not list the second worktree"
+  ctl select-workspace --workspace "$wt_b_id" >/dev/null
+  sleep 2
+  pb1=$(open_terminal "sleep 300")
+  pb2=$(open_terminal "sleep 300")
+  ctl select-workspace --workspace "$wt_a_id" >/dev/null
+  sleep 2
+  ctl surface host end-all >/dev/null || fail "End All was refused"
+  wait_until 20 host_gone || fail "the host did not end after End All"
+  app_quit
+  app_start
+  wait_until 30 pane_known "$pa1" || fail "the relaunched app does not know $pa1"
+  pa3=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$pa3" || fail "the new terminal $pa3 in A is not on the host"
+  pa3_pid=$(session_pid "$pa3")
+  ctl close-workspace --workspace "$wt_b_id" >/dev/null || fail "closing B was refused"
+  sleep 3
+  session_listed "$pa3" || fail "A's new terminal $pa3 was ended by the close of B (B held $pb1 and $pb2)"
+  pid_alive "$pa3_pid" || fail "pid $pa3_pid of A's new terminal $pa3 died with the close of B"
+  NOTE="A's new terminal $pa3 (pid $pa3_pid) survives the close of B, which held $pb1 and $pb2"
+}
+
+# Finding N5 and #11 (a fresh terminal never dead-ends on a held id): the app
+# starts while the host is unverifiable and does not adopt it. Once the host
+# answers, a control session holds the id the next app terminal would take. The
+# new terminal gets its own session and runs its command; the control session
+# is untouched.
+case_fresh_tab_never_dead_ends() {
+  new_world c25
+  app_start
+  select_repo "$W/repo"
+  local first t1 next control_pid control_clients t2 pidfile pid t2_now host_pid
+  first=$(open_terminal "sleep 300")
+  wait_until 10 session_listed "$first" || fail "the first terminal $first is not on the host"
+  app_quit
+  host_pid=$(current_host_pid)
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  STOPPED+=("$host_pid")
+  app_start
+  # The startup ensure gives up on the stopped host (its own log line says so),
+  # so the app starts with no host adopted and the floor not raised.
+  wait_until 90 grep -q "host unavailable" "$W/app.log" || fail "the startup ensure never reported the stopped host"
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  STOPPED=()
+  t1=$(open_terminal "sleep 300")
+  wait_until 60 session_listed "$t1" || fail "the terminal $t1 opened after SIGCONT is not on the host"
+  next="pane-$(( ${t1#pane-} + 1 ))"
+  probe term-create "$W/repo" --id "$next" -- sleep 300
+  [ "$RC" -eq 0 ] || fail "host_probe term-create $next failed: $OUT"
+  wait_until 10 session_listed "$next" || fail "the control session $next is not listed"
+  control_pid=$(session_pid "$next")
+  control_clients=$(session_clients "$next")
+  pidfile="$W/pid.txt"
+  t2=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 30 pid_written "$pidfile" || fail "the fresh terminal (held $next, opened as $t2) never ran its command"
+  pid=$(pid_in "$pidfile")
+  term_list || true
+  t2_now=$(printf '%s\n' "$TERM_LIST" | grep -E " pid=$pid( |\$)" | sed -n 's/^session=\([^ ]*\) .*/\1/p' | head -1)
+  [ -n "$t2_now" ] || fail "no host session runs the fresh terminal's pid $pid"
+  [ "$t2_now" != "$next" ] || fail "the fresh terminal attached to the control session $next"
+  session_listed "$next" || fail "the control session $next was ended"
+  [ "$(session_clients "$next")" = "$control_clients" ] || fail "the control session $next gained a client (clients $(session_clients "$next"), expected $control_clients)"
+  [ "$(session_pid "$next")" = "$control_pid" ] || fail "the held id $next now names another session"
+  pid_alive "$control_pid" || fail "the control session pid $control_pid is not alive"
+  NOTE="held $next (pid $control_pid) untouched; the fresh terminal runs its own session $t2_now (pid $pid)"
+}
+
+# Finding N5 (Restart on a Failed pane must never close a session): a restored
+# tab fails while its session is live (the host is stopped). Restart, then the
+# host resumes: the reopen must attach to the original session, not close it
+# and create another under the same id.
+case_restart_on_failed_is_safe() {
+  new_world c26
+  local pane pidfile pid host_pid
+  app_start
+  select_repo "$W/repo"
+  pidfile="$W/pid.txt"
+  pane=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 10 pid_written "$pidfile" || fail "the terminal never wrote its pid"
+  pid=$(pid_in "$pidfile")
+  app_quit
+  host_pid=$(current_host_pid)
+  kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
+  STOPPED+=("$host_pid")
+  app_start
+  wait_until 150 lost_flagged "$pane" || fail "the restored tab $pane never failed while the host was stopped"
+  "$CTL" surface terminal restart "$pane" >/dev/null 2>&1 || fail "Restart on the failed tab $pane was refused"
+  sleep 2
+  kill -CONT "$host_pid" || fail "could not resume the host $host_pid"
+  STOPPED=()
+  wait_until 90 clients_are 1 "$pane" || fail "the reopened tab $pane never attached (clients $(session_clients "$pane"))"
+  pid_alive "$pid" || fail "Restart on the failed tab closed its live session: pid $pid is dead"
+  [ "$(session_pid "$pane")" = "$pid" ] || fail "the reopened tab $pane runs pid $(session_pid "$pane"), expected the original $pid"
+  NOTE="restarted $pane attached to its original pid $pid after SIGCONT"
+}
+
 # ---------------------------------------------------------------- the run
 
 run_case() { # number name function
@@ -1395,6 +1506,9 @@ run_case 20 close-connecting case_close_connecting
 run_case 21 exited-attach case_exited_attach
 run_case 22 sp1-host-upgrade case_sp1_host_upgrade
 run_case 23 close-unvisited-worktree case_close_unvisited_worktree
+run_case 24 close-worktree-id-collision case_close_worktree_id_collision
+run_case 25 fresh-tab-never-dead-ends case_fresh_tab_never_dead_ends
+run_case 26 restart-on-failed-is-safe case_restart_on_failed_is_safe
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED of 23 cases)"
