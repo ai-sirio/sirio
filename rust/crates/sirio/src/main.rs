@@ -30,8 +30,8 @@ use sirio_persistence::{
     stable_worktree_id,
 };
 use sirio_project::{
-    OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, display_absolute_path, display_path,
-    is_git_repository, numeric_tab_selection, read_head_label,
+    OnceGate, PaneRole, TabKind, display_absolute_path, display_path, is_git_repository,
+    numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -1058,11 +1058,6 @@ enum ControlAction {
         pane_id: String,
         status: AgentStatus,
     },
-    /// F-WIN-11: drives the update-toast state machine from outside the
-    /// process -- the cheapest honest test source, since no Linux update
-    /// transport exists yet to raise these events on its own (see
-    /// `sirio_project::ui`'s doc-comment on `UpdateState`).
-    UpdateEvent(UpdateEvent),
     SelectWorktree {
         selector: String,
         reply: ControlReply,
@@ -2150,7 +2145,6 @@ impl ControlHandler for AppControlHandler {
                     "workspace.close",
                     "worktree.set",
                     "notify",
-                    "update.event",
                     "panel.create",
                     "panel.split",
                     "panel.list",
@@ -3205,66 +3199,6 @@ impl ControlHandler for AppControlHandler {
                     );
                 };
                 actions.push(ControlAction::Notify { pane_id, status });
-                Self::success(&request.id, [("queued".to_string(), "true".to_string())])
-            }
-            // F-WIN-11: injects one `UpdateEvent` into the update toast's
-            // state machine. `event` names the transition;
-            // `available`/`failed` carry a free-text payload in `version`/
-            // `message`, `download-progress` carries an integer `percent`.
-            "update.event" => {
-                let Some(kind) = request.params.get("event") else {
-                    return ControlResponse::failure(&request.id, "update.event requires event");
-                };
-                let event = match kind.as_str() {
-                    "check-started" => UpdateEvent::CheckStarted,
-                    "available" => {
-                        let Some(version) = request.params.get("version").cloned() else {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "update.event available requires version",
-                            );
-                        };
-                        UpdateEvent::Available(version)
-                    }
-                    "download-progress" => {
-                        let Some(percent) = request
-                            .params
-                            .get("percent")
-                            .and_then(|value| value.parse::<u8>().ok())
-                        else {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "update.event download-progress requires an integer percent",
-                            );
-                        };
-                        UpdateEvent::DownloadProgress(percent)
-                    }
-                    "install-started" => UpdateEvent::InstallStarted,
-                    "finished" => UpdateEvent::Finished,
-                    "failed" => {
-                        let Some(message) = request.params.get("message").cloned() else {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "update.event failed requires message",
-                            );
-                        };
-                        UpdateEvent::Failed(message)
-                    }
-                    "reset" => UpdateEvent::Reset,
-                    other => {
-                        return ControlResponse::failure(
-                            &request.id,
-                            format!("update.event has an unknown event {other}"),
-                        );
-                    }
-                };
-                let Ok(mut actions) = self.control_actions.lock() else {
-                    return ControlResponse::failure(
-                        &request.id,
-                        "control action queue unavailable",
-                    );
-                };
-                actions.push(ControlAction::UpdateEvent(event));
                 Self::success(&request.id, [("queued".to_string(), "true".to_string())])
             }
             "workspace.select" => {
@@ -4936,11 +4870,6 @@ struct SirioWorkspace {
     /// already replaced) can't clear a toast it doesn't own.
     toast: Option<Toast>,
     next_toast_id: u64,
-    /// F-WIN-11: the update-toast's own state machine, driven exclusively
-    /// by `ControlAction::UpdateEvent` -- no Linux update transport exists
-    /// yet to raise these on its own (see `sirio_project::ui`'s
-    /// doc-comment on `UpdateState`).
-    update_state: UpdateState,
     /// The host's own copy of the update facts shown on `StatusBar` and
     /// `Settings`. The updater (poll loop, apply task) writes into it via
     /// [`Self::apply_update_outcome`] and it is pushed to both surfaces by
@@ -5368,11 +5297,6 @@ impl SirioWorkspace {
                                     workspace.post_activity_notification(&transition);
                                     workspace.request_auto_rename(&transition, cx);
                                     workspace.mark_activity_dirty();
-                                    cx.notify();
-                                }
-                                ControlAction::UpdateEvent(event) => {
-                                    workspace.update_state =
-                                        workspace.update_state.clone().transition(event);
                                     cx.notify();
                                 }
                                 ControlAction::SelectWorktree { selector, reply } => {
@@ -5920,7 +5844,6 @@ impl SirioWorkspace {
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
-            update_state: UpdateState::Idle,
             live_update_state: UiUpdateState::default(),
             updater: None,
             updates_enabled: Arc::new(AtomicBool::new(true)),
@@ -10822,15 +10745,6 @@ impl SirioWorkspace {
 
     fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
         self.toast = None;
-        cx.notify();
-    }
-
-    /// F-WIN-11: the update toast's dismiss control -- the one action wired
-    /// to a real transition (`UpdateEvent::Reset`) regardless of which
-    /// visible state it is dismissed from, mirroring the reference
-    /// `UpdaterModel.dismiss()`.
-    fn dismiss_update_toast(&mut self, cx: &mut Context<Self>) {
-        self.update_state = self.update_state.clone().transition(UpdateEvent::Reset);
         cx.notify();
     }
 
@@ -20528,131 +20442,6 @@ impl SirioWorkspace {
         )
     }
 
-    /// F-WIN-11: the update toast -- renders every user-visible
-    /// `UpdateState` (all but `Idle`, which is silence) with its message
-    /// and, where the reference names one, its action. No Linux update
-    /// transport is wired yet to back "Download"/"Retry" (see
-    /// `UpdateState`'s doc-comment, deliberately transport-independent),
-    /// so those render muted and inert -- the same "not yet wired"
-    /// convention `Titlebar`'s cluster seams use rather than a
-    /// live-looking dead control. Dismiss is the one action every state
-    /// actually supports, and is fully wired to `UpdateEvent::Reset`.
-    fn render_update_toast(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
-        let (message, action_label, message_tone): (String, Option<&'static str>, gpui::Hsla) =
-            match &self.update_state {
-                UpdateState::Idle => return None,
-                UpdateState::Checking => {
-                    ("Checking for updates…".to_string(), None, theme.ely.fg_muted)
-                }
-                // An available update is the one state waiting on the reader,
-                // so it is the one state that spends a colour. Checking,
-                // downloading and installing are the app talking about itself.
-                UpdateState::Available { version } => (
-                    format!("Sirio {version} is available"),
-                    Some("Download"),
-                    theme.ely.warning,
-                ),
-                UpdateState::Downloading { progress_percent } => (
-                    format!("Downloading Sirio… {progress_percent}%"),
-                    None,
-                    theme.ely.fg_muted,
-                ),
-                UpdateState::Installing => {
-                    ("Installing update…".to_string(), None, theme.ely.fg_muted)
-                }
-                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.ely.success),
-                UpdateState::Failed { message } => (
-                    format!("Update failed: {message}"),
-                    Some("Retry"),
-                    theme.ely.danger,
-                ),
-            };
-        let progress_percent = match &self.update_state {
-            UpdateState::Downloading { progress_percent } => Some(*progress_percent),
-            _ => None,
-        };
-        let dismiss_entity = entity;
-        Some(
-            div()
-                .id("update-toast")
-                .debug_selector(|| "update-toast".to_owned())
-                .absolute()
-                .top(px(20.0))
-                .right(px(20.0))
-                .max_w(px(320.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .rounded(theme.radii.control)
-                .border_1()
-                .border_color(theme.ely.border)
-                .bg(theme.sirio.floating_surface)
-                .shadow_lg()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .id("update-toast-message")
-                                .debug_selector(|| "update-toast-message".to_owned())
-                                .flex_1()
-                                .text_size(theme.typography.footnote)
-                                .text_color(message_tone)
-                                .child(sirio_ui::text_selection::selectable_text(message)),
-                        )
-                        .child(
-                            div()
-                                .id("update-toast-dismiss")
-                                .debug_selector(|| "update-toast-dismiss".to_owned())
-                                .text_size(theme.typography.footnote)
-                                .text_color(theme.ely.fg_subtle)
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                    dismiss_entity.update(cx, |workspace, cx| {
-                                        workspace.dismiss_update_toast(cx)
-                                    });
-                                })
-                                .child("×"),
-                        ),
-                )
-                .when_some(progress_percent, |this, progress_percent| {
-                    this.child(
-                        div()
-                            .id("update-toast-progress")
-                            .debug_selector(|| "update-toast-progress".to_owned())
-                            .w_full()
-                            .h(px(5.0))
-                            .rounded(px(3.0))
-                            .bg(theme.ely.surface)
-                            .child(
-                                div()
-                                    .h(px(5.0))
-                                    .rounded(px(3.0))
-                                    // A bar filling up is a quantity, not a status.
-                                    .bg(theme.sirio.quantity)
-                                    .w(px(280.0 * (progress_percent as f32 / 100.0))),
-                            ),
-                    )
-                })
-                .when_some(action_label, |this, label| {
-                    this.child(
-                        div()
-                            .id("update-toast-action")
-                            .debug_selector(|| "update-toast-action".to_owned())
-                            .text_size(theme.typography.footnote)
-                            .text_color(theme.ely.fg_muted)
-                            .child(label),
-                    )
-                })
-                .into_any_element(),
-        )
-    }
-
     /// Root-level transient surfaces must outlive whichever main content
     /// branch is mounted. In particular, Settings replaces the columns but
     /// must not hide an already-open confirmation, prompt, or toast.
@@ -20662,7 +20451,6 @@ impl SirioWorkspace {
             self.render_title_prompt(theme, entity.clone()),
             self.render_update_card(entity.clone()),
             self.render_toast(theme, entity.clone()),
-            self.render_update_toast(theme, entity),
         ]
         .into_iter()
         .flatten()
@@ -33667,85 +33455,6 @@ done
         );
     }
 
-    /// F-WIN-11: drives `UpdateState` through every user-visible state
-    /// (all but `Idle`, which renders nothing) and asserts the toast
-    /// draws for each, then that its wired Dismiss control resets the
-    /// state and un-draws the toast -- the same drawn-control contract
-    /// `drawn_add_project_duplicate_shows_sidebar_notice` holds
-    /// `workspace-toast` to.
-    #[gpui::test]
-    async fn drawn_update_toast_renders_every_state_and_dismiss_resets_it(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        assert!(
-            cx.debug_bounds("update-toast").is_none(),
-            "Idle must draw no toast"
-        );
-
-        for event in [
-            UpdateEvent::CheckStarted,
-            UpdateEvent::Available("1.4.0".into()),
-            UpdateEvent::DownloadProgress(150),
-            UpdateEvent::InstallStarted,
-            UpdateEvent::Finished,
-            UpdateEvent::Failed("network unreachable".into()),
-        ] {
-            workspace.update(&mut cx, |workspace, cx| {
-                workspace.update_state = workspace.update_state.clone().transition(event);
-                cx.notify();
-            });
-            cx.run_until_parked();
-            let toast = cx
-                .debug_bounds("update-toast")
-                .expect("the update toast is drawn for every non-Idle state");
-            let center = cx
-                .debug_bounds("shell-center-panel")
-                .expect("the shell center panel is drawn beneath the root toast");
-            assert!(
-                toast.top() < center.top(),
-                "the root toast must extend above the overflow-hidden center panel"
-            );
-            assert!(
-                toast.size.width > px(0.0) && toast.size.height > px(0.0),
-                "the root update toast must paint a non-empty surface"
-            );
-        }
-        // The last transition above (`Failed`) left a clamped 100% progress
-        // bar behind it in `Downloading`'s wake -- confirm the clamp
-        // itself is visible along the way by re-checking it directly.
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.update_state = UpdateState::Downloading {
-                progress_percent: 100,
-            };
-            cx.notify();
-        });
-        cx.run_until_parked();
-        wait_for_drawn(&mut cx, "update-toast-progress");
-
-        let dismiss = cx
-            .debug_bounds("update-toast-dismiss")
-            .expect("dismiss control is drawn");
-        cx.simulate_click(dismiss.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("update-toast").is_none(),
-            "dismiss must reset UpdateState to Idle and un-draw the toast"
-        );
-        assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.update_state.clone()),
-            UpdateState::Idle
-        );
-    }
-
     #[cfg(target_os = "linux")]
     #[gpui::test]
     async fn drawn_save_failure_is_visible_without_hiding_the_file(cx: &mut TestAppContext) {
@@ -37616,117 +37325,6 @@ done
         );
     }
 
-    /// F-WIN-11: `update.event` is the cheapest honest way to drive
-    /// `UpdateState` on Linux (see the `ControlAction::UpdateEvent` and
-    /// `update_state` field docs) -- this asserts every event kind it
-    /// accepts queues the matching `UpdateEvent`, and that malformed input
-    /// is rejected rather than silently dropped or defaulted.
-    #[test]
-    fn update_event_queues_the_matching_control_action() {
-        let control_actions = Arc::new(Mutex::new(Vec::new()));
-        let handler = AppControlHandler::new(
-            Arc::new(Mutex::new(ControlState {
-                projects: Vec::new(),
-                project_settings: BTreeMap::new(),
-                workspaces: Vec::new(),
-                current: None,
-            })),
-            control_actions.clone(),
-            Arc::new(PaneRegistry::new()),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(BTreeMap::new())),
-            None,
-            ControlSocketInfo::new(PathBuf::from("/tmp/sirio-update-event-test.sock")),
-        );
-
-        let cases: Vec<(BTreeMap<String, String>, UpdateEvent)> = vec![
-            (
-                BTreeMap::from([("event".to_string(), "check-started".to_string())]),
-                UpdateEvent::CheckStarted,
-            ),
-            (
-                BTreeMap::from([
-                    ("event".to_string(), "available".to_string()),
-                    ("version".to_string(), "1.4.0".to_string()),
-                ]),
-                UpdateEvent::Available("1.4.0".to_string()),
-            ),
-            (
-                BTreeMap::from([
-                    ("event".to_string(), "download-progress".to_string()),
-                    ("percent".to_string(), "150".to_string()),
-                ]),
-                UpdateEvent::DownloadProgress(150),
-            ),
-            (
-                BTreeMap::from([("event".to_string(), "install-started".to_string())]),
-                UpdateEvent::InstallStarted,
-            ),
-            (
-                BTreeMap::from([("event".to_string(), "finished".to_string())]),
-                UpdateEvent::Finished,
-            ),
-            (
-                BTreeMap::from([
-                    ("event".to_string(), "failed".to_string()),
-                    ("message".to_string(), "network unreachable".to_string()),
-                ]),
-                UpdateEvent::Failed("network unreachable".to_string()),
-            ),
-            (
-                BTreeMap::from([("event".to_string(), "reset".to_string())]),
-                UpdateEvent::Reset,
-            ),
-        ];
-
-        for (params, expected) in cases {
-            let response = handler.handle(&ControlRequest {
-                id: "update-event".into(),
-                method: "update.event".into(),
-                params,
-            });
-            assert!(response.ok, "update.event failed: {:?}", response.error);
-            let mut actions = control_actions.lock().expect("action queue");
-            assert_eq!(
-                actions.pop().map(|action| matches!(
-                    action,
-                    ControlAction::UpdateEvent(ref event) if *event == expected
-                )),
-                Some(true),
-                "expected {expected:?} to be queued"
-            );
-            actions.clear();
-        }
-
-        let missing_version = handler.handle(&ControlRequest {
-            id: "missing-version".into(),
-            method: "update.event".into(),
-            params: BTreeMap::from([("event".to_string(), "available".to_string())]),
-        });
-        assert!(!missing_version.ok, "available without version must fail");
-
-        let bad_percent = handler.handle(&ControlRequest {
-            id: "bad-percent".into(),
-            method: "update.event".into(),
-            params: BTreeMap::from([
-                ("event".to_string(), "download-progress".to_string()),
-                ("percent".to_string(), "not-a-number".to_string()),
-            ]),
-        });
-        assert!(!bad_percent.ok, "a non-integer percent must fail");
-
-        let unknown_event = handler.handle(&ControlRequest {
-            id: "unknown-event".into(),
-            method: "update.event".into(),
-            params: BTreeMap::from([("event".to_string(), "levitate".to_string())]),
-        });
-        assert!(!unknown_event.ok, "an unrecognized event name must fail");
-        assert!(
-            control_actions.lock().expect("action queue").is_empty(),
-            "no rejected request may queue an action"
-        );
-    }
-
     #[test]
     fn control_notification_create_posts_exact_title_and_body() {
         let captured = Arc::new(Mutex::new(Vec::<NotificationPayload>::new()));
@@ -38700,9 +38298,7 @@ done
             | ControlAction::Chat { reply, .. } => {
                 let _ = reply.send(Ok(Vec::new()));
             }
-            ControlAction::Notify { .. }
-            | ControlAction::UpdateEvent(_)
-            | ControlAction::RefreshSidebar => {}
+            ControlAction::Notify { .. } | ControlAction::RefreshSidebar => {}
         }
     }
 
@@ -38760,7 +38356,6 @@ done
             "workspace.close" => request::workspace_close("workspace-1"),
             "worktree.set" => request::worktree_set("workspace-1", Some("comment"), None),
             "notify" => request::notify("pane-1", "done", None),
-            "update.event" => request_with_params(method, &[("event", "reset")]),
             "panel.create" => request_with_params(method, &[]),
             "panel.split" => request_with_params(method, &[]),
             "panel.list" => request::panel_list(None),
