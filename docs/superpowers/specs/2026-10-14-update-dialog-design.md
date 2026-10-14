@@ -66,9 +66,9 @@ Shown when **all** hold:
 - updates are enabled (`UpdateState.enabled`) and the compiled channel is not
   Dev (a Dev build reports `Disabled` and never gets here);
 - the status is `Available`, `Ready`, `Downloading`, `Installing` or
-  `Installed`, or `Failed` *from an apply* (the card's or Settings'). A failed
-  background check never raises the card: it stays Settings' "Could not check
-  for updates", as §7.3 of the auto-update spec has it;
+  `Installed`, or `ApplyFailed` (an apply the card or Settings started). A
+  failed background check (`Failed`) never raises the card: it stays Settings'
+  "Could not check for updates", as §7.3 of the auto-update spec has it;
 - the version is not the one put off with *Later* this session;
 - the user has not hidden it with × while work is in flight (§2.3).
 
@@ -118,7 +118,7 @@ From the click until the outcome, every action is disabled and the card shows
 ### §3.1 `sirio_ui::update_card` (new)
 
 - `update_card_view(input) -> Option<UpdateCardView>` — **pure**. Input: the
-  `UpdateState`, whether a `Failed` came from an apply, the version put off, whether the card is hidden, the count of
+  `UpdateState`, the version put off, whether the card is hidden, the count of
   agents at work, and whether the platform's installer restarts the app
   (`cfg!(windows)`, passed in so every case runs on every OS). Output: `None`
   or the title, body, warning, progress line and an ordered list of actions
@@ -138,18 +138,22 @@ pub enum UpdateStatus {
     Disabled, NotDue, Checking, UpToDate,
     Available { version: String, notes: String },
     Ready { version: String, notes: String },
+    Failed { message: String },               // a check failed, as today
     Downloading { version: String },          // new
     Installing { version: String },           // new
     Installed { version: String },            // new
-    Failed { message: String, retryable: bool }, // `retryable` new
+    ApplyFailed { version: String, message: String, retryable: bool }, // new
 }
 ```
 
-Today an apply in flight shows `Checking`, which is false. A new variant of a
+Today an apply in flight shows `Checking`, which is false, and a failed apply
+shows `Failed`, which Settings words as "Could not check for updates". A
+separate `ApplyFailed` keeps the two apart without the card needing to know
+where a failure came from. A new variant of a
 public enum breaks `match`es in other crates' test targets, so the change is
 verified with `cargo build --workspace --all-targets`. Settings → General draws
-the three new states as a muted line and keeps its button hidden during
-`Downloading` / `Installing`.
+the four new states as a muted line (`Update failed: …` for `ApplyFailed`)
+and keeps its button hidden during `Downloading` / `Installing`.
 
 ### §3.3 `sirio_apply::relaunch_target() -> Option<PathBuf>` (new)
 
@@ -191,7 +195,7 @@ The legacy update toast, which no real transport ever fed:
 `sirio_project::ui::{UpdateState, UpdateEvent}`, `render_update_toast` and
 `dismiss_update_toast`, `ControlAction::UpdateEvent`, the `update.event` socket
 method (served in every build; nothing in `Scripts/`, `docs/` or
-`sirio_control` calls it) and its use in `sirio_ui/examples/registry_browse_proto.rs`.
+`sirio_control` calls it) and the two tests that drove it.
 
 ### §3.6 Driving it over the socket — debug builds only
 
@@ -208,14 +212,14 @@ not list it.
 ## §4 Failure and edge cases
 
 **Download or verification failed** (network, signature, staging) →
-`Failed { retryable: true }`. `Updater::download` today refuses a second
+`ApplyFailed { retryable: true }`. `Updater::download` today refuses a second
 attempt on the same version within the interval (`SkippedAlreadyAttempted`),
 and the host ignores that answer — so a second click after a failure leaves the
 UI on `Checking` forever. That guard exists for **automatic** retries (§7.2 of
 the auto-update spec: "a battery bug"). A download the user asked for bypasses
 it (`Updater::download_requested`, or a flag on `download`); the poll loop's
 automatic download keeps it. A `Skipped*` answer the host does receive now
-lands as `Failed` instead of nothing.
+lands as `ApplyFailed` instead of nothing.
 
 **Apply failed:**
 
@@ -238,6 +242,12 @@ the card disappears with the state.
 replace `Downloading` / `Installing`; it is kept as `last_available` /
 `last_verified` and shown when the apply ends.
 
+**A check lands after an install without restart:** the running binary is still
+the old version, so the next check reports the installed version as `Available`
+/ `Ready` again. A check for the version already `Installed` keeps `Installed`;
+only a newer version replaces it. A check that fails or is not due keeps
+`ApplyFailed` too, so the card's error does not vanish under a poll.
+
 **Double click:** the actions are disabled from the first click to the outcome,
 and `begin_update_apply` refuses a second start regardless.
 
@@ -258,7 +268,8 @@ are listed first and each becomes a test before the function exists:
 - shows while hidden with × during `Downloading` / `Installing`;
 - offers *Install without restarting* on Windows, or with no agent at work;
 - leaves any action enabled during `Downloading` / `Installing`;
-- offers *Retry* on a non-retryable failure;
+- offers *Retry* on a non-retryable `ApplyFailed`; raises the card for a
+  check's `Failed`;
 - names the wrong primary label per platform (`Restart to update` vs
   `Update and restart`);
 - shows the warning with zero agents, or a singular/plural mismatch.
