@@ -236,6 +236,17 @@ wait_until() {
   done
   "$@"
 }
+
+# wait_secs SECS CMD...: like wait_until, with a deadline in seconds rather
+# than a count of polls; a term-read of a flooded session is slow on Windows.
+wait_secs() {
+  local deadline=$((SECONDS + $1))
+  shift
+  until "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.5
+  done
+}
 absent() { [ ! -e "$1" ]; }
 has_line() { grep -q "$2" "$1" 2>/dev/null; }
 
@@ -742,13 +753,8 @@ case_flood() {
   reader=$!
   HELPERS+=("$reader")
   log_direct "term-attach $id --for $((hold * 1000)) --replica-text r.txt & (reader, pid $reader)"
-  # A deadline in seconds: wait_until counts polls, and one term-read of a
-  # flooded session is slow on Windows.
-  local deadline=$((SECONDS + secs))
-  until term_read_has "$id" "FLOOD-DONE"; do
-    [ "$SECONDS" -lt "$deadline" ] || fail "the $bytes-byte flood never finished in ${secs}s"
-    sleep 0.5
-  done
+  wait_secs "$secs" term_read_has "$id" "FLOOD-DONE" \
+    || fail "the $bytes-byte flood never finished in ${secs}s"
   sleep 1
   wait "$reader" || fail "the reading attach failed"
   { echo "--- reader attach.out"; cat "$ROOT/attach.out"; } >>"$TRANSCRIPT"
@@ -867,13 +873,17 @@ case_bounded_read() {
   # A read bigger than one response frame (1 MiB payload, spec §6.1) must be
   # answered, not dropped: `raw` is capped at 512 KiB (base64 ≈ 683 KiB) of the
   # newest bytes, so this returns at once instead of timing out.
-  new_session -- sh -c 'head -c 3000000 /dev/zero | tr "\0" y; echo READY-MARKER; sleep 30'
+  # Windows floods 1 MB, still past the 512 KiB cap: ConPTY passes about
+  # 11 KB/s on a GitHub runner (see case_flood).
+  local bytes=3000000 secs=30
+  [ "$OS" = windows ] && { bytes=1000000; secs=200; }
+  new_session -- sh -c "head -c $bytes /dev/zero | tr '\\0' y; echo READY-MARKER; sleep 30"
   local id="$NEW_ID" started took size
-  wait_until 30 term_read_has "$id" "READY-MARKER" \
-    || fail "the 3 MB flood never finished"
+  wait_secs "$secs" term_read_has "$id" "READY-MARKER" \
+    || fail "the $bytes-byte flood never finished in ${secs}s"
   started="$(date +%s)"
   "$PROBE" term-read "$id" raw >"$ROOT/capped.bin" 2>"$ROOT/capped.err" \
-    || fail "term-read raw of a 3 MB journal failed"
+    || fail "term-read raw of a $bytes-byte journal failed"
   log_direct "term-read $id raw -> capped.bin"
   took=$(( $(date +%s) - started ))
   size="$(wc -c <"$ROOT/capped.bin" | tr -d ' ')"
