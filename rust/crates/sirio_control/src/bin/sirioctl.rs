@@ -135,7 +135,7 @@ fn usage() {
          \x20 surface changes confirm           (debug builds) confirm the open Discard\n\
          \x20 surface update read               (debug builds) read the update card\n\
          \x20 surface update act --action later|restart|install|retry|hide|open  (debug builds) press a card action\n\
-         \x20 surface update inject --status S [--version V] [--notes N] [--message M]  (debug builds) set the update status\n\
+         \x20 surface update inject --status available|ready|downloading|installing|installed|failed|refused [--version V] [--notes N] [--message M]  (debug builds) set the update status; failed reads back as apply-failed\n\
          \x20 surface settings open [--section s]\n\
          \x20 surface settings select <section>\n\
          \x20 surface settings read             read the mounted Settings section\n\

@@ -16009,7 +16009,10 @@ impl SirioWorkspace {
             "downloading" => UiUpdateStatus::Downloading { version },
             "installing" => UiUpdateStatus::Installing { version },
             "installed" => UiUpdateStatus::Installed { version },
-            "failed" => UiUpdateStatus::ApplyFailed {
+            // `failed` is an apply failure: it reads back as `apply-failed`,
+            // the kind `UpdateStatus` gives an ApplyFailed. A check failure
+            // never raises the card, so it cannot be injected here.
+            "failed" | "apply-failed" => UiUpdateStatus::ApplyFailed {
                 version,
                 message: message.unwrap_or_else(|| "network unreachable".into()),
                 retryable: true,

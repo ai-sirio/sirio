@@ -501,7 +501,10 @@ pub mod request {
     }
 
     /// Sets the host's update status for a state the network cannot reach on
-    /// demand. Debug builds only.
+    /// demand. Debug builds only. `status` is one of `available`, `ready`,
+    /// `downloading`, `installing`, `installed`, `failed` (an apply failure,
+    /// read back as `apply-failed`; `apply-failed` is accepted too) or
+    /// `refused` (an apply refused as `InstallNotFound`).
     pub fn update_inject(
         status: &str,
         version: Option<&str>,

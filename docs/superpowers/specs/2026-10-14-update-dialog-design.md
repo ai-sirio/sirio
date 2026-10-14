@@ -203,11 +203,15 @@ method (served in every build; nothing in `Scripts/`, `docs/` or
 `surface changes confirm`; a release build answers "unknown method" and does
 not list it.
 
-- `state` — the card's `UpdateCardView` (or none) and the host's status.
+- `read` — the card's `UpdateCardView` (or none) and the host's status.
 - `act later|restart|install|retry|hide|open` — presses that action through
   the same callbacks a click uses (`open` is the indicator).
-- `inject <status> [version] [message] [retryable]` — sets the host's status
-  for states the network cannot reach on demand.
+- `inject <status> [version] [notes] [message]` (sirioctl spells them
+  `--status`, `--version`, `--notes`, `--message`) — sets the host's status for
+  states the network cannot reach on demand. `<status>` is one of
+  `available|ready|downloading|installing|installed|failed|refused`. `failed`
+  is an apply failure and reads back as `apply-failed`; `refused` is an apply
+  refused as `InstallNotFound`.
 
 ## §4 Failure and edge cases
 
