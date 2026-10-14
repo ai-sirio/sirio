@@ -6193,6 +6193,15 @@ impl SirioWorkspace {
                 match &result {
                     Ok(sirio_update::CheckResult::Available(update)) => {
                         self.last_available = Some(update.clone());
+                        // The verified artifact of another version is no longer
+                        // the offer: an apply must not install it over this one.
+                        if self
+                            .last_verified
+                            .as_ref()
+                            .is_some_and(|verified| verified.version != update.version)
+                        {
+                            self.last_verified = None;
+                        }
                     }
                     Ok(sirio_update::CheckResult::Ready(update)) => {
                         self.last_verified = Some(update.clone());
@@ -6228,13 +6237,18 @@ impl SirioWorkspace {
                 self.push_update_state(next, cx);
             }
             UpdateHostOutcome::Download(Err(error)) => {
-                self.finish_update_apply(error.to_string(), true, cx);
+                self.finish_update_apply(error.to_string(), update_error_kind(&error), true, cx);
             }
             UpdateHostOutcome::Download(Ok(
                 sirio_update::DownloadResult::SkippedMetered
                 | sirio_update::DownloadResult::SkippedAlreadyAttempted,
             )) => {
-                self.finish_update_apply("the download did not start".to_string(), true, cx);
+                self.finish_update_apply(
+                    "the download did not start".to_string(),
+                    "skipped",
+                    true,
+                    cx,
+                );
             }
             UpdateHostOutcome::Apply { update, result: Ok(()) } => {
                 self.update_apply_in_flight = false;
@@ -6267,21 +6281,39 @@ impl SirioWorkspace {
                     error,
                     sirio_apply::ApplyError::Launch(_) | sirio_apply::ApplyError::Swap(_)
                 );
-                self.finish_update_apply(error.to_string(), retryable, cx);
+                self.finish_update_apply(
+                    error.to_string(),
+                    apply_error_kind(&error),
+                    retryable,
+                    cx,
+                );
             }
         }
     }
 
     /// Ends an apply that failed: the card shows why, and *Retry* only where
     /// trying again can help (spec §4). A newer answer a check held while the
-    /// apply ran replaces the failure: the card shows what the user can do
-    /// next, and *Retry* stays a choice for the failed version.
-    fn finish_update_apply(&mut self, message: String, retryable: bool, cx: &mut Context<Self>) {
+    /// apply ran replaces the failure: the card shows that answer, so *Retry*
+    /// is not offered for the failed version, and the failure is logged by its
+    /// kind, since its text can name paths.
+    fn finish_update_apply(
+        &mut self,
+        message: String,
+        kind: &'static str,
+        retryable: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.update_apply_in_flight = false;
         self.update_card_hidden = false;
         let held = self.update_pending_check.take();
         let status = match held {
-            Some(held) => held,
+            Some(held) => {
+                let version = self.live_update_state.status.version().unwrap_or_default();
+                eprintln!(
+                    "[update] apply of {version} failed ({kind}); showing the newer update the check held"
+                );
+                held
+            }
             None => {
                 let version = self
                     .live_update_state
@@ -6299,9 +6331,7 @@ impl SirioWorkspace {
 
     /// A check that finds another version while an apply runs is held for the
     /// apply's end (spec §4), so the card keeps the apply's progress. The
-    /// installed artifact must not stay in `last_verified` over it, and an
-    /// answer that is not verified clears a different one, so the next apply
-    /// targets the version the card shows.
+    /// check arm has already dropped a verified artifact of another version.
     fn hold_newer_check(
         &mut self,
         applying: &UiUpdateStatus,
@@ -6312,18 +6342,9 @@ impl SirioWorkspace {
             answer,
             UiUpdateStatus::Available { .. } | UiUpdateStatus::Ready { .. }
         ) && answer.version() != applying.version();
-        if !is_newer {
-            return;
+        if is_newer {
+            self.update_pending_check = Some(answer);
         }
-        let found = answer.version().map(str::to_owned);
-        if self
-            .last_verified
-            .as_ref()
-            .is_some_and(|verified| Some(verified.version.as_str()) != found.as_deref())
-        {
-            self.last_verified = None;
-        }
-        self.update_pending_check = Some(answer);
     }
 
     /// The one door every update action goes through — the card, its
@@ -6338,7 +6359,11 @@ impl SirioWorkspace {
         let Some(updater) = self.updater.clone() else {
             return;
         };
-        let plan = apply_plan(self.last_verified.as_ref(), self.last_available.as_ref());
+        let plan = apply_plan(
+            offered_version(&self.live_update_state.status),
+            self.last_verified.as_ref(),
+            self.last_available.as_ref(),
+        );
         let first = match &plan {
             ApplyPlan::Nothing => return,
             ApplyPlan::ApplyVerified(verified) => UiUpdateStatus::Installing {
@@ -23019,15 +23044,57 @@ enum ApplyPlan {
 }
 
 fn apply_plan(
+    offered: Option<&str>,
     verified: Option<&sirio_update::VerifiedUpdate>,
     available: Option<&sirio_update::AvailableUpdate>,
 ) -> ApplyPlan {
+    // A verified artifact is applied only when the card offers its version: a
+    // successful apply leaves the installed artifact in `verified`, and a newer
+    // update offered later must not install that one again (fix round 2).
+    let verified = verified.filter(|verified| offered == Some(verified.version.as_str()));
     if let Some(verified) = verified {
         ApplyPlan::ApplyVerified(verified.clone())
     } else if let Some(available) = available {
         ApplyPlan::DownloadThenApply(available.clone())
     } else {
         ApplyPlan::Nothing
+    }
+}
+
+/// The version the card offers to apply: an update that is available, ready
+/// or failed to apply. `None` for any other status.
+fn offered_version(status: &UiUpdateStatus) -> Option<&str> {
+    match status {
+        UiUpdateStatus::Available { .. }
+        | UiUpdateStatus::Ready { .. }
+        | UiUpdateStatus::ApplyFailed { .. } => status.version(),
+        _ => None,
+    }
+}
+
+/// The kind of an update error, for the log: a name, never the message, which
+/// can name paths.
+fn update_error_kind(error: &sirio_update::UpdateError) -> &'static str {
+    match error {
+        sirio_update::UpdateError::Disabled => "disabled",
+        sirio_update::UpdateError::Network(_) => "network",
+        sirio_update::UpdateError::Manifest(_) => "manifest",
+        sirio_update::UpdateError::Version(_) => "version",
+        sirio_update::UpdateError::ChannelMismatch { .. } => "channel-mismatch",
+        sirio_update::UpdateError::NoArtifact { .. } => "no-artifact",
+        sirio_update::UpdateError::Staging(_) => "staging",
+        sirio_update::UpdateError::Verification(_) => "verification",
+    }
+}
+
+/// The kind of an apply error, for the log (see [`update_error_kind`]).
+fn apply_error_kind(error: &sirio_apply::ApplyError) -> &'static str {
+    match error {
+        sirio_apply::ApplyError::InstallNotFound => "install-not-found",
+        sirio_apply::ApplyError::Launch(_) => "launch",
+        sirio_apply::ApplyError::Swap(_) => "swap",
+        sirio_apply::ApplyError::Rollback { .. } => "rollback",
+        sirio_apply::ApplyError::UnsupportedPlatform => "unsupported-platform",
     }
 }
 
@@ -34631,16 +34698,31 @@ done
         };
 
         assert_eq!(
-            apply_plan(Some(&verified), Some(&available)),
+            apply_plan(Some("0.7.0"), Some(&verified), Some(&available)),
             ApplyPlan::ApplyVerified(verified.clone()),
             "a verified download wins over a pending one"
         );
         assert_eq!(
-            apply_plan(None, Some(&available)),
-            ApplyPlan::DownloadThenApply(available),
+            apply_plan(Some("0.7.0"), None, Some(&available)),
+            ApplyPlan::DownloadThenApply(available.clone()),
             "an available update is enough to start the pipeline"
         );
-        assert_eq!(apply_plan(None, None), ApplyPlan::Nothing);
+        let other = sirio_update::AvailableUpdate {
+            version: "0.8.0".into(),
+            notes: "More".into(),
+            artifact: test_manifest_artifact(),
+        };
+        assert_eq!(
+            apply_plan(Some("0.8.0"), Some(&verified), Some(&other)),
+            ApplyPlan::DownloadThenApply(other),
+            "a verified artifact of another version is not the offer"
+        );
+        assert_eq!(
+            apply_plan(None, Some(&verified), Some(&available)),
+            ApplyPlan::DownloadThenApply(available),
+            "an artifact is applied only when the card offers it"
+        );
+        assert_eq!(apply_plan(None, None, None), ApplyPlan::Nothing);
     }
 
     fn update_state_with(status: UiUpdateStatus) -> UiUpdateState {
@@ -34983,6 +35065,7 @@ done
                     "the newer answer the check held is shown when the apply ends"
                 );
                 let target = match apply_plan(
+                    offered_version(&workspace.live_update_state.status),
                     workspace.last_verified.as_ref(),
                     workspace.last_available.as_ref(),
                 ) {
@@ -34996,6 +35079,74 @@ done
                 );
             });
         }
+    }
+
+    /// A successful apply leaves the installed artifact in `last_verified`.
+    /// The newer update the card then offers must be downloaded, never
+    /// re-applied from that stale artifact (fix round 2).
+    #[gpui::test]
+    async fn an_apply_never_reinstalls_the_artifact_it_just_installed(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
+        let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let installed = sirio_update::VerifiedUpdate {
+            version: "0.32.0".into(),
+            notes: "Fixes".into(),
+            path: PathBuf::from("/tmp/sirio-update-0.32.0"),
+            platform: "linux-x86_64".into(),
+        };
+        let newer = sirio_update::AvailableUpdate {
+            version: "0.33.0".into(),
+            notes: "More".into(),
+            artifact: test_manifest_artifact(),
+        };
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.update_apply_in_flight = true;
+            workspace.update_after_apply = AfterApply::Stay;
+            workspace.push_update_state(
+                update_state_with(UiUpdateStatus::Installing { version: "0.32.0".into() }),
+                cx,
+            );
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Apply { update: installed, result: Ok(()) },
+                cx,
+            );
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::Installed { version: "0.32.0".into() }
+            );
+
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Available(newer))),
+                cx,
+            );
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::Available { version: "0.33.0".into(), notes: "More".into() }
+            );
+            let target = match apply_plan(
+                offered_version(&workspace.live_update_state.status),
+                workspace.last_verified.as_ref(),
+                workspace.last_available.as_ref(),
+            ) {
+                ApplyPlan::ApplyVerified(verified) => verified.version,
+                ApplyPlan::DownloadThenApply(available) => available.version,
+                ApplyPlan::Nothing => String::new(),
+            };
+            assert_eq!(
+                target, "0.33.0",
+                "the offered update is downloaded, not the artifact installed before it"
+            );
+        });
     }
 
     /// The apply pipeline: a verified artifact is applied off the UI
