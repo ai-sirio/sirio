@@ -586,6 +586,20 @@ impl AgentActivityModel {
             .collect()
     }
 
+    /// How many panes have an agent at work right now — each pane once, by
+    /// its resolved status, so two panes running the same CLI are two agents
+    /// a restart would stop (`running_agent_ids` de-duplicates by agent and
+    /// would say one). The update card's warning reads this.
+    pub fn running_pane_count(&self) -> usize {
+        self.agent_status
+            .keys()
+            .chain(self.entity_status.keys())
+            .collect::<HashSet<&String>>()
+            .into_iter()
+            .filter(|pane_id| self.resolved(pane_id) == Some(AgentStatus::Running))
+            .count()
+    }
+
     /// Builds the platform-neutral notification payload for a tracked pane.
     /// The caller supplies display context because project/worktree ownership
     /// belongs above this crate.
@@ -793,5 +807,61 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(model.is_process_owned("pane-process"));
         assert_eq!(model.status("pane-process"), Some(AgentStatus::Running));
+    }
+
+    #[test]
+    fn an_empty_model_counts_no_running_pane() {
+        assert_eq!(AgentActivityModel::new().running_pane_count(), 0);
+    }
+
+    #[test]
+    fn two_panes_running_the_same_agent_count_twice() {
+        let mut model = AgentActivityModel::new();
+        let now = Instant::now();
+        model.notify("pane-1", AgentStatus::Running, now);
+        model.notify("pane-2", AgentStatus::Running, now);
+        assert_eq!(model.running_pane_count(), 2);
+    }
+
+    #[test]
+    fn only_running_counts() {
+        let mut model = AgentActivityModel::new();
+        let now = Instant::now();
+        model.notify("pane-1", AgentStatus::NeedsInput, now);
+        model.notify("pane-2", AgentStatus::Done, now);
+        model.notify("pane-3", AgentStatus::Error, now);
+        model.notify("pane-4", AgentStatus::Running, now);
+        assert_eq!(model.running_pane_count(), 1);
+    }
+
+    #[test]
+    fn a_chat_known_only_to_its_surface_counts() {
+        let mut model = AgentActivityModel::new();
+        model.set_entity_status("pane-chat", Some(AgentStatus::Running));
+        assert_eq!(model.running_pane_count(), 1);
+    }
+
+    #[test]
+    fn a_pane_known_to_two_layers_counts_once() {
+        let mut model = AgentActivityModel::new();
+        model.notify("pane-1", AgentStatus::Running, Instant::now());
+        model.set_entity_status("pane-1", Some(AgentStatus::Running));
+        assert_eq!(model.running_pane_count(), 1);
+    }
+
+    #[test]
+    fn the_resolved_status_decides_not_a_stale_layer() {
+        let mut model = AgentActivityModel::new();
+        model.notify("pane-1", AgentStatus::Running, Instant::now());
+        model.set_entity_status("pane-1", Some(AgentStatus::Done));
+        assert_eq!(model.running_pane_count(), 0);
+    }
+
+    #[test]
+    fn a_closed_pane_does_not_count() {
+        let mut model = AgentActivityModel::new();
+        model.notify("pane-1", AgentStatus::Running, Instant::now());
+        model.pane_closed("pane-1");
+        assert_eq!(model.running_pane_count(), 0);
     }
 }
