@@ -489,7 +489,7 @@ impl ChangeRequestTab {
             div()
                 .id("change-request-handoff-status")
                 .debug_selector(|| "change-request-handoff-status".into())
-                .child(message(severity, text, theme))
+                .child(message(severity, text, "change-request-handoff-status", theme))
                 .into_any_element(),
         )
     }
@@ -609,12 +609,12 @@ impl ChangeRequestTab {
             group("change-request-handoff-surface", "surface", &surfaces, state.surface.word(), true);
 
         let worktree = match &state.preview {
-            HandoffPreview::Loading => message(Severity::Info, "Worktree: working it out…".to_string(), theme),
+            HandoffPreview::Loading => message(Severity::Info, "Worktree: working it out…".to_string(), "change-request-handoff-preview", theme),
             HandoffPreview::Ready { worktree: Ok(line), .. } => {
-                message(Severity::Info, format!("Worktree: {line}"), theme)
+                message(Severity::Info, format!("Worktree: {line}"), "change-request-handoff-preview", theme)
             }
             HandoffPreview::Ready { worktree: Err(reason), .. } => {
-                message(Severity::Danger, format!("Worktree: {reason}"), theme)
+                message(Severity::Danger, format!("Worktree: {reason}"), "change-request-handoff-preview", theme)
             }
         };
         let close = entity.clone();
@@ -631,10 +631,11 @@ impl ChangeRequestTab {
             message(
                 Severity::Warning,
                 "This change request's text reaches the agent as data, and the agent runs with your permissions.".to_string(),
+                "change-request-handoff-warning",
                 theme,
             )
         }))
-        .children(state.refusal.clone().map(|reason| message(Severity::Danger, reason, theme)))
+        .children(state.refusal.clone().map(|reason| message(Severity::Danger, reason, "change-request-handoff-refusal", theme)))
         .action(|close| {
             text_button("change-request-handoff-cancel", "Cancel", None, ButtonState::IDLE, move |window, cx| {
                 close(window, cx)

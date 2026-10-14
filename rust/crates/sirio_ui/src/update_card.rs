@@ -7,6 +7,7 @@
 use std::rc::Rc;
 
 use ely_gpui_component::primitives::{IconName, Severity};
+use ely_gpui_component::theme::{ActiveTheme as _, Elevation};
 use gpui::{
     Animation, AnimationExt, App, IntoElement, RenderOnce, Window, div, prelude::*, px, relative,
 };
@@ -378,7 +379,9 @@ impl RenderOnce for UpdateCard {
             .border_1()
             .border_color(theme.ely.border)
             .bg(theme.sirio.floating_surface)
-            .shadow_lg()
+            // Ely's floating elevation, as its popovers draw it: the card sits
+            // off the window in light and dark alike.
+            .shadow(cx.theme().elevation(Elevation::Floating))
             .child(header)
             .when_some(view.body.clone(), |card, body| {
                 card.child(
@@ -396,14 +399,14 @@ impl RenderOnce for UpdateCard {
                 card.child(
                     div()
                         .debug_selector(|| "update-card-warning".to_owned())
-                        .child(message(Severity::Warning, warning, &theme)),
+                        .child(message(Severity::Warning, warning, "update-card-warning", &theme)),
                 )
             })
             .when_some(view.error.clone(), |card, error| {
                 card.child(
                     div()
                         .debug_selector(|| "update-card-error".to_owned())
-                        .child(message(Severity::Danger, error, &theme)),
+                        .child(message(Severity::Danger, error, "update-card-error", &theme)),
                 )
             })
             .when_some(view.progress.clone(), |card, progress| {

@@ -1248,7 +1248,7 @@ impl ChangeRequestTab {
                 .gap(px(8.0))
                 .px(px(12.0))
                 .pb(px(6.0))
-                .child(ely_ui::message(severity, text, theme))
+                .child(ely_ui::message(severity, text, "change-request-threads-notice", theme))
                 .when(retry, |this| {
                     this.child(ely_ui::text_button(
                         "change-request-threads-retry",

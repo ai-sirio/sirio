@@ -322,7 +322,7 @@ impl ChangeRequestTab {
                 .border_t_1()
                 .border_b_1()
                 .border_color(theme.ely.border)
-                .child(div().min_w_0().child(message(kind.severity(), kind.text(), theme)))
+                .child(div().min_w_0().child(message(kind.severity(), kind.text(), "change-request-merge-status", theme)))
                 .child(controls.flex_none())
                 .into_any_element(),
         )
@@ -386,7 +386,7 @@ impl ChangeRequestTab {
         })
         .child(dialog.title.clone());
         if let Some((severity, text)) = self.merge_dialog_status() {
-            card = card.child(message(severity, text, theme));
+            card = card.child(message(severity, text, "change-request-merge-dialog-status", theme));
         }
         if let Some(message) = &dialog.message {
             card = card.child(message.clone());

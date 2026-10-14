@@ -309,15 +309,15 @@ impl ChangeRequestTab {
         };
         let choices = picker_choices(&picker.current, picker.found.as_deref().unwrap_or(&[]));
         let list = if let Some(error) = &picker.error {
-            message(Severity::Danger, error.clone(), theme)
+            message(Severity::Danger, error.clone(), "change-request-people-status", theme)
         } else if picker.found.is_none() {
-            message(Severity::Info, "Searching…".to_string(), theme)
+            message(Severity::Info, "Searching…".to_string(), "change-request-people-status", theme)
         } else if choices.is_empty() {
             let text = match picker.kind {
                 PickerKind::Reviewers => "No one matches. Teams are not offered.",
                 PickerKind::Labels => "No label matches.",
             };
-            message(Severity::Info, text.to_string(), theme)
+            message(Severity::Info, text.to_string(), "change-request-people-status", theme)
         } else {
             let pick = entity.clone();
             ListBox::new(("change-request-picker-list", picker.generation as usize), choices)

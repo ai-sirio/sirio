@@ -1343,7 +1343,7 @@ fn error_panel(
         .items_center()
         .gap(theme.spacing.card_gap)
         .p(theme.spacing.card_gap)
-        .child(ely_ui::message(Severity::Danger, message, theme))
+        .child(ely_ui::message(Severity::Danger, message, "change-request-error-panel", theme))
         .child(
             div()
                 .flex()
@@ -1380,6 +1380,7 @@ fn stale_line(message: String, theme: &Theme, retry: Rc<dyn Fn(&mut App)>) -> An
                 .child(ely_ui::message(
                     Severity::Warning,
                     format!("Refresh failed · {message}"),
+                    "change-request-stale",
                     theme,
                 )),
         )
@@ -2325,7 +2326,7 @@ impl ChangeRequestTab {
             .child(
                 div()
                     .max_w(px(520.0))
-                    .child(ely_ui::message(Severity::Warning, message, theme)),
+                    .child(ely_ui::message(Severity::Warning, message, "change-request-unreachable", theme)),
             )
             .child(
                 div()

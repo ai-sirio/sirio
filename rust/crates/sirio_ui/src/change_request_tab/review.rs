@@ -144,7 +144,7 @@ impl ChangeRequestTab {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(div().flex_1().min_w_0().child(message(Severity::Info, words, theme)))
+                        .child(div().flex_1().min_w_0().child(message(Severity::Info, words, "change-request-review-words", theme)))
                         .child(text_button(
                             "change-request-review-discard",
                             "Discard",
@@ -168,7 +168,7 @@ impl ChangeRequestTab {
                             },
                         )),
                 )
-                .children(error.map(|error| message(Severity::Danger, error, theme)))
+                .children(error.map(|error| message(Severity::Danger, error, "change-request-review-error", theme)))
                 .into_any_element(),
         )
     }
@@ -185,7 +185,7 @@ impl ChangeRequestTab {
             })
             .detail(pending)
             .child(Input::new(input))
-            .children(self.review_error().map(|error| message(Severity::Danger, error, theme)))
+            .children(self.review_error().map(|error| message(Severity::Danger, error, "change-request-review-dialog-error", theme)))
             .action(|close| {
                 text_button("change-request-review-submit-cancel", "Cancel", None, ButtonState::IDLE, move |window, cx| {
                     close(window, cx)

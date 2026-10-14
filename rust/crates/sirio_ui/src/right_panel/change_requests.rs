@@ -1010,7 +1010,7 @@ impl ChangeRequestList {
                 .h(px(10.0))
                 .w(gpui::relative(0.7))
                 .into_any_element(),
-            Card::Failed(error) => ely_ui::message(Severity::Danger, error_text(error), theme)
+            Card::Failed(error) => ely_ui::message(Severity::Danger, error_text(error), "change-requests-card-error", theme)
                 .into_any_element(),
         };
         let found = matches!(self.card, Card::Found(_));
@@ -1264,6 +1264,7 @@ impl ChangeRequestList {
                                 .child(ely_ui::message(
                                     Severity::Danger,
                                     format!("Refresh failed · {}", error_text(error)),
+                                    "change-requests-refresh-error",
                                     theme,
                                 )),
                         )
@@ -1401,8 +1402,8 @@ impl ChangeRequestList {
         .when_some(
             match &self.token_state {
                 TokenState::Idle => None,
-                TokenState::Saving => Some(ely_ui::message(Severity::Info, "Checking the token…".to_string(), theme)),
-                TokenState::Failed(why) => Some(ely_ui::message(Severity::Danger, why.clone(), theme)),
+                TokenState::Saving => Some(ely_ui::message(Severity::Info, "Checking the token…".to_string(), "change-requests-token-status", theme)),
+                TokenState::Failed(why) => Some(ely_ui::message(Severity::Danger, why.clone(), "change-requests-token-error", theme)),
             },
             |this, line| this.child(line),
         )
