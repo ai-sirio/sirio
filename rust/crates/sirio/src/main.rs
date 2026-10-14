@@ -4968,6 +4968,9 @@ struct SirioWorkspace {
     update_after_apply: AfterApply,
     /// An apply is running; a second start is refused (spec §4).
     update_apply_in_flight: bool,
+    /// A newer answer a check held while an apply ran (spec §4): shown when
+    /// the apply ends, and cleared by it.
+    update_pending_check: Option<UiUpdateStatus>,
     /// The latest `Available` found by a check, so the apply button can
     /// download it (Nightly's explicit download).
     last_available: Option<sirio_update::AvailableUpdate>,
@@ -5927,6 +5930,7 @@ impl SirioWorkspace {
             update_card_hidden: false,
             update_after_apply: AfterApply::Stay,
             update_apply_in_flight: false,
+            update_pending_check: None,
             last_available: None,
             last_verified: None,
             auto_naming_throttle: BTreeMap::new(),
@@ -6166,8 +6170,22 @@ impl SirioWorkspace {
     /// updates must suppress downloads and indicator changes immediately.
     fn apply_update_outcome(&mut self, outcome: UpdateHostOutcome, cx: &mut Context<Self>) {
         if !self.updates_enabled.load(Ordering::SeqCst) {
+            // A check that lands after the opt-out changes nothing; an apply's
+            // own outcome ends the apply, so it also ends its progress line.
+            if matches!(outcome, UpdateHostOutcome::Check(_)) {
+                return;
+            }
             self.update_apply_in_flight = false;
             self.update_card_hidden = false;
+            self.update_pending_check = None;
+            if matches!(
+                self.live_update_state.status,
+                UiUpdateStatus::Downloading { .. } | UiUpdateStatus::Installing { .. }
+            ) {
+                let mut next = self.live_update_state.clone();
+                next.status = UiUpdateStatus::NotDue;
+                self.push_update_state(next, cx);
+            }
             return;
         }
         match outcome {
@@ -6187,6 +6205,9 @@ impl SirioWorkspace {
                     | Err(_) => {}
                 }
                 let previous = self.live_update_state.clone();
+                if self.update_apply_in_flight {
+                    self.hold_newer_check(&previous.status, &result);
+                }
                 let checked_at = self.updater.as_ref().and_then(|updater| {
                     updater
                         .lock()
@@ -6218,16 +6239,30 @@ impl SirioWorkspace {
             UpdateHostOutcome::Apply { update, result: Ok(()) } => {
                 self.update_apply_in_flight = false;
                 self.update_card_hidden = false;
+                let held = self.update_pending_check.take();
+                // The installed artifact is not stored over a newer one a
+                // check held meanwhile (spec §4).
+                if held.is_none() {
+                    self.last_verified = Some(update.clone());
+                }
+                // A restart goes on to the installed version on macOS and
+                // Linux, so its card says installed first, as before.
+                let restarts =
+                    self.update_after_apply == AfterApply::Restart && !cfg!(target_os = "windows");
                 let mut next = self.live_update_state.clone();
-                next.status = UiUpdateStatus::Installed { version: update.version.clone() };
-                self.last_verified = Some(update);
+                next.status = match held {
+                    Some(held) if !restarts => held,
+                    _ => UiUpdateStatus::Installed { version: update.version.clone() },
+                };
                 self.push_update_state(next, cx);
-                if self.update_after_apply == AfterApply::Restart && !cfg!(target_os = "windows") {
+                if restarts {
                     self.restart_into_update(cx);
                 }
             }
             UpdateHostOutcome::Apply { update, result: Err(error) } => {
-                self.last_verified = Some(update);
+                if self.update_pending_check.is_none() {
+                    self.last_verified = Some(update);
+                }
                 let retryable = matches!(
                     error,
                     sirio_apply::ApplyError::Launch(_) | sirio_apply::ApplyError::Swap(_)
@@ -6238,19 +6273,57 @@ impl SirioWorkspace {
     }
 
     /// Ends an apply that failed: the card shows why, and *Retry* only where
-    /// trying again can help (spec §4).
+    /// trying again can help (spec §4). A newer answer a check held while the
+    /// apply ran replaces the failure: the card shows what the user can do
+    /// next, and *Retry* stays a choice for the failed version.
     fn finish_update_apply(&mut self, message: String, retryable: bool, cx: &mut Context<Self>) {
         self.update_apply_in_flight = false;
         self.update_card_hidden = false;
-        let version = self
-            .live_update_state
-            .status
-            .version()
-            .unwrap_or_default()
-            .to_owned();
+        let held = self.update_pending_check.take();
+        let status = match held {
+            Some(held) => held,
+            None => {
+                let version = self
+                    .live_update_state
+                    .status
+                    .version()
+                    .unwrap_or_default()
+                    .to_owned();
+                UiUpdateStatus::ApplyFailed { version, message, retryable }
+            }
+        };
         let mut next = self.live_update_state.clone();
-        next.status = UiUpdateStatus::ApplyFailed { version, message, retryable };
+        next.status = status;
         self.push_update_state(next, cx);
+    }
+
+    /// A check that finds another version while an apply runs is held for the
+    /// apply's end (spec §4), so the card keeps the apply's progress. The
+    /// installed artifact must not stay in `last_verified` over it, and an
+    /// answer that is not verified clears a different one, so the next apply
+    /// targets the version the card shows.
+    fn hold_newer_check(
+        &mut self,
+        applying: &UiUpdateStatus,
+        result: &Result<sirio_update::CheckResult, sirio_update::UpdateError>,
+    ) {
+        let answer = check_answer(applying, result);
+        let is_newer = matches!(
+            answer,
+            UiUpdateStatus::Available { .. } | UiUpdateStatus::Ready { .. }
+        ) && answer.version() != applying.version();
+        if !is_newer {
+            return;
+        }
+        let found = answer.version().map(str::to_owned);
+        if self
+            .last_verified
+            .as_ref()
+            .is_some_and(|verified| Some(verified.version.as_str()) != found.as_deref())
+        {
+            self.last_verified = None;
+        }
+        self.update_pending_check = Some(answer);
     }
 
     /// The one door every update action goes through — the card, its
@@ -6279,12 +6352,7 @@ impl SirioWorkspace {
         self.update_after_apply = after;
         self.update_card_dismissed = None;
         self.update_card_hidden = false;
-        if cfg!(target_os = "windows") {
-            // Inno closes Sirio from outside once the installer runs, and no
-            // quit hook can be relied on then: save the session first.
-            self.schedule_save(cx);
-            self.session.flush_now();
-        }
+        self.update_pending_check = None;
         let mut next = self.live_update_state.clone();
         next.status = first;
         self.push_update_state(next, cx);
@@ -6321,6 +6389,15 @@ impl SirioWorkspace {
                     verified
                 }
             };
+            if cfg!(target_os = "windows") {
+                // Inno closes Sirio from outside once the installer runs, and no
+                // quit hook can be relied on then: save the session before the
+                // installer is spawned (spec §3.4).
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.schedule_save(cx);
+                    workspace.session.flush_now();
+                });
+            }
             let result = cx
                 .background_executor()
                 .spawn({
@@ -6344,6 +6421,10 @@ impl SirioWorkspace {
     /// `on_app_quit` saves the layout and ends the PTYs as any Quit does.
     fn restart_into_update(&mut self, cx: &mut Context<Self>) {
         let Some(target) = sirio_apply::relaunch_target() else {
+            eprintln!(
+                "[update] restart not started: no relaunch target for {}",
+                self.live_update_state.status.version().unwrap_or("")
+            );
             return;
         };
         cx.set_restart_path(target);
@@ -6353,8 +6434,15 @@ impl SirioWorkspace {
     fn on_update_card_action(&mut self, action: UpdateCardAction, cx: &mut Context<Self>) {
         match action {
             UpdateCardAction::Later => {
-                self.update_card_dismissed =
-                    self.live_update_state.status.version().map(str::to_owned);
+                // Refused while work is in flight: the card's button is
+                // disabled then, and the host does not rely on that (spec §2.2).
+                if !matches!(
+                    self.live_update_state.status,
+                    UiUpdateStatus::Downloading { .. } | UiUpdateStatus::Installing { .. }
+                ) {
+                    self.update_card_dismissed =
+                        self.live_update_state.status.version().map(str::to_owned);
+                }
             }
             UpdateCardAction::Hide => self.update_card_hidden = true,
             UpdateCardAction::Restart => {
@@ -22784,46 +22872,60 @@ fn format_update_check_age(now: SystemTime, checked_at: SystemTime) -> String {
     }
 }
 
+/// What a check's result says on its own, before any apply is weighed
+/// against it. `NotDue` answers with what was shown before.
+fn check_answer(
+    previous: &UiUpdateStatus,
+    result: &Result<sirio_update::CheckResult, sirio_update::UpdateError>,
+) -> UiUpdateStatus {
+    match result {
+        Ok(sirio_update::CheckResult::Disabled) => UiUpdateStatus::Disabled,
+        Ok(sirio_update::CheckResult::NotDue) => previous.clone(),
+        Ok(sirio_update::CheckResult::UpToDate) => UiUpdateStatus::UpToDate,
+        Ok(sirio_update::CheckResult::Available(update)) => UiUpdateStatus::Available {
+            version: update.version.clone(),
+            notes: update.notes.clone(),
+        },
+        Ok(sirio_update::CheckResult::Ready(update)) => UiUpdateStatus::Ready {
+            version: update.version.clone(),
+            notes: update.notes.clone(),
+        },
+        Err(error) => UiUpdateStatus::Failed {
+            message: error.to_string(),
+        },
+    }
+}
+
+/// The status a check leaves on the card. A check never overwrites an apply
+/// the user started (spec §4): not its progress, not an install the running
+/// binary does not know about yet (the old binary reports the installed
+/// version as new again), and not its failure under a check that failed or
+/// was not due.
+fn merge_check_status(previous: &UiUpdateStatus, answer: UiUpdateStatus) -> UiUpdateStatus {
+    match (previous, answer) {
+        (UiUpdateStatus::Downloading { .. } | UiUpdateStatus::Installing { .. }, _) => {
+            previous.clone()
+        }
+        (
+            UiUpdateStatus::Installed { version: installed },
+            UiUpdateStatus::Available { ref version, .. } | UiUpdateStatus::Ready { ref version, .. },
+        ) if version == installed => previous.clone(),
+        (UiUpdateStatus::Installed { .. }, UiUpdateStatus::Failed { .. } | UiUpdateStatus::UpToDate) => {
+            previous.clone()
+        }
+        (UiUpdateStatus::ApplyFailed { .. }, UiUpdateStatus::Failed { .. }) => previous.clone(),
+        (_, answer) => answer,
+    }
+}
+
 fn ui_update_state_from_check(
     previous: &UiUpdateState,
     result: Result<sirio_update::CheckResult, sirio_update::UpdateError>,
     checked_at: Option<SystemTime>,
     now: SystemTime,
 ) -> UiUpdateState {
-    let answer = match result {
-        Ok(sirio_update::CheckResult::Disabled) => UiUpdateStatus::Disabled,
-        Ok(sirio_update::CheckResult::NotDue) => previous.status.clone(),
-        Ok(sirio_update::CheckResult::UpToDate) => UiUpdateStatus::UpToDate,
-        Ok(sirio_update::CheckResult::Available(update)) => UiUpdateStatus::Available {
-            version: update.version,
-            notes: update.notes,
-        },
-        Ok(sirio_update::CheckResult::Ready(update)) => UiUpdateStatus::Ready {
-            version: update.version,
-            notes: update.notes,
-        },
-        Err(error) => UiUpdateStatus::Failed {
-            message: error.to_string(),
-        },
-    };
-    // A check never overwrites an apply the user started (spec §4): not its
-    // progress, not an install the running binary does not know about yet
-    // (the old binary reports the installed version as new again), and not
-    // its failure under a check that failed or was not due.
-    let status = match (&previous.status, answer) {
-        (UiUpdateStatus::Downloading { .. } | UiUpdateStatus::Installing { .. }, _) => {
-            previous.status.clone()
-        }
-        (
-            UiUpdateStatus::Installed { version: installed },
-            UiUpdateStatus::Available { ref version, .. } | UiUpdateStatus::Ready { ref version, .. },
-        ) if version == installed => previous.status.clone(),
-        (UiUpdateStatus::Installed { .. }, UiUpdateStatus::Failed { .. } | UiUpdateStatus::UpToDate) => {
-            previous.status.clone()
-        }
-        (UiUpdateStatus::ApplyFailed { .. }, UiUpdateStatus::Failed { .. }) => previous.status.clone(),
-        (_, answer) => answer,
-    };
+    let answer = check_answer(&previous.status, &result);
+    let status = merge_check_status(&previous.status, answer);
     UiUpdateState {
         enabled: previous.enabled,
         channel: previous.channel.clone(),
@@ -23324,7 +23426,7 @@ fn main() {
         let pending_actions = Arc::new(Mutex::new(Vec::<WorkspaceAction>::new()));
         let pending_for_tab_bar = pending_actions.clone();
         let pending_for_status_bar = pending_actions.clone();
-        let pending_for_update_settings = pending_actions.clone();
+        let pending_for_update_card = pending_actions.clone();
         let pending_for_update_enabled = pending_actions.clone();
         let pending_for_apply_update = pending_actions.clone();
         let pending_for_settings = pending_actions.clone();
@@ -23543,7 +23645,7 @@ fn main() {
                             }
                         })
                         .on_update(move || {
-                            if let Ok(mut actions) = pending_for_update_settings.lock() {
+                            if let Ok(mut actions) = pending_for_update_card.lock() {
                                 actions.push(WorkspaceAction::ShowUpdateCard);
                             }
                         })
@@ -34710,6 +34812,192 @@ done
         });
     }
 
+    /// An apply whose outcome is dropped by the opt-out must not leave the
+    /// status on its progress line: re-enabling and the next check have to
+    /// repopulate the card (spec §4).
+    #[gpui::test]
+    async fn an_apply_dropped_by_the_opt_out_does_not_leave_the_card_working(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
+        let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let applying = sirio_update::VerifiedUpdate {
+            version: "0.32.0".into(),
+            notes: "Fixes".into(),
+            path: PathBuf::from("/tmp/sirio-update-0.32.0"),
+            platform: "linux-x86_64".into(),
+        };
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.update_apply_in_flight = true;
+            workspace.push_update_state(
+                update_state_with(UiUpdateStatus::Installing { version: "0.32.0".into() }),
+                cx,
+            );
+            workspace.set_updates_enabled(false, cx);
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Apply { update: applying, result: Ok(()) },
+                cx,
+            );
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::NotDue,
+                "a dropped apply leaves no progress line behind"
+            );
+            assert!(!workspace.update_apply_in_flight);
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_updates_enabled(true, cx);
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::UpToDate)),
+                cx,
+            );
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::UpToDate,
+                "the next check repopulates the card after the opt-out"
+            );
+        });
+    }
+
+    /// *Later* is disabled while an apply runs, and the host refuses it too:
+    /// a click that reaches the host must not hide the work behind the card.
+    #[gpui::test]
+    async fn later_is_refused_while_an_apply_is_in_flight(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
+        let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.update_apply_in_flight = true;
+            workspace.push_update_state(
+                update_state_with(UiUpdateStatus::Installing { version: "0.32.0".into() }),
+                cx,
+            );
+            workspace.on_update_card_action(UpdateCardAction::Later, cx);
+            assert!(
+                workspace.update_card_dismissed.is_none(),
+                "Later during an apply put nothing away"
+            );
+            assert!(
+                workspace.current_update_card().is_some(),
+                "the card stays up while the work runs"
+            );
+        });
+    }
+
+    /// A check that finds a newer version while an apply runs does not
+    /// replace the apply's progress; the newer answer is shown when the
+    /// apply ends with success, and the installed artifact is not stored over
+    /// the newer one (spec §4).
+    #[gpui::test]
+    async fn a_check_that_lands_during_an_apply_is_shown_when_the_apply_ends(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
+        let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let applying = sirio_update::VerifiedUpdate {
+            version: "0.32.0".into(),
+            notes: "Fixes".into(),
+            path: PathBuf::from("/tmp/sirio-update-0.32.0"),
+            platform: "linux-x86_64".into(),
+        };
+        let newer_available = sirio_update::AvailableUpdate {
+            version: "0.33.0".into(),
+            notes: "More".into(),
+            artifact: test_manifest_artifact(),
+        };
+        let newer_ready = sirio_update::VerifiedUpdate {
+            version: "0.33.0".into(),
+            notes: "More".into(),
+            path: PathBuf::from("/tmp/sirio-update-0.33.0"),
+            platform: "linux-x86_64".into(),
+        };
+        let newer = UiUpdateStatus::Available {
+            version: "0.33.0".into(),
+            notes: "More".into(),
+        };
+        let newer_verified = UiUpdateStatus::Ready {
+            version: "0.33.0".into(),
+            notes: "More".into(),
+        };
+        for (check, expected) in [
+            (
+                sirio_update::CheckResult::Available(newer_available),
+                newer,
+            ),
+            (
+                sirio_update::CheckResult::Ready(newer_ready),
+                newer_verified,
+            ),
+        ] {
+            workspace.update(&mut cx.cx, |workspace, cx| {
+                workspace.push_update_state(
+                    update_state_with(UiUpdateStatus::Installing { version: "0.32.0".into() }),
+                    cx,
+                );
+                workspace.update_apply_in_flight = true;
+                workspace.update_after_apply = AfterApply::Stay;
+                workspace.last_verified = Some(applying.clone());
+                workspace.apply_update_outcome(UpdateHostOutcome::Check(Ok(check)), cx);
+                assert_eq!(
+                    workspace.live_update_state.status,
+                    UiUpdateStatus::Installing { version: "0.32.0".into() },
+                    "a check does not replace the apply's progress"
+                );
+
+                workspace.apply_update_outcome(
+                    UpdateHostOutcome::Apply { update: applying.clone(), result: Ok(()) },
+                    cx,
+                );
+                assert_eq!(
+                    workspace.live_update_state.status, expected,
+                    "the newer answer the check held is shown when the apply ends"
+                );
+                let target = match apply_plan(
+                    workspace.last_verified.as_ref(),
+                    workspace.last_available.as_ref(),
+                ) {
+                    ApplyPlan::ApplyVerified(verified) => verified.version,
+                    ApplyPlan::DownloadThenApply(available) => available.version,
+                    ApplyPlan::Nothing => String::new(),
+                };
+                assert_eq!(
+                    target, "0.33.0",
+                    "the next apply targets the version the card shows, not the one just installed"
+                );
+            });
+        }
+    }
+
     /// The apply pipeline: a verified artifact is applied off the UI
     /// thread, and the outcome lands back in the live state. The test
     /// process has no `$APPIMAGE`, so `sirio_apply` refuses with
@@ -34758,16 +35046,19 @@ done
         // No drain loop runs on a Dev-channel test build (the poll task
         // exits at attach), so the apply outcome waits in the shared queue
         // for the real process's loop. Drain it by hand, as that loop does.
-        let outcome = workspace.read_with(&cx.cx, |workspace, _| {
+        let outcomes: Vec<UpdateHostOutcome> = workspace.read_with(&cx.cx, |workspace, _| {
             workspace
                 .update_outcomes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop()
-                .expect("the apply task parked its outcome")
+                .drain(..)
+                .collect()
         });
+        assert_eq!(outcomes.len(), 1, "the apply task parked exactly one outcome");
         workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.apply_update_outcome(outcome, cx);
+            for outcome in outcomes {
+                workspace.apply_update_outcome(outcome, cx);
+            }
             assert!(
                 matches!(
                     workspace.live_update_state.status,
