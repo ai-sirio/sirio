@@ -750,11 +750,11 @@ case_isolation() {
   session_listed "$a_pane" || fail "world A's host does not list its own $a_pane"
   [ "$(session_pid "$a_pane")" = "$pid_a" ] || fail "world A's host lists another pid for $a_pane"
   term_list || fail "world A's host did not answer term-list"
-  [ -z "$(printf '%s\n' "$TERM_LIST" | grep "pid=$pid_b ")" ] || fail "world A's host lists world B's pid $pid_b"
+  ! printf '%s\n' "$TERM_LIST" | grep -q "pid=$pid_b " || fail "world A's host lists world B's pid $pid_b"
   use_world "$b_dir"
   session_listed "$b_pane" || fail "world B's host does not list its own $b_pane"
   term_list || fail "world B's host did not answer term-list"
-  [ -z "$(printf '%s\n' "$TERM_LIST" | grep "pid=$pid_a ")" ] || fail "world B's host lists world A's pid $pid_a"
+  ! printf '%s\n' "$TERM_LIST" | grep -q "pid=$pid_a " || fail "world B's host lists world A's pid $pid_a"
   [ "$(pane_state "$b_pane" survives)" = true ] || fail "world B's $b_pane is not on its own host"
   use_world "$a_dir"
   [ "$(pane_state "$a_pane" survives)" = true ] || fail "world A's $a_pane is not on its own host"
@@ -785,6 +785,19 @@ case_echo_latency() {
 # Unverifiable, never Absent. A restored tab must not run a local shell beside
 # the session, must not report survives=false, and attaches once the host
 # answers again.
+# The shells among PID's children that lead their own process group, as a
+# fallback PTY's shell does; comma-separated pids, empty when none. pgrep -P and
+# ps -o pid=,pgid=,comm= read the same on Linux and macOS.
+fallback_shells() {
+  local child pid pgid comm found=""
+  for child in $(pgrep -P "$1" || true); do
+    read -r pid pgid comm < <(ps -o pid=,pgid=,comm= -p "$child" 2>/dev/null || true) || continue
+    case "${comm##*/}" in sh|bash|zsh|fish|dash|-sh|-bash|-zsh) ;; *) continue ;; esac
+    [ "$pid" = "$pgid" ] && found="${found:+$found,}$pid"
+  done
+  printf '%s' "$found"
+}
+
 case_unverifiable_no_fallback() {
   new_world c14
   local pane pidfile pid host_pid i kids
@@ -799,11 +812,11 @@ case_unverifiable_no_fallback() {
   kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
   app_start
   for i in $(seq 1 60); do
-    # A local shell is what a fallback would start, and a fallback shell owns a
-    # terminal. The app's other shell children (the tab summarizer, a usage
-    # request) run on pipes with no tty, and are not the session's business.
-    kids=$(ps -o tty=,comm= --ppid "$APP_PID" | awk '$1 != "?" && $2 ~ /^(sh|bash|zsh|fish|dash)$/' | wc -l)
-    [ "$kids" -eq 0 ] || fail "the app runs $kids local shell(s) on a terminal while the host is unverifiable"
+    # A local shell is what a fallback would start: a PTY's shell leads its own
+    # session, so it is its own process-group leader. The app's other shell
+    # children (the tab summarizer, a usage request) stay in the app's group.
+    kids=$(fallback_shells "$APP_PID")
+    [ -z "$kids" ] || fail "the app runs local shell(s) while the host is unverifiable: $(ps -o pid,pgid,tty,args -p "$kids" 2>/dev/null | tr '\n' ' ')"
     ! grep -q 'terminal on the in-process fallback' "$W/app.log" \
       || fail "the app logged an in-process fallback while the host is unverifiable"
     [ "$(pane_state "$pane" survives 2>/dev/null)" = false ] && fail "pane $pane reports survives=false while the host is unverifiable"

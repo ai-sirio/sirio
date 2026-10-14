@@ -632,8 +632,17 @@ session_gone() { ! session_listed "$1"; }
 case_sirioctl_direct() {
   fresh_root
   start_held_host
-  local id text
-  id="$(sirioctl_panel create --cwd "$(native "$ROOT")" --cmd 'echo worker-ok; sleep 60')" \
+  local id text worker keyed_cmd
+  # The command runs through the platform's shell: cmd.exe on Windows has no
+  # `sleep` and reads variables as %NAME%.
+  if [ "$OS" = windows ]; then
+    worker='echo worker-ok & ping -n 60 127.0.0.1 > nul'
+    keyed_cmd='echo id=%SIRIO_PANE_ID% & ping -n 60 127.0.0.1 > nul'
+  else
+    worker='echo worker-ok; sleep 60'
+    keyed_cmd='echo id=$SIRIO_PANE_ID; sleep 60'
+  fi
+  id="$(sirioctl_panel create --cwd "$(native "$ROOT")" --cmd "$worker")" \
     || fail "sirioctl panel create failed with no app"
   case "$id" in pane-c[0-9a-f]*) ;; *) fail "panel create printed no host id: $id" ;; esac
   text=""
@@ -663,7 +672,7 @@ case_sirioctl_direct() {
   case "$state" in *'"exitStatus":"running"'*) ;; *) fail "panel state says the session is not running: $state" ;; esac
   # `SIRIO_PANE_ID` is the session's id, read back from inside the session (spec §3.1).
   local keyed
-  keyed="$(sirioctl_panel create --cwd "$(native "$ROOT")" --cmd 'echo id=$SIRIO_PANE_ID; sleep 60')" \
+  keyed="$(sirioctl_panel create --cwd "$(native "$ROOT")" --cmd "$keyed_cmd")" \
     || fail "sirioctl panel create (SIRIO_PANE_ID) failed"
   text=""
   for _ in $(seq 1 60); do
