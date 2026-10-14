@@ -282,8 +282,8 @@ impl TrayHandle {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        NO_ACTIVE_AGENTS_LABEL, OPEN_SIRIO_LABEL, QUIT_SIRIO_LABEL, SharedRoster, TrayIconKind,
-        TrayRequest, TrayRequestQueue, roster_menu_label,
+        END_ALL_SESSIONS_LABEL, NO_ACTIVE_AGENTS_LABEL, OPEN_SIRIO_LABEL, QUIT_SIRIO_LABEL,
+        SharedRoster, TrayIconKind, TrayRequest, TrayRequestQueue, roster_menu_label,
     };
     use objc2::rc::Id;
     use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject, Sel};

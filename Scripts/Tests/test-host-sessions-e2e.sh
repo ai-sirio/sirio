@@ -799,10 +799,13 @@ case_unverifiable_no_fallback() {
   kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
   app_start
   for i in $(seq 1 60); do
-    # A local shell is what a fallback would start; other children (the
-    # app's own usage requests, say) are not the session's business.
-    kids=$(ps -o comm= --ppid "$APP_PID" | grep -cE '^(sh|bash|zsh|fish|dash)$' || true)
-    [ "$kids" -eq 0 ] || fail "the app runs $kids local shell(s) while the host is unverifiable"
+    # A local shell is what a fallback would start, and a fallback shell owns a
+    # terminal. The app's other shell children (the tab summarizer, a usage
+    # request) run on pipes with no tty, and are not the session's business.
+    kids=$(ps -o tty=,comm= --ppid "$APP_PID" | awk '$1 != "?" && $2 ~ /^(sh|bash|zsh|fish|dash)$/' | wc -l)
+    [ "$kids" -eq 0 ] || fail "the app runs $kids local shell(s) on a terminal while the host is unverifiable"
+    ! grep -q 'terminal on the in-process fallback' "$W/app.log" \
+      || fail "the app logged an in-process fallback while the host is unverifiable"
     [ "$(pane_state "$pane" survives 2>/dev/null)" = false ] && fail "pane $pane reports survives=false while the host is unverifiable"
     sleep 0.5
   done

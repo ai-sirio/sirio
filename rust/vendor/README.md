@@ -181,10 +181,14 @@ would replace it, so every affected user has to reinstall by hand.
 
 ### What's patched, and how little
 
-Five lines in `build.rs`, backported verbatim from upstream
+Two backports in `build.rs`. The first is five lines, backported verbatim from upstream
 [uzaaft/libghostty-rs#73](https://github.com/uzaaft/libghostty-rs/pull/73) (merged 2026-08-14,
 closing their #66): `-Dcpu` is now always passed, defaulting to `baseline` and overridable through
-`LIBGHOSTTY_VT_SYS_CPU`. Every other file is byte-for-byte the published 0.2.1 source, apart from
+`LIBGHOSTTY_VT_SYS_CPU`. The second is upstream 0.2.2's Windows static link: 0.2.1 emits
+`static=ghostty-vt`, which MSVC resolves to `ghostty-vt.lib`, the *import library* of
+`ghostty-vt.dll`, so every Windows binary linked against a DLL no package ships (SP2's
+`sirio-host`, staged alone into the data root, could not start); the build now links
+`ghostty-vt-static.lib` with `+verbatim`. Every other file is byte-for-byte the published 0.2.1 source, apart from
 the `[workspace]` table this arrangement needs (and the removed `Cargo.toml.orig`/`Cargo.lock`
 publishing artifacts). `libghostty-vt`, the safe wrapper, is **not** patched: the vendored `-sys`
 keeps 0.2.1's ghostty pin and generated bindings, so the two halves still match.
