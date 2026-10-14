@@ -6331,7 +6331,8 @@ impl SirioWorkspace {
 
     /// A check that finds another version while an apply runs is held for the
     /// apply's end (spec §4), so the card keeps the apply's progress. The
-    /// check arm has already dropped a verified artifact of another version.
+    /// check arm has already replaced or dropped a verified artifact of
+    /// another version.
     fn hold_newer_check(
         &mut self,
         applying: &UiUpdateStatus,
@@ -23048,10 +23049,14 @@ fn apply_plan(
     verified: Option<&sirio_update::VerifiedUpdate>,
     available: Option<&sirio_update::AvailableUpdate>,
 ) -> ApplyPlan {
-    // A verified artifact is applied only when the card offers its version: a
-    // successful apply leaves the installed artifact in `verified`, and a newer
-    // update offered later must not install that one again (fix round 2).
-    let verified = verified.filter(|verified| offered == Some(verified.version.as_str()));
+    // Nothing is planned unless the card offers a version. A verified artifact
+    // is applied only when the card offers its version: a successful apply
+    // leaves the installed artifact in `verified`, and a newer update offered
+    // later must not install that one again.
+    let Some(offered) = offered else {
+        return ApplyPlan::Nothing;
+    };
+    let verified = verified.filter(|verified| verified.version == offered);
     if let Some(verified) = verified {
         ApplyPlan::ApplyVerified(verified.clone())
     } else if let Some(available) = available {
@@ -34719,8 +34724,8 @@ done
         );
         assert_eq!(
             apply_plan(None, Some(&verified), Some(&available)),
-            ApplyPlan::DownloadThenApply(available),
-            "an artifact is applied only when the card offers it"
+            ApplyPlan::Nothing,
+            "nothing is planned when the card offers no version"
         );
         assert_eq!(apply_plan(None, None, None), ApplyPlan::Nothing);
     }
@@ -35083,7 +35088,7 @@ done
 
     /// A successful apply leaves the installed artifact in `last_verified`.
     /// The newer update the card then offers must be downloaded, never
-    /// re-applied from that stale artifact (fix round 2).
+    /// re-applied from that stale artifact.
     #[gpui::test]
     async fn an_apply_never_reinstalls_the_artifact_it_just_installed(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -35132,6 +35137,10 @@ done
             assert_eq!(
                 workspace.live_update_state.status,
                 UiUpdateStatus::Available { version: "0.33.0".into(), notes: "More".into() }
+            );
+            assert!(
+                workspace.last_verified.is_none(),
+                "a check that offers another version drops the installed artifact"
             );
             let target = match apply_plan(
                 offered_version(&workspace.live_update_state.status),
