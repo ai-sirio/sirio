@@ -138,6 +138,22 @@ pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
     }
 }
 
+/// The path to relaunch after a successful [`apply`]: the bundle macOS
+/// swapped, the AppImage Linux renamed over. `None` on Windows — Inno
+/// relaunches Sirio itself — and wherever self-location refuses. It is the
+/// self-location `apply` uses, so the path relaunched is the one just
+/// replaced.
+pub fn relaunch_target() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return macos::self_locate().ok();
+    #[cfg(target_os = "linux")]
+    return linux::self_locate().ok();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// The injectable launcher seam: takes the staged artifact and its
 /// arguments, returns the launch outcome. [`apply`] uses [`real_launch`].
 /// The lifetime parameter keeps the trait object bound to the caller's

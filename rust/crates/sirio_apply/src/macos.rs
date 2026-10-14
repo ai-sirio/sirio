@@ -58,7 +58,7 @@ pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
 }
 
 /// Self-location for the real process.
-fn self_locate() -> Result<PathBuf, ApplyError> {
+pub(crate) fn self_locate() -> Result<PathBuf, ApplyError> {
     let exe = std::env::current_exe().map_err(|_| ApplyError::InstallNotFound)?;
     bundle_of(&exe)
 }
