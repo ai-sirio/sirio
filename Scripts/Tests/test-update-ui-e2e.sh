@@ -523,24 +523,26 @@ sys.exit(0 if "card-keeps-the-keyboard-away" in text else 1)
   expect visible false
   ctl surface update act --action open
 
-  # The agent warning and an error share one call site in the card's message
-  # helper (ely_ui.rs `message`), so both drawn together give two a11y nodes
-  # with one id: a debug build panics ("Duplicate a11y node id", bezel-gpui
-  # window/a11y.rs). That is an app defect, recorded in docs/testing/update-card.md;
-  # until it is fixed the error states are checked with no agent at work.
-  "$CTL" notify --session "$pane" --status done
-  wait_for agentsWorking 0 surface update read
-
+  # A failed apply and a refusal, drawn with the agent still at work: the card
+  # carries the agent warning and the error together (spec 2.2). Both were
+  # once one a11y node id in a debug build, which panicked ("Duplicate a11y
+  # node id", bezel-gpui window/a11y.rs); after each capture Sirio must answer.
   ctl surface update inject --status failed --version 99.1.0 --message "network unreachable"
   expect status apply-failed
   expect error "network unreachable"
+  expect warning "1 agent is working — restarting will stop it."
   expect buttons "later:on,retry:on"
   capture ui-failed
+  ctl ping
+  kill -0 "$APP_PID" 2>/dev/null || fail "Sirio is gone after the failed card was drawn"
 
   ctl surface update inject --status refused --version 99.1.0
   expect buttons "later:on"
+  expect warning "1 agent is working — restarting will stop it."
   read_field error surface update read | grep -q "github.com/ai-sirio/sirio/releases" || fail "the refusal does not name the download page"
   capture ui-refused
+  ctl ping
+  kill -0 "$APP_PID" 2>/dev/null || fail "Sirio is gone after the refused card was drawn"
 
   ctl surface update inject --status installed --version 99.1.0
   expect title "Sirio 99.1.0 is installed — restart to use it"
