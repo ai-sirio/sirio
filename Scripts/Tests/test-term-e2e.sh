@@ -728,20 +728,27 @@ case_flood() {
   # mid-flow: the replica is rebuilt from it and then reads normally to the
   # end of the flood. Afterwards it must agree byte-for-byte with the host's
   # text; `lagged` may be >= 0 either way and is recorded, not asserted.
-  # ConPTY passes the flood on far slower (50 MB did not finish in 270 s on a
-  # GitHub runner), so Windows floods 8 MB: still twice the 4 MiB journal,
-  # which is what the case needs to outrun.
-  local bytes=50000000 secs=90
-  [ "$OS" = windows ] && { bytes=8000000; secs=240; }
+  # ConPTY passes a flood on at about 11 KB/s on a GitHub runner (8 MB took
+  # 12 minutes) and repaints rather than relays, so on Windows the case floods
+  # 1 MB and proves the replica agrees after a mid-flow attach; whether it
+  # outran the journal is not claimed there. The reader stays attached past
+  # the deadline, so it never stops before the flood does.
+  local bytes=50000000 secs=90 hold=90
+  [ "$OS" = windows ] && { bytes=1000000; secs=200; hold=240; }
   new_session -- sh -c "yes | head -c $bytes; echo FLOOD-DONE; sleep 60"
   local id="$NEW_ID" reader lagged
-  "$PROBE" term-attach "$id" --for "$((secs * 1000))" --replica-text "$(native "$ROOT/r.txt")" \
+  "$PROBE" term-attach "$id" --for "$((hold * 1000))" --replica-text "$(native "$ROOT/r.txt")" \
     >"$ROOT/attach.out" 2>"$ROOT/attach.err" &
   reader=$!
   HELPERS+=("$reader")
-  log_direct "term-attach $id --for $((secs * 1000)) --replica-text r.txt & (reader, pid $reader)"
-  wait_until "$secs" term_read_has "$id" "FLOOD-DONE" \
-    || fail "the $bytes-byte flood never finished"
+  log_direct "term-attach $id --for $((hold * 1000)) --replica-text r.txt & (reader, pid $reader)"
+  # A deadline in seconds: wait_until counts polls, and one term-read of a
+  # flooded session is slow on Windows.
+  local deadline=$((SECONDS + secs))
+  until term_read_has "$id" "FLOOD-DONE"; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "the $bytes-byte flood never finished in ${secs}s"
+    sleep 0.5
+  done
   sleep 1
   wait "$reader" || fail "the reading attach failed"
   { echo "--- reader attach.out"; cat "$ROOT/attach.out"; } >>"$TRANSCRIPT"
