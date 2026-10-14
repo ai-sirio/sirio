@@ -121,13 +121,17 @@ pub fn update_card_view(input: &UpdateCardInput<'_>) -> Option<UpdateCardView> {
     if input.dismissed == Some(version) {
         return None;
     }
-    // The cross puts the card away only while work goes on behind it (§2.1);
-    // once the work is over the outcome is shown whatever the cross said.
+    // The cross puts the card away only while work goes on behind it (§2.1):
+    // an apply in flight, or on Windows the installer closing Sirio after
+    // `Installed` (the user waits for it, so the cross must still work there).
+    // Once that work is over the outcome is shown whatever the cross said.
     let in_flight = matches!(
         status,
         UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. }
     );
-    if input.hidden && in_flight {
+    let installer_closing = input.installer_restarts
+        && matches!(status, UpdateStatus::Installed { .. });
+    if input.hidden && (in_flight || installer_closing) {
         return None;
     }
     let restart_label = if input.installer_restarts {
@@ -197,7 +201,9 @@ pub fn update_card_view(input: &UpdateCardInput<'_>) -> Option<UpdateCardView> {
         UpdateStatus::Installed { .. } if input.installer_restarts => UpdateCardView {
             title: format!("Sirio {version} is installed"),
             body: None,
-            warning: None,
+            // The warning has no exemption (§2.2): the installer still stops
+            // the agents as it closes Sirio.
+            warning,
             progress: Some("Sirio restarts to finish the update…".to_string()),
             error: None,
             hideable: true,
@@ -225,7 +231,8 @@ pub fn update_card_view(input: &UpdateCardInput<'_>) -> Option<UpdateCardView> {
             UpdateCardView {
                 title: "Update failed".to_string(),
                 body: None,
-                warning: None,
+                // No exemption (§2.2): a retry restarts Sirio, which stops them.
+                warning,
                 progress: None,
                 error: Some(message.clone()),
                 hideable: false,
@@ -655,6 +662,59 @@ mod tests {
         assert_eq!(view.title, "Sirio 1.0.0 is installed");
         assert!(view.buttons.is_empty());
         assert_eq!(view.progress.as_deref(), Some("Sirio restarts to finish the update…"));
+    }
+
+    #[test]
+    fn the_cross_puts_an_installed_update_away_only_where_the_installer_restarts() {
+        let s = state(UpdateStatus::Installed { version: "1.0.0".into() });
+        let mut hidden = input(&s);
+        hidden.hidden = true;
+        hidden.installer_restarts = true;
+        assert_eq!(
+            update_card_view(&hidden),
+            None,
+            "Windows: the installer closes Sirio behind the cross, and the cross must still work"
+        );
+
+        hidden.installer_restarts = false;
+        assert!(
+            update_card_view(&hidden).is_some(),
+            "macOS and Linux: an installed update waits for the user to restart"
+        );
+    }
+
+    #[test]
+    fn the_agents_warning_is_drawn_in_every_status_the_card_shows() {
+        for (status, installer_restarts) in [
+            (
+                UpdateStatus::ApplyFailed {
+                    version: "1.0.0".into(),
+                    message: "network unreachable".into(),
+                    retryable: true,
+                },
+                false,
+            ),
+            (
+                UpdateStatus::ApplyFailed {
+                    version: "1.0.0".into(),
+                    message: "not an install".into(),
+                    retryable: false,
+                },
+                false,
+            ),
+            (UpdateStatus::Installed { version: "1.0.0".into() }, true),
+        ] {
+            let s = state(status.clone());
+            let mut i = input(&s);
+            i.agents_working = 1;
+            i.installer_restarts = installer_restarts;
+            let view = update_card_view(&i).unwrap();
+            assert_eq!(
+                view.warning.as_deref(),
+                Some("1 agent is working — restarting will stop it."),
+                "{status:?} (installer_restarts: {installer_restarts}) drew no warning"
+            );
+        }
     }
 
     #[test]
