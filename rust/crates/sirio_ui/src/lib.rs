@@ -49,6 +49,7 @@ pub mod sidebar;
 pub mod status;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod update_card;
 pub mod text_selection;
 pub mod titlebar;
 pub mod worktree_picker;
