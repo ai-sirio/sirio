@@ -785,15 +785,19 @@ case_echo_latency() {
 # Unverifiable, never Absent. A restored tab must not run a local shell beside
 # the session, must not report survives=false, and attaches once the host
 # answers again.
-# The shells among PID's children that lead their own process group, as a
-# fallback PTY's shell does; comma-separated pids, empty when none. pgrep -P and
-# ps -o pid=,pgid=,comm= read the same on Linux and macOS.
+# The shells among PID's children that a terminal pane runs, as a fallback
+# would: every pane exports SIRIO_PANE_ID, which `ps eww` shows on Linux and
+# macOS alike. The app's other shell children (the /usage probe's login shell
+# on its own PTY, the tab summarizer) carry no pane id, and an exited child
+# waiting to be reaped has no environment left. Comma-separated pids, empty
+# when none.
 fallback_shells() {
-  local child pid pgid comm found=""
+  local child comm found=""
   for child in $(pgrep -P "$1" || true); do
-    read -r pid pgid comm < <(ps -o pid=,pgid=,comm= -p "$child" 2>/dev/null || true) || continue
+    comm=$(ps -o comm= -p "$child" 2>/dev/null || true)
     case "${comm##*/}" in sh|bash|zsh|fish|dash|-sh|-bash|-zsh) ;; *) continue ;; esac
-    [ "$pid" = "$pgid" ] && found="${found:+$found,}$pid"
+    ps eww -o command= -p "$child" 2>/dev/null | grep -q 'SIRIO_PANE_ID=' \
+      && found="${found:+$found,}$child"
   done
   printf '%s' "$found"
 }
@@ -812,9 +816,7 @@ case_unverifiable_no_fallback() {
   kill -STOP "$host_pid" || fail "could not stop the host $host_pid"
   app_start
   for i in $(seq 1 60); do
-    # A local shell is what a fallback would start: a PTY's shell leads its own
-    # session, so it is its own process-group leader. The app's other shell
-    # children (the tab summarizer, a usage request) stay in the app's group.
+    # A local shell carrying a pane id is what a fallback would start.
     kids=$(fallback_shells "$APP_PID")
     [ -z "$kids" ] || fail "the app runs local shell(s) while the host is unverifiable: $(ps -o pid,pgid,tty,args -p "$kids" 2>/dev/null | tr '\n' ' ')"
     ! grep -q 'terminal on the in-process fallback' "$W/app.log" \

@@ -728,15 +728,20 @@ case_flood() {
   # mid-flow: the replica is rebuilt from it and then reads normally to the
   # end of the flood. Afterwards it must agree byte-for-byte with the host's
   # text; `lagged` may be >= 0 either way and is recorded, not asserted.
-  new_session -- sh -c 'yes | head -c 50000000; echo FLOOD-DONE; sleep 60'
+  # ConPTY passes the flood on far slower (50 MB did not finish in 270 s on a
+  # GitHub runner), so Windows floods 8 MB: still twice the 4 MiB journal,
+  # which is what the case needs to outrun.
+  local bytes=50000000 secs=90
+  [ "$OS" = windows ] && { bytes=8000000; secs=240; }
+  new_session -- sh -c "yes | head -c $bytes; echo FLOOD-DONE; sleep 60"
   local id="$NEW_ID" reader lagged
-  "$PROBE" term-attach "$id" --for 60000 --replica-text "$(native "$ROOT/r.txt")" \
+  "$PROBE" term-attach "$id" --for "$((secs * 1000))" --replica-text "$(native "$ROOT/r.txt")" \
     >"$ROOT/attach.out" 2>"$ROOT/attach.err" &
   reader=$!
   HELPERS+=("$reader")
-  log_direct "term-attach $id --for 60000 --replica-text r.txt & (reader, pid $reader)"
-  wait_until 90 term_read_has "$id" "FLOOD-DONE" \
-    || fail "the 50 MB flood never finished"
+  log_direct "term-attach $id --for $((secs * 1000)) --replica-text r.txt & (reader, pid $reader)"
+  wait_until "$secs" term_read_has "$id" "FLOOD-DONE" \
+    || fail "the $bytes-byte flood never finished"
   sleep 1
   wait "$reader" || fail "the reading attach failed"
   { echo "--- reader attach.out"; cat "$ROOT/attach.out"; } >>"$TRANSCRIPT"
