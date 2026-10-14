@@ -1109,6 +1109,20 @@ enum ControlAction {
     ChangesConfirm {
         reply: ControlReply,
     },
+    UpdateCardRead {
+        reply: ControlReply,
+    },
+    UpdateCardAct {
+        action: String,
+        reply: ControlReply,
+    },
+    UpdateCardInject {
+        status: String,
+        version: Option<String>,
+        notes: Option<String>,
+        message: Option<String>,
+        reply: ControlReply,
+    },
     OpenSettings {
         section: Option<SettingsCategory>,
         reply: ControlReply,
@@ -2214,6 +2228,9 @@ impl ControlHandler for AppControlHandler {
                 if cfg!(debug_assertions) {
                     methods.push("surface.change_request.act");
                     methods.push("surface.changes.confirm");
+                    methods.push("surface.update.read");
+                    methods.push("surface.update.act");
+                    methods.push("surface.update.inject");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2366,6 +2383,30 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.changes.confirm" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::ChangesConfirm { reply })
+            }
+            "surface.update.read" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::UpdateCardRead { reply })
+            }
+            "surface.update.act" if cfg!(debug_assertions) => {
+                let Some(action) = request.params.get("action").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.update.act requires action");
+                };
+                self.queue_action(request, move |reply| ControlAction::UpdateCardAct { action, reply })
+            }
+            "surface.update.inject" if cfg!(debug_assertions) => {
+                let Some(status) = request.params.get("status").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.update.inject requires status");
+                };
+                let version = request.params.get("version").cloned();
+                let notes = request.params.get("notes").cloned();
+                let message = request.params.get("message").cloned();
+                self.queue_action(request, move |reply| ControlAction::UpdateCardInject {
+                    status,
+                    version,
+                    notes,
+                    message,
+                    reply,
+                })
             }
             // F-GIT-BRANCH-01: GitBranches::list has no UI caller (the New
             // Worktree prompt is free-text with no read-back), so this
@@ -5356,6 +5397,17 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::ChangesConfirm { reply } => {
                                     let _ = reply.send(workspace.control_changes_confirm(cx));
+                                }
+                                ControlAction::UpdateCardRead { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_read_update_card()));
+                                }
+                                ControlAction::UpdateCardAct { action, reply } => {
+                                    let _ = reply.send(workspace.control_update_card_act(&action, cx));
+                                }
+                                ControlAction::UpdateCardInject { status, version, notes, message, reply } => {
+                                    let _ = reply.send(
+                                        workspace.control_update_card_inject(&status, version, notes, message, cx),
+                                    );
                                 }
                                 ControlAction::OpenSettings { section, reply } => {
                                     let result = workspace.control_open_settings(section, cx);
@@ -15880,6 +15932,99 @@ impl SirioWorkspace {
             return Err("no Discard confirmation is open".to_string());
         }
         self.control_read_changes(cx)
+    }
+
+    fn control_read_update_card(&self) -> Vec<(String, String)> {
+        let card = self.current_update_card();
+        let text = |value: Option<&String>| value.cloned().unwrap_or_default();
+        vec![
+            ("visible".into(), card.is_some().to_string()),
+            ("title".into(), card.as_ref().map(|c| c.title.clone()).unwrap_or_default()),
+            ("body".into(), text(card.as_ref().and_then(|c| c.body.as_ref()))),
+            ("warning".into(), text(card.as_ref().and_then(|c| c.warning.as_ref()))),
+            ("progress".into(), text(card.as_ref().and_then(|c| c.progress.as_ref()))),
+            ("error".into(), text(card.as_ref().and_then(|c| c.error.as_ref()))),
+            ("hideable".into(), card.as_ref().is_some_and(|c| c.hideable).to_string()),
+            (
+                "buttons".into(),
+                card.as_ref()
+                    .map(|c| {
+                        c.buttons
+                            .iter()
+                            .map(|b| format!("{}:{}", b.action.name(), if b.enabled { "on" } else { "off" }))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default(),
+            ),
+            ("status".into(), self.live_update_state.status.kind().into()),
+            (
+                "version".into(),
+                self.live_update_state.status.version().unwrap_or_default().into(),
+            ),
+            ("agentsWorking".into(), self.activity.running_pane_count().to_string()),
+            ("pid".into(), std::process::id().to_string()),
+        ]
+    }
+
+    fn control_update_card_act(
+        &mut self,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let action = match action {
+            "open" => {
+                self.show_update_card(cx);
+                return Ok(self.control_read_update_card());
+            }
+            "later" => UpdateCardAction::Later,
+            "restart" => UpdateCardAction::Restart,
+            "install" => UpdateCardAction::InstallOnly,
+            "retry" => UpdateCardAction::Retry,
+            "hide" => UpdateCardAction::Hide,
+            other => return Err(format!("unknown update card action {other}")),
+        };
+        let card = self.current_update_card().ok_or("the update card is not shown")?;
+        let offered = (action == UpdateCardAction::Hide && card.hideable)
+            || card.buttons.iter().any(|b| b.action == action && b.enabled);
+        if !offered {
+            return Err(format!("the update card does not offer {}", action.name()));
+        }
+        self.on_update_card_action(action, cx);
+        Ok(self.control_read_update_card())
+    }
+
+    fn control_update_card_inject(
+        &mut self,
+        status: &str,
+        version: Option<String>,
+        notes: Option<String>,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let version = version.unwrap_or_else(|| "99.0.0".into());
+        let status = match status {
+            "available" => UiUpdateStatus::Available { version, notes: notes.unwrap_or_default() },
+            "ready" => UiUpdateStatus::Ready { version, notes: notes.unwrap_or_default() },
+            "downloading" => UiUpdateStatus::Downloading { version },
+            "installing" => UiUpdateStatus::Installing { version },
+            "installed" => UiUpdateStatus::Installed { version },
+            "failed" => UiUpdateStatus::ApplyFailed {
+                version,
+                message: message.unwrap_or_else(|| "network unreachable".into()),
+                retryable: true,
+            },
+            "refused" => UiUpdateStatus::ApplyFailed {
+                version,
+                message: sirio_apply::ApplyError::InstallNotFound.to_string(),
+                retryable: false,
+            },
+            other => return Err(format!("unknown update status {other}")),
+        };
+        let mut next = self.live_update_state.clone();
+        next.status = status;
+        self.push_update_state(next, cx);
+        Ok(self.control_read_update_card())
     }
 
     fn control_read_changes(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
@@ -38260,6 +38405,9 @@ done
             | ControlAction::ChangesView { reply, .. }
             | ControlAction::ChangesDialog { reply, .. }
             | ControlAction::ChangesConfirm { reply }
+            | ControlAction::UpdateCardRead { reply }
+            | ControlAction::UpdateCardAct { reply, .. }
+            | ControlAction::UpdateCardInject { reply, .. }
             | ControlAction::OpenSettings { reply, .. }
             | ControlAction::SelectSettings { reply, .. }
             | ControlAction::ReadSettings { reply }
@@ -38394,6 +38542,9 @@ done
             "surface.changes.view" => request::changes_view(Some("split"), None, false),
             "surface.changes.dialog" => request::changes_dialog(None, false, true),
             "surface.changes.confirm" => request::changes_confirm(),
+            "surface.update.read" => request::update_read(),
+            "surface.update.act" => request::update_act("open"),
+            "surface.update.inject" => request::update_inject("ready", Some("99.0.0"), None, None),
             "git.branches" => request_with_params(method, &[]),
             "surface.settings.open" => request::settings_open(None),
             "surface.settings.select" => request_with_params(method, &[]),

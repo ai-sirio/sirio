@@ -133,6 +133,9 @@ fn usage() {
          \x20 surface changes view [--mode unified|split] [--expand path] [--refresh]\n\
          \x20 surface changes dialog --discard path|--discard-all|--close\n\
          \x20 surface changes confirm           (debug builds) confirm the open Discard\n\
+         \x20 surface update read               (debug builds) read the update card\n\
+         \x20 surface update act --action later|restart|install|retry|hide|open  (debug builds) press a card action\n\
+         \x20 surface update inject --status S [--version V] [--notes N] [--message M]  (debug builds) set the update status\n\
          \x20 surface settings open [--section s]\n\
          \x20 surface settings select <section>\n\
          \x20 surface settings read             read the mounted Settings section\n\
@@ -782,6 +785,27 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ),
         ("changes", "confirm") => {
             require_ok(socket, &sirio_control::protocol::request::changes_confirm())
+        }
+        ("update", "read") => require_ok(socket, &sirio_control::protocol::request::update_read()),
+        ("update", "act") => {
+            let action = parsed
+                .value("action")
+                .ok_or_else(|| "Missing --action".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::update_act(action))
+        }
+        ("update", "inject") => {
+            let status = parsed
+                .value("status")
+                .ok_or_else(|| "Missing --status".to_string())?;
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::update_inject(
+                    status,
+                    parsed.value("version"),
+                    parsed.value("notes"),
+                    parsed.value("message"),
+                ),
+            )
         }
         ("changes", "view") => require_ok(
             socket,
