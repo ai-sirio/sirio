@@ -294,13 +294,16 @@ impl StatusBar {
     }
 
     /// Whether the quiet status-bar indicator should be drawn: whenever there
-    /// is an update the card can be reopened for.
+    /// is an update the card can be reopened for, work in flight included
+    /// (the card's × hides it during a download or an install, spec §2.3).
     fn update_indicator_visible(state: &UpdateState) -> bool {
         state.enabled
             && matches!(
                 state.status,
                 UpdateStatus::Available { .. }
                     | UpdateStatus::Ready { .. }
+                    | UpdateStatus::Downloading { .. }
+                    | UpdateStatus::Installing { .. }
                     | UpdateStatus::Installed { .. }
                     | UpdateStatus::ApplyFailed { .. }
             )
@@ -747,10 +750,12 @@ impl Render for StatusBar {
                     .child(IconElement::new(Icon::Sparkles, IconSize::XSmall))
                     .child(text!(
                         id = "status-update-label",
-                        if matches!(self.update_state.status, UpdateStatus::Installed { .. }) {
-                            "Restart to update"
-                        } else {
-                            "Update available"
+                        match self.update_state.status {
+                            UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. } => {
+                                "Updating…"
+                            }
+                            UpdateStatus::Installed { .. } => "Restart to update",
+                            _ => "Update available",
                         }
                     )),
             );

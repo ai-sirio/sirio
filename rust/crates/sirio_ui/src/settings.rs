@@ -3387,7 +3387,13 @@ impl Settings {
             UpdateStatus::Installed { version } => {
                 Some(format!("{version} installed — restart to use it"))
             }
-            UpdateStatus::ApplyFailed { message, .. } => Some(format!("Update failed: {message}")),
+            UpdateStatus::ApplyFailed { message, .. } => {
+                if message.trim().is_empty() {
+                    Some("Update failed".into())
+                } else {
+                    Some(format!("Update failed: {message}"))
+                }
+            }
             UpdateStatus::Failed { message } => {
                 let mut text = "Could not check for updates".to_string();
                 if let Some(stamp) = &self.update_state.last_checked {
