@@ -7,7 +7,9 @@
 use std::rc::Rc;
 
 use ely_gpui_component::primitives::{IconName, Severity};
-use gpui::{App, IntoElement, RenderOnce, Window, div, prelude::*, px};
+use gpui::{
+    Animation, AnimationExt, App, IntoElement, RenderOnce, Window, div, prelude::*, px, relative,
+};
 use sirio_theme::Theme;
 
 use crate::ely_ui::{ButtonState, icon_button, message, text_button};
@@ -65,28 +67,67 @@ pub struct UpdateCardView {
 
 const NOTES_CAP: usize = 4096;
 
-impl UpdateCardAction {
-    /// The name the debug socket uses.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Later => "later",
-            Self::Restart => "restart",
-            Self::InstallOnly => "install",
-            Self::Retry => "retry",
-            Self::Hide => "hide",
+/// The card is this wide.
+const CARD_WIDTH: f32 = 360.0;
+/// The indeterminate segment that slides along the progress track.
+const PROGRESS_SEGMENT: f32 = 120.0;
+/// Where the segment's left edge sweeps, as a fraction of the track: from
+/// before the track to its right end, so the segment is off the track at both
+/// ends of every sweep and the track's clip hides it in between.
+const PROGRESS_FROM: f32 = -0.4;
+const PROGRESS_TO: f32 = 1.0;
+const PROGRESS_PERIOD: std::time::Duration = std::time::Duration::from_millis(1500);
+const PROGRESS_MAX_FPS: f32 = 30.0;
+
+/// Each action's socket name, and from it the element id of its button: one
+/// table both come from, so the socket's `act <name>` and the card's
+/// `update-card-action-<name>` selectors (spec §3.1, §3.6) cannot drift apart.
+macro_rules! update_card_actions {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        impl UpdateCardAction {
+            /// The name the debug socket uses.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            /// The element id, and debug selector, of this action's button.
+            fn element_id(self) -> &'static str {
+                match self {
+                    $(Self::$variant => concat!("update-card-action-", $name),)+
+                }
+            }
         }
-    }
+    };
+}
+
+update_card_actions! {
+    Later => "later",
+    Restart => "restart",
+    InstallOnly => "install",
+    Retry => "retry",
+    Hide => "hide",
 }
 
 /// Everything the card shows, decided from the host's facts (spec §2). `None`
 /// is "no card".
 pub fn update_card_view(input: &UpdateCardInput<'_>) -> Option<UpdateCardView> {
-    if !input.state.enabled || input.hidden {
+    if !input.state.enabled {
         return None;
     }
     let status = &input.state.status;
     let version = status.version()?;
     if input.dismissed == Some(version) {
+        return None;
+    }
+    // The cross puts the card away only while work goes on behind it (§2.1);
+    // once the work is over the outcome is shown whatever the cross said.
+    let in_flight = matches!(
+        status,
+        UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. }
+    );
+    if input.hidden && in_flight {
         return None;
     }
     let restart_label = if input.installer_restarts {
@@ -136,7 +177,9 @@ pub fn update_card_view(input: &UpdateCardInput<'_>) -> Option<UpdateCardView> {
         UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. } => UpdateCardView {
             title: format!("Updating to Sirio {version}"),
             body: None,
-            warning: None,
+            // The warning has no exemption for work in flight (§2.2): the
+            // restart that follows still stops the agents.
+            warning,
             progress: Some(
                 if matches!(status, UpdateStatus::Downloading { .. }) {
                     format!("Downloading Sirio {version}…")
@@ -207,14 +250,22 @@ fn agents_warning(count: usize) -> String {
 }
 
 /// Nightly says what it is, as Settings does; Stable shows the notes as plain
-/// text with control characters dropped and the length capped (spec §4).
+/// text, tabs made spaces, other control characters dropped and the length
+/// capped (spec §4).
 fn body(state: &UpdateState, notes: &str) -> Option<String> {
     if state.channel.trim().eq_ignore_ascii_case("nightly") {
         return Some("Nightly builds track main".to_string());
     }
+    // A tab keeps its word apart from the next one; any other control
+    // character is dropped, so no escape sequence reaches the card.
     let clean: String = notes
         .chars()
-        .filter(|c| *c == '\n' || !c.is_control())
+        .filter_map(|c| match c {
+            '\n' => Some('\n'),
+            '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
         .collect();
     let clean = clean.trim();
     if clean.is_empty() {
@@ -228,6 +279,12 @@ fn body(state: &UpdateState, notes: &str) -> Option<String> {
         end -= 1;
     }
     Some(format!("{}…", &clean[..end]))
+}
+
+/// Where the progress segment's left edge is, as a fraction of the track, at
+/// `t` (0 to 1) through one sweep.
+fn segment_left(t: f32) -> f32 {
+    PROGRESS_FROM + (PROGRESS_TO - PROGRESS_FROM) * t.clamp(0.0, 1.0)
 }
 
 /// Draws an [`UpdateCardView`] docked bottom-right above the status bar. It
@@ -248,16 +305,6 @@ impl UpdateCard {
             view,
             on_action: Rc::new(on_action),
         }
-    }
-}
-
-fn button_id(action: UpdateCardAction) -> &'static str {
-    match action {
-        UpdateCardAction::Later => "update-card-later",
-        UpdateCardAction::Restart => "update-card-restart",
-        UpdateCardAction::InstallOnly => "update-card-install-only",
-        UpdateCardAction::Retry => "update-card-retry",
-        UpdateCardAction::Hide => "update-card-hide",
     }
 }
 
@@ -284,7 +331,7 @@ impl RenderOnce for UpdateCard {
             .when(view.hideable, |header| {
                 let on_action = on_action.clone();
                 header.child(icon_button(
-                    "update-card-hide",
+                    UpdateCardAction::Hide.element_id(),
                     IconName::X,
                     "Hide",
                     true,
@@ -301,7 +348,7 @@ impl RenderOnce for UpdateCard {
                 state
             };
             text_button(
-                button_id(action),
+                action.element_id(),
                 button.label,
                 None,
                 state,
@@ -315,7 +362,7 @@ impl RenderOnce for UpdateCard {
             .absolute()
             .bottom(px(44.0))
             .right(px(16.0))
-            .w(px(360.0))
+            .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -368,12 +415,22 @@ impl RenderOnce for UpdateCard {
                                 .w_full()
                                 .rounded_full()
                                 .bg(theme.ely.surface)
+                                .overflow_hidden()
                                 .child(
                                     div()
+                                        .id("update-card-progress-segment")
+                                        .absolute()
                                         .h_full()
-                                        .w(px(120.0))
+                                        .w(px(PROGRESS_SEGMENT))
                                         .rounded_full()
-                                        .bg(theme.ely.fg_muted),
+                                        .bg(theme.ely.fg_muted)
+                                        .with_animation(
+                                            "update-card-progress-segment",
+                                            Animation::new(PROGRESS_PERIOD)
+                                                .repeat()
+                                                .with_max_fps(PROGRESS_MAX_FPS),
+                                            |segment, t| segment.left(relative(segment_left(t))),
+                                        ),
                                 ),
                         ),
                 )
@@ -388,6 +445,10 @@ impl RenderOnce for UpdateCard {
 mod tests {
     use super::*;
     use UpdateCardAction::*;
+
+    /// The progress track: the card less its 14 px padding and the 1 px
+    /// border on each side. The sweep must clear it at this width.
+    const TRACK_WIDTH: f32 = CARD_WIDTH - 2.0 * (14.0 + 1.0);
 
     fn state(status: UpdateStatus) -> UpdateState {
         UpdateState { enabled: true, channel: "stable".into(), status, last_checked: None }
@@ -438,14 +499,57 @@ mod tests {
 
     #[test]
     fn the_cross_hides_the_card_during_work_and_only_then_is_offered() {
-        let working = state(UpdateStatus::Installing { version: "1.0.0".into() });
-        assert!(update_card_view(&input(&working)).unwrap().hideable);
-        let mut hidden = input(&working);
-        hidden.hidden = true;
-        assert_eq!(update_card_view(&hidden), None);
+        for status in [
+            UpdateStatus::Downloading { version: "1.0.0".into() },
+            UpdateStatus::Installing { version: "1.0.0".into() },
+        ] {
+            let working = state(status);
+            assert!(update_card_view(&input(&working)).unwrap().hideable);
+            let mut hidden = input(&working);
+            hidden.hidden = true;
+            assert_eq!(update_card_view(&hidden), None, "{:?}", working.status);
+        }
 
         let idle = state(ready("1.0.0"));
         assert!(!update_card_view(&input(&idle)).unwrap().hideable);
+    }
+
+    #[test]
+    fn the_cross_puts_away_only_work_in_flight() {
+        for status in [
+            UpdateStatus::ApplyFailed {
+                version: "1.0.0".into(),
+                message: "network unreachable".into(),
+                retryable: true,
+            },
+            UpdateStatus::Installed { version: "1.0.0".into() },
+        ] {
+            let s = state(status.clone());
+            let mut hidden = input(&s);
+            hidden.hidden = true;
+            assert!(update_card_view(&hidden).is_some(), "{status:?} was hidden behind the cross");
+        }
+    }
+
+    #[test]
+    fn every_button_is_selected_by_its_socket_name() {
+        for (action, id) in [
+            (Later, "update-card-action-later"),
+            (Restart, "update-card-action-restart"),
+            (InstallOnly, "update-card-action-install"),
+            (Retry, "update-card-action-retry"),
+            (Hide, "update-card-action-hide"),
+        ] {
+            assert_eq!(action.element_id(), id);
+        }
+    }
+
+    #[test]
+    fn the_progress_segment_enters_and_leaves_the_track() {
+        assert!(segment_left(0.0) * TRACK_WIDTH + PROGRESS_SEGMENT <= 0.0);
+        assert!(segment_left(1.0) >= 1.0);
+        let samples: Vec<f32> = (0..=10).map(|step| segment_left(step as f32 / 10.0)).collect();
+        assert!(samples.windows(2).all(|pair| pair[0] < pair[1]), "{samples:?}");
     }
 
     #[test]
@@ -510,6 +614,10 @@ mod tests {
             assert!(view.buttons.iter().all(|button| !button.enabled), "{view:?}");
             assert_eq!(view.progress.as_deref(), Some(line));
             assert_eq!(view.title, "Updating to Sirio 1.0.0");
+            assert_eq!(
+                view.warning.as_deref(),
+                Some("2 agents are working — restarting will stop them.")
+            );
         }
     }
 
@@ -567,5 +675,14 @@ mod tests {
 
         let empty = state(UpdateStatus::Ready { version: "1.0.0".into(), notes: "  \n".into() });
         assert_eq!(update_card_view(&input(&empty)).unwrap().body, None);
+
+        let tabbed = state(UpdateStatus::Ready {
+            version: "1.0.0".into(),
+            notes: "fix\tthe\u{7} bug".into(),
+        });
+        assert_eq!(
+            update_card_view(&input(&tabbed)).unwrap().body.as_deref(),
+            Some("fix the bug")
+        );
     }
 }
