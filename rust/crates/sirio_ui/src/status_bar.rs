@@ -85,7 +85,7 @@ impl UsageBarPrefs {
     }
 }
 
-/// The update facts the host supplies to the two UI surfaces. The updater
+/// The update facts the host supplies to the update surfaces. The updater
 /// owns checking, downloading and applying; this crate only renders its
 /// result and emits user intent back to the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,9 +94,73 @@ pub enum UpdateStatus {
     NotDue,
     Checking,
     UpToDate,
-    Available { version: String, notes: String },
-    Ready { version: String, notes: String },
-    Failed { message: String },
+    Available {
+        version: String,
+        notes: String,
+    },
+    Ready {
+        version: String,
+        notes: String,
+    },
+    /// A check failed. Never raises the update card (spec §2.1).
+    Failed {
+        message: String,
+    },
+    /// An apply the user started is fetching the artifact.
+    Downloading {
+        version: String,
+    },
+    /// An apply the user started is installing the verified artifact.
+    Installing {
+        version: String,
+    },
+    /// Installed on disk; the running instance is still the old version.
+    Installed {
+        version: String,
+    },
+    /// An apply the user started failed. `retryable` is false when trying
+    /// again cannot help: not an install, or a failed rollback.
+    ApplyFailed {
+        version: String,
+        message: String,
+        retryable: bool,
+    },
+}
+
+impl UpdateStatus {
+    /// The version this status is about, when it is about one.
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            Self::Available { version, .. }
+            | Self::Ready { version, .. }
+            | Self::Downloading { version }
+            | Self::Installing { version }
+            | Self::Installed { version }
+            | Self::ApplyFailed { version, .. } => Some(version),
+            Self::Disabled
+            | Self::NotDue
+            | Self::Checking
+            | Self::UpToDate
+            | Self::Failed { .. } => None,
+        }
+    }
+
+    /// A stable, content-free name for logs and the debug socket.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::NotDue => "not-due",
+            Self::Checking => "checking",
+            Self::UpToDate => "up-to-date",
+            Self::Available { .. } => "available",
+            Self::Ready { .. } => "ready",
+            Self::Failed { .. } => "failed",
+            Self::Downloading { .. } => "downloading",
+            Self::Installing { .. } => "installing",
+            Self::Installed { .. } => "installed",
+            Self::ApplyFailed { .. } => "apply-failed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,12 +293,16 @@ impl StatusBar {
         &self.prefs
     }
 
-    /// Whether the quiet status-bar indicator should be drawn.
+    /// Whether the quiet status-bar indicator should be drawn: whenever there
+    /// is an update the card can be reopened for.
     fn update_indicator_visible(state: &UpdateState) -> bool {
         state.enabled
             && matches!(
                 state.status,
-                UpdateStatus::Available { .. } | UpdateStatus::Ready { .. }
+                UpdateStatus::Available { .. }
+                    | UpdateStatus::Ready { .. }
+                    | UpdateStatus::Installed { .. }
+                    | UpdateStatus::ApplyFailed { .. }
             )
     }
 
@@ -262,8 +330,8 @@ impl StatusBar {
         self
     }
 
-    /// Installs the host callback used by the update indicator. Hosts should
-    /// route it to Settings → General rather than starting an update.
+    /// Installs the host callback used by the update indicator. The host shows
+    /// the update card (spec 2026-10-14 §2.1).
     pub fn on_update(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_update = Some(Rc::new(callback));
         self
@@ -677,7 +745,14 @@ impl Render for StatusBar {
                         }
                     })
                     .child(IconElement::new(Icon::Sparkles, IconSize::XSmall))
-                    .child(text!(id = "status-update-label", "Update available")),
+                    .child(text!(
+                        id = "status-update-label",
+                        if matches!(self.update_state.status, UpdateStatus::Installed { .. }) {
+                            "Restart to update"
+                        } else {
+                            "Update available"
+                        }
+                    )),
             );
         }
 
