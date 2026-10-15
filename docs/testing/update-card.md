@@ -26,6 +26,8 @@ Limitation: the guard only means something while bezel's accessibility adapter
 connects to the AT-SPI bus when `org.a11y.Status.ScreenReaderEnabled` changes to
 true. In three probes on the run's private buses, a change of that flag (false,
 then true) opened no new connection from the app, so the guard can pass without
-the adapter. The run does give the app a private session bus and AT-SPI bus, and
-checks that the app holds a connection on that AT-SPI bus (a read-only `busctl
-list`; the OK/NOTE line in the transcript).
+the adapter. The run gives the app a private session bus and AT-SPI bus, with the
+accessibility flags (`IsEnabled`, `ScreenReaderEnabled`) turned on there before the
+app starts (under `env -i` they are off), and notes whether the app holds a
+connection on that AT-SPI bus (a read-only `busctl list`; a NOTE line in the
+transcript).

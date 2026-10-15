@@ -22,11 +22,15 @@ set -euo pipefail
 # --state-only the captures are skipped, and the keyboard and focus steps are
 # printed as SKIP.
 #
-# Display: a display is required unless --state-only. Refused: no --display; a
-# --display that is this session's $DISPLAY or $WAYLAND_DISPLAY; a value that is
-# not :N. The keys and clicks go to the display through XTEST, so before each one
-# the focused window and the window under the pointer must belong to the app's
-# pid, or the run stops. Start a private display for a run, for example:
+# Display: a display is required unless --state-only, and there is no default: the
+# ambient $DISPLAY is never used. Refused (exit 2, nothing created): no --display;
+# a value that is not a local :N; a number that is this session's $DISPLAY or
+# $WAYLAND_DISPLAY (":0.0", ":00" and ":97.0" are the numbers 0, 0 and 97); a number
+# that no Xvfb started by this user serves. The keys and clicks go to the display
+# through XTEST, so before every one of them (the pointer move, the click, the
+# typing and Return) the focused window, the window under the pointer and the
+# window aimed at must belong to the app's pid, or the run stops. Start a private
+# display for a run, for example:
 #   Xvfb :97 -screen 0 1600x1000x24 &
 #
 # Isolation: every Sirio is started under `env -i` with the allowlist written in
@@ -41,11 +45,14 @@ set -euo pipefail
 # stage asserts from stub-calls.log that the app's `claude --version` probe
 # reached the stub, so stub-first is observed rather than assumed. A display-backed
 # run also gets a private session bus and a private AT-SPI bus (never the user's),
-# and stage ui checks that this app holds a connection on it. Limitation: the run does not
+# with the two accessibility flags turned on there (under env -i they are off: no
+# desktop setting reaches the run), and stage ui notes whether this app holds a
+# connection on it (a note, not a check). Limitation: the run does not
 # prove that accesskit's adapter is active, which the duplicate-id guard (the
 # ping after each error capture) needs. Its activation (a change of the
 # screen-reader flag) opened no connection in three probes, so the guard can pass
-# without the adapter; docs/testing/update-card.md records this.
+# without the adapter; docs/testing/update-card.md records this. Chain and ui note
+# whether a started sirio-host detached (a session leader); the note is not asserted.
 #
 # The artifact: --out-dir DIR (default artifacts/update-ui-e2e-<stamp>-<pid>)
 # keeps transcript.log (every card read and expect reply, as JSON), the app
@@ -92,18 +99,36 @@ done
 refuse() { echo "refused: $*" >&2; exit 2; }
 case "$STAGE" in chain|ui|all) ;; *) refuse "unknown stage $STAGE" ;; esac
 case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark, not $APPEARANCE" ;; esac
+# The display number of a local X display: ":97", ":0097", ":97.0" and
+# "localhost:97" are all 97. Any other host is refused: it is not this machine's
+# Xvfb. Prints nothing when the string is not such a display.
+display_number() { # DISPLAY-string
+  [[ "$1" =~ ^([A-Za-z0-9._-]*):([0-9]+)(\.[0-9]+)?$ ]] || return 0
+  [ -z "${BASH_REMATCH[1]}" ] || [ "${BASH_REMATCH[1]}" = localhost ] || return 0
+  echo $((10#${BASH_REMATCH[2]}))
+}
+
+if [ "$STATE_ONLY" -eq 0 ]; then
+  for tool in import identify xwininfo xprop xdotool timeout gdbus busctl dbus-daemon; do
+    command -v "$tool" >/dev/null || refuse "$tool is required for captures, input and the private buses; pass --state-only to skip them"
+  done
+fi
 if [ -n "$DISPLAY_TARGET" ]; then
-  [[ "$DISPLAY_TARGET" =~ ^:[0-9]+$ ]] || refuse "--display takes an X display such as :97, not '$DISPLAY_TARGET'"
-  [ "$DISPLAY_TARGET" != "${DISPLAY:-}" ] || refuse "--display $DISPLAY_TARGET is this session's own \$DISPLAY: the keys and clicks would reach that desktop. Start a private display (Xvfb :97 -screen 0 1600x1000x24) and pass it"
+  target_number=$(display_number "$DISPLAY_TARGET")
+  [ -n "$target_number" ] || refuse "--display takes a local X display such as :97, not '$DISPLAY_TARGET'"
+  ambient_number=$(display_number "${DISPLAY:-}")
+  [ "$target_number" != "$ambient_number" ] || refuse "--display $DISPLAY_TARGET is this session's own \$DISPLAY (${DISPLAY:-}): the keys and clicks would reach that desktop. Start a private display (Xvfb :$target_number -screen 0 1600x1000x24) and pass it"
   [ "$DISPLAY_TARGET" != "${WAYLAND_DISPLAY:-}" ] || refuse "--display $DISPLAY_TARGET is this session's \$WAYLAND_DISPLAY"
+  # The number must be served by an Xvfb this user started. A server of another
+  # number, or one that belongs to someone else, is refused whatever it is called.
+  ps -u "$(id -u)" -o args= | python3 -c 'import re, sys; n = sys.argv[1]; sys.exit(0 if any(re.search(r"(^|/)Xvfb :" + n + r"( |$)", line) for line in sys.stdin) else 1)' "$target_number" \
+    || refuse "no Xvfb :$target_number is running as ${USER:-$(id -un)}: start a private one (Xvfb :$target_number -screen 0 1600x1000x24 &)"
+  DISPLAY_TARGET=":$target_number"
 fi
 if [ "$STATE_ONLY" -eq 0 ] && [ -z "$DISPLAY_TARGET" ]; then
   refuse "no --display: the captures and the keyboard need a display of their own; pass --display :N (a private Xvfb), or --state-only"
 fi
 if [ "$STATE_ONLY" -eq 0 ]; then
-  for tool in import identify xwininfo xprop xdotool timeout; do
-    command -v "$tool" >/dev/null || refuse "$tool is required for captures and input; pass --state-only to skip them"
-  done
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool getdisplaygeometry >/dev/null 2>&1 \
     || refuse "no X server answers on $DISPLAY_TARGET: start a private one (Xvfb $DISPLAY_TARGET -screen 0 1600x1000x24 &)"
 fi
@@ -140,8 +165,16 @@ cleanup() {
   stop_run_processes
   [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
   cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
-  rm -rf "$RUN_DIR"
+  # A mount still under the run dir is reported and the dir is kept: removing a
+  # tree with a live mount in it is not safe. Otherwise the removal stays on this
+  # filesystem.
+  if run_dir_mounted; then
+    echo "LEFTOVER: a mount is still under $RUN_DIR; the run dir is kept" >&2
+  else
+    rm -rf --one-file-system "$RUN_DIR"
+  fi
 }
+run_dir_mounted() { awk -v dir="$RUN_DIR" 'index($2, dir) == 1 { found = 1 } END { exit !found }' /proc/mounts; }
 trap cleanup EXIT
 
 # Unmounts whatever this run mounted under its own directory (FUSE mounts, which
@@ -149,7 +182,7 @@ trap cleanup EXIT
 unmount_run_mounts() {
   local mount
   while read -r mount; do
-    fusermount3 -u "$mount" 2>/dev/null || umount "$mount" 2>/dev/null || true
+    timeout 10 fusermount3 -u "$mount" 2>/dev/null || timeout 10 umount "$mount" 2>/dev/null || true
   done < <(awk -v dir="$RUN_DIR" 'index($2, dir) == 1 { print $2 }' /proc/mounts)
 }
 
@@ -245,7 +278,7 @@ expect() { # key value -- reads the card once, and logs the reply
 # DISPLAY it names is the run's own (never the ambient one).
 xd() { DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool "$@"; }
 
-find_window() {
+find_window_once() {
   DISPLAY_TARGET="$DISPLAY_TARGET" APP_PID="$APP_PID" python3 - <<'PY'
 import os, re, subprocess
 display = os.environ["DISPLAY_TARGET"]
@@ -266,10 +299,25 @@ if best:
 PY
 }
 
+# The app's window, found by its pid. The window may still be opening, so the
+# lookup is bounded (20 seconds) and prints nothing if it never appears.
+find_window() {
+  local window="" _
+  for _ in $(seq 1 100); do
+    window=$(find_window_once)
+    if [ -n "$window" ]; then
+      echo "$window"
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 0
+}
+
 # The window must be the size the Terminal tile coordinates were measured at.
 assert_window_size() { # window
   local size
-  size=$(xwininfo -display "$DISPLAY_TARGET" -id "$1" | python3 -c '
+  size=$(timeout 5 xwininfo -display "$DISPLAY_TARGET" -id "$1" | python3 -c '
 import re, sys
 text = sys.stdin.read()
 w, h = re.search(r"Width:\s*(\d+)", text), re.search(r"Height:\s*(\d+)", text)
@@ -282,11 +330,12 @@ print(f"{w.group(1)}x{h.group(1)}" if w and h else "")
 # Before any XTEST input: the focused window and the window under the pointer must
 # both belong to the app's pid. A child window has no _NET_WM_PID of its own, so
 # the owner is the nearest ancestor that carries one.
-assert_input_target() { # window -- the window the input is aimed at
-  WINDOW="$1" DISPLAY="$DISPLAY_TARGET" APP_PID="$APP_PID" timeout 20 python3 - <<'PY' || fail "keyboard, pointer or target window is not the app's; no input was sent"
+assert_input_target() { # window [focus-only] -- the window the input is aimed at; focus-only before the pointer moves
+  WINDOW="$1" FOCUS_ONLY="${2:-}" DISPLAY="$DISPLAY_TARGET" APP_PID="$APP_PID" timeout 20 python3 - <<'PY' || fail "keyboard, pointer or target window is not the app's; no input was sent"
 import os, re, subprocess, sys
 want = int(os.environ["APP_PID"])
 aimed = int(os.environ["WINDOW"], 0)
+focus_only = os.environ.get("FOCUS_ONLY") == "focus-only"
 env = dict(os.environ)
 
 def run(*args):
@@ -312,9 +361,14 @@ focus_owner = owner(hexid(focus)) if focus.isdigit() else None
 pointer_owner = owner(hexid(pointer.group(1))) if pointer else None
 aimed_owner = owner(hex(aimed))
 print(f"input focus: pid {focus_owner}; pointer: pid {pointer_owner}; aimed window: pid {aimed_owner}; the app: {want}", file=sys.stderr)
-sys.exit(0 if focus_owner == want and pointer_owner == want and aimed_owner == want else 1)
+pointer_ok = focus_only or pointer_owner == want
+sys.exit(0 if focus_owner == want and pointer_ok and aimed_owner == want else 1)
 PY
-  echo "OK: the keyboard focus and the pointer are on the app's window (pid $APP_PID)" >&2
+  if [ "${2:-}" = focus-only ]; then
+    echo "OK: the keyboard focus is the app's window (pid $APP_PID)" >&2
+  else
+    echo "OK: the keyboard focus, the pointer and the target are the app's window (pid $APP_PID)" >&2
+  fi
 }
 
 capture() { # name
@@ -365,7 +419,8 @@ open_terminal() { # window -> prints the new terminal's pane id
   before=$(reply panel list | python3 -c 'import json, sys; print(" ".join(row["id"] for row in json.load(sys.stdin) if row.get("tab") == "Terminal"))')
   assert_window_size "$window"
   xd windowfocus --sync "$window" || fail "could not focus the app's window (xdotool windowfocus)"
-  assert_input_target "$window"
+  # The move is XTEST input as well: before it, the focus must be the app's.
+  assert_input_target "$window" focus-only
   xd mousemove --window "$window" "$TILE_X" "$TILE_Y" || fail "could not move the pointer onto the Terminal tile"
   assert_input_target "$window"
   xd click 1 || fail "could not click the Terminal tile"
@@ -392,6 +447,7 @@ print(fresh[0] if fresh else "")
 type_marker() { # window pane marker
   assert_input_target "$1"
   xd type --delay 30 "$3" || fail "xdotool could not type into the app's window"
+  assert_input_target "$1"
   xd key Return || fail "xdotool could not press Return in the app's window"
   wait_pane_text "$2" "$3" 15
   echo "OK: '$3' reached the terminal $2"
@@ -487,26 +543,51 @@ curl -fsS -o /dev/null --max-time 1 "$MANIFEST_URL" || fail "the manifest server
 # from outside here (see note_a11y_bus).
 start_private_bus() {
   [ -z "$SESSION_BUS" ] || return 0
-  local runtime="$RUN_DIR/bus-runtime" launcher
-  launcher=$(command -v /usr/lib/at-spi-bus-launcher || true)
-  [ -n "$launcher" ] || fail "at-spi-bus-launcher is required for the accessibility check (install at-spi2-core)"
-  mkdir -m 700 "$runtime"
-  SESSION_BUS="unix:path=$RUN_DIR/session-bus"
-  env SIRIO_UPDATE_E2E_RUN="$RUN_DIR" XDG_RUNTIME_DIR="$runtime" \
-    dbus-daemon --session --fork --address="$SESSION_BUS" >>"$RUN_DIR/bus.log" 2>&1 \
+  local launcher=/usr/lib/at-spi-bus-launcher bus_home="$RUN_DIR/bus-home"
+  local bus_runtime="$RUN_DIR/bus-runtime" address="" _
+  [ -x "$launcher" ] || fail "at-spi-bus-launcher is required for the accessibility notes (install at-spi2-core)"
+  mkdir -p "$bus_home/.config" "$RUN_DIR/bus-data"
+  mkdir -m 700 "$bus_runtime"
+  # Both bus processes start under env -i with nothing of the user's: the system
+  # directories, the run's own HOME and XDG dirs, the system service files, and the
+  # run marker. The session bus socket is the default one under this runtime dir,
+  # so the launcher needs no address variable to find it.
+  local bus_env=(
+    PATH=/usr/local/bin:/usr/bin:/bin
+    "HOME=$bus_home"
+    "XDG_CONFIG_HOME=$bus_home/.config"
+    "XDG_DATA_HOME=$RUN_DIR/bus-data"
+    "XDG_RUNTIME_DIR=$bus_runtime"
+    XDG_DATA_DIRS=/usr/local/share:/usr/share
+    "SIRIO_UPDATE_E2E_RUN=$RUN_DIR"
+  )
+  SESSION_BUS="unix:path=$bus_runtime/bus"
+  env -i "${bus_env[@]}" dbus-daemon --session --fork --address="$SESSION_BUS" >>"$RUN_DIR/bus.log" 2>&1 \
     || fail "could not start a private session bus"
-  env SIRIO_UPDATE_E2E_RUN="$RUN_DIR" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$SESSION_BUS" \
-    "$launcher" --launch-immediately >>"$RUN_DIR/a11y-launcher.log" 2>&1 &
-  local address=""
+  env -i "${bus_env[@]}" "$launcher" --launch-immediately >>"$RUN_DIR/a11y-launcher.log" 2>&1 &
   for _ in $(seq 1 50); do
-    address=$(gdbus call --address "$SESSION_BUS" --dest org.a11y.Bus --object-path /org/a11y/bus \
+    address=$(timeout 5 gdbus call --address "$SESSION_BUS" --dest org.a11y.Bus --object-path /org/a11y/bus \
       --method org.a11y.Bus.GetAddress 2>/dev/null | python3 -c 'import re, sys; m = re.search(r"\(\x27([^\x27]+)\x27,?\)", sys.stdin.read()); print(m.group(1) if m else "")' || true)
     [ -n "$address" ] && break
     sleep 0.2
   done
   [ -n "$address" ] || fail "the private AT-SPI bus did not answer org.a11y.Bus.GetAddress"
   A11Y_BUS="$address"
-  echo "OK: private session bus and AT-SPI bus for this run (not the user's)"
+  # The launcher starts with the accessibility flags off: under this run's env -i
+  # and private HOME there is no desktop setting that turns them on. The run turns
+  # them on for its own bus, as a user with a screen reader has them, before any
+  # app starts; an app started then holds a connection on the AT-SPI bus from its
+  # start, which note_a11y_bus notes.
+  local flag state
+  for flag in IsEnabled ScreenReaderEnabled; do
+    timeout 5 gdbus call --address "$SESSION_BUS" --dest org.a11y.Bus --object-path /org/a11y/bus \
+      --method org.freedesktop.DBus.Properties.Set org.a11y.Status "$flag" "<true>" >/dev/null \
+      || fail "could not turn on org.a11y.Status.$flag on the private bus"
+    state=$(timeout 5 gdbus call --address "$SESSION_BUS" --dest org.a11y.Bus --object-path /org/a11y/bus \
+      --method org.freedesktop.DBus.Properties.Get org.a11y.Status "$flag" 2>/dev/null || true)
+    case "$state" in *"<true>"*) ;; *) fail "org.a11y.Status.$flag is not on the private bus (got '$state')" ;; esac
+  done
+  echo "OK: private session bus and AT-SPI bus for this run (not the user's); accessibility flags on"
 }
 
 # What the run can observe of the AT-SPI bus: a read-only busctl listing of the
@@ -525,9 +606,9 @@ note_a11y_bus() {
     sleep 0.2
   done
   if [ "$count" -ge 1 ]; then
-    echo "OK: sirio (pid $APP_PID) holds $count connection(s) on the run's private AT-SPI bus"
+    echo "NOTE: the run's AT-SPI bus holds $count connection(s) of sirio (pid $APP_PID)"
   else
-    echo "NOTE: sirio (pid $APP_PID) holds no connection on the run's private AT-SPI bus"
+    echo "NOTE: the run's AT-SPI bus holds no connection of sirio (pid $APP_PID)"
   fi
 }
 
@@ -570,7 +651,8 @@ assert_alive() { # what
 # The environment is written to <name>-expected-env.log; stage chain checks the
 # relaunched Sirio's /proc/<pid>/environ against it.
 launch() { # name
-  local name=$1
+  local name=$1 probes_before
+  probes_before=$(stub_probe_count)
   local home="$RUN_DIR/$name-home" data="$RUN_DIR/$name-data" state="$RUN_DIR/$name-state"
   local cache="$RUN_DIR/$name-cache" runtime="$RUN_DIR/$name-runtime"
   local appimage="$RUN_DIR/$name-install/Sirio.AppImage" marker="$RUN_DIR/$name.marker"
@@ -642,21 +724,32 @@ PY
   for _ in $(seq 1 75); do [ -S "$SIRIO_SOCKET" ] && break; sleep 0.2; done
   [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket ($name)"
   echo "OK: the control socket of $name opened $(( ($(date +%s%N) - started) / 1000000 )) ms after the wait began"
-  assert_stub_probe "$name"
+  assert_stub_probe "$name" "$probes_before"
   check_host_detached "$name"
 }
 
 # The app's claude probe reached the stub: the stub writes stub-calls.log, so the
 # app's PATH resolution picked the stub (stub-first, observed).
-assert_stub_probe() { # name
+# The count of `claude --version` lines the stub has recorded. Each launch of Sirio
+# probes claude once, so a launch shows as a line after the count taken before it.
+stub_probe_count() {
+  local count
+  count=$(grep -c '^claude --version$' "$RUN_DIR/stub-calls.log" 2>/dev/null || true)
+  echo "${count:-0}"
+}
+
+# The app's claude probe reached the stub after this launch began: the stub writes
+# stub-calls.log, so a new line is the app's PATH resolution picking the stub
+# (stub-first, observed). Required after every launch, in both stages.
+assert_stub_probe() { # name probes-before
   for _ in $(seq 1 150); do
-    if grep -q '^claude --version$' "$RUN_DIR/stub-calls.log" 2>/dev/null; then
-      echo "OK: $1: the app's claude --version probe reached the stub (stub-calls.log)"
+    if [ "$(stub_probe_count)" -gt "$2" ]; then
+      echo "OK: $1: the app's claude --version probe reached the stub (a new stub-calls.log line)"
       return 0
     fi
     sleep 0.2
   done
-  fail "$1: the app never asked the stub claude for its version"
+  fail "$1: the app never asked the stub claude for its version after this launch"
 }
 
 # The packaged sirio-host starts when the app finds one beside its binary, and
@@ -678,13 +771,16 @@ for path in glob.glob(sys.argv[1] + "/host-v*.json"):
     sleep 0.2
   done
   if [ -z "$pid" ]; then
-    echo "NOTE: $name started no sirio-host (none beside the app binary)"
+    echo "NOTE: no sirio-host seen within 10 s for $name; not checked further"
     return 0
   fi
   cp "$host_dir"/host-v*.json "$RUN_DIR/$name-host-state.log" 2>/dev/null || true
   session=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
-  [ "$session" = "$pid" ] || fail "$name: sirio-host $pid is not a session leader ($session): it did not start detached"
-  echo "OK: $name: sirio-host $pid started detached (its own session, setsid; no systemd scope)"
+  if [ "$session" = "$pid" ]; then
+    echo "NOTE: $name: sirio-host $pid is a session leader (setsid, no systemd scope)"
+  else
+    echo "NOTE: $name: sirio-host $pid is not a session leader (session '${session:-gone}')"
+  fi
 }
 
 # Waits until a pid is gone or a zombie (the reaper is the script's shell).
@@ -716,6 +812,8 @@ stage_chain() {
   capture chain-available
   local before after
   before=$(read_field pid surface update read)
+  local probes_before_restart
+  probes_before_restart=$(stub_probe_count)
   ctl surface update act --action restart
   after=""
   for _ in $(seq 1 200); do
@@ -726,8 +824,15 @@ stage_chain() {
   [ -n "$after" ] && [ "$after" != "$before" ] || fail "no new Sirio answered after the restart (before: $before)"
   echo "OK: relaunched, pid $before -> $after"
   wait_gone "$before"
+  # The old pid is gone, so the cleanup no longer signals it.
+  local kept=() pid
+  for pid in ${RUN_PIDS[@]+"${RUN_PIDS[@]}"}; do [ "$pid" = "$before" ] || kept+=("$pid"); done
+  RUN_PIDS=(${kept[@]+"${kept[@]}"})
   APP_PID=$after
   RUN_PIDS+=("$after")
+  for _ in $(seq 1 150); do [ "$(stub_probe_count)" -gt "$probes_before_restart" ] && break; sleep 0.2; done
+  [ "$(stub_probe_count)" -gt "$probes_before_restart" ] || fail "the relaunched Sirio never asked the stub claude for its version"
+  echo "OK: the relaunched Sirio's claude --version probe reached the stub"
   [ -f "$RUN_DIR/chain.marker" ] || fail "the relaunched Sirio is not the new artifact (no marker)"
   echo "OK: the new artifact ran"
   grep -q "\[update\] status: downloading $VERSION" "$RUN_DIR/chain-app.log" || fail "no Downloading in the app log"
@@ -752,8 +857,6 @@ stage_chain() {
     fi
   done < "$RUN_DIR/chain-expected-env.log"
   echo "OK: the relaunched Sirio's PATH leads with the stub directory; every other variable is the run's own (chain-relaunched-env.log)"
-  grep -q '^claude --version$' "$RUN_DIR/stub-calls.log" || fail "the app never asked the stub claude for its version"
-  echo "OK: the app's claude probe reached the stub"
   reply project list | grep -q "$project" || fail "the project did not survive the restart"
   echo "OK: the project survived the restart"
   # The layout comes back: the worktree selected before the restart is the

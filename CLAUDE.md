@@ -37,7 +37,7 @@ Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 # swapped stand-in AppImage (stage chain), every card state, Later and the
 # indicator, the agent warning, the keyboard and focus (stage ui).
 # --stage chain|ui|all (all runs chain, then ui); --display :N is required
-# unless --state-only, and must be a private X display, never $DISPLAY;
+# unless --state-only, and must be an Xvfb this user started, never $DISPLAY;
 # --out-dir DIR, --appearance light|dark.
 Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 
