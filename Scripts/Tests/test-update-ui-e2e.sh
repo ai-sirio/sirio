@@ -270,7 +270,7 @@ call_ctl() {
 }
 reply() {
   local status=0
-  # The timeout's own message goes to the script's stderr; only sirioctl's is hidden.
+  # sirioctl's stderr is hidden; a timeout is reported by timed_out below.
   timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" --json 2>/dev/null || status=$?
   case "$status" in 124 | 137) timed_out "sirioctl $* (${CALL_TIMEOUT} s)" ;; esac
   return "$status"
@@ -434,7 +434,7 @@ PY
 # The decoded scrollback of a terminal pane (panel read answers base64).
 pane_text() { # pane
   local raw status=0
-  raw=$(timeout -k 5 "$CALL_TIMEOUT" "$CTL" panel read "$1") || status=$?
+  raw=$(timeout -k 5 "$CALL_TIMEOUT" "$CTL" panel read "$1" 2>/dev/null) || status=$?
   case "$status" in 124 | 137) timed_out "sirioctl panel read $1 (${CALL_TIMEOUT} s)" ;; esac
   [ "$status" -eq 0 ] || return "$status"
   printf '%s' "$raw" | python3 -c 'import base64, sys; sys.stdout.write(base64.b64decode(sys.stdin.read().strip()).decode(errors="replace"))'
@@ -444,7 +444,7 @@ pane_text() { # pane
 wait_pane_text() { # pane needle timeout-seconds
   local pane=$1 needle=$2 tries=$(( ${3:-15} * 5 )) text=""
   for _ in $(seq 1 "$tries"); do
-    text=$(pane_text "$pane" 2>/dev/null || true)
+    text=$(pane_text "$pane" || true)
     case "$text" in *"$needle"*) return 0 ;; esac
     sleep 0.2
   done
